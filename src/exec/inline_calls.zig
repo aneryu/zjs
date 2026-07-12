@@ -373,9 +373,11 @@ pub const Machine = struct {
         const entry = try self.acquireSlot(global);
         entry.native_caller = core.JSValue.undefinedValue();
         if (isSimpleInlineFrame(target, source))
-            try setupSimpleInlineEntry(self.ctx, global, entry, target, source)
+            try setupSimpleInlineEntry(false, false, self.ctx, global, entry, target, source)
+        else if (isStrictSimpleInlineFrame(false, target, source))
+            try setupSimpleInlineEntry(true, false, self.ctx, global, entry, target, source)
         else
-            try setupInlineEntry(self.ctx, global, entry, target, source);
+            try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         // Link the new frame into the chain — qjs `sf->prev_frame =
         // rt->current_stack_frame; rt->current_stack_frame = sf;`
         // (quickjs.c:17869-17870).
@@ -416,15 +418,50 @@ pub const Machine = struct {
         return true;
     }
 
-    /// Straight-line frame setup for the `isSimpleInlineFrame` shape — the hot
-    /// fib/closure-call path, a line-for-line mirror of qjs `JS_CallInternal`'s
+    /// Strict-mode twin of `isSimpleInlineFrame`. qjs uses the same
+    /// JS_CallInternal frame layout for strict and sloppy functions; the only
+    /// plain-call difference is that strict preserves undefined `this` while
+    /// sloppy substitutes the realm global. A separate precomputed flag and
+    /// setup instantiation keep that choice off the established sloppy path.
+    fn isStrictSimpleInlineFrame(comptime snapshot_args: bool, target: *const InlineTarget, source: ArgsSource) bool {
+        const function = target.view orelse return false;
+        const eligible = if (snapshot_args)
+            function.strict_simple_snapshot_inline_eligible
+        else
+            function.strict_simple_inline_eligible;
+        if (!eligible) return false;
+        switch (source) {
+            .stack_region => |region| if (region.has_receiver) return false,
+            .moved => return false,
+        }
+        if (!target.this_value.isUndefined()) return false;
+        if (!canBorrowSourceArgs(function, source)) return false;
+        return true;
+    }
+
+    /// Keep the arguments-snapshot specialization out of `pushFrame`: it is
+    /// cold relative to the established sloppy and strict/no-arguments paths,
+    /// and inlining its eligibility block grew the common dispatcher by 84B.
+    /// Both callees are noinline and this function only returns their result,
+    /// allowing ReleaseFast to use a tail branch rather than another frame.
+    noinline fn setupFallbackInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+        if (isStrictSimpleInlineFrame(true, target, source)) {
+            return setupSimpleInlineEntry(true, true, ctx, global, entry, target, source);
+        }
+        return setupInlineEntry(ctx, global, entry, target, source);
+    }
+
+    /// Straight-line frame setup for the sloppy/strict simple-inline shapes —
+    /// the hot fib/closure-call path and its strict twin, a line-for-line mirror
+    /// of qjs `JS_CallInternal`'s
     /// prologue (quickjs.c:17828-17871): compute the storage need, carve ONE
     /// contiguous slab, partition it by pointer arithmetic, bind every frame
     /// field exactly once. No shared-primitive calls, no `Frame.init`
     /// default-then-overwrite pass, no by-value `FrameSlab` /
     /// `FrameStorageWindows` round-trips. Every simple-case branch is resolved
-    /// at compile time: `this = global` (borrowed), no
-    /// original-args snapshot, borrowed args, borrowed all-cell var_refs. Lives
+    /// at compile time: `this = global` for sloppy or undefined for strict
+    /// (both borrowed), original-args snapshot absent or arena-backed, borrowed
+    /// args, borrowed all-cell var_refs. Lives
     /// in its OWN function so its register allocation is not coupled to the
     /// general path (whose register pressure spilled the hot fields). Ownership
     /// flags MUST mirror the general path exactly: current_function .take, this
@@ -434,7 +471,7 @@ pub const Machine = struct {
     /// allocation OFF the general `setupInlineEntry`/`pushFrame` chain. If LLVM
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
-    noinline fn setupSimpleInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         const function = target.view.?; // isSimpleInlineFrame requires a cached view
         entry.function = function;
@@ -452,6 +489,7 @@ pub const Machine = struct {
         };
         const callable_slot = &region.stack.values[region.region_base];
         const args = region.stack.values[region.region_base + 1 ..][0..region.argc];
+        const snapshot_count: usize = if (snapshot_args) args.len else 0;
         // Retreat the caller's operand region NOW, before the slab carve — qjs
         // borrows the caller slots equally early (`arg_buf = argv`, 17841) and
         // the caller sp is dead from here on. Doing it at the tail put the
@@ -485,7 +523,7 @@ pub const Machine = struct {
             0
         else
             (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
-        const total = var_count + stack_count + open_slots;
+        const total = var_count + stack_count + open_slots + snapshot_count;
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -507,18 +545,33 @@ pub const Machine = struct {
             &.{}
         else
             std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(slab_values[var_count + stack_count ..][0..open_slots]))[0..open_var_ref_count];
+        const original_args = slab_values[var_count + stack_count + open_slots ..][0..snapshot_count];
 
         @memset(locals, core.JSValue.undefinedValue()); // 17859-17860
         if (open_var_refs.len != 0) @memset(open_var_refs, null); // 17866-17867
 
+        // zjs parameter writes update frame.args in place. An unmapped strict
+        // arguments object must nevertheless expose the incoming values, so
+        // its dedicated specialization snapshots them before the frame starts.
+        // Allocate the cold box before takeSourceSlot: this is the final
+        // failable point, preserving the source-restoration errdefer above.
+        const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
+            const box = try rt.memory.create(frame_mod.Frame.FrameCold);
+            for (args, 0..) |arg, index| original_args[index] = arg.dup();
+            box.* = .{ .original_args = original_args };
+            break :blk box;
+        };
+
         const captures = target.captures.*;
         // Bind the frame in ONE shot — qjs sets sf's handful of fields
-        // (17838-17845) with no default-init-then-overwrite pass. Sloppy
-        // plain-call receiver coerces to the global object, borrowed
-        // (17933, sloppy leg). `pc` and `cold` keep their struct defaults.
+        // (17838-17845) with no default-init-then-overwrite pass. The setup
+        // instantiation makes the plain-call receiver choice at compile time:
+        // strict preserves undefined; sloppy uses the borrowed global object
+        // (17933, sloppy leg). `pc` keeps its struct default; `cold` is either
+        // null or the prebuilt original-args snapshot box.
         entry.frame = .{
             .function = function,
-            .this_value = global.value(),
+            .this_value = if (strict_this) core.JSValue.undefinedValue() else global.value(),
             .this_value_owned = false,
             .current_function = takeSourceSlot(callable_slot),
             .new_target = target.new_target,
@@ -530,6 +583,7 @@ pub const Machine = struct {
             .open_var_refs = open_var_refs,
             .storage_values = if (storage_on_heap) slab_values else &.{},
             .storage_on_heap = storage_on_heap,
+            .cold = cold,
         };
         entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, stack_window);
     }

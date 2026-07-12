@@ -8335,6 +8335,15 @@ const function_mod = struct {
         /// Precomputed bytecode-only half of simple inline-call eligibility.
         /// Call-site predicates remain checked in the exec inline-call path.
         simple_inline_eligible: bool = false,
+        /// Strict-mode twin of `simple_inline_eligible`. Kept separate so the
+        /// established sloppy hot path does not gain a per-call strict-mode
+        /// branch; inline_calls instantiates a dedicated strict setup whose
+        /// only semantic difference is preserving an undefined plain `this`.
+        strict_simple_inline_eligible: bool = false,
+        /// Strict simple-frame variant that also snapshots the incoming args
+        /// before mutable parameter slots can change them. Selected only when
+        /// finalized bytecode materializes an arguments object.
+        strict_simple_snapshot_inline_eligible: bool = false,
         /// Precomputed: NO `var_buf` local slot of this function can ever hold a
         /// var-ref cell. In qjs a captured local (`capture_var`, quickjs.c:32907)
         /// gets `is_captured = TRUE` for BOTH closure capture and OP_make_loc_ref
@@ -8650,6 +8659,27 @@ const function_mod = struct {
         return true;
     }
 
+    /// Whether finalized bytecode materializes either arguments-object form.
+    /// Strict calls need this once-per-FB fact to choose the simple-frame
+    /// specialization that preserves the pre-mutation argument values.
+    fn functionMaterializesArgumentsObject(fb: *const FunctionBytecode) bool {
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size = opcode.sizeOf(op_id);
+            if (size == 0 or pc + size > code.len) return true;
+            if (op_id == opcode.op.special_object) {
+                if (size < 2) return true;
+                const subtype = code[pc + 1];
+                if (subtype == opcode.special_object_subtype.arguments or
+                    subtype == opcode.special_object_subtype.mapped_arguments) return true;
+            }
+            pc += size;
+        }
+        return false;
+    }
+
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
     ///
     /// The returned value does not own any slices and must not be deinitialized.
@@ -8660,6 +8690,12 @@ const function_mod = struct {
     }
 
     pub fn makeBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) BytecodeImpl {
+        const strict_mode = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
+        const simple_inline_base = fb.flags.func_kind == .normal and
+            !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
+            !fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
+            fb.global_vars_len == 0;
+        const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -8685,10 +8721,9 @@ const function_mod = struct {
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
             },
-            .simple_inline_eligible = fb.flags.func_kind == .normal and
-                !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
-                !fb.flags.is_arrow_function and !fb.flags.is_strict_mode and !fb.flags.runtime_strict_mode and
-                fb.flags.has_simple_parameter_list and fb.global_vars_len == 0,
+            .simple_inline_eligible = simple_inline_base and !strict_mode,
+            .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
+            .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,
             .locals_never_boxed = computeLocalsNeverBoxed(fb),
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,

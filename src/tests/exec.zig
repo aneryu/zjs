@@ -5555,6 +5555,47 @@ test "Engine eval executes simple functions and arrows" {
     try std.testing.expectEqualStrings("5\n42\n720\n12\nobject\n", stream.buffered());
 }
 
+test "strict plain calls preserve this arguments eval captures and backtraces" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function strictZero() {
+        \\    "use strict";
+        \\    assert.sameValue(this, undefined);
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(strictZero(), 0);
+        \\function strictArgs(value) {
+        \\    "use strict";
+        \\    arguments[0] = 9;
+        \\    return value;
+        \\}
+        \\assert.sameValue(strictArgs(1), 1);
+        \\function strictOriginalArgs(value) {
+        \\    "use strict";
+        \\    value = 17;
+        \\    return arguments[0];
+        \\}
+        \\assert.sameValue(strictOriginalArgs(1), 1);
+        \\function strictEval() {
+        \\    "use strict";
+        \\    eval("var hidden = 1");
+        \\    return typeof hidden;
+        \\}
+        \\assert.sameValue(strictEval(), "undefined");
+        \\function makeStrictClosure() {
+        \\    var captured = 4;
+        \\    return function strictClosure() { "use strict"; return captured; };
+        \\}
+        \\assert.sameValue(makeStrictClosure()(), 4);
+        \\function strictStack() { "use strict"; return new Error("x").stack; }
+        \\assert.sameValue(strictStack().indexOf("    at strictStack"), 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

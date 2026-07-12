@@ -3209,6 +3209,69 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(fb.stack_size, view.stack_size);
 }
 
+test "bytecode view separates strict and sloppy simple inline eligibility" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("simple-inline");
+    defer rt.atoms.free(name);
+
+    {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expect(view.simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+    }
+
+    {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        fd.is_strict_mode = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expect(!view.simple_inline_eligible);
+        try std.testing.expect(view.strict_simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+    }
+
+    {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        fd.is_strict_mode = true;
+        try fd.appendByteCode(&.{
+            bytecode.opcode.op.special_object,
+            bytecode.opcode.special_object_subtype.arguments,
+            bytecode.opcode.op.drop,
+            bytecode.opcode.op.return_undef,
+        });
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expect(!view.simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_inline_eligible);
+        try std.testing.expect(view.strict_simple_snapshot_inline_eligible);
+    }
+}
+
 test "createFunctionBytecode: copies global var records from FunctionDef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

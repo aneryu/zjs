@@ -250,8 +250,9 @@ fn forceFunctionBytecodeRuntimeStrict(rt: *core.JSRuntime, value: core.JSValue) 
     const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", aligned);
     function_bytecode.flags.runtime_strict_mode = true;
-    // No cached execution view to refresh: the VM rebuilds the `Bytecode` view
-    // per call (`makeBytecodeView`), so the updated flag is read fresh next call.
+    // No cached execution view to refresh: runtime-strict forcing happens
+    // before the script's first execution, so the lazy cached view observes
+    // this flag when it is materialized for the first call.
     for (function_bytecode.cpoolSlice()) |child| forceFunctionBytecodeRuntimeStrict(rt, child);
 }
 
