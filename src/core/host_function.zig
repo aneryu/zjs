@@ -719,6 +719,15 @@ pub const builtin_method_ids = struct {
             from_entries = 22,
             group_by = 23,
         };
+
+        pub const ConstructorMethod = enum(u32) {
+            // `Object(value)` call entry. Kept immediately below the
+            // prototype-method range (101+) so the domain table stays dense.
+            // Like QuickJS's `JS_CFUNC_constructor_or_func`, this record also
+            // handles direct `new Object(...)`; custom-new-target construction
+            // is intercepted before the record and keeps its distinct branch.
+            call = 100,
+        };
     };
 
     pub const promise = struct {

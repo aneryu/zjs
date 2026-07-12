@@ -133,7 +133,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         defer rt.memory.allocator.free(name);
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return constructCollectionValue(ctx, kind, prototype, rooted_args, globals);
         if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt, constructor);
-        if (std.mem.eql(u8, name, "Object")) return constructObjectValue(ctx, rooted_args, constructor);
+        if (std.mem.eql(u8, name, "Object")) return objectConstructorValue(ctx, rooted_args, constructor);
         if (std.mem.eql(u8, name, "Array")) return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, constructor, array_construct_ref, prototype, rooted_args, null, null)) orelse error.TypeError;
         if (std.mem.eql(u8, name, "Iterator")) return error.TypeError;
         if (std.mem.eql(u8, name, "Symbol")) return error.TypeError;
@@ -652,7 +652,11 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn constructObjectValue(ctx: *core.JSContext, args: []const core.JSValue, constructor: *core.Object) !core.JSValue {
+/// Shared Object constructor body for the native record and the generic
+/// construct fallback. In the record path the caller has already distinguished
+/// a custom new.target, matching QuickJS `js_object_constructor` before it
+/// reaches the nullish/ToObject switch below.
+pub fn objectConstructorValue(ctx: *core.JSContext, args: []const core.JSValue, constructor: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
     if (args.len >= 1) {
         const value = args[0];

@@ -3579,6 +3579,45 @@ test "Object.defineProperty returns retained target object" {
     try std.testing.expectEqualStrings("true\n7\nvalue\n", stream.buffered());
 }
 
+test "Object constructor record preserves call and construct semantics" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const value = { marker: 1 };
+        \\assert.sameValue(Object.prototype.hasOwnProperty("Object"), false);
+        \\assert.sameValue(Object(value), value);
+        \\assert.sameValue(Object.call(null, value), value);
+        \\assert.sameValue(Object(value, 2, 3), value);
+        \\assert.sameValue(Object() instanceof Object, true);
+        \\assert.sameValue(Object(null) instanceof Object, true);
+        \\assert.sameValue(Object(undefined) instanceof Object, true);
+        \\assert.sameValue(Object(7).valueOf(), 7);
+        \\assert.sameValue(Object(true).valueOf(), true);
+        \\assert.sameValue(Object("z").valueOf(), "z");
+        \\assert.sameValue(Object(1n).valueOf(), 1n);
+        \\const symbol = Symbol("s");
+        \\assert.sameValue(Object(symbol).valueOf(), symbol);
+        \\const renamed = Object;
+        \\const originalName = Object.getOwnPropertyDescriptor(renamed, "name");
+        \\Object.defineProperty(renamed, "name", { value: "RenamedObject" });
+        \\assert.sameValue(renamed(value), value);
+        \\assert.sameValue(new renamed(value), value);
+        \\function NewTarget() {}
+        \\const reflected = Reflect.construct(renamed, [value], NewTarget);
+        \\assert.sameValue(reflected === value, false);
+        \\assert.sameValue(Object.getPrototypeOf(reflected), NewTarget.prototype);
+        \\class ObjectSubclass extends renamed {}
+        \\const subclassed = new ObjectSubclass(value);
+        \\assert.sameValue(subclassed === value, false);
+        \\assert.sameValue(Object.getPrototypeOf(subclassed), ObjectSubclass.prototype);
+        \\Object.defineProperty(renamed, "name", originalName);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

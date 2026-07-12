@@ -819,6 +819,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
                     const cached = try global.cachedRealmValueSlot(rt, .object_prototype);
                     try global.setOptionalValueSlot(rt, cached, object_proto.value().dup());
+                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
                     try bindObjectStaticNativeRecords(rt, constructor);
                     try bindObjectPrototypeNativeRecords(rt, constructor);
                 },
@@ -1669,7 +1670,7 @@ const object_static = [_]Method{
 
 const object_prototype = methodsFromInternalEntriesWhere(&object_builtin.internal_entries, struct {
     fn keep(id: u32) bool {
-        return id >= 100;
+        return object_builtin.prototypeMethodOrdinal(id) != null;
     }
 }.keep);
 

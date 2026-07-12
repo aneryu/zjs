@@ -11,6 +11,7 @@ const coercion_ops = @import("coercion_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
+const construct_mod = @import("construct.zig");
 
 const HostError = exceptions.HostError;
 const InternalCall = core.host_function.InternalCall;
@@ -77,6 +78,7 @@ const RootedValueCopies = struct {
 };
 
 pub const StaticMethod = core.host_function.builtin_method_ids.object.StaticMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.object.ConstructorMethod;
 
 pub const PrototypeMethod = enum(u32) {
     to_string = 101,
@@ -185,16 +187,27 @@ fn prototypeEntry(comptime name: []const u8, comptime length: u8, comptime metho
     return .{ .name = name, .length = length, .id = @intFromEnum(method), .magic = @intFromEnum(method), .prepared_call_ok = false, .call = &objectCall };
 }
 
-/// Declaration table for the `.object` domain: one entry per `Object.*` static
-/// and `Object.prototype.*` method. `id`/`magic` are the `StaticMethod`/
-/// `PrototypeMethod` enum values consumed by `qjsObjectCallForNativeRecord` and
-/// the bare-runtime fallback, kept in lockstep with the install names in
+fn constructorEntry() core.host_function.InternalEntry {
+    return .{
+        .name = "Object",
+        .length = 1,
+        .id = @intFromEnum(ConstructorMethod.call),
+        .prepared_call_ok = false,
+        .constructor = true,
+        .call = &objectConstructorCall,
+    };
+}
+
+/// Declaration table for the `.object` domain: the Object call entry plus one
+/// entry per `Object.*` static and `Object.prototype.*` method. Static/prototype
+/// `id`/`magic` values are consumed by `qjsObjectCallForNativeRecord` and the
+/// bare-runtime fallback, kept in lockstep with the install names in
 /// `registry.object_static`/`object_prototype`. Every record sets
-/// `prepared_call_ok = false`: Object methods need a realm global and/or the
-/// shared property helper web, matching the prepared-call gate
-/// (`vm_call.nativeBuiltinSupportedWithoutFunctionObject` returns false for
-/// `.object`).
+/// `prepared_call_ok = false`: the constructor fallback and Object methods need
+/// a materialized function object, realm global, and/or the shared property
+/// helper web.
 pub const internal_entries = [_]core.host_function.InternalEntry{
+    constructorEntry(),
     staticEntry("assign", 2, .assign),
     staticEntry("create", 2, .create),
     staticEntry("defineProperty", 3, .define_property),
@@ -229,6 +242,15 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     prototypeEntry("__lookupGetter__", 1, .lookup_getter),
     prototypeEntry("__lookupSetter__", 1, .lookup_setter),
 };
+
+/// QuickJS `js_object_constructor` call/direct-construct body. Custom
+/// new-target construction is intercepted by the VM before this record; both
+/// remaining modes apply the same nullish-new-object / ToObject behavior.
+fn objectConstructorCall(host_call: InternalCall) HostError!core.JSValue {
+    if (host_call.args.len != 0 and host_call.args[0].isObject()) return host_call.args[0].dup();
+    const constructor = host_call.func_obj orelse return error.TypeError;
+    return construct_mod.objectConstructorValue(host_call.ctx, host_call.args, constructor);
+}
 
 /// Shared record handler for the `.object` domain. With a realm global the
 /// statics and prototype methods dispatch through `objectCallForNativeRecord`

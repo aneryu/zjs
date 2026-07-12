@@ -1383,7 +1383,7 @@ pub fn constructValueOrBytecode(
 // VM construct path routes through `builtin_dispatch.callConstructRecord`. The
 // VM dispatcher decodes the constructor's native id and matches against these
 // instead of comparing the resolved function name, so a user function named
-// "Date"/"String"/"RegExp" no longer aliases the builtin (matching the
+// "Date"/"String"/"RegExp"/"Object" no longer aliases the builtin (matching the
 // native-id keying `exec/construct.zig` adopted in Phase 6b-3d). The construct
 // branches run the same builtin `constructWithPrototype` bodies the VM fast
 // paths previously called directly; the VM-context argument coercion stays on
@@ -1392,6 +1392,7 @@ pub fn constructValueOrBytecode(
 const date_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_ids.date.ConstructorMethod.construct);
 const string_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call);
 const regexp_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct);
+const object_construct_id: u32 = @intFromEnum(core.host_function.builtin_method_ids.object.ConstructorMethod.call);
 
 // `Map.groupBy` static-method record id. The collection static-method id range
 // is `StaticMethod.group_by == 101` in `exec/collection_ops.zig`, kept out of
@@ -1618,6 +1619,17 @@ pub fn constructValueOrBytecodeWithNewTarget(
         // `constructBuiltinSuperConstructor`, exactly as for the other builtin
         // constructors.
         const construct_native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*);
+        if (construct_native_ref) |native_ref| {
+            // QuickJS `js_object_constructor`: when new.target is the active
+            // Object function, construction shares the same nullish/ToObject
+            // body as a plain call. A distinct new.target must instead create
+            // from that constructor and therefore continues to the existing
+            // name-aware custom-new-target branch below.
+            if (native_ref.domain == .object and native_ref.id == object_construct_id and new_target.sameValue(func)) {
+                const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
+                return (try constructBuiltinNativeRecordVm(ctx, output, constructor_global, function_object, native_ref, null, args, caller_function, caller_frame)) orelse error.TypeError;
+            }
+        }
         const dispatch_name = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object);
         defer if (dispatch_name) |dispatch| dispatch.name_value.free(ctx.runtime);
         var owned_name: ?[]u8 = null;

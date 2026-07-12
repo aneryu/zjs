@@ -110,3 +110,13 @@ test "Promise.resolve has an internal record handler" {
     const record = if (resolve_id < records.len) records[resolve_id] else return error.TestUnexpectedResult;
     try testing.expect(record.call != null);
 }
+
+test "Object constructor has a constructor-or-function internal record handler" {
+    const testing = @import("std").testing;
+    const records = table[@intFromEnum(NativeBuiltinDomain.object)];
+    const call_id = @intFromEnum(core.host_function.builtin_method_ids.object.ConstructorMethod.call);
+    try testing.expect(call_id < records.len);
+    const record = records[call_id];
+    try testing.expect(record.call != null);
+    try testing.expect(record.constructor);
+}
