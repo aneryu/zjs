@@ -5734,6 +5734,121 @@ test "method calls preserve receiver arguments eval captures and abrupt ownershi
         \\};
         \\assert.sameValue((4).sloppyReceiver(), 4);
         \\delete Number.prototype.sloppyReceiver;
+        \\Number.prototype.arrowReceiver = function arrowReceiver() {
+        \\    return () => this;
+        \\};
+        \\const readArrowReceiver = (5).arrowReceiver();
+        \\const arrowBox = readArrowReceiver();
+        \\assert.sameValue(Object.getPrototypeOf(arrowBox), Number.prototype);
+        \\assert.sameValue(arrowBox.valueOf(), 5);
+        \\assert.sameValue(readArrowReceiver(), arrowBox);
+        \\delete Number.prototype.arrowReceiver;
+        \\Number.prototype.evalReceiver = function evalReceiver() {
+        \\    return eval("this");
+        \\};
+        \\const evalBox = (6).evalReceiver();
+        \\assert.sameValue(Object.getPrototypeOf(evalBox), Number.prototype);
+        \\assert.sameValue(evalBox.valueOf(), 6);
+        \\delete Number.prototype.evalReceiver;
+        \\function sloppyViaCall() { return this; }
+        \\const callBox = sloppyViaCall.call(7);
+        \\assert.sameValue(Object.getPrototypeOf(callBox), Number.prototype);
+        \\assert.sameValue(callBox.valueOf(), 7);
+        \\assert.sameValue(sloppyViaCall.call(null), globalThis);
+        \\assert.sameValue(sloppyViaCall.call(undefined), globalThis);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const dataKey = "__zjs_primitive_data_probe__";
+        \\const inheritedKey = "__zjs_primitive_inherited_probe__";
+        \\const strictGetterKey = "__zjs_primitive_strict_getter_probe__";
+        \\const sloppyGetterKey = "__zjs_primitive_sloppy_getter_probe__";
+        \\const proxyKey = "__zjs_primitive_proxy_probe__";
+        \\const originalNumberParent = Object.getPrototypeOf(Number.prototype);
+        \\const intrinsicBigInt = BigInt;
+        \\const intrinsicSymbol = Symbol;
+        \\const bigintPrototype = BigInt.prototype;
+        \\const symbolPrototype = Symbol.prototype;
+        \\const symbolValue = Symbol("s");
+        \\try {
+        \\    Number.prototype[dataKey] = 11;
+        \\    Boolean.prototype[dataKey] = 12;
+        \\    String.prototype[dataKey] = 13;
+        \\    bigintPrototype[dataKey] = 14;
+        \\    symbolPrototype[dataKey] = 15;
+        \\    Object.prototype[inheritedKey] = 16;
+        \\    assert.sameValue((1)[dataKey], 11);
+        \\    assert.sameValue(true[dataKey], 12);
+        \\    assert.sameValue("x"[dataKey], 13);
+        \\    assert.sameValue((1n)[dataKey], 14);
+        \\    assert.sameValue(symbolValue[dataKey], 15);
+        \\    assert.sameValue((2)[inheritedKey], 16);
+        \\    assert.sameValue("x"[inheritedKey], 16);
+        \\    globalThis.BigInt = function ReplacementBigInt() {};
+        \\    globalThis.Symbol = function ReplacementSymbol() {};
+        \\    assert.sameValue((1n)[dataKey], 14);
+        \\    assert.sameValue(symbolValue[dataKey], 15);
+        \\    Object.defineProperty(Number.prototype, strictGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveStrictGetter() {
+        \\            "use strict";
+        \\            return this;
+        \\        },
+        \\    });
+        \\    Object.defineProperty(Number.prototype, sloppyGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveSloppyGetter() {
+        \\            return Object.getPrototypeOf(this) === Number.prototype && this.valueOf();
+        \\        },
+        \\    });
+        \\    assert.sameValue((3)[strictGetterKey], 3);
+        \\    assert.sameValue((4)[sloppyGetterKey], 4);
+        \\    const parent = Object.create(originalNumberParent);
+        \\    parent[inheritedKey] = 17;
+        \\    Object.setPrototypeOf(Number.prototype, parent);
+        \\    assert.sameValue((5)[inheritedKey], 17);
+        \\    let seenReceiver;
+        \\    let trapCount = 0;
+        \\    const proxy = new Proxy(parent, {
+        \\        get(target, key, receiver) {
+        \\            trapCount++;
+        \\            if (key === proxyKey) {
+        \\                seenReceiver = receiver;
+        \\                return 18;
+        \\            }
+        \\            return Reflect.get(target, key, receiver);
+        \\        },
+        \\    });
+        \\    Object.setPrototypeOf(Number.prototype, proxy);
+        \\    assert.sameValue((6)[proxyKey], 18);
+        \\    assert.sameValue(seenReceiver, 6);
+        \\    assert.sameValue(trapCount, 1);
+        \\    assert.sameValue((7).__zjs_primitive_missing_probe__, undefined);
+        \\    String.prototype[0] = "prototype";
+        \\    assert.sameValue("a"[0], "a");
+        \\    assert.sameValue("a".length, 1);
+        \\} finally {
+        \\    globalThis.BigInt = intrinsicBigInt;
+        \\    globalThis.Symbol = intrinsicSymbol;
+        \\    Object.setPrototypeOf(Number.prototype, originalNumberParent);
+        \\    delete Number.prototype[dataKey];
+        \\    delete Boolean.prototype[dataKey];
+        \\    delete String.prototype[dataKey];
+        \\    delete bigintPrototype[dataKey];
+        \\    delete symbolPrototype[dataKey];
+        \\    delete Object.prototype[inheritedKey];
+        \\    delete Number.prototype[strictGetterKey];
+        \\    delete Number.prototype[sloppyGetterKey];
+        \\    delete String.prototype[0];
+        \\}
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());

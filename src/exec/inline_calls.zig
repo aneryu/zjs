@@ -61,10 +61,10 @@ pub const InlineTarget = struct {
     /// Raw receiver before [[Call]] `this` boxing: an arrow target's lexical
     /// `this` (arrows ignore any provided receiver), otherwise the call
     /// receiver — `undefined` for plain calls, the property base for method
-    /// calls. `pushFrame` applies `coerceCallThis` to it. Borrowed; stays
-    /// valid while `callable` is rooted (the lexical `this` is owned by the
-    /// function object; a method receiver is co-owned with the operand
-    /// region).
+    /// calls. Normal frames keep it raw until OP_push_this, arrow capture, or
+    /// direct eval observes the binding. Borrowed; stays valid while `callable`
+    /// is rooted (the lexical `this` is owned by the function object; a method
+    /// receiver is co-owned with the operand region).
     this_value: core.JSValue,
     /// Lexical `new.target` for arrow targets, `undefined` otherwise.
     /// Borrowed; valid while `callable` is rooted.
@@ -82,9 +82,9 @@ pub const InlineTarget = struct {
 ///
 /// Arrow targets ARE eligible: an arrow has no own `this` / `new.target`, so
 /// the resolved `this_value` / `new_target` come from the lexical values
-/// captured on the function object (mirroring the slow path's arrow leg) and
-/// `pushFrame` boxes `this_value` through the same `coerceCallThis` primitive
-/// as the recursive path — the boxing rules stay in one place.
+/// captured on the function object (mirroring the slow path's arrow leg).
+/// That lexical `this` was materialized, when necessary, in the enclosing
+/// frame at arrow creation and is preserved verbatim here.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_payload = function_object.bytecodeFunctionPayloadPtr();
@@ -461,12 +461,10 @@ pub const Machine = struct {
         return null;
     }
 
-    /// Select a simple frame for `[receiver, callable, args...]`. For an object
-    /// receiver, strict and sloppy [[Call]] both preserve the object verbatim;
-    /// for a strict callee every primitive is likewise preserved. Only sloppy
-    /// primitive receivers need the general path's allocating ToObject arm.
-    /// qjs stores raw `this_obj` in this same JS_CallInternal frame and performs
-    /// any required boxing only at OP_push_this (quickjs.c:17924-17944).
+    /// Select a simple frame for `[receiver, callable, args...]`. Object and
+    /// primitive receivers both transfer verbatim: qjs stores raw `this_obj`
+    /// in this same JS_CallInternal frame and performs sloppy substitution or
+    /// boxing only at OP_push_this (quickjs.c:17924-17944).
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
         const function = target.view orelse return null;
         const region = switch (source) {
@@ -480,10 +478,6 @@ pub const Machine = struct {
         const snapshot = function.strict_simple_snapshot_inline_eligible;
         const no_snapshot = function.simple_inline_eligible or function.strict_simple_inline_eligible;
         if (!snapshot and !no_snapshot) return null;
-        // Sloppy primitive `this` must be boxed before zjs's current push_this
-        // implementation can read it. Strict functions keep the primitive.
-        if (function.simple_inline_eligible and !receiver.isObject()) return null;
-
         const padded = region.argc < function.arg_count;
         if (snapshot) return if (padded) .snapshot_padded else .snapshot_exact;
         return if (padded) .padded else .exact;
@@ -748,21 +742,20 @@ pub const Machine = struct {
         // No per-call backtrace node: the invocation's single MachineBacktrace
         // (zjs_vm.runWithCallEnv) walks this Entry directly via the chain.
 
-        // Mirror qjs's inline prologue for the common plain-call receiver:
-        // strict keeps undefined, sloppy uses the global object. Arrow,
-        // method, and primitive receivers stay on the shared coercion path.
-        var boxed_this: ?core.JSValue = null;
-        defer if (boxed_this) |value| value.free(rt);
+        // Keep qjs's raw `this_obj` for method receivers, including sloppy
+        // primitives. The established plain-undefined specialization remains
+        // allocation-free (strict undefined / sloppy global); observed method
+        // bindings materialize later through OP_push_this/arrow/eval.
         const fb_strict = target.fb.flags.is_strict_mode or target.fb.flags.runtime_strict_mode;
         const receiver_slot = sourceReceiverSlot(source);
         const plain_undefined_this = !target.fb.flags.is_arrow_function and receiver_slot == null and target.this_value.isUndefined();
         const effective_this = if (plain_undefined_this)
             if (fb_strict) core.JSValue.undefinedValue() else global.value()
         else
-            try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
+            target.this_value;
 
         var take_receiver_as_this = false;
-        if (boxed_this == null and !target.fb.flags.is_arrow_function) {
+        if (!target.fb.flags.is_arrow_function) {
             if (receiver_slot) |slot| {
                 if (effective_this.same(slot.*)) {
                     take_receiver_as_this = true;
@@ -783,18 +776,14 @@ pub const Machine = struct {
         //   current_function .take -> owns the callable's transferred ref
         //   new_target .borrow -> not owned
         //   constructor_this keeps Frame.init's undefined/unowned default
-        //   this .borrow, unless boxed (sloppy primitive `this`) or taken from
-        //   the receiver slot (method call) -> then .take/owned.
+        //   this .borrow, unless taken raw from the receiver slot (method call)
+        //   -> then .take/owned. Lazy materialization updates this slot once.
         // `takeSourceSlot` nulls the source slot so the popped stack region
         // never double-frees the value (the leak guard the method-call comment
         // below describes).
         entry.frame.current_function = takeSourceSlot(callable_slot);
         entry.frame.new_target = target.new_target;
-        if (boxed_this) |boxed| {
-            entry.frame.this_value = boxed;
-            entry.frame.this_value_owned = true;
-            boxed_this = null;
-        } else if (take_receiver_as_this) {
+        if (take_receiver_as_this) {
             entry.frame.this_value = takeSourceSlot(receiver_slot.?);
             entry.frame.this_value_owned = true;
         } else {

@@ -823,6 +823,9 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     try bindObjectPrototypeNativeRecords(rt, constructor);
                 },
                 .symbol => {
+                    const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .symbol_prototype);
+                    try global.setOptionalValueSlot(rt, cached, symbol_proto.value().dup());
                     constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
                     try installSymbolExtras(rt, constructor);
                 },
@@ -858,6 +861,11 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                     const cached = try global.cachedRealmValueSlot(rt, .number_prototype);
                     try global.setOptionalValueSlot(rt, cached, number_proto.value().dup());
                     try bindNumberNativeRecords(rt, constructor);
+                },
+                .bigint => {
+                    const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .bigint_prototype);
+                    try global.setOptionalValueSlot(rt, cached, bigint_proto.value().dup());
                 },
                 .regexp => {
                     constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));

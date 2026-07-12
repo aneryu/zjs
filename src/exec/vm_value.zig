@@ -4,6 +4,7 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
+const object_ops = @import("object_ops.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
@@ -140,7 +141,14 @@ pub noinline fn pushThisVm(
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
-    pushThis(stack, frame.this_value) catch |err| switch (err) {
+    const this_value = object_ops.materializeFrameThisBinding(ctx, global, frame) catch |err| switch (err) {
+        error.TypeError => {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            return error.TypeError;
+        },
+        else => return err,
+    };
+    pushThis(stack, this_value) catch |err| switch (err) {
         error.ReferenceError => {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;

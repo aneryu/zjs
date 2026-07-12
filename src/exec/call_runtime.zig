@@ -306,15 +306,9 @@ pub fn callValueOrBytecode(
     return callValueOrBytecodeClassMode(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
 }
 
-/// Coerce a call receiver per the ordinary [[Call]] `this` boxing for a
-/// callee with strictness `runtime_strict`. Returns the effective `this`
-/// borrowed from `this_value`, the realm `global`, or a freshly boxed
-/// primitive wrapper. When a wrapper is created, `boxed_out.*` holds the
-/// owned box and the caller frees it once the frame has duplicated the
-/// value. Mirrors the boxing QuickJS `JS_CallInternal` performs before
-/// entering a non-strict bytecode frame; shared by the recursive slow path
-/// (`callFunctionBytecodeModeState`) and the inline frame setup
-/// (`inline_calls.Machine.pushFrame`) so the boxing rules live in one place.
+/// Eagerly coerce a receiver for suspended async/generator state, whose `this`
+/// slot currently lives outside the active Frame. Ordinary normal bytecode
+/// calls retain raw `this` and materialize it when first observed.
 pub fn coerceCallThis(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -4420,6 +4414,7 @@ pub fn containsUtf8LineSeparator(bytes: []const u8) bool {
 
 pub fn evalSimpleCallerExpression(
     ctx: *core.JSContext,
+    global: *core.Object,
     source: []const u8,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -4427,7 +4422,7 @@ pub fn evalSimpleCallerExpression(
     const frame = caller_frame orelse return null;
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
     if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
-    if (std.mem.eql(u8, trimmed, "this")) return eval_ops.directEvalThisValue(caller_function, caller_frame).dup();
+    if (std.mem.eql(u8, trimmed, "this")) return (try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame)).dup();
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
         _ = frame;
         return null;
@@ -4675,11 +4670,11 @@ pub fn callFunctionBytecodeModeState(
         break :blk &nested_base;
     };
 
-    var boxed_this: ?core.JSValue = null;
-    defer if (boxed_this) |value| value.free(ctx.runtime);
     const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
-    const effective_this = try coerceCallThis(ctx, global, fb_runtime_strict, this_value, &boxed_this);
     if (fb.flags.func_kind == .async and generator_state == null) {
+        var boxed_this: ?core.JSValue = null;
+        defer if (boxed_this) |value| value.free(ctx.runtime);
+        const effective_this = try coerceCallThis(ctx, global, fb_runtime_strict, this_value, &boxed_this);
         return promise_ops.qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, var_refs, output, global);
     }
     const stop_on_yield = fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator;
@@ -4708,7 +4703,7 @@ pub fn callFunctionBytecodeModeState(
         .ctx = ctx,
         .stack = &nested_stack,
         .function = nested,
-        .initial_this_value = effective_this,
+        .initial_this_value = this_value,
         .args = args,
         .var_refs = var_refs,
         .output = output,

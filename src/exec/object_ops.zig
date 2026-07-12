@@ -202,6 +202,59 @@ pub fn primitivePrototypeFromRealmOrGlobal(
     return constructorPrototypeFromGlobalAtom(rt, global, constructor_atom);
 }
 
+fn primitivePrototypeForAccess(rt: *core.JSRuntime, global: *core.Object, primitive: core.JSValue) ?*core.Object {
+    if (primitive.isString()) {
+        const constructor_atom = comptime (core.atom.predefinedId("String", .string)).?;
+        return primitivePrototypeFromRealmOrGlobal(rt, global, .string_prototype, constructor_atom);
+    }
+    if (primitive.isNumber()) {
+        const constructor_atom = comptime (core.atom.predefinedId("Number", .string)).?;
+        return primitivePrototypeFromRealmOrGlobal(rt, global, .number_prototype, constructor_atom);
+    }
+    if (primitive.isBool()) {
+        const constructor_atom = comptime (core.atom.predefinedId("Boolean", .string)).?;
+        return primitivePrototypeFromRealmOrGlobal(rt, global, .boolean_prototype, constructor_atom);
+    }
+    if (primitive.isBigInt()) {
+        const constructor_atom = comptime (core.atom.predefinedId("BigInt", .string)).?;
+        return primitivePrototypeFromRealmOrGlobal(rt, global, .bigint_prototype, constructor_atom);
+    }
+    if (primitive.isSymbol()) {
+        const constructor_atom = comptime (core.atom.predefinedId("Symbol", .string)).?;
+        return primitivePrototypeFromRealmOrGlobal(rt, global, .symbol_prototype, constructor_atom);
+    }
+    return null;
+}
+
+/// Materialize an ordinary function's ThisBinding on first observation.
+/// QuickJS keeps the raw `this_obj` through JS_CallInternal and performs
+/// sloppy nullish substitution / primitive ToObject in OP_push_this. Arrow
+/// capture and direct eval are zjs's other observation points, so they use the
+/// same hook. Replacing the frame slot once preserves wrapper identity within
+/// the invocation.
+pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame) !core.JSValue {
+    const flags = frame.function.flags;
+    if (flags.is_arrow_function or flags.is_strict or flags.runtime_strict) return frame.this_value;
+
+    const current = frame.this_value;
+    if (current.isObject()) return current;
+    if (current.isUndefined() or current.isNull()) {
+        if (frame.this_value_owned) {
+            current.free(ctx.runtime);
+            frame.this_value = global.value().dup();
+        } else {
+            frame.this_value = global.value();
+        }
+        return frame.this_value;
+    }
+
+    const boxed = try primitiveObjectForAccess(ctx.runtime, global, current);
+    if (frame.this_value_owned) current.free(ctx.runtime);
+    frame.this_value = boxed;
+    frame.this_value_owned = true;
+    return boxed;
+}
+
 pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(global, .generator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global) orelse objectPrototypeFromGlobal(rt, global));
@@ -324,6 +377,13 @@ pub fn createBytecodeFunctionObject(
         try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
     if (fb.flags.is_arrow_function) {
+        // Arrow creation observes the enclosing ThisBinding even when the
+        // outer bytecode never executed OP_push_this. Materialize the outer
+        // sloppy binding once so arrows, direct `this`, and direct eval share
+        // the same wrapper/global object.
+        if (!frame.function.flags.is_derived_class_constructor) {
+            _ = try materializeFrameThisBinding(ctx, global, frame);
+        }
         const lexical_this_slot = derivedConstructorThisLocalSlot(frame) orelse &frame.this_value;
         const lexical_this_value = if (frame.function.flags.is_derived_class_constructor or varRefCellFromValue(lexical_this_slot.*) != null)
             try ensureVarRefCell(ctx, lexical_this_slot)
@@ -2717,22 +2777,13 @@ pub fn getPrimitiveProperty(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (try getFastStringPrimitiveDataProperty(ctx, global, receiver, atom_id)) |value| return value;
-    if (try getFastNumberPrimitiveDataProperty(ctx, global, receiver, atom_id)) |value| return value;
 
-    const object_value = try primitiveObjectForAccess(ctx.runtime, global, receiver);
-    defer object_value.free(ctx.runtime);
-    const object = try property_ops.expectObject(object_value);
-    if (try findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
-        switch (desc.kind) {
-            .data => return desc.value.dup(),
-            .accessor => {
-                if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                return callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
-            },
-            .generic => return core.JSValue.undefinedValue(),
-        }
-    }
+    // QuickJS JS_GetPropertyInternal selects ctx->class_proto directly for a
+    // primitive and walks that object chain with the original primitive as the
+    // receiver. Property reads must not materialize a transient boxed object;
+    // boxing belongs to ToObject/OP_push_this and other observable conversions.
+    const prototype = primitivePrototypeForAccess(ctx.runtime, global, receiver) orelse return core.JSValue.undefinedValue();
+    if (try getPropertyValueFromObjectChain(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame)) |value| return value;
     return core.JSValue.undefinedValue();
 }
 
@@ -2746,34 +2797,6 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
         };
     }
     return null;
-}
-
-pub fn getFastNumberPrimitiveDataProperty(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    receiver: core.JSValue,
-    atom_id: core.Atom,
-) !?core.JSValue {
-    if (!receiver.isNumber()) return null;
-    if (!isStandardNumberPrototypeMethodAtom(ctx.runtime, atom_id)) return null;
-
-    const number_ctor_atom = comptime (core.atom.predefinedId("Number", .string)).?;
-    const proto = primitivePrototypeFromRealmOrGlobal(ctx.runtime, global, .number_prototype, number_ctor_atom) orelse return null;
-    const desc = (try findPropertyDescriptor(ctx.runtime, proto, atom_id)) orelse return core.JSValue.undefinedValue();
-    defer desc.destroy(ctx.runtime);
-    return switch (desc.kind) {
-        .data => desc.value.dup(),
-        .generic => core.JSValue.undefinedValue(),
-        .accessor => null,
-    };
-}
-
-pub fn isStandardNumberPrototypeMethodAtom(rt: *core.JSRuntime, atom_id: core.Atom) bool {
-    return value_ops.atomNameEql(rt, atom_id, "toString") or
-        value_ops.atomNameEql(rt, atom_id, "toLocaleString") or
-        value_ops.atomNameEql(rt, atom_id, "toFixed") or
-        value_ops.atomNameEql(rt, atom_id, "toExponential") or
-        value_ops.atomNameEql(rt, atom_id, "toPrecision");
 }
 
 pub fn getValuePropertyWithReceiver(
@@ -2817,9 +2840,8 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
+    const prototype = primitivePrototypeForAccess(rt, global, rooted_primitive) orelse return error.TypeError;
     if (rooted_primitive.isString()) {
-        const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
-        const prototype = primitivePrototypeFromRealmOrGlobal(rt, global, .string_prototype, string_ctor_atom) orelse return error.TypeError;
         const object = try core.Object.create(rt, core.class.ids.string, prototype);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
@@ -2842,23 +2864,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         core.class.ids.symbol
     else
         return error.TypeError;
-    const constructor_name = if (rooted_primitive.isNumber())
-        "Number"
-    else if (rooted_primitive.isBool())
-        "Boolean"
-    else if (rooted_primitive.isBigInt())
-        "BigInt"
-    else
-        "Symbol";
-    const prototype = if (rooted_primitive.isNumber()) blk: {
-        const number_ctor_atom = comptime (core.atom.predefinedId("Number", .string)).?;
-        break :blk primitivePrototypeFromRealmOrGlobal(rt, global, .number_prototype, number_ctor_atom);
-    } else if (rooted_primitive.isBool()) blk: {
-        const boolean_ctor_atom = comptime (core.atom.predefinedId("Boolean", .string)).?;
-        break :blk primitivePrototypeFromRealmOrGlobal(rt, global, .boolean_prototype, boolean_ctor_atom);
-    } else constructorPrototypeFromGlobal(rt, global, constructor_name);
-    const resolved_prototype = prototype orelse return error.TypeError;
-    const object = try core.Object.create(rt, class_id, resolved_prototype);
+    const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();
@@ -3662,7 +3668,21 @@ pub fn getPrototypePropertyValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    var current = object.getPrototype();
+    const prototype = object.getPrototype() orelse return null;
+    return getPropertyValueFromObjectChain(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);
+}
+
+fn getPropertyValueFromObjectChain(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    first: *core.Object,
+    atom_id: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    var current: ?*core.Object = first;
     while (current) |prototype| : (current = prototype.getPrototype()) {
         if (prototype.proxyTarget() != null) {
             return try getProxyProperty(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);

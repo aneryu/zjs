@@ -659,7 +659,7 @@ pub fn directEval(
     defer source.deinit(ctx.runtime.memory.allocator);
     try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
     if (try simpleEvalRegExpLiteral(ctx, global, source.items)) |value| return value;
-    if (try evalSimpleCallerExpression(ctx, source.items, caller_function, caller_frame)) |value| return value;
+    if (try evalSimpleCallerExpression(ctx, global, source.items, caller_function, caller_frame)) |value| return value;
     const caller_strict = if (caller_function) |outer_function| outer_function.flags.is_strict else false;
     const requested_eval_global_var_bindings = if (caller_frame) |outer_frame|
         outer_frame.current_function.isUndefined()
@@ -713,7 +713,7 @@ pub fn directEval(
     var direct_eval_frame_var_refs_root = CellSliceRoot{};
     direct_eval_frame_var_refs_root.init(ctx.runtime, &direct_eval_frame_var_refs);
     defer direct_eval_frame_var_refs_root.deinit();
-    const eval_this = directEvalThisValue(caller_function, caller_frame);
+    const eval_this = try directEvalThisValue(ctx, global, caller_function, caller_frame);
     const eval_new_target = if (eval_allows_new_target) blk: {
         if (caller_frame) |outer_frame| break :blk outer_frame.new_target;
         break :blk core.JSValue.undefinedValue();
@@ -741,14 +741,16 @@ pub fn directEval(
 }
 
 pub fn directEvalThisValue(
+    ctx: *core.JSContext,
+    global: *core.Object,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) core.JSValue {
+) !core.JSValue {
     const outer_frame = caller_frame orelse return core.JSValue.undefinedValue();
     if (classStaticThisAtom(caller_function, caller_frame)) |atom_id| {
         if (classStaticThisValue(caller_function, outer_frame, atom_id)) |value| return value;
     }
-    return outer_frame.this_value;
+    return object_ops.materializeFrameThisBinding(ctx, global, outer_frame);
 }
 
 pub fn directEvalPrivateBoundNames(

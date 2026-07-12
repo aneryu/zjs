@@ -627,6 +627,8 @@ pub const RealmValueSlot = enum(u8) {
     string_prototype,
     number_prototype,
     boolean_prototype,
+    bigint_prototype,
+    symbol_prototype,
     async_function_constructor,
     async_function_prototype,
     generator_prototype,
