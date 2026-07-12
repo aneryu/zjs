@@ -5596,6 +5596,76 @@ test "strict plain calls preserve this arguments eval captures and backtraces" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "missing-argument plain calls preserve parameter and arguments ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function sloppyMissing(first, second) {
+        \\    assert.sameValue(arguments.length, 0);
+        \\    assert.sameValue(arguments.hasOwnProperty("0"), false);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.hasOwnProperty("0"), false);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(sloppyMissing(), 15);
+        \\function sloppyPartial(first, second) {
+        \\    assert.sameValue(arguments.length, 1);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments[0], 7);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(sloppyPartial(1), 15);
+        \\function strictPartial(first, second) {
+        \\    "use strict";
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.length, 1);
+        \\    assert.sameValue(arguments[0], 1);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(strictPartial(1), 15);
+        \\function captureMissing(value) {
+        \\    return function readCaptured() { return value; };
+        \\}
+        \\assert.sameValue(captureMissing()(), undefined);
+        \\function evalMissing(value) {
+        \\    return eval("value");
+        \\}
+        \\assert.sameValue(evalMissing(), undefined);
+        \\const marker = {};
+        \\function keepActual(first, second) { return first; }
+        \\assert.sameValue(keepActual(marker), marker);
+        \\function escapeMapped(first, second) { return arguments; }
+        \\const mapped = escapeMapped(marker);
+        \\assert.sameValue(mapped.length, 1);
+        \\assert.sameValue(mapped[0], marker);
+        \\assert.sameValue(mapped.hasOwnProperty("1"), false);
+        \\function escapeStrict(first, second) {
+        \\    "use strict";
+        \\    first = 9;
+        \\    return arguments;
+        \\}
+        \\const unmapped = escapeStrict(marker);
+        \\assert.sameValue(unmapped.length, 1);
+        \\assert.sameValue(unmapped[0], marker);
+        \\assert.sameValue(unmapped.hasOwnProperty("1"), false);
+        \\try {
+        \\    (function throwMissing(first, second) { throw first; })(marker);
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, marker);
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
