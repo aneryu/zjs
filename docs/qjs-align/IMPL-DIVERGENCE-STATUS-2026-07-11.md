@@ -381,6 +381,23 @@ getter/Proxy action 跟进新增 10 个固定脚本。空 getter 5M 控制先证
 
 object own/inherited static、primitive static、computed data 与 empty-getter controls 相对起点分别为 +0.7%/+0.1%/−0.8%/+0.1%/−0.3%；`op_get_field` 为 0x200（起点 0x208），`op_get_array_el` 保持 0x178，primitive field handler 为 0x37c（起点 0x384）。三参数 direct method control 为 54.288→55.533ms、qjs 34.614ms（当前 1.60x，+2.3% 的布局漂移），因此没有把 trap 残差误归为普通三参数调用本体。no-trap 已回到普通调用尺度；有 bytecode trap 时仍需在 trap 返回后执行 target invariant，现有递归调用无法像 getter 一样直接恢复到下一 opcode。下一刀需要为 same-Machine trap 增加显式 post-call continuation，而不是跳过或提前校验 invariant。
 
+Proxy `get` post-call continuation 跟进把上一段保留的边界落成 `Machine.Entry` 返回动作：static/computed handler 的普通 data bytecode trap 都在当前 Machine 建帧，caller 把 `[receiver]` / `[receiver,key]` 改写为 `[target,key]`，trap 返回后才按 qjs 顺序读取 target 的最新 own descriptor 并检查 invariant。continuation 对 atom 持有强引用，因为 zjs String 上的 atom 回指是弱缓存，trap 重入可能释放并复用原 id；proper tail call 替换 trap 帧时也把返回动作和 atom 所有权传给新帧，throw/unwind 则随帧释放。临时 `[handler,trap,target,key,receiver]` 区域使用 simple moved-method frame，在 slab 中一次搬运 3 个参数，覆盖 exact/padded 与 strict arguments snapshot，避免重新落回通用 `Frame.init`。无 trap 的 plain target data/missing 在第一次 handler probe 后直接完成，未重复可观察的 handler lookup；accessor、Proxy/exotic handler 与非 bytecode trap 仍走原权威路径。
+
+冻结 `02cf911c` 起点、最终候选与 qjs 的二进制 SHA 分别为 `315ff310…`、`e2867a39…`、`b76d1542…`。CPU19、ReleaseFast、9 轮三方轮换墙钟中位数如下；宿主 `perf_event_paranoid=4`，本组仍只报告同机墙钟 A/B。
+
+| 固定脚本/路径 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
+|---|---:|---:|---:|---:|
+| static Proxy, constant trap | 109.487ms | 69.289ms | 36.212ms | 1.91x |
+| static Proxy, no trap | 37.115ms | 32.652ms | 25.031ms | 1.30x |
+| computed Proxy, constant trap | 112.755ms | 70.883ms | 41.467ms | 1.71x |
+| computed Proxy, frozen target data | 118.143ms | 74.902ms | 44.817ms | 1.67x |
+| computed Proxy, configurable target data | 114.200ms | 73.171ms | 43.565ms | 1.68x |
+| computed Proxy, no trap | 43.044ms | 38.473ms | 30.165ms | 1.28x |
+| computed Proxy + `Reflect.get` | 184.819ms | 142.952ms | 77.576ms | 1.84x |
+| primitive computed Proxy | 137.305ms | 91.302ms | 54.365ms | 1.68x |
+
+三参数 direct method 为 55.508→55.308ms，static/computed accessor 为 50.144→50.573ms / 49.878→50.590ms，普通 computed data 为 111.323→110.641ms，未见与收益同方向的控制变化。由此 bytecode trap 的专有递归 VM 税已闭合：普通 constant/frozen/primitive 形态回到约 1.67–1.91x 的共同 method-call + refcount/invariant 前沿；`Reflect.get` 形态还叠加 trap 内 reflective lookup。专门 Zig 回归覆盖 nested continuation、trap throw、falloff、proper-tail-call、trap 后冻结、target/receiver/key 返回别名、handler accessor、exotic descriptor target、moved padded 与 strict arguments snapshot；Proxy/get test262 为 19/19，弱 atom 复用回归继续通过。
+
 新增 named-function 隔离把 closure cell 与函数名序言拆开：匿名 factory 与直接声明在 zjs 都约 1.76–1.77s/50M，给返回函数增加内部名字后变为 2.16s，而 qjs 两者都约 1.05–1.06s。两端都发 `special_object THIS_FUNC; put_loc*`；qjs 在 `JS_CallInternal` CASE 内直接 `JS_DupValue(sf->cur_func)`，zjs 原先却走 `coldStd → vm_literal.specialObject → coldNext`。当前只把不可失败的 `THIS_FUNC` arm 放进 152B frameless handler，其他会分配或访问复杂状态的 subtype 保持 cold；named 与 named-closure 分别约下降 14.4%/14.5%。同时 FunctionDef 序言复用 `selectShortSlot/emitSlotInstruction`，开启 short-opcode 时的全序言样本从 42B 降到 29B，实际 named 函数从 wide `put_loc u16` 对齐为 qjs 式 `put_loc0`（9B→7B）。
 
 本轮也用单变量构建否决了四个诱人但无收益的方向：强制内联 `pushFrame` 让三组调用变慢 3–8%；删除 inline depth 上限比较对 call0 中性、对 call2/named 变慢约 4%；删除未读 `InlineTarget.callable`（48B→40B）中性到约 +1%；关闭 same-loop 后，现有 recursive fallback 慢 3.2–3.4 倍。四项源码均已撤回，避免把结构清理或“更像 C 递归”误报成性能对齐。

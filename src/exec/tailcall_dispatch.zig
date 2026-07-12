@@ -142,6 +142,7 @@ pub const Vm = struct {
 
     /// Outcome payloads (ride here, not in the u32 return).
     return_value: JSValue = JSValue.undefinedValue(),
+    return_atom: core.Atom = core.atom.null_atom,
     pending_error: HostError = error.OutOfMemory,
     tail_request: call_runtime.InlineCallRequest = undefined,
     /// On `.tail`: true => `tailCallReuse` (op.tail_call*/eval-tail), false => `pushCall`
@@ -417,6 +418,40 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
 }
 
+/// Same-Machine entry for a call region already moved out of the caller's
+/// operand layout. Proxy `get` uses this because its semantic arguments are
+/// `[target, key, receiver]`, while the caller must retain `[target, key]` for
+/// the post-trap invariant continuation.
+inline fn pushMovedAndEnter(
+    vb: [*]JSValue,
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    moved_values: []JSValue,
+    return_action: inline_calls.ReturnAction,
+    continuation_atom: core.Atom,
+) Outcome {
+    const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_atom) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    vm.function = entry.function;
+    vm.frame = &entry.frame;
+    vm.stack = &entry.stack;
+    vm.catch_target = &entry.catch_target;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    vm.local_fast_blocked = false;
+    const pc2: [*]const u8 = vm.code_base;
+    const sp2: [*]JSValue = vm.stack.values.ptr + vm.stack.values.len;
+    const vb2: [*]JSValue = vm.frame.locals.ptr;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
     const function_object = class_vm.callableObjectFromValue(method) orelse return false;
     if (function_object.class_payload_kind != core.class.PayloadKind.function) return false;
@@ -499,6 +534,60 @@ inline fn pushForwardedAndEnter(
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
 }
 
+/// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
+/// trap returns. The caller stack ends in `[target, key]`; temporarily rooting
+/// `result` above them makes all three values survive a nested exotic
+/// descriptor probe. On success the triple contracts to the property result;
+/// on error it is removed before the caller's catch machinery runs.
+fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) HostError!void {
+    defer vm.ctx.runtime.atoms.free(atom_id);
+    const stack = vm.stack;
+    std.debug.assert(stack.values.len >= 2);
+    const region_base = stack.values.len - 2;
+    const target_value = stack.values[region_base];
+    const key = stack.values[region_base + 1];
+    stack.pushOwnedAssumeCapacity(result);
+
+    const target = class_vm.objectFromValue(target_value) orelse unreachable;
+    class_vm.validateProxyGetResult(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        target,
+        atom_id,
+        result,
+        vm.function,
+        vm.frame,
+    ) catch |err| {
+        stack.values = stack.values.ptr[0..region_base];
+        result.free(vm.ctx.runtime);
+        key.free(vm.ctx.runtime);
+        target_value.free(vm.ctx.runtime);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return e2;
+        if (!caught) return err;
+        return;
+    };
+
+    target_value.free(vm.ctx.runtime);
+    key.free(vm.ctx.runtime);
+    const values = stack.values.ptr;
+    values[region_base] = result;
+    values[region_base + 1] = JSValue.undefinedValue();
+    values[region_base + 2] = JSValue.undefinedValue();
+    stack.values = values[0 .. region_base + 1];
+}
+
+fn op_proxy_get_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    _ = pc;
+    _ = sp;
+    const result = vm.return_value;
+    const atom_id = vm.return_atom;
+    vm.return_value = JSValue.undefinedValue();
+    vm.return_atom = core.atom.null_atom;
+    completeProxyGetContinuation(vm, result, atom_id) catch |err| return vm.fail(err);
+    return coldNext(var_buf, vm);
+}
+
 /// Fused popReturn + reload for an in-handler return to an inline caller —
 /// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
 /// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
@@ -508,6 +597,11 @@ inline fn pushForwardedAndEnter(
 inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
     const dying = machine.topEntry();
+    const continuation = inline_calls.ReturnContinuation{
+        .action = dying.return_action,
+        .atom_id = dying.continuation_atom,
+    };
+    dying.continuation_atom = core.atom.null_atom;
     // Straight-line teardown (qjs done: epilogue) unless execution escaped
     // the simple shape: grew the operand stack to the heap, materialized the
     // cold box (arguments object), or moved frame storage to the heap.
@@ -528,6 +622,12 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
     reloadTop(vm, &pc2, &sp2, &vb2);
+    if (continuation.action == .proxy_get) {
+        vm.return_value = value;
+        vm.return_atom = continuation.atom_id;
+        return @call(.always_tail, op_proxy_get_continuation, .{ pc2, sp2, vb2, vm });
+    }
+    std.debug.assert(continuation.atom_id == core.atom.null_atom);
     // Deliver the result on the (now-current) caller stack. AssumeCapacity
     // never reallocs, so the stack_base reloadTop captured stays valid; sp
     // just advances past the pushed slot.
@@ -1524,6 +1624,7 @@ fn op_get_field_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue);
     vm.stack.values = vm.stack_base[0..operand_len];
     const receiver = vm.stack.values[operand_len - 1];
+    if (tryInlineProxyTrap(false, var_buf, vm, vm.property_holder, vm.property_atom)) |outcome| return outcome;
     const retained_atom = vm.ctx.runtime.atoms.dup(vm.property_atom);
     defer vm.ctx.runtime.atoms.free(retained_atom);
     const value = class_vm.getProxyProperty(
@@ -1547,12 +1648,68 @@ fn op_get_field_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     return coldNext(var_buf, vm);
 }
 
+/// Enter an ordinary bytecode Proxy `get` trap without recursively invoking a
+/// second VM. This deliberately accepts only a plain data `handler.get` hit;
+/// accessor/Proxy/exotic trap lookup remains on getProxyProperty so its
+/// observable lookup is not repeated. The caller's static `[receiver]` or
+/// computed `[receiver,key]` region becomes `[target,key]`: the original
+/// receiver moves into argv, while target/key and a strong atom reference stay
+/// rooted for the post-call invariant continuation.
+inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, vm: *Vm, proxy: *core.Object, atom_id: core.Atom) ?Outcome {
+    const target_value = proxy.proxyTarget() orelse return null;
+    const handler_value = proxy.proxyHandler() orelse return null;
+    const trap = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, handler_value, core.atom.ids.get) orelse return null;
+    const stack = vm.stack;
+    const operand_len = stack.values.len;
+    const operand_count: usize = if (computed_key) 2 else 1;
+    std.debug.assert(operand_len >= operand_count);
+    const region_base = operand_len - operand_count;
+    const receiver = stack.values[region_base];
+    const computed_key_value: JSValue = if (computed_key) stack.values[region_base + 1] else undefined;
+    if (trap.isUndefined() or trap.isNull()) {
+        if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(vm.ctx.runtime, target_value, atom_id)) |borrowed| {
+            const result = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
+            receiver.free(vm.ctx.runtime);
+            if (computed_key) computed_key_value.free(vm.ctx.runtime);
+            stack.values[region_base] = result;
+            stack.values = stack.values.ptr[0 .. region_base + 1];
+            return coldNext(var_buf, vm);
+        }
+        return null;
+    }
+    const target = inline_calls.resolveInlineTarget(vm.ctx, vm.global, handler_value, trap) orelse return null;
+
+    const key = if (computed_key)
+        computed_key_value
+    else
+        class_vm.proxyTrapKeyValue(vm.ctx.runtime, atom_id) catch |err| {
+            stack.values = stack.values.ptr[0..region_base];
+            receiver.free(vm.ctx.runtime);
+            const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+            if (!caught) return vm.fail(err);
+            return coldNext(var_buf, vm);
+        };
+    var moved = [_]JSValue{
+        handler_value.dup(),
+        trap.dup(),
+        target_value.dup(),
+        key.dup(),
+        receiver,
+    };
+    defer for (moved) |value| value.free(vm.ctx.runtime);
+
+    stack.values[region_base] = target_value.dup();
+    if (!computed_key) stack.pushOwnedAssumeCapacity(key);
+    return pushMovedAndEnter(var_buf, vm, &target, &moved, .proxy_get, atom_id);
+}
+
 fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
     const operand_len = vm.stack.values.len;
     const key = vm.stack.values[operand_len - 1];
     const receiver = vm.stack.values[operand_len - 2];
     const atom_id = vm_property_field.cachedStringAtomForFastPath(key) orelse unreachable;
+    if (tryInlineProxyTrap(true, var_buf, vm, vm.property_holder, atom_id)) |outcome| return outcome;
     const retained_atom = vm.ctx.runtime.atoms.dup(atom_id);
     defer vm.ctx.runtime.atoms.free(retained_atom);
     const value = class_vm.getProxyProperty(
@@ -2116,8 +2273,16 @@ pub fn run(vm: *Vm) HostError!JSValue {
         switch (next(pc, sp, var_buf, vm)) {
             .returned => {
                 if (vm.machine.depth == 0) return vm.return_value;
-                try vm.machine.popReturn(vm.return_value);
+                const continuation = vm.machine.popReturn(vm.return_value);
                 reloadTop(vm, &pc, &sp, &var_buf);
+                if (continuation.action == .proxy_get) {
+                    const result = vm.return_value;
+                    vm.return_value = JSValue.undefinedValue();
+                    try completeProxyGetContinuation(vm, result, continuation.atom_id);
+                    reloadTop(vm, &pc, &sp, &var_buf);
+                } else {
+                    std.debug.assert(continuation.atom_id == core.atom.null_atom);
+                }
             },
             .threw => return vm.pending_error,
             .tail => {

@@ -6045,6 +6045,212 @@ test "static named getter and proxy fast paths preserve receivers throws and inv
     try std.testing.expect(result.isUndefined());
 }
 
+test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const key = ["__zjs_computed_", "proxy_probe__"].join("");
+        \\let trapCount = 0;
+        \\let seenTarget;
+        \\let seenKey;
+        \\let seenReceiver;
+        \\const basicTarget = {};
+        \\const basicProxy = new Proxy(basicTarget, {
+        \\    get(target, propertyKey, receiver) {
+        \\        trapCount++;
+        \\        seenTarget = target;
+        \\        seenKey = propertyKey;
+        \\        seenReceiver = receiver;
+        \\        return 31;
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(basicProxy[key], 31);
+        \\}
+        \\assert.sameValue(trapCount, 3);
+        \\assert.sameValue(seenTarget, basicTarget);
+        \\assert.sameValue(seenKey, key);
+        \\assert.sameValue(seenReceiver, basicProxy);
+        \\const falloffProxy = new Proxy({}, {
+        \\    get() {},
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(falloffProxy[key], undefined);
+        \\}
+        \\let throwCount = 0;
+        \\const throwingProxy = new Proxy({}, {
+        \\    get() { throw new Error("computed proxy sentinel"); },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        throwingProxy[key];
+        \\    } catch (error) {
+        \\        assert.sameValue(error.message, "computed proxy sentinel");
+        \\        throwCount++;
+        \\    }
+        \\}
+        \\assert.sameValue(throwCount, 3);
+        \\let innerCount = 0;
+        \\let outerCount = 0;
+        \\const innerProxy = new Proxy({}, {
+        \\    get() {
+        \\        innerCount++;
+        \\        return 32;
+        \\    },
+        \\});
+        \\const outerProxy = new Proxy({}, {
+        \\    get() {
+        \\        outerCount++;
+        \\        return innerProxy[key];
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(outerProxy[key], 32);
+        \\}
+        \\assert.sameValue(innerCount, 3);
+        \\assert.sameValue(outerCount, 3);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, key, {
+        \\    value: 33,
+        \\    writable: false,
+        \\    configurable: false,
+        \\});
+        \\const correctFrozenProxy = new Proxy(frozenTarget, {
+        \\    get() { return 33; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(correctFrozenProxy[key], 33);
+        \\}
+        \\const rejectedFrozenProxy = new Proxy(frozenTarget, {
+        \\    get() { return 34; },
+        \\});
+        \\let frozenRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        rejectedFrozenProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) frozenRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(frozenRejected, 3);
+        \\function tailWrongFrozenValue() { return 34; }
+        \\const tailRejectedProxy = new Proxy(frozenTarget, {
+        \\    get() { return tailWrongFrozenValue(); },
+        \\});
+        \\let tailRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        tailRejectedProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) tailRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(tailRejected, 3);
+        \\const catchingProxy = new Proxy({}, {
+        \\    get() {
+        \\        try {
+        \\            return rejectedFrozenProxy[key];
+        \\        } catch (error) {
+        \\            assert.sameValue(error instanceof TypeError, true);
+        \\            return 35;
+        \\        }
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(catchingProxy[key], 35);
+        \\}
+        \\const mutationTarget = { marker: 1 };
+        \\const mutationProxy = new Proxy(mutationTarget, {
+        \\    get(target, propertyKey) {
+        \\        Object.defineProperty(target, propertyKey, {
+        \\            value: 36,
+        \\            writable: false,
+        \\            configurable: false,
+        \\        });
+        \\        return 37;
+        \\    },
+        \\});
+        \\let mutationRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        mutationProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) mutationRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(mutationRejected, 3);
+        \\const targetAlias = {};
+        \\const targetAliasProxy = new Proxy(targetAlias, {
+        \\    get(target) { return target; },
+        \\});
+        \\const receiverAliasProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver) { return receiver; },
+        \\});
+        \\const keyAliasProxy = new Proxy({}, {
+        \\    get(target, propertyKey) { return propertyKey; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(targetAliasProxy[key], targetAlias);
+        \\    assert.sameValue(receiverAliasProxy[key], receiverAliasProxy);
+        \\    assert.sameValue(keyAliasProxy[key], key);
+        \\}
+        \\const paddedProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver, missing) {
+        \\        assert.sameValue(missing, undefined);
+        \\        return 38;
+        \\    },
+        \\});
+        \\const snapshotPaddedProxy = new Proxy({}, {
+        \\    get: function (target, propertyKey, receiver, missing) {
+        \\        "use strict";
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(arguments[0], target);
+        \\        assert.sameValue(arguments[1], propertyKey);
+        \\        assert.sameValue(arguments[2], receiver);
+        \\        assert.sameValue(missing, undefined);
+        \\        target = null;
+        \\        assert.notSameValue(arguments[0], target);
+        \\        return 39;
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(paddedProxy[key], 38);
+        \\    assert.sameValue(snapshotPaddedProxy[key], 39);
+        \\}
+        \\let handlerLookupCount = 0;
+        \\const accessorHandler = {};
+        \\Object.defineProperty(accessorHandler, "get", {
+        \\    get() {
+        \\        handlerLookupCount++;
+        \\        return function () { return 40; };
+        \\    },
+        \\});
+        \\const accessorHandlerProxy = new Proxy({}, accessorHandler);
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(accessorHandlerProxy[key], 40);
+        \\}
+        \\assert.sameValue(handlerLookupCount, 3);
+        \\let descriptorCount = 0;
+        \\const descriptorTarget = new Proxy({}, {
+        \\    getOwnPropertyDescriptor(target, propertyKey) {
+        \\        descriptorCount++;
+        \\        return Reflect.getOwnPropertyDescriptor(target, propertyKey);
+        \\    },
+        \\});
+        \\const descriptorProxy = new Proxy(descriptorTarget, {
+        \\    get() { return 41; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(descriptorProxy[key], 41);
+        \\}
+        \\assert.sameValue(descriptorCount, 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

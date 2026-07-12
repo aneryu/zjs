@@ -163,6 +163,23 @@ pub const SimpleTeardownKind = enum(u8) {
     owned_this,
 };
 
+/// Work the caller must finish after an inline callee returns. Ordinary calls
+/// push the result and resume immediately. A Proxy `get` trap must instead
+/// validate the trap result against the target's *post-call* own descriptor
+/// before the property opcode can produce its value.
+pub const ReturnAction = enum(u8) {
+    next,
+    proxy_get,
+};
+
+pub const ReturnContinuation = struct {
+    action: ReturnAction,
+    /// Owned by the continuation when non-null. Proxy property keys keep only
+    /// a weak atom back-pointer, so this strong reference must span user trap
+    /// execution and any tail-call frame replacements it performs.
+    atom_id: core.Atom,
+};
+
 pub const Entry = struct {
     /// The live execution view: the pointer-stable per-FB cache (common), or
     /// `owned_view` for a cache-less FB. qjs dispatches straight from
@@ -183,6 +200,8 @@ pub const Entry = struct {
     /// borrow realm/undefined `this`; method calls own the receiver moved from
     /// the caller region. General-path frames still need the full teardown.
     fast_teardown: SimpleTeardownKind,
+    return_action: ReturnAction,
+    continuation_atom: core.Atom,
     /// Native Function.call record skipped by transparent forwarding. Owned by
     /// this entry so a stack captured inside the bytecode target still sees the
     /// qjs frame order `target -> call (native) -> caller`.
@@ -356,11 +375,11 @@ pub const Machine = struct {
             argc: u16,
             has_receiver: bool,
         },
-        /// Region already moved off a torn-down frame's operand stack for
-        /// tail-call frame reuse. Layout is `[callable, args...]`, or
-        /// `[receiver, callable, args...]` when `has_receiver` (a method tail
-        /// call). Entries transfer to the new frame and are replaced with
-        /// undefined as they move; the caller frees whatever is left.
+        /// Owned temporary region used by tail-call frame reuse and post-call
+        /// continuations. Layout is `[callable, args...]`, or
+        /// `[receiver, callable, args...]` when `has_receiver`. Entries
+        /// transfer to the new frame and are replaced with undefined as they
+        /// move; the caller frees whatever is left.
         moved: struct {
             values: []core.JSValue,
             has_receiver: bool,
@@ -380,10 +399,12 @@ pub const Machine = struct {
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.native_caller = core.JSValue.undefinedValue();
+        entry.return_action = .next;
+        entry.continuation_atom = core.atom.null_atom;
         if (isSimpleInlineFrame(target, source))
-            try setupSimpleInlineEntry(false, false, false, false, self.ctx, global, entry, target, source)
+            try setupSimpleInlineEntry(false, false, false, false, false, self.ctx, global, entry, target, source)
         else if (isStrictSimpleInlineFrame(false, target, source))
-            try setupSimpleInlineEntry(true, false, false, false, self.ctx, global, entry, target, source)
+            try setupSimpleInlineEntry(true, false, false, false, false, self.ctx, global, entry, target, source)
         else
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         // Link the new frame into the chain — qjs `sf->prev_frame =
@@ -398,12 +419,11 @@ pub const Machine = struct {
     /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
     /// a sloppy, non-arrow plain call (no receiver, undefined `this` → global)
     /// with simple parameters (no original-args snapshot), no global-var rebinds,
-    /// args that can be borrowed in place, and
-    /// all-cell closure captures (borrowable as `var_refs`). Each rejected
-    /// condition is exactly a branch the lean path elides; the general
-    /// `setupInlineEntry` stays the authority for everything else (arrow,
-    /// method receiver, moved tail-call args, non-simple parameters). The
-    /// outlined fallback handles the same shape with arity padding.
+    /// args that can be borrowed in place, and all-cell closure captures
+    /// (borrowable as `var_refs`). Each rejected condition is exactly a branch
+    /// the lean path elides; method, moved-method, arity-padding, and snapshot
+    /// variants are selected by the outlined fallback. `setupInlineEntry`
+    /// remains authoritative for arrows and non-simple parameters.
     fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
         // A cache-less FB (view == null) needs the general path's per-call
         // view rebuild.
@@ -434,10 +454,14 @@ pub const Machine = struct {
     };
 
     const MethodSimpleInlineMode = enum {
-        exact,
-        padded,
-        snapshot_exact,
-        snapshot_padded,
+        stack_exact,
+        stack_padded,
+        stack_snapshot_exact,
+        stack_snapshot_padded,
+        moved_exact,
+        moved_padded,
+        moved_snapshot_exact,
+        moved_snapshot_padded,
     };
 
     /// Select the qjs `argc < arg_count` twin of a simple frame. qjs does not
@@ -461,26 +485,47 @@ pub const Machine = struct {
         return null;
     }
 
-    /// Select a simple frame for `[receiver, callable, args...]`. Object and
-    /// primitive receivers both transfer verbatim: qjs stores raw `this_obj`
-    /// in this same JS_CallInternal frame and performs sloppy substitution or
-    /// boxing only at OP_push_this (quickjs.c:17924-17944).
+    /// Select a simple frame for `[receiver, callable, args...]`, whether the
+    /// region still occupies the caller stack or was moved aside for a Proxy
+    /// continuation/tail-call reuse. Object and primitive receivers both
+    /// transfer verbatim: qjs stores raw `this_obj` in this same
+    /// JS_CallInternal frame and performs sloppy substitution or boxing only
+    /// at OP_push_this (quickjs.c:17924-17944).
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
         const function = target.view orelse return null;
-        const region = switch (source) {
-            .stack_region => |region| region,
-            .moved => return null,
+        const source_kind: enum { stack, moved } = switch (source) {
+            .stack_region => |region| blk: {
+                if (!region.has_receiver) return null;
+                const receiver = region.stack.values[region.region_base];
+                if (!target.this_value.same(receiver)) return null;
+                break :blk .stack;
+            },
+            .moved => |moved| blk: {
+                if (!moved.has_receiver) return null;
+                const receiver = moved.values[0];
+                if (!target.this_value.same(receiver)) return null;
+                break :blk .moved;
+            },
         };
-        if (!region.has_receiver) return null;
-        const receiver = region.stack.values[region.region_base];
-        if (!target.this_value.same(receiver)) return null;
 
         const snapshot = function.strict_simple_snapshot_inline_eligible;
         const no_snapshot = function.simple_inline_eligible or function.strict_simple_inline_eligible;
         if (!snapshot and !no_snapshot) return null;
-        const padded = region.argc < function.arg_count;
-        if (snapshot) return if (padded) .snapshot_padded else .snapshot_exact;
-        return if (padded) .padded else .exact;
+        const padded = sourceArgCount(source) < function.arg_count;
+        return switch (source_kind) {
+            .stack => if (snapshot)
+                if (padded) .stack_snapshot_padded else .stack_snapshot_exact
+            else if (padded)
+                .stack_padded
+            else
+                .stack_exact,
+            .moved => if (snapshot)
+                if (padded) .moved_snapshot_padded else .moved_snapshot_exact
+            else if (padded)
+                .moved_padded
+            else
+                .moved_exact,
+        };
     }
 
     /// Strict-mode twin of `isSimpleInlineFrame`. qjs uses the same
@@ -512,18 +557,22 @@ pub const Machine = struct {
     /// frame.
     noinline fn setupFallbackInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .exact => return setupSimpleInlineEntry(false, false, false, true, ctx, global, entry, target, source),
-            .padded => return setupSimpleInlineEntry(false, false, true, true, ctx, global, entry, target, source),
-            .snapshot_exact => return setupSimpleInlineEntry(false, true, false, true, ctx, global, entry, target, source),
-            .snapshot_padded => return setupSimpleInlineEntry(false, true, true, true, ctx, global, entry, target, source),
+            .stack_exact => return setupSimpleInlineEntry(false, false, false, true, false, ctx, global, entry, target, source),
+            .stack_padded => return setupSimpleInlineEntry(false, false, true, true, false, ctx, global, entry, target, source),
+            .stack_snapshot_exact => return setupSimpleInlineEntry(false, true, false, true, false, ctx, global, entry, target, source),
+            .stack_snapshot_padded => return setupSimpleInlineEntry(false, true, true, true, false, ctx, global, entry, target, source),
+            .moved_exact => return setupSimpleInlineEntry(false, false, false, true, true, ctx, global, entry, target, source),
+            .moved_padded => return setupSimpleInlineEntry(false, false, true, true, true, ctx, global, entry, target, source),
+            .moved_snapshot_exact => return setupSimpleInlineEntry(false, true, false, true, true, ctx, global, entry, target, source),
+            .moved_snapshot_padded => return setupSimpleInlineEntry(false, true, true, true, true, ctx, global, entry, target, source),
         };
         if (paddedSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .sloppy => return setupSimpleInlineEntry(false, false, true, false, ctx, global, entry, target, source),
-            .strict => return setupSimpleInlineEntry(true, false, true, false, ctx, global, entry, target, source),
-            .strict_snapshot => return setupSimpleInlineEntry(true, true, true, false, ctx, global, entry, target, source),
+            .sloppy => return setupSimpleInlineEntry(false, false, true, false, false, ctx, global, entry, target, source),
+            .strict => return setupSimpleInlineEntry(true, false, true, false, false, ctx, global, entry, target, source),
+            .strict_snapshot => return setupSimpleInlineEntry(true, true, true, false, false, ctx, global, entry, target, source),
         };
         if (isStrictSimpleInlineFrame(true, target, source)) {
-            return setupSimpleInlineEntry(true, true, false, false, ctx, global, entry, target, source);
+            return setupSimpleInlineEntry(true, true, false, false, false, ctx, global, entry, target, source);
         }
         return setupInlineEntry(ctx, global, entry, target, source);
     }
@@ -543,14 +592,15 @@ pub const Machine = struct {
     /// in its OWN function so its register allocation is not coupled to the
     /// general path (whose register pressure spilled the hot fields). Ownership
     /// flags MUST mirror the general path exactly: current_function .take,
-    /// plain this .borrow / method this .take, new_target borrowed, exact args
-    /// borrowed / padded args moved, var_refs borrowed.
+    /// plain this .borrow / method this .take, new_target borrowed, stack exact
+    /// args borrowed / padded and temporary-region args moved, var_refs
+    /// borrowed.
     ///
     /// `noinline` is LOAD-BEARING: the whole point is to keep this register
     /// allocation OFF the general `setupInlineEntry`/`pushFrame` chain. If LLVM
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
-    noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         const function = target.view.?; // every simple-frame selector requires a cached view
         entry.function = function;
@@ -560,21 +610,31 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
 
-        // Every simple selector admits only a .stack_region source. The
-        // comptime receiver bit fixes its layout as `[callable, args...]` or
-        // `[receiver, callable, args...]` with no runtime offset branch.
-        const region = switch (source) {
+        // `move_args` makes the source variant compile-time fixed: ordinary
+        // calls borrow/move out of their caller stack region, while Proxy
+        // continuations and tail-call reuse consume a temporary owned region.
+        // Both share `[receiver, callable, args...]` for method calls.
+        comptime std.debug.assert(!move_args or method_receiver);
+        const region = if (move_args)
+            switch (source) {
+                .moved => |r| r,
+                .stack_region => unreachable,
+            }
+        else switch (source) {
             .stack_region => |r| r,
             .moved => unreachable,
         };
         std.debug.assert(region.has_receiver == method_receiver);
         const receiver_count: usize = @intFromBool(method_receiver);
-        const receiver_slot: ?*core.JSValue = if (method_receiver) &region.stack.values[region.region_base] else null;
-        const callable_slot = &region.stack.values[region.region_base + receiver_count];
-        const args = region.stack.values[region.region_base + receiver_count + 1 ..][0..region.argc];
+        const values = if (move_args) region.values else region.stack.values;
+        const region_base: usize = if (move_args) 0 else region.region_base;
+        const argc: usize = if (move_args) region.values.len - receiver_count - 1 else region.argc;
+        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[region_base] else null;
+        const callable_slot = &values[region_base + receiver_count];
+        const args = values[region_base + receiver_count + 1 ..][0..argc];
         const actual_arg_count = args.len;
         const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
-        const arg_storage_count: usize = if (pad_args) frame_arg_count else 0;
+        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
         const snapshot_count: usize = if (snapshot_args) args.len else 0;
         if (pad_args) {
             std.debug.assert(actual_arg_count < frame_arg_count);
@@ -590,17 +650,17 @@ pub const Machine = struct {
         // watermark is untouched — the new slab below cannot overlap them),
         // and the values keep their refcounts (the cycle collector roots by
         // rc, it never scans operand-stack slices).
-        region.stack.values = region.stack.values.ptr[0..region.region_base];
+        if (!move_args) region.stack.values = region.stack.values.ptr[0..region.region_base];
         // On failure below nothing has been bound yet (`takeSourceSlot` runs
         // in the frame literal, after the last failable point): restore the
         // pre-truncation len — the region layout pins it at
         // `region_base + receiver? + callable(1) + argc` — so
         // popOwnedStackRegion sees and frees the whole region, matching the
         // general path's `.full` cleanup.
-        errdefer {
+        errdefer if (!move_args) {
             region.stack.values = region.stack.values.ptr[0 .. region.region_base + receiver_count + 1 + region.argc];
             cleanupStackSource(rt, source);
-        }
+        };
 
         // alloca_size (quickjs.c:17834-17836): optional padded args | locals |
         // operand stack | open var-ref slots | zjs original-args snapshot.
@@ -661,14 +721,14 @@ pub const Machine = struct {
         };
 
         // All failable setup is complete. Transfer supplied argument ownership
-        // into the padded prefix, clear the dead caller slots, then initialize
-        // only the missing tail. The exact specialization compiles this block
-        // out and continues borrowing the original operand slots.
-        const frame_args = if (pad_args) arg_storage else args;
-        if (pad_args) {
+        // into the padded/moved prefix, clear the source slots, then initialize
+        // only a missing tail. Exact caller-stack args continue borrowing the
+        // original operand slots.
+        const frame_args = if (pad_args or move_args) arg_storage else args;
+        if (pad_args or move_args) {
             @memcpy(frame_args[0..actual_arg_count], args);
             @memset(args, core.JSValue.undefinedValue());
-            @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+            if (pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
         }
 
         const captures = target.captures.*;
@@ -1007,6 +1067,28 @@ pub const Machine = struct {
         });
     }
 
+    /// Push a call whose owned receiver/callable/arguments already live in a
+    /// temporary moved region. The frame setup consumes entries by replacing
+    /// them with undefined; the caller remains responsible for freeing any
+    /// entries left behind on setup failure.
+    pub fn pushMovedCall(
+        self: *Machine,
+        global: *core.Object,
+        target: *const InlineTarget,
+        moved_values: []core.JSValue,
+        layout: RegionLayout,
+        return_action: ReturnAction,
+        continuation_atom: core.Atom,
+    ) HostError!*Entry {
+        const entry = try self.pushFrame(global, target, .{ .moved = .{
+            .values = moved_values,
+            .has_receiver = layout == .method,
+        } });
+        entry.return_action = return_action;
+        entry.continuation_atom = self.ctx.runtime.atoms.dup(continuation_atom);
+        return entry;
+    }
+
     /// Push a bytecode target reached through Function.prototype.call. Takes
     /// ownership of `native_caller` only on success; the caller retains and
     /// frees it when frame setup fails.
@@ -1066,8 +1148,18 @@ pub const Machine = struct {
         // args not yet transferred into the new frame).
         defer for (moved) |value| value.free(rt);
 
+        const dying = self.topEntry();
+        const continuation = ReturnContinuation{
+            .action = dying.return_action,
+            .atom_id = dying.continuation_atom,
+        };
+        dying.continuation_atom = core.atom.null_atom;
         self.popTeardown();
-        return self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
+        errdefer if (continuation.atom_id != core.atom.null_atom) rt.atoms.free(continuation.atom_id);
+        const entry = try self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
+        entry.return_action = continuation.action;
+        entry.continuation_atom = continuation.atom_id;
+        return entry;
     }
 
     /// Tear down the top inline frame. Mirrors the defer chain of the
@@ -1096,6 +1188,7 @@ pub const Machine = struct {
     pub inline fn teardownSimpleEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
         const frame = &entry.frame;
+        if (entry.continuation_atom != core.atom.null_atom) rt.atoms.free(entry.continuation_atom);
         if (entry.fast_teardown == .owned_this) frame.this_value.free(rt);
         frame.current_function.free(rt);
         entry.native_caller.free(rt);
@@ -1114,6 +1207,7 @@ pub const Machine = struct {
     /// (popTeardown) and the recursion path.
     pub fn teardownInlineEntry(ctx: *core.JSContext, entry: *Entry) void {
         const rt = ctx.runtime;
+        if (entry.continuation_atom != core.atom.null_atom) rt.atoms.free(entry.continuation_atom);
         entry.native_caller.free(rt);
         entry.stack.deinit(rt);
         entry.frame.deinitInlineCall(&rt.memory, rt);
@@ -1122,12 +1216,24 @@ pub const Machine = struct {
         entry.profile_guard.deinit();
     }
 
-    /// Pop the top inline frame after a completed return, pushing `result`
-    /// onto the caller's operand stack. Takes ownership of `result`.
-    pub fn popReturn(self: *Machine, result: core.JSValue) HostError!void {
+    /// Pop the top inline frame after a completed return. Ordinary calls push
+    /// `result` onto the caller stack; continuations retain it in the driver's
+    /// return slot until their post-call action runs. Takes ownership of
+    /// `result` either way and returns the selected action.
+    pub fn popReturn(self: *Machine, result: core.JSValue) ReturnContinuation {
+        const dying = self.topEntry();
+        const continuation = ReturnContinuation{
+            .action = dying.return_action,
+            .atom_id = dying.continuation_atom,
+        };
+        dying.continuation_atom = core.atom.null_atom;
         self.popTeardown();
-        const caller_stack = if (self.depth == 0) self.l0_stack else &self.topEntry().stack;
-        caller_stack.pushOwnedAssumeCapacity(result);
+        if (continuation.action == .next) {
+            std.debug.assert(continuation.atom_id == core.atom.null_atom);
+            const caller_stack = if (self.depth == 0) self.l0_stack else &self.topEntry().stack;
+            caller_stack.pushOwnedAssumeCapacity(result);
+        }
+        return continuation;
     }
 
     /// Unwind inline frames looking for a catch handler for `err`. The top
