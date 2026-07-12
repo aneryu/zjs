@@ -348,7 +348,12 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     return core.JSValue.float64(@floatFromInt(len));
 }
 
-pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+inline fn qjsGetFieldFastWithExoticOrder(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    comptime own_before_slow: bool,
+) ?core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
@@ -356,10 +361,11 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     var object = objectFromValue(receiver) orelse return null;
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
-        if (object.needsSlowPropertyAccess()) return null;
+        if (!own_before_slow and object.needsSlowPropertyAccess()) return null;
         var slow_property = false;
         if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
         if (slow_property) return null;
+        if (own_before_slow and object.needsSlowPropertyAccess()) return null;
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
         // class objects via a by-class-name global fallback (object_ops.getValueProperty),
@@ -369,6 +375,23 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
         // returns a genuine `undefined` for truly-absent properties.
         object = object.getPrototype() orelse return null;
     }
+}
+
+pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    // The generic zjs fast path must stop before inspecting a slow object:
+    // mapped Arguments numeric bindings live in separate var-ref storage rather
+    // than qjs's shape-level JS_PROP_VARREF entries, so their materialized data
+    // slots cannot bypass the mapped resolver.
+    return qjsGetFieldFastWithExoticOrder(rt, receiver, atom_id, false);
+}
+
+/// qjs GET_FIELD_INLINE probes an own shape entry before `p->is_exotic`.
+/// This ordering is safe for the constant `length` atom because it can never
+/// alias zjs's out-of-shape mapped Arguments numeric bindings. It lets ordinary
+/// own `length` data on Arguments and typed arrays hit before their slow class
+/// semantics while misses and accessor entries still defer to the resolver.
+pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
+    return qjsGetFieldFastWithExoticOrder(rt, receiver, core.atom.ids.length, true);
 }
 
 /// Primitive twin of qjsGetFieldFast. QuickJS selects

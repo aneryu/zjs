@@ -1760,8 +1760,10 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 // (`OP_get_field` length fast leg: `JS_VALUE_GET_STRING(sp[-1])->len`) instead of
 // routing through the general property machinery. A string operand (flat or rope —
 // `len()` reads the rope's logical length without flattening) pushes its character
-// count directly, replacing the popped string. String WRAPPER objects, arrays,
-// typed arrays, and everything else fall to the cold getLength (full getValueProperty).
+// count directly, replacing the popped string. Arrays keep their synthetic length
+// arm; every other object gets the same ordinary shape walk as qjs
+// `GET_FIELD_INLINE(..., JS_ATOM_length)` before typed arrays, accessors, proxies,
+// and other slow cases fall to getLength's full getValueProperty path.
 // 1-byte op (operand on the stack).
 pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
@@ -1779,6 +1781,17 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // read inline instead of via the cold getLength's getValueProperty.
     // Exotic/subclassed arrays, typed arrays, and length-getter objects fall cold.
     if (vm_property_field.fastArrayLengthValue(value)) |len_val| {
+        value.free(vm.ctx.runtime);
+        (sp - 1)[0] = len_val;
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    // qjs OP_get_length is the ordinary GET_FIELD_INLINE macro with a constant
+    // `length` atom: an Arguments object (and any other ordinary object with an
+    // own/inherited data property) stays in the interpreter loop and duplicates
+    // the borrowed slot before releasing the receiver. zjs previously sent every
+    // non-string/non-Array object through the published cold resolver.
+    if (vm_property_field.qjsGetLengthFieldFast(vm.ctx.runtime, value)) |borrowed| {
+        const len_val = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
         value.free(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);

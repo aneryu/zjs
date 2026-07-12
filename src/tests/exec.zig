@@ -5750,6 +5750,76 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
+test "get_length preserves qjs own-data-before-exotic ordering and slow fallbacks" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const own = { length: 3 };
+        \\assert.sameValue(own.length, 3);
+        \\const inherited = Object.create({ length: 4 });
+        \\assert.sameValue(inherited.length, 4);
+        \\const self = {};
+        \\self.length = self;
+        \\assert.sameValue(self.length, self);
+        \\function strictLength(value) {
+        \\    "use strict";
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(strictLength(1), 1);
+        \\function mappedLength(value) {
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(mappedLength(1), 1);
+        \\function mappedComputedDescriptor(value) {
+        \\    const args = arguments;
+        \\    const key = "0";
+        \\    Object.defineProperty(args, key, { configurable: false });
+        \\    args[key] = 2;
+        \\    assert.sameValue(value, 2);
+        \\    assert.sameValue(args[key], 2);
+        \\    const desc = Object.getOwnPropertyDescriptor(args, key);
+        \\    assert.sameValue(desc.value, 2);
+        \\    assert.sameValue(desc.writable, true);
+        \\    assert.sameValue(desc.enumerable, true);
+        \\    assert.sameValue(desc.configurable, false);
+        \\}
+        \\mappedComputedDescriptor(1);
+        \\const typed = new Uint8Array(2);
+        \\Object.defineProperty(typed, "length", { value: 9, configurable: true });
+        \\assert.sameValue(typed.length, 9);
+        \\let getterCount = 0;
+        \\const accessor = {
+        \\    get length() {
+        \\        getterCount++;
+        \\        return 5;
+        \\    },
+        \\};
+        \\assert.sameValue(accessor.length, 5);
+        \\assert.sameValue(getterCount, 1);
+        \\let trapCount = 0;
+        \\const proxy = new Proxy({}, {
+        \\    get(target, key, receiver) {
+        \\        trapCount++;
+        \\        return key === "length" ? 6 : Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\assert.sameValue(proxy.length, 6);
+        \\assert.sameValue(trapCount, 1);
+        \\function mappedAccessor(value) {
+        \\    const args = arguments;
+        \\    Object.defineProperty(args, "length", {
+        \\        configurable: true,
+        \\        get() { return 11; },
+        \\    });
+        \\    return args.length;
+        \\}
+        \\assert.sameValue(mappedAccessor(1), 11);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "missing-argument plain calls preserve parameter and arguments ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
