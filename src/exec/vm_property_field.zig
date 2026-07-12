@@ -383,6 +383,22 @@ pub inline fn primitivePrototypeDataPropertyValueForFastPath(
     receiver: core.JSValue,
     atom_id: core.Atom,
 ) ?core.JSValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
+    while (true) {
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+        var slow_property = false;
+        if (object.findOwnDataValueFast(atom_id, &slow_property)) |value| return value;
+        if (slow_property) return null;
+        object = object.getPrototype() orelse return null;
+    }
+}
+
+inline fn primitivePrototypeObjectForFastPath(
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?*core.Object {
     const slot: core.object.RealmValueSlot = if (receiver.isString()) blk: {
         if (atom_id == core.atom.ids.length or core.atom.isTaggedInt(atom_id)) return null;
         break :blk .string_prototype;
@@ -397,16 +413,83 @@ pub inline fn primitivePrototypeDataPropertyValueForFastPath(
     else
         return null;
 
-    if (rt.atoms.mightBePrivate(atom_id)) return null;
     const prototype_value = global.cachedRealmValue(slot) orelse return null;
-    var object = objectFromValue(prototype_value) orelse return null;
+    return objectFromValue(prototype_value);
+}
+
+pub const CachedStringPropertyFastValue = union(enum) {
+    borrowed: core.JSValue,
+    owned: core.JSValue,
+    getter: core.JSValue,
+    proxy: *core.Object,
+};
+
+inline fn primitivePrototypePropertyForComputedFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?CachedStringPropertyFastValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
     while (true) {
-        if (object.needsSlowPropertyAccess() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
-        var slow_property = false;
-        if (object.findOwnDataValueFast(atom_id, &slow_property)) |value| return value;
-        if (slow_property) return null;
+        if (object.proxyTarget() != null) return .{ .proxy = object };
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;
+        if (object.findProperty(atom_id)) |index| {
+            return switch (object.propKindAt(index)) {
+                .data => .{ .borrowed = object.prop_values[index].slot.data },
+                .accessor => .{ .getter = object.prop_values[index].slot.accessor.getterValue() },
+                .var_ref, .auto_init => null,
+            };
+        }
         object = object.getPrototype() orelse return null;
     }
+}
+
+/// Computed-property twin of the field fast paths. qjs strings are atoms,
+/// so JS_ValueToAtom can pass an already-interned key straight into
+/// JS_GetProperty. zjs keeps a weak atom back-pointer on materialized strings;
+/// when it is present, indexed storage or an ordinary data hit can be resolved
+/// without publishing the VM or entering the allocating/general computed-key
+/// resolver. The operation cannot re-enter, so borrowing the weak id is safe.
+pub inline fn cachedStringPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    key: core.JSValue,
+) ?CachedStringPropertyFastValue {
+    const atom_id = cachedStringAtom(key) orelse return null;
+    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+        if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
+            const index_value = core.JSValue.int32(@intCast(index));
+            if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
+            if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+            if (fastTypedArrayElementValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+        }
+    }
+    if (objectFromValue(receiver)) |object| {
+        // The ordinary lookup distinguishes data, a semantically complete
+        // missing result, getters, and a Proxy holder. Carrying the latter two
+        // forward avoids repeating the receiver-chain walk in the cold action;
+        // other exotics still fall back. Non-ordinary builtins retain zjs's
+        // class-based fallback below.
+        if (object.class_id == core.class.ids.object or object.flags.is_array or object.flags.is_global) {
+            return switch (property_ic.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
+                .value => |value| .{ .borrowed = value },
+                .getter => |getter| .{ .getter = getter },
+                .proxy => |proxy| .{ .proxy = proxy },
+                .undefined => .{ .borrowed = core.JSValue.undefinedValue() },
+                .slow => null,
+            };
+        }
+        const value = qjsGetFieldFast(rt, receiver, atom_id) orelse return null;
+        return .{ .borrowed = value };
+    }
+    return primitivePrototypePropertyForComputedFastPath(rt, global, receiver, atom_id);
+}
+
+pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
+    return cachedStringAtom(value);
 }
 
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {

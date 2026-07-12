@@ -48,8 +48,10 @@ const FastProtoDataLookup = union(enum) {
     slow,
 };
 
-const OrdinaryDataPropertyLookup = union(enum) {
+pub const OrdinaryComputedPropertyLookup = union(enum) {
     value: core.JSValue,
+    getter: core.JSValue,
+    proxy: *core.Object,
     undefined,
     slow,
 };
@@ -367,29 +369,38 @@ fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.
     };
 }
 
-fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryDataPropertyLookup {
+fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
     if (rt.atoms.kind(atom_id) == .private) return .slow;
     var cursor = objectFromValue(value) orelse return .slow;
     while (true) {
-        if (cursor.proxyTarget() != null or cursor.hasExoticMethods()) return .slow;
+        if (cursor.proxyTarget() != null) return .{ .proxy = cursor };
+        if (cursor.hasExoticMethods()) return .slow;
         if (cursor.flags.is_array) {
             if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
         } else if (cursor.class_id != core.class.ids.object and !cursor.flags.is_global) return .slow;
-        switch (fastOwnOrdinaryDataPropertyBorrowedValue(cursor, atom_id)) {
-            .value => |property_value| return .{ .value = property_value },
-            .missing => cursor = cursor.getPrototype() orelse {
+        if (cursor.findProperty(atom_id)) |index| {
+            return switch (cursor.propKindAt(index)) {
+                .data => .{ .value = cursor.prop_values[index].slot.data },
+                .accessor => .{ .getter = cursor.prop_values[index].slot.accessor.getterValue() },
+                .var_ref, .auto_init => .slow,
+            };
+        } else {
+            cursor = cursor.getPrototype() orelse {
                 if (cursor.flags.is_array) return .slow;
                 return .undefined;
-            },
-            .slow => return .slow,
+            };
         }
     }
+}
+
+pub fn ordinaryComputedPropertyLookupForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) OrdinaryComputedPropertyLookup {
+    return ordinaryDataPropertyLookup(rt, value, atom_id);
 }
 
 pub fn ordinaryDataPropertyBorrowedValueForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
         .value => |property_value| property_value,
-        .undefined, .slow => null,
+        .getter, .proxy, .undefined, .slow => null,
     };
 }
 
@@ -397,7 +408,7 @@ pub fn ordinaryDataPropertyValueOrUndefinedForFastPath(rt: *core.JSRuntime, valu
     return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
         .value => |property_value| property_value,
         .undefined => core.JSValue.undefinedValue(),
-        .slow => null,
+        .getter, .proxy, .slow => null,
     };
 }
 
@@ -405,7 +416,7 @@ pub fn ordinaryDataPropertyIsUndefinedForFastPath(rt: *core.JSRuntime, value: co
     return switch (ordinaryDataPropertyLookup(rt, value, atom_id)) {
         .value => |property_value| property_value.isUndefined(),
         .undefined => true,
-        .slow => null,
+        .getter, .proxy, .slow => null,
     };
 }
 

@@ -5872,6 +5872,75 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
     try std.testing.expect(result.isUndefined());
 }
 
+test "computed named reads preserve prototype accessors proxies and operand ownership" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const dataKey = "__zjs_computed_data_probe__";
+        \\const getterKey = "__zjs_computed_getter_probe__";
+        \\const emptyGetterKey = "__zjs_computed_empty_getter_probe__";
+        \\const throwingGetterKey = "__zjs_computed_throwing_getter_probe__";
+        \\const proxyKey = "__zjs_computed_proxy_probe__";
+        \\const selfKey = "__zjs_computed_self_probe__";
+        \\const prototype = {};
+        \\prototype[dataKey] = 11;
+        \\const object = Object.create(prototype);
+        \\assert.sameValue(object[dataKey], 11);
+        \\let getterReceiver;
+        \\let getterCount = 0;
+        \\Object.defineProperty(prototype, getterKey, {
+        \\    configurable: true,
+        \\    get() {
+        \\        getterReceiver = this;
+        \\        getterCount++;
+        \\        return 12;
+        \\    },
+        \\});
+        \\assert.sameValue(object[getterKey], 12);
+        \\assert.sameValue(getterReceiver, object);
+        \\assert.sameValue(getterCount, 1);
+        \\Object.defineProperty(prototype, emptyGetterKey, {
+        \\    configurable: true,
+        \\    get: undefined,
+        \\});
+        \\assert.sameValue(object[emptyGetterKey], undefined);
+        \\Object.defineProperty(prototype, throwingGetterKey, {
+        \\    configurable: true,
+        \\    get() { throw new Error("computed getter sentinel"); },
+        \\});
+        \\let caughtMessage;
+        \\try {
+        \\    object[throwingGetterKey];
+        \\} catch (error) {
+        \\    caughtMessage = error.message;
+        \\}
+        \\assert.sameValue(caughtMessage, "computed getter sentinel");
+        \\let proxyReceiver;
+        \\let proxyCount = 0;
+        \\const proxy = new Proxy(prototype, {
+        \\    get(target, key, receiver) {
+        \\        proxyReceiver = receiver;
+        \\        proxyCount++;
+        \\        if (key === proxyKey) return 13;
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\const proxyObject = Object.create(proxy);
+        \\assert.sameValue(proxyObject[proxyKey], 13);
+        \\assert.sameValue(proxyReceiver, proxyObject);
+        \\assert.sameValue(proxyCount, 1);
+        \\object[selfKey] = object;
+        \\assert.sameValue(object[selfKey], object);
+        \\object[dataKey] = dataKey;
+        \\assert.sameValue(object[dataKey], dataKey);
+        \\assert.sameValue(Object.create(null)[dataKey], undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
