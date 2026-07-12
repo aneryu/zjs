@@ -487,6 +487,23 @@ pub const String = struct {
         return self;
     }
 
+    /// If `bytes` is ASCII, allocate the final narrow string and case-map the
+    /// source directly into its inline payload. A non-ASCII source returns null
+    /// without allocating so the caller can use the full Unicode converter.
+    pub fn createAsciiCaseMapped(rt: *JSRuntime, bytes: []const u8, to_lower: bool) !?*String {
+        for (bytes) |byte| {
+            if (byte >= 0x80) return null;
+        }
+        const self = try createUninitialized(rt, .latin1, bytes.len);
+        errdefer destroyFlat(rt, self);
+        const out = self.latin1Mut();
+        for (bytes, 0..) |byte, index| {
+            out[index] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
+        }
+        writeLatin1Terminator(out);
+        return self;
+    }
+
     /// QuickJS `JS_STRING_ROPE_SHORT_LEN`: a short RHS is merged into a rope's
     /// short right leaf before another wrapper node is introduced.
     pub const rope_short_len: usize = 512;

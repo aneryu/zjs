@@ -3,12 +3,12 @@ const bignum = @import("../libs/bigint.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-// The `.string` builtin record handler `stringCall` dispatches every
-// prototype-method id into the exec `qjsStringPrototypeMethod` (BOTH-reachable:
-// the string opcode/`call_runtime` host path also calls it). The realm-aware
-// method bodies themselves (pad/HTML/normalize/localeCompare/numeric-arg) are
-// exec-only and live in `exec/string_ops.zig`; this module only reaches the
-// shared VM string entry points (`string_ops.*`) for dispatch.
+// The `.string` builtin record table uses direct leaf handlers for the qjs-like
+// index reads and case conversion entries; its residual `stringCall` handler
+// dispatches the shared prototype-method ids into `qjsStringPrototypeMethod`
+// (BOTH-reachable: the string opcode/`call_runtime` host path also calls it).
+// Realm-aware pad/HTML/normalize/localeCompare/numeric-arg bodies remain
+// exec-only in `exec/string_ops.zig`.
 const string_ops = @import("string_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
@@ -47,14 +47,13 @@ pub const decodePrototypeMethodId = string_id_lookup.decodePrototypeMethodId;
 pub const encodePrototypeMethodId = string_id_lookup.encodePrototypeMethodId;
 
 /// Declaration + dispatch table for the `.string` native-builtin domain
-/// (QuickJS js_string_funcs / js_string_proto_funcs analogue). One shared
-/// record handler `stringCall` switches on the per-record `magic` (== the
-/// domain-local id, i.e. the `StaticMethod`/`ConstructorMethod`/`PrototypeMethod`
-/// enum value) and mirrors the retired `call.zig` `callStringNativeFunctionRecord`
-/// exactly: the constructor/statics and the prototype methods delegate to the
-/// exec VM ops in `string_ops.zig`, which stay in exec because the string
-/// opcode handlers (`vm_call.zig`/`call_runtime.zig`) and `regexp_fastpath.zig`
-/// also call them. Property installation still resolves names/lengths through
+/// (QuickJS js_string_funcs / js_string_proto_funcs analogue). Most entries use
+/// the shared `stringCall` magic dispatcher; qjs's per-method index and case
+/// conversion bodies use dedicated record functions. The shared constructor,
+/// statics and prototype methods delegate to exec VM ops in `string_ops.zig`,
+/// which stay in exec because the string opcode handlers
+/// (`vm_call.zig`/`call_runtime.zig`) and `regexp_fastpath.zig` also call them.
+/// Property installation still resolves names/lengths through
 /// the registry's `string_static`/`string_prototype` Method tables plus the
 /// `staticMethodId`/`prototypeMethodId` id helpers above (like Date/Number);
 /// this table is consumed only by the slow record-dispatch path
@@ -79,8 +78,8 @@ pub const internal_entries = stringEntries: {
         // native functions and never reach record dispatch.
         stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), false),
         stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring), true),
-        stringEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), false),
-        stringEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), false),
+        stringDirectEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), &stringCaseCall),
+        stringDirectEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), &stringCaseCall),
         stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of), false),
         stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes), false),
         stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with), false),
@@ -125,6 +124,20 @@ fn stringDirectEntry(
     return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .call = call };
 }
 
+test "String case conversion methods have a dedicated native record handler" {
+    var upper_call: ?core.host_function.InternalCallFn = null;
+    var lower_call: ?core.host_function.InternalCallFn = null;
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = entry.call;
+        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = entry.call;
+    }
+    try std.testing.expect(upper_call != null);
+    try std.testing.expect(lower_call != null);
+    try std.testing.expect(upper_call.? != &stringCall);
+    try std.testing.expect(lower_call.? != &stringCall);
+    try std.testing.expect(upper_call.? == lower_call.?);
+}
+
 /// The String constructor record: construct-capable so `new String(...)`
 /// routes through the construct dispatch path into `stringCall`'s construct
 /// branch (it still serves `String(...)` as a function on the call path).
@@ -138,12 +151,13 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
 /// because the string opcode handlers and `regexp_fastpath.zig` also call them.
 ///
-/// QJS gives `at`, `charCodeAt`, and `codePointAt` their own function-list
-/// entries. Their zjs entries likewise land in the small functions below. The
-/// already-string/immediate-index path stays local; values requiring observable
-/// ToString/ToNumber coercion tail into this shared handler. Keeping that rare
-/// path out of the direct functions avoids cloning the whole coercion tower into
-/// each hot native entry.
+/// QJS gives `at`, `charCodeAt`, `codePointAt`, and the shared
+/// `js_string_toLowerCase` case-conversion body their own function-list entries.
+/// Their zjs entries likewise land in the small functions below. The index
+/// methods keep their already-string/immediate-index path local; values requiring
+/// observable ToString/ToNumber coercion tail into this shared handler. Keeping
+/// that rare path out of the direct index functions avoids cloning the whole
+/// coercion tower into each hot native entry.
 inline fn stringPrimitiveIndexRead(host_call: InternalCall, comptime mid: u32) HostError!?core.JSValue {
     const string_value = host_call.this_value;
     if (!string_value.isString()) return null;
@@ -207,6 +221,28 @@ fn stringAtCall(host_call: InternalCall) HostError!core.JSValue {
 fn stringCodePointAtCall(host_call: InternalCall) HostError!core.JSValue {
     if (try stringPrimitiveIndexRead(host_call, 31)) |value| return value;
     return stringCall(host_call);
+}
+
+fn stringCaseCall(host_call: InternalCall) HostError!core.JSValue {
+    const to_lower = host_call.magic == @intFromEnum(PrototypeMethod.to_lower_case);
+    if (host_call.global == null) {
+        if (host_call.func_obj != null or host_call.flags.constructor) return error.TypeError;
+        return unicodeCaseReceiver(host_call.ctx.runtime, host_call.this_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
+    }
+
+    const global = host_call.global orelse return error.TypeError;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+    const string_value = try string_ops.toStringCheckObject(
+        host_call.ctx,
+        host_call.output,
+        global,
+        host_call.this_value,
+        caller_function,
+        caller_frame,
+    );
+
+    return unicodeCaseOwnedString(host_call.ctx.runtime, string_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
 }
 
 fn stringCall(host_call: InternalCall) HostError!core.JSValue {
@@ -1093,16 +1129,30 @@ fn codePointAtResolved(data: core.string.String.ResolvedData, len: usize, index:
 
 fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
     const primitive = try toStringValueForMethod(rt, receiver);
-    defer primitive.free(rt);
-    const string_value = primitive.asStringBody() orelse return error.TypeError;
+    return unicodeCaseOwnedString(rt, primitive, to_lower);
+}
 
-    // Resolve the source to its flat code-unit slice ONCE (decode code points from
-    // it directly instead of re-walking via codeUnitAt per char), and accumulate
-    // into a NARROW latin1 buffer that widens to UTF-16 only when an output unit
-    // exceeds 0xFF — so an ASCII string never materializes a UTF-16 result. qjs
-    // js_string_toLowerCase uses a pre-sized narrow string_buffer (quickjs.c:46510).
+fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower: bool) !core.JSValue {
+    const string_value = primitive.asStringBody() orelse {
+        primitive.free(rt);
+        return error.TypeError;
+    };
+
+    // Resolve the source to its flat code-unit slice ONCE. ASCII maps directly
+    // into the final inline narrow String, matching qjs's pre-sized StringBuffer
+    // ownership. The remaining Unicode path accumulates into a narrow latin1
+    // buffer that widens to UTF-16 only when an output unit exceeds 0xFF.
     const data = string_value.resolveData();
     const slen = string_value.len();
+    if (slen == 0) return primitive;
+    defer primitive.free(rt);
+
+    switch (data) {
+        .latin1 => |bytes| {
+            if (try core.string.String.createAsciiCaseMapped(rt, bytes, to_lower)) |mapped| return mapped.value();
+        },
+        .utf16 => {},
+    }
 
     var latin1 = std.ArrayList(u8).empty;
     defer latin1.deinit(rt.memory.allocator);

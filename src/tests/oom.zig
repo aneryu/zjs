@@ -142,6 +142,15 @@ const corpus = [_]Snippet{
         .post_source = "out === 6 ? \"jobs-ok\" : \"jobs-bad\"",
         .post_expect = "jobs-ok",
     },
+    .{
+        .name = "string-case-conversion",
+        .source =
+        \\const upper = "abcdefghijklmnopqrstuvwxyz".toUpperCase();
+        \\const lower = "AΣ".toLowerCase();
+        \\upper === "ABCDEFGHIJKLMNOPQRSTUVWXYZ" && lower === "aς" ? "case-ok" : "case-bad"
+        ,
+        .expect = .{ .string = "case-ok" },
+    },
 };
 
 // ---------------------------------------------------------------------------

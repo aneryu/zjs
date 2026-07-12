@@ -2339,6 +2339,45 @@ test "string prototype native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("4\n", output.buffered());
 }
 
+test "String case conversion records preserve coercion and Unicode semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var hints = [];
+        \\var receiver = {};
+        \\receiver[Symbol.toPrimitive] = function(hint) {
+        \\    hints.push(hint);
+        \\    return "aßΣ";
+        \\};
+        \\assert.sameValue(String.prototype.toUpperCase.call(receiver), "ASSΣ");
+        \\assert.sameValue(hints.join(","), "string");
+        \\assert.sameValue("AΣ".toLowerCase(), "aς");
+        \\assert.sameValue("AΣA".toLowerCase(), "aσa");
+        \\assert.sameValue("\uD801\uDC28".toUpperCase(), "\uD801\uDC00");
+        \\assert.sameValue(String.prototype.toLowerCase.call(new String("ABC")), "abc");
+        \\var upper = String.prototype.toUpperCase;
+        \\Object.defineProperty(upper, "name", { value: "renamed" });
+        \\assert.sameValue(upper.call("ab"), "AB");
+        \\assert.throws(TypeError, function() {
+        \\    String.prototype.toUpperCase.call(Symbol("x"));
+        \\});
+        \\var other = $262.createRealm().global;
+        \\assert.throws(other.TypeError, function() {
+        \\    other.String.prototype.toUpperCase.call(Symbol("x"));
+        \\});
+    );
+    defer result.free(js.runtime);
+
+    const pure_source = try core.string.String.createUtf8(js.runtime, "ABC");
+    defer pure_source.value().free(js.runtime);
+    const pure_result = try engine.exec.string_ops.callStringBody(js.context, pure_source.value(), 3, &.{});
+    defer pure_result.free(js.runtime);
+    try std.testing.expect((pure_result.asStringBody() orelse return error.TestUnexpectedResult).eqlBytes("abc"));
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "date static native builtin records ignore dispatch names" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

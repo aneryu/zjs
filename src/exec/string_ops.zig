@@ -4553,10 +4553,11 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // Realm-aware String.prototype method bodies (pad / HTML wrappers / normalize /
 // localeCompare / numeric-arg methods). These are reachable ONLY through the
 // `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
-// handler `stringCall` routes every prototype method to it), never from a
-// builtin dispatch table entry, so they are exec-only. They were briefly hosted
-// in the transitional String owner (Phase 6b-2) and were moved back here in Phase 6b-3
-// STEP 3B to keep the dependency edge exec -> builtins out of these bodies. They
+// handler `stringCall` routes the remaining shared prototype methods to it),
+// never from a dedicated builtin table entry, so they are exec-only. They were
+// briefly hosted in the transitional String owner (Phase 6b-2) and were moved
+// back here in Phase 6b-3 STEP 3B to keep the dependency edge exec -> builtins
+// out of these bodies. They
 // reuse the file-local rope/UTF helpers (`toStringForAnnexB`,
 // `appendStringValueUnits`, `appendUtf32FromStringValue`, `appendUtf16CodePoint`,
 // `appendAsciiUnits`) plus the shared `value_ops`/`coercion_ops`/`builtin_glue`
