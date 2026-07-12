@@ -2476,6 +2476,40 @@ pub fn qjsPromiseKeyedCombinatorCall(
     return capability.releaseCallbacks(ctx.runtime);
 }
 
+/// Per-method body for `Promise.resolve`, matching qjs
+/// `js_promise_resolve(..., magic = 0)`. Keeping it separate prevents the
+/// identity hot path from inheriting the combinator/reject/try/withResolvers
+/// frame and register pressure of `qjsPromiseStaticCall`.
+pub fn qjsPromiseResolveStaticCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (!constructor_value.isObject()) return error.TypeError;
+
+    // qjs `js_promise_resolve` reads a native Promise's observable
+    // `constructor` and returns an identity match before asking whether
+    // `this_val` is a constructor. NewPromiseCapability performs that check
+    // only after the identity arm misses. Besides matching the observable
+    // getter/error order, this keeps the overwhelmingly common
+    // `Promise.resolve(existingPromise)` path out of capability validation.
+    const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (try qjsPromiseResolveIdentity(ctx, output, global, constructor_value, payload, caller_function, caller_frame)) |same_promise| {
+        return same_promise;
+    }
+
+    if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
+    var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
+    errdefer capability.deinit(ctx.runtime);
+    const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
+    resolve_result.free(ctx.runtime);
+    return capability.releaseCallbacks(ctx.runtime);
+}
+
 pub fn qjsPromiseStaticCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2486,6 +2520,7 @@ pub fn qjsPromiseStaticCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    if (mode == .resolve) return qjsPromiseResolveStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     if (!constructor_value.isObject()) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
 
@@ -2500,17 +2535,7 @@ pub fn qjsPromiseStaticCall(
     }
 
     switch (mode) {
-        .resolve => {
-            const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            if (try qjsPromiseResolveIdentity(ctx, output, global, constructor_value, payload, caller_function, caller_frame)) |same_promise| {
-                return same_promise;
-            }
-            var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-            errdefer capability.deinit(ctx.runtime);
-            const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
-            resolve_result.free(ctx.runtime);
-            return capability.releaseCallbacks(ctx.runtime);
-        },
+        .resolve => unreachable,
         .reject => {
             const reason = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);

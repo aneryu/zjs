@@ -3124,6 +3124,32 @@ test "Promise.resolve rejects self-resolution from custom capability" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Promise.resolve returns an identity match before constructor validation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var receiver = {};
+        \\var constructorGets = 0;
+        \\var promise = Promise.resolve(1);
+        \\Object.defineProperty(promise, "constructor", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        constructorGets++;
+        \\        return receiver;
+        \\    }
+        \\});
+        \\assert.sameValue(Promise.resolve.call(receiver, promise), promise);
+        \\assert.sameValue(constructorGets, 1);
+        \\assert.throws(TypeError, function() {
+        \\    Promise.resolve.call(receiver, Promise.resolve(2));
+        \\});
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise capability executor keeps internal slot off user properties" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

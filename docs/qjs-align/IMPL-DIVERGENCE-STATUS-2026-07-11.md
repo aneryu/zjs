@@ -1,9 +1,9 @@
 # zjs ↔ qjs 实现差异现状全景与整改结果（2026-07-11，更新至 2026-07-12）
 
 > 方法：分步骤对比 — ①重建双引擎并测量 20 个基准（insn+cycles）→ ②同源码双引擎字节码序列 dump 对比 → ③perf 热点归因 → ④九个子系统代码级审计 → ⑤正确性与性能前沿排序。
-> 结论先行：本文最初记录的 C1–C4 正确性缺陷已经修复；二次审计又闭合了 conditional-only 回边中断、lexical lowering 死路径和 native builtin 栈帧。本轮进一步修复了模块 DFS/TLA 调度、动态导入 arrow 的 named-evaluation 状态泄漏、隐式 `arguments` 绑定优先级，以及 generator return 穿越 finally 时的显式抛出传播。原 13 条 known-errors 中已有 11 条转绿并移除，剩余 2 条在当前 QJS 参照上也失败，不构成已证实的 zjs → QJS 差异。§5.2 的 10 个性能候选均已执行“重建证据→实现、收窄或否决”：1–6、8、10 已按证据闭环；7 已完成 Math typed-cproto 首域、通用 op_call memo、Function record 化，并让 `Array.prototype.push` 先进入 per-method full-context record，再按 qjs 顺序于 ToObject/receiver dup 前尝试 fast-array arm；其他 builtin 域的 typed ABI 仍是架构迁移债；9 的 delete compact 原假设被基准否决，改为收益明确的 cached-string-atom 读路径。§1–§4 保留为**整改前历史快照**，当前结论以 §5 为准。
+> 结论先行：本文最初记录的 C1–C4 正确性缺陷已经修复；二次审计又闭合了 conditional-only 回边中断、lexical lowering 死路径和 native builtin 栈帧。本轮进一步修复了模块 DFS/TLA 调度、动态导入 arrow 的 named-evaluation 状态泄漏、隐式 `arguments` 绑定优先级、generator return 穿越 finally 时的显式抛出传播，以及 `Promise.resolve` 身份命中的构造器验证顺序。原 13 条 known-errors 中已有 11 条转绿并移除，剩余 2 条在当前 QJS 参照上也失败，不构成已证实的 zjs → QJS 差异。§5.2 的 10 个性能候选均已执行“重建证据→实现、收窄或否决”：1–6、8、10 已按证据闭环；7 已完成 Math typed-cproto 首域、通用 op_call memo、Function record 化，让 `Array.prototype.push` 先进入 per-method full-context record，并让 `Promise.resolve` 成为 Promise 域首个 per-method record；其他 builtin 域的 typed ABI 仍是架构迁移债；9 的 delete compact 原假设被基准否决，改为收益明确的 cached-string-atom 读路径。§1–§4 保留为**整改前历史快照**，当前结论以 §5 为准。
 >
-> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用、函数生命周期与 Array.push 的 22 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
+> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用、函数生命周期、Array.push 与 Promise.resolve 的 23 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
 
 ## 0. 初始审计环境与方法
 
@@ -271,7 +271,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 ### 5.1 正确性门禁
 
-十项均先加入失败回归或双引擎可执行证据，再修根因；没有扩大 test262 exclude；C7–C10 只删除已经转绿的 known-errors。
+十一项均先加入失败回归或双引擎可执行证据，再修根因；没有扩大 test262 exclude；C7–C10 只删除已经转绿的 known-errors。
 
 | # | 整改 | 当前结果 |
 |---|---|---|
@@ -285,6 +285,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 | C8 | DynamicImportCall 发码后清除匿名函数 named-evaluation 候选，避免参数 arrow 把外层声明错误标记为匿名函数命名目标 | 原失败 1/1 转绿；整个 dynamic-import assignment-expression 目录 28/28；直接 arrow 声明的正对照仍保留 `set_name` |
 | C9 | 当前非箭头函数的隐式 `arguments` 在父作用域捕获前物化；显式参数绑定优先于 pseudo-variable，嵌套 arrow 捕获同一函数绑定 | 原失败 2/2 转绿；整个 `for-await-of` 目录 1234/1234；显式同名参数与 destructuring 对照均与当前 qjs 一致 |
 | C10 | generator return-through-finally 用正常出口定位真正的合成重抛，并让该出口标记跨 dead-code peephole 保留 | 原 AsyncGenerator 失败转绿；`AsyncGeneratorPrototype/return` 19/19；同步/异步显式 finally throw 与关闭后 `.next()` 均有 Zig 回归 |
+| C11 | `Promise.resolve` 对 native Promise 先读取 observable `constructor` 并完成身份命中，再由 capability 慢路验证 `this` 是否可构造 | ordinary receiver 与自定义 `promise.constructor` 相同的最小用例由 `TypeError` 转为身份返回；getter 次数/抛出顺序、subclass、`.call`/`Reflect.apply` 与 qjs 一致；resolve 目录 30/30 |
 
 原先列为开放的 if-only 中断 poll 与 `useUncheckedLexicalLocals` 死码均已闭合。仍存在的正确性与机制差异单列在 §5.4，不再与 §5.2 的性能架构迁移或附录 A 的历史证据缺失混写。
 
@@ -298,7 +299,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 | 4 | 完成 | slab header 与 GC Metadata 复用，64B payload 使用 72-class；公开累计统计和 heap-accounting 不变量保留 |
 | 5 | 完成（窄刀） | const local write resolve 期发 message-carrying `throw_error`；运行时 handler 删除 is_const 分支 |
 | 6 | 完成（首刀） | 删除 `Machine.switched` 3 写 0 读；其余调用架构候选仍独立留置 |
-| 7 | 部分完成（边界扩大） | Math `.f_f/.f_f_f` + observable-coercion fallback + plain-call nativeRecord memo；Function `toString/bind/call/apply` 全部 record 化，native frame 可见；Array.push 使用 per-method full-context record 并在 ToObject/receiver dup 前走 qjs 式 fast-array arm；其他共享 full-context builtin 域未伪装成 typed-cproto 已迁移 |
+| 7 | 部分完成（边界扩大） | Math `.f_f/.f_f_f` + observable-coercion fallback + plain-call nativeRecord memo；Function `toString/bind/call/apply` 全部 record 化，native frame 可见；Array.push 使用 per-method full-context record 并在 ToObject/receiver dup 前走 qjs 式 fast-array arm；Promise.resolve 使用 Promise 域首个 per-method record 并按 qjs 顺序在 capability 构造器验证前完成身份命中；其他共享 full-context builtin 域未伪装成 typed-cproto 已迁移 |
 | 8 | 完成（证据改刀） | 原 GC-pacing 假设未采纳；真正瓶颈是 cell local 禁用 rope tail，2M 代表运行约 −62.2% instructions / −78.2% cycles / −96.2% minor faults |
 | 9 | 原刀否决，替代刀完成 | 64 tombstones 无可测 instructions 惩罚，未做 risky compact；cached-string-atom 路径使 computed read 约 −26.9% instructions / −23.5% cycles，静态读不回退 |
 | 10 | 完成 | 五族 peephole、atom ownership 与隐式控制流保护均有 snapshot/语义回归；相关 test262 867/867 |
@@ -322,19 +323,21 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 Array builtin 首域使用固定脚本 `array-push-one-arg-5m.js` 做 CPU19、ReleaseFast、7 轮交替配对：冻结起点 zjs 中位数 299.828ms，当前 275.392ms，qjs 184.735ms，故 zjs/qjs 由 1.62x 降到 1.49x（当前相对起点 −8.15%）。同一反馈环的零参数探针为 422.105→235.786ms、qjs 166.703ms（2.53x→1.41x），四参数探针为 370.241→344.611ms、qjs 226.592ms（1.63x→1.52x）；未改的 `call-const-zero-arg-10m.js` 控制为 315.856→315.052ms，中性。反汇编显示起点 `arrayCall` 共享体 4620B、后续 `qjsArrayPushCall` 再验证 444B；当前 record 直达 152B wrapper 后进入同一语义实现体。收益因此同时来自 per-method record 与 qjs 式 pre-ToObject fast-array arm，不外推为整个 Array 域已迁移。
 
+Promise builtin 首刀使用固定脚本 `promise-resolve-same-1m.js` 做 CPU19、ReleaseFast、9 轮交错配对：冻结起点 zjs 中位数 580.090ms，当前 130.166ms，qjs 40.408ms，故 zjs/qjs 由 14.36x 降到 3.22x（当前相对起点 −77.6%）。根因是 `.promise` 域原先没有 internal record，VM 每次都借 dispatch name、重新解析 realm 的 `Promise.resolve`，并在身份命中前先验证 `this` 的构造器能力；当前 record 直达独立的 `qjsPromiseResolveStaticCall`，且按 qjs `js_promise_resolve` 顺序先做 observable `constructor` 身份检查。提取式 `.call` 探针下降约 29%，primitive resolve 探针下降约 35%；未改的 `call-const-zero-arg-10m.js` 控制为 316.187→316.274ms，中性。把 capability 慢路再标为 `noinline` 的实验使身份脚本 130.829→131.481ms（+0.5%），已经撤回。3.22x 残差因此仍属开放性能边界，不外推为整个 Promise 域已迁移。
+
 函数生命周期另发现一个独立的二次复杂度缺陷：嵌套函数的 realm 借用引用都登记在 runtime holder 数组，FIFO 析构原先逐项线性查找并 `copyForwards`，20 万函数需要 2.26s。当前函数 payload 用既有 3 字节尾隙缓存 `index+1`，holder 删除改为 swap-remove 并修复被移动项的缓存；`function-create-nested-hold-200k.js` 降到 0.11s，复杂度扫描 50k/100k/200k 为 0.02/0.06/0.10s。qjs 同一 200k 脚本为 0.04s，因此算法级差异已闭合，固定成本和内存差距仍在。DWARF 实测默认 `FunctionPayload` 保持 80B；该脚本 max RSS 当前约 79.4MiB、qjs 约 30.8MiB。
 
 ### 5.3 验证状态
 
-- Debug unified：最新工作树 1341/1341；`checkpoint-check` 25/25 steps。
+- Debug unified：最新工作树 1343/1343；`checkpoint-check` 25/25 steps。
 - `quick-check` 16/16、`checkpoint-check` 25/25、architecture/API snapshot、OOM-cap 2/2：通过。
-- alternate representation：最新工作树 1341/1341。
+- alternate representation：最新工作树 1343/1343。
 - OOM injection：最新工作树 7/7。
-- `test262-smoke`：12/12；Array/prototype/push 24/24；最新联合 changed-area：TLA 251、dynamic-import assignment-expression 28、for-await-of 1234、AsyncGeneratorPrototype return 19、Function call/apply 97，合计 1629/1629。staging `Function/arguments-parameter-shadowing.js` 当前 zjs 1/1，当前 qjs 0/1。
+- `test262-smoke`：12/12；Array/prototype/push 24/24；Promise/resolve 30/30；最新联合 changed-area：TLA 251、dynamic-import assignment-expression 28、for-await-of 1234、AsyncGeneratorPrototype return 19、Function call/apply 97，合计 1629/1629。staging `Function/arguments-parameter-shadowing.js` 当前 zjs 1/1，当前 qjs 0/1。
 - 函数序言 changed-area：function expression/statement、new.target、method-definition、arrow-function、Function builtins 联合 1884/1884。
 - C1–C4/相关 changed-area test262：1215/1215；peephole 相关切片：867/867；二次审计 `let` 145/145；C7 的 module-code 595、dynamic-import 597。
 - full test262：默认 8B repr 与 alternate 16B repr 均准备 49,775/53,293，排除 3,518，按 feature 跳过 5,174；通过 44,599，known 2，unexpected 0；两次 `test262-gate` 均 5/5 steps。
-- ReleaseSafe unified：1341/1341，10/10 steps。
+- ReleaseSafe unified：1343/1343，10/10 steps。
 
 full test262 的阶段首跑曾暴露 IsHTMLDDA callable 判定与 generator finally rethrow marker；C8–C10 的收口首跑又暴露普通 catch 误判 finally、参数环境 `arguments` 同名声明回填两条回归。上面的最终全量结果均已覆盖，不以逐文件复测替代全量门禁。
 
@@ -360,7 +363,7 @@ full test262 的阶段首跑曾暴露 IsHTMLDDA callable 判定与 generator fin
 |---|---|---|
 | P0 | 调用帧与闭包访问 | qjs 的 `JS_CallInternal` 单体路径与寄存器驻留仍未被 zjs 的 Machine/Frame、tail-dispatch 分段路径同构替代；本轮闭合 named-function cold 序言后，四个固定调用脚本仍为 1.59–1.73x。 |
 | P0 | 函数对象与 runtime holder 内存 | FIFO 析构已从 O(n²) 修成 O(n)，但 qjs 没有对应 borrowed-holder side table；20 万嵌套函数 max RSS 仍约 79.4MiB vs 30.8MiB。 |
-| P1 | builtin typed ABI | Math `.f_f/.f_f_f` 与 Function record 已迁移；Array.push 已用 per-method full-context function pointer 直达，但尚非 typed ABI；Array 其余方法、String、Promise 等大域仍经过共享 full-context/magic-switch handler。 |
+| P1 | builtin typed ABI | Math `.f_f/.f_f_f` 与 Function record 已迁移；Array.push 与 Promise.resolve 已用 per-method full-context function pointer 直达，但尚非 typed ABI；Array 其余方法、String、Promise 其余方法等大域仍经过共享 full-context/magic-switch handler。Promise identity 固定脚本仍为 qjs 的 3.22x。 |
 | P1 | 异步模块 SCC 状态机 | 目标 test262 切片已对齐，但 ModuleRecord 字段、cycle-root capability、parent/pending 关系以及 host-hook dynamic import 路径仍非 qjs 同构。 |
 | P1 | 分配、RC 与 cycle GC | slab-backed GC metadata/refcount 前缀已与 qjs allocator header 同构；默认 8B NaN-box JSValue 仍是有意偏离本机 qjs 的 16B repr，每对象公开统计记账、borrowed/iterator/weak-id side table 与需要堆分配候选快照的多阶段 cycle collector 仍有额外工作。 |
 | P2 | atom、shape 与属性删除 | zjs 仍是独立 AtomTable/字符串回指、deleted tombstone；qjs 是 JSString 即 atom，并物理摘链/阈值 compact。tombstone 专项没有测出收益，所以目前只记录机制差异，不凭结构相似性强改。 |

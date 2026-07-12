@@ -580,8 +580,8 @@ inline fn fastNativeMethodCall(
     // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
     // name-based TypedArray slice/subarray path that has no native-builtin id)
     // and then the generic value/bytecode dispatch — the same fall-through the
-    // non-table domains (`.atomics` / `.performance` / `.host` / `.promise`)
-    // already relied on.
+    // non-table domains (`.atomics` / `.performance` / `.host`) and the
+    // still-unmigrated Promise record ids already relied on.
     const function_object = property_ops.expectObject(func) catch return null;
     // Structural .function proof (divergence C, mitigation): only a native c_function
     // object has a FunctionPayload; a bound_function/proxy/other-class callable reaches

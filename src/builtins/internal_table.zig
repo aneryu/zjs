@@ -21,6 +21,7 @@ const math = @import("../exec/math_ops.zig");
 const number = @import("../exec/number_ops.zig");
 const object = @import("../exec/object_builtin_ops.zig");
 const primitive = @import("../exec/primitive_ops.zig");
+const promise = @import("../exec/promise_builtin_ops.zig");
 const reflect_proxy = @import("../exec/reflect_proxy_ops.zig");
 const regexp = @import("../exec/regexp_ops.zig");
 const string = @import("../exec/string_builtin_ops.zig");
@@ -88,6 +89,7 @@ pub const table: [domain_count][]const InternalRecord = build: {
     domains[@intFromEnum(NativeBuiltinDomain.error_object)] = denseRecords(&error_object.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.function)] = denseRecords(&function.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.primitive)] = denseRecords(&primitive_entries);
+    domains[@intFromEnum(NativeBuiltinDomain.promise)] = denseRecords(&promise.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.iterator)] = denseRecords(&iterator.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.collection)] = denseRecords(&collection.internal_entries);
     domains[@intFromEnum(NativeBuiltinDomain.reflect)] = denseRecords(&reflect_proxy.internal_entries);
@@ -98,3 +100,12 @@ pub const table: [domain_count][]const InternalRecord = build: {
     domains[@intFromEnum(NativeBuiltinDomain.regexp)] = denseRecords(&regexp.internal_entries);
     break :build domains;
 };
+
+test "Promise.resolve has an internal record handler" {
+    const testing = @import("std").testing;
+    const records = table[@intFromEnum(NativeBuiltinDomain.promise)];
+    const resolve_id = @intFromEnum(core.host_function.builtin_method_ids.promise.LegacyStaticMethod.resolve);
+    try testing.expect(resolve_id < records.len);
+    const record = if (resolve_id < records.len) records[resolve_id] else return error.TestUnexpectedResult;
+    try testing.expect(record.call != null);
+}
