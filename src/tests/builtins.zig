@@ -38,6 +38,31 @@ test "Engine eval executes allocator-backed wide Math min max calls" {
     try std.testing.expectEqualStrings("4\n9\nNaN\nNaN\n0\n1\n", stream.buffered());
 }
 
+test "bare Math scalar fallback shares qjs edge semantics" {
+    const math = engine.exec.math_ops;
+
+    const rounded = try math.call(4, &.{core.JSValue.float64(-0.1)});
+    try std.testing.expect(std.math.isNegativeZero(rounded));
+
+    const powered = try math.call(6, &.{
+        core.JSValue.int32(-1),
+        core.JSValue.float64(std.math.inf(f64)),
+    });
+    try std.testing.expect(std.math.isNan(powered));
+
+    const minimum = try math.call(7, &.{
+        core.JSValue.int32(0),
+        core.JSValue.float64(-0.0),
+    });
+    const maximum = try math.call(8, &.{
+        core.JSValue.float64(-0.0),
+        core.JSValue.int32(0),
+    });
+    try std.testing.expect(std.math.isNegativeZero(minimum));
+    try std.testing.expect(!std.math.isNegativeZero(maximum));
+    try std.testing.expectError(error.TypeError, math.call(9, &.{}));
+}
+
 test "Math min max induction range fast path preserves observable method lookup" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

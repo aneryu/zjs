@@ -4748,6 +4748,33 @@ test "Engine destructuring snapshots with binding references before property rea
     );
 }
 
+test "Engine with destructuring assignment reaches const fallback at runtime" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallback() {
+        \\  const x = 0;
+        \\  with ({}) ({ x } = { x: 1 });
+        \\}
+        \\let caught = false;
+        \\try { fallback(); } catch (error) { caught = error instanceof TypeError; }
+        \\assert.sameValue(caught, true);
+        \\function dynamicBinding() {
+        \\  const x = 0;
+        \\  const scope = { x: 2 };
+        \\  with (scope) ({ x } = { x: 3 });
+        \\  return [x, scope.x];
+        \\}
+        \\const values = dynamicBinding();
+        \\assert.sameValue(values[0], 0);
+        \\assert.sameValue(values[1], 3);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval preserves assignment references across direct eval" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -4791,6 +4818,52 @@ test "Engine eval preserves assignment references across direct eval" {
         \\compoundAssignment();
         \\initializerAssignment();
         \\templateAssignment();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine arrow eval preserves assignment references across direct eval" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer() {
+        \\  var x = 0;
+        \\  var simple = () => { x = (eval("var x;"), 1); return x; };
+        \\  print(simple(), x);
+        \\  x = 3;
+        \\  var compound = () => { x *= (eval("var x = 2;"), 4); return x; };
+        \\  print(compound(), x);
+        \\  x = 0;
+        \\  var initializer = () => {
+        \\    var value = (x = (eval("var x;"), 1));
+        \\    return [x, value];
+        \\  };
+        \\  var initialized = initializer();
+        \\  print(initialized[0], initialized[1], x);
+        \\  x = 3;
+        \\  var template = () => { x += `${eval("var x = 2;")}`; return x; };
+        \\  print(template(), x);
+        \\}
+        \\outer();
+        \\const parameterEval = (
+        \\  p = eval("var arguments = 'parameter'"),
+        \\  readParameterArguments = () => arguments
+        \\) => {
+        \\  var arguments = "body";
+        \\  return [arguments, readParameterArguments()];
+        \\};
+        \\const parameterEvalResult = parameterEval();
+        \\assert.sameValue(parameterEvalResult[0], "body");
+        \\assert.sameValue(parameterEvalResult[1], "parameter");
     , &stream);
     defer result.free(js.runtime);
 
@@ -5830,6 +5903,14 @@ test "get_length preserves qjs own-property-before-exotic ordering and actions" 
         \\assert.sameValue(typed.length, 2);
         \\assert.sameValue(typed.byteLength, 2);
         \\assert.sameValue(typed.byteOffset, 0);
+        \\const typedPrototypeImpostor = Object.create(typed);
+        \\let typedBrandRejected = false;
+        \\try {
+        \\    void typedPrototypeImpostor.length;
+        \\} catch (error) {
+        \\    typedBrandRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(typedBrandRejected, true);
         \\const customPrototypeTyped = new Uint8Array(2);
         \\Object.setPrototypeOf(customPrototypeTyped, { length: 15, byteLength: 16, byteOffset: 17 });
         \\assert.sameValue(customPrototypeTyped.length, 15);
@@ -6395,6 +6476,24 @@ test "static named getter and proxy fast paths preserve receivers throws and inv
     try std.testing.expect(result.isUndefined());
 }
 
+test "proxy bytecode get continuation does not require spare operand capacity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function readX(object) { return object.x; }
+        \\const proxy = new Proxy({ x: 1 }, {
+        \\    get(target, key, receiver) {
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\assert.sameValue(readX(proxy), 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
     engine.builtins.registry.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -6648,6 +6747,7 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
         \\function make() { return () => this.tag; }
         \\const bound = make.call(lex);
         \\print(bound());
+        \\print(bound.call());
         \\const carrier = { tag: "CARRIER", m: bound };
         \\print(carrier.m());
         \\const obj = { name: "outer", run() { const a = () => this.name; return a(); } };
@@ -6656,7 +6756,33 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("LEX\nLEX\nouter\n", stream.buffered());
+    try std.testing.expectEqualStrings("LEX\nLEX\nLEX\nouter\n", stream.buffered());
+}
+
+test "forwarded call releases ignored arrow thisArg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\const strictArrowForCall = (function () {
+        \\    "use strict";
+        \\    return () => 0;
+        \\})();
+        \\strictArrowForCall.call({ marker: 0 });
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval(
+        \\for (let i = 0; i < 256; i++) {
+        \\    strictArrowForCall.call({ marker: i });
+        \\}
+    );
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
 test "function inherited data lookup preserves own and exotic semantics" {

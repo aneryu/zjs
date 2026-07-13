@@ -707,6 +707,7 @@ pub fn build(b: *std.Build) void {
     const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, or alternate-representation gates");
     checkpoint_check_step.dependOn(test_step);
     checkpoint_check_step.dependOn(smoke_dev_step);
+    checkpoint_check_step.dependOn(smoke_step);
     checkpoint_check_step.dependOn(architecture_check_step);
     checkpoint_check_step.dependOn(test262_smoke_step);
 

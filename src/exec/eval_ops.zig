@@ -764,13 +764,6 @@ pub fn directEvalPrivateBoundNames(
     return names;
 }
 
-pub fn directEvalVisibleBindingExists(rt: *core.JSRuntime, names: []const core.Atom, atom_id: core.Atom) bool {
-    for (names) |existing| {
-        if (atomIdOrNameEql(rt, existing, atom_id)) return true;
-    }
-    return false;
-}
-
 pub fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, vardefs: []const bytecode.function_bytecode.VarDef, atom_id: core.Atom) usize {
     var count: usize = 0;
     for (vardefs) |vd| {

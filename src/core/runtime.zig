@@ -32,6 +32,13 @@ pub const default_gc_threshold = 256 * 1024;
 /// call chain; worker threads have ~16 MiB) while sitting far above any
 /// legitimate nesting depth — the same value QuickJS uses for conformance runs.
 pub const default_native_stack_size = 1024 * 1024;
+// Debug codegen has materially larger parser/VM frames. Scale the physical
+// allowance so it represents the same logical recursion budget as optimized
+// builds; Release modes retain QuickJS's exact 1 MiB native budget.
+const initial_native_stack_size = if (builtin.mode == .Debug)
+    default_native_stack_size * 4
+else
+    default_native_stack_size;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
@@ -907,7 +914,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
-        rt.native_stack_size = default_native_stack_size;
+        rt.native_stack_size = initial_native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
         // entry path (eval / evalScript / ES module graph) even those that do not
@@ -917,7 +924,7 @@ pub const JSRuntime = struct {
         // per-thread base — required when execution runs on a different thread
         // than construction (conformance worker runtimes).
         rt.native_stack_top = @frameAddress();
-        rt.native_stack_limit = if (default_native_stack_size == 0) 0 else rt.native_stack_top -| default_native_stack_size;
+        rt.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.native_stack_top -| initial_native_stack_size;
         rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;

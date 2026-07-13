@@ -216,6 +216,23 @@ pub const Vm = struct {
 
 pub const Handler = *const fn (pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome;
 
+const PropertyTailSlot = enum(usize) {
+    get_field_primitive,
+    get_field2_primitive,
+    get_array_el_cached_string,
+    get_array_el_cached_getter,
+    get_array_el_cached_proxy,
+    get_field_cached_getter,
+    get_field_property,
+    get_static_cached_proxy,
+    get_length_property,
+    get_field_typed_property,
+};
+
+inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
+    return vm.property_tail_tbl[@intFromEnum(slot)];
+}
+
 /// Computed-goto: tail-call the handler for the opcode at `pc[0]`. A forward dispatch
 /// reaching code_end is a fall-off (implicit return of the stack top / undefined).
 /// `callconv(.c)` + non-inline so its `always_tail` to a handler matches signatures
@@ -476,6 +493,11 @@ inline fn pushForwardedAndEnter(
     region_base: usize,
     outer_argc: u16,
 ) Outcome {
+    // Arrow functions ignore Function.prototype.call's thisArg. Their resolved
+    // InlineTarget carries the lexical this instead, so it cannot describe the
+    // operand-region layout below. Keep arrows on the authoritative generic
+    // call path rather than guessing a layout from target.this_value.
+    std.debug.assert(!target.fb.flags.is_arrow_function);
     const stack = vm.stack;
     const target_argc: u16 = if (outer_argc == 0) 0 else outer_argc - 1;
     const native_caller = stack.values[region_base + 1];
@@ -536,17 +558,29 @@ inline fn pushForwardedAndEnter(
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
 /// trap returns. The caller stack ends in `[target, key]`; temporarily rooting
-/// `result` above them makes all three values survive a nested exotic
-/// descriptor probe. On success the triple contracts to the property result;
-/// on error it is removed before the caller's catch machinery runs.
+/// `result` with an explicit runtime root makes all three values survive a
+/// nested exotic descriptor probe without assuming spare operand capacity. On
+/// success the pair contracts to the property result; on error it is removed
+/// before the caller's catch machinery runs.
 fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) HostError!void {
     defer vm.ctx.runtime.atoms.free(atom_id);
+    const rt = vm.ctx.runtime;
+    var rooted_result = result;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_result },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
     const stack = vm.stack;
     std.debug.assert(stack.values.len >= 2);
     const region_base = stack.values.len - 2;
     const target_value = stack.values[region_base];
     const key = stack.values[region_base + 1];
-    stack.pushOwnedAssumeCapacity(result);
 
     const target = class_vm.objectFromValue(target_value) orelse unreachable;
     class_vm.validateProxyGetResult(
@@ -555,25 +589,26 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
         vm.global,
         target,
         atom_id,
-        result,
+        rooted_result,
         vm.function,
         vm.frame,
     ) catch |err| {
         stack.values = stack.values.ptr[0..region_base];
-        result.free(vm.ctx.runtime);
-        key.free(vm.ctx.runtime);
-        target_value.free(vm.ctx.runtime);
+        const failed_result = rooted_result;
+        rooted_result = JSValue.undefinedValue();
+        failed_result.free(rt);
+        key.free(rt);
+        target_value.free(rt);
         const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return e2;
         if (!caught) return err;
         return;
     };
 
-    target_value.free(vm.ctx.runtime);
-    key.free(vm.ctx.runtime);
+    target_value.free(rt);
+    key.free(rt);
     const values = stack.values.ptr;
-    values[region_base] = result;
+    values[region_base] = rooted_result;
     values[region_base + 1] = JSValue.undefinedValue();
-    values[region_base + 2] = JSValue.undefinedValue();
     stack.values = values[0 .. region_base + 1];
 }
 
@@ -759,8 +794,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else vm.stack.values[region_base + 2];
             if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, this_arg, receiver)) |target| {
-                vm.frame.pc += 2;
-                return pushForwardedAndEnter(vb, vm, &target, region_base, argc);
+                // Arrow targets require lexical-this handling and ignore the
+                // supplied thisArg. The forwarded layout cannot represent both
+                // facts safely, so let callMethod use the generic call path.
+                if (!target.fb.flags.is_arrow_function) {
+                    vm.frame.pc += 2;
+                    return pushForwardedAndEnter(vb, vm, &target, region_base, argc);
+                }
             }
         }
     }
@@ -1415,7 +1455,7 @@ fn op_get_field_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
     }
-    return @call(.always_tail, vm.property_tail_tbl[6], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
 }
 
 fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -1428,14 +1468,14 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
             .getter => |getter| blk: {
                 if (!getter.isUndefined()) {
                     sp[0] = getter.dup();
-                    return @call(.always_tail, vm.property_tail_tbl[5], .{ pc, sp + 1, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_field_cached_getter), .{ pc, sp + 1, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
             .proxy => |proxy| {
                 vm.property_holder = proxy;
                 vm.property_atom = atom_id;
-                return @call(.always_tail, vm.property_tail_tbl[7], .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, propertyTailHandler(vm, .get_static_cached_proxy), .{ pc, sp, var_buf, vm });
             },
         };
         receiver.free(vm.ctx.runtime);
@@ -1455,14 +1495,14 @@ fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
             .getter => |getter| blk: {
                 if (!getter.isUndefined()) {
                     sp[0] = getter.dup();
-                    return @call(.always_tail, vm.property_tail_tbl[5], .{ pc, sp + 1, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_field_cached_getter), .{ pc, sp + 1, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
             .proxy => |proxy| {
                 vm.property_holder = proxy;
                 vm.property_atom = atom_id;
-                return @call(.always_tail, vm.property_tail_tbl[7], .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, propertyTailHandler(vm, .get_static_cached_proxy), .{ pc, sp, var_buf, vm });
             },
         };
         receiver.free(vm.ctx.runtime);
@@ -1475,7 +1515,7 @@ fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject()) return @call(.always_tail, vm.property_tail_tbl[0], .{ pc, sp, var_buf, vm });
+    if (!receiver.isObject()) return @call(.always_tail, propertyTailHandler(vm, .get_field_primitive), .{ pc, sp, var_buf, vm });
     // qjs OP_get_field does an inline find_own_property on each access (no cache).
     // Walk self+prototype for a plain data property; on a hit the value is BORROWED
     // from the holder slot, so dup onto the stack (which owns its entries) and free
@@ -1489,10 +1529,10 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
         if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
             vm.property_holder = object;
-            return @call(.always_tail, vm.property_tail_tbl[10], .{ pc, sp, var_buf, vm });
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_typed_property), .{ pc, sp, var_buf, vm });
         }
     }
-    return @call(.always_tail, vm.property_tail_tbl[6], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, propertyTailHandler(vm, .get_field_property), .{ pc, sp, var_buf, vm });
 }
 
 // Primitive get_field2 keeps the raw receiver on the stack and pushes the resolved
@@ -1522,7 +1562,7 @@ fn op_get_field2_primitive(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue,
 pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
-    if (!receiver.isObject()) return @call(.always_tail, vm.property_tail_tbl[1], .{ pc, sp, var_buf, vm });
+    if (!receiver.isObject()) return @call(.always_tail, propertyTailHandler(vm, .get_field2_primitive), .{ pc, sp, var_buf, vm });
     // Object receiver: own-or-prototype data/method via the same self+prototype
     // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
@@ -1587,13 +1627,13 @@ fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
                     const owned_getter = getter.dup();
                     key.free(vm.ctx.runtime);
                     (sp - 1)[0] = owned_getter;
-                    return @call(.always_tail, vm.property_tail_tbl[3], .{ pc, sp, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_getter), .{ pc, sp, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
             .proxy => |proxy| {
                 vm.property_holder = proxy;
-                return @call(.always_tail, vm.property_tail_tbl[4], .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_proxy), .{ pc, sp, var_buf, vm });
             },
         };
         obj.free(vm.ctx.runtime);
@@ -1786,7 +1826,7 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
         return cont(pc + 1, sp - 1, var_buf, vm);
     }
-    if (key.isString()) return @call(.always_tail, vm.property_tail_tbl[2], .{ pc, sp, var_buf, vm });
+    if (key.isString()) return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -1832,7 +1872,7 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
     }
-    return @call(.always_tail, vm.property_tail_tbl[9], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, propertyTailHandler(vm, .get_length_property), .{ pc, sp, var_buf, vm });
 }
 
 fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -1849,14 +1889,14 @@ fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVa
             .getter => |getter| blk: {
                 if (!getter.isUndefined()) {
                     sp[0] = getter.dup();
-                    return @call(.always_tail, vm.property_tail_tbl[3], .{ pc, sp + 1, var_buf, vm });
+                    return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_getter), .{ pc, sp + 1, var_buf, vm });
                 }
                 break :blk JSValue.undefinedValue();
             },
             .proxy => |proxy| {
                 vm.property_holder = proxy;
                 vm.property_atom = core.atom.ids.length;
-                return @call(.always_tail, vm.property_tail_tbl[8], .{ pc, sp, var_buf, vm });
+                return @call(.always_tail, propertyTailHandler(vm, .get_static_cached_proxy), .{ pc, sp, var_buf, vm });
             },
         };
         value.free(vm.ctx.runtime);
@@ -2308,7 +2348,18 @@ const specials: colds.SpecialHandlers = .{
 /// so the cold publish+helper is NOT inlined into the lean fast handler.
 const cold_table: [256]Handler = colds.buildTable(specials, false);
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
-const property_tail_table = [11]Handler{ op_get_field_primitive, op_get_field2_primitive, op_get_array_el_cached_string, op_get_array_el_cached_getter, op_get_array_el_cached_proxy, op_get_field_cached_getter, op_get_field_property_tail, op_get_static_cached_proxy, op_get_static_cached_proxy, op_get_length_property_tail, op_get_field_typed_property_tail };
+const property_tail_table = [10]Handler{
+    op_get_field_primitive,
+    op_get_field2_primitive,
+    op_get_array_el_cached_string,
+    op_get_array_el_cached_getter,
+    op_get_array_el_cached_proxy,
+    op_get_field_cached_getter,
+    op_get_field_property_tail,
+    op_get_static_cached_proxy,
+    op_get_length_property_tail,
+    op_get_field_typed_property_tail,
+};
 
 // ===========================================================================
 // Driver — the Outcome loop. Replaces dispatchLoop's switch; reuses the Machine +

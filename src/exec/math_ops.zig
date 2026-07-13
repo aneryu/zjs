@@ -539,12 +539,14 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
         1 => @abs(a),
         2 => @floor(a),
         3 => @ceil(a),
-        4 => @floor(a + 0.5),
+        4 => qjsMathRound(a),
         5 => @sqrt(a),
-        6 => std.math.pow(f64, a, b),
-        7 => min(args),
-        8 => maxSlice(args),
-        9 => 0.5,
+        6 => qjsMathPow(a, b),
+        7 => qjsMathMinMaxPrimitiveFast(args, false) orelse error.TypeError,
+        8 => qjsMathMinMaxPrimitiveFast(args, true) orelse error.TypeError,
+        // Random requires per-runtime state and is handled by mathOpCall before
+        // this bare-runtime scalar fallback. Never return a fake constant.
+        9 => error.TypeError,
         10 => exp(a),
         11 => @sin(a),
         12 => @cos(a),
@@ -559,17 +561,17 @@ pub fn call(id: u32, args: []const core.JSValue) !f64 {
         21 => @log(a),
         22 => if (std.math.isNan(a) or a == 0 or !std.math.isFinite(a)) a else if (a < 0) -@floor(@abs(a)) else @floor(a),
         23 => std.math.cbrt(a),
-        24 => @floatFromInt(@clz(toUint32(a))),
+        24 => @floatFromInt(@clz(toUint32Number(a))),
         25 => std.math.cosh(a),
         26 => std.math.expm1(a),
         27 => @floatCast(@as(f16, @floatCast(a))),
         28 => @floatCast(@as(f32, @floatCast(a))),
-        29 => hypot(args),
-        30 => @floatFromInt(imul(a, b)),
+        29 => qjsMathHypotPrimitive(args),
+        30 => @floatFromInt(qjsMathImul(a, b)),
         31 => std.math.log1p(a),
         32 => log2(a),
         33 => @log10(a),
-        34 => sign(a),
+        34 => qjsMathSign(a),
         35 => std.math.sinh(a),
         36 => std.math.tanh(a),
         else => error.TypeError,
@@ -595,39 +597,12 @@ pub fn max(a: f64, b: f64) f64 {
     return if (a > b) a else b;
 }
 
-fn min(args: []const core.JSValue) !f64 {
-    var out = std.math.inf(f64);
-    for (args) |arg| out = @min(out, try numberValue(arg));
-    return out;
-}
-
-fn maxSlice(args: []const core.JSValue) !f64 {
-    var out = -std.math.inf(f64);
-    for (args) |arg| out = @max(out, try numberValue(arg));
-    return out;
-}
-
-fn hypot(args: []const core.JSValue) !f64 {
-    var sum: f64 = 0;
-    for (args) |arg| {
-        const number = try numberValue(arg);
-        if (std.math.isInf(number)) return std.math.inf(f64);
-        if (std.math.isNan(number)) return std.math.nan(f64);
-        sum += number * number;
-    }
-    return @sqrt(sum);
-}
-
-fn imul(lhs: f64, rhs: f64) i32 {
-    const a = toUint32(lhs);
-    const b = toUint32(rhs);
-    const product = a *% b;
-    return @bitCast(product);
-}
-
-fn sign(value: f64) f64 {
-    if (std.math.isNan(value) or value == 0) return value;
-    return if (value < 0) -1 else 1;
+fn qjsMathHypotPrimitive(args: []const core.JSValue) !f64 {
+    if (args.len == 0) return 0;
+    var result = try numberValue(args[0]);
+    if (args.len == 1) return @abs(result);
+    for (args[1..]) |arg| result = std.math.hypot(result, try numberValue(arg));
+    return result;
 }
 
 fn exactPowerOfTwoExponent(value: f64) ?i32 {
@@ -642,15 +617,6 @@ fn exactPowerOfTwoExponent(value: f64) ?i32 {
     }
     if (fraction != 0) return null;
     return @as(i32, @intCast(exponent_bits)) - 1023;
-}
-
-fn toUint32(value: f64) u32 {
-    if (std.math.isNan(value) or value == 0 or !std.math.isFinite(value)) return 0;
-    const integer = if (value < 0) -@floor(@abs(value)) else @floor(value);
-    const two32 = 4294967296.0;
-    var modulo = @mod(integer, two32);
-    if (modulo < 0) modulo += two32;
-    return @intFromFloat(modulo);
 }
 
 fn numberValue(value: core.JSValue) !f64 {

@@ -4164,7 +4164,12 @@ pub const pipeline_resolve_variables = struct {
     fn evalVarObjectProbeFallbackSize(ctx: *const JSContext, atom_id: u32, scope_level: i32, op_id: u8) Error!usize {
         if (scope_level < 0) return 3;
         if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
-            .local => |loc_idx| if (isEvalNonLexicalLocal(ctx, loc_idx)) return 3,
+            .local => |loc_idx| {
+                if (isEvalNonLexicalLocal(ctx, loc_idx)) return 3;
+                if (op_id == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
+                    return throw_error_instr_size;
+                }
+            },
             .arg => {},
         };
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
@@ -7273,7 +7278,10 @@ pub const pipeline_finalize = struct {
     ///
     pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError![]fb_mod.FunctionBytecode {
         try installChildFunctionBytecodes(fd, rt);
+        return createFunctionBytecodeAfterChildren(fd, rt);
+    }
 
+    fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError![]fb_mod.FunctionBytecode {
         var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, fd.func_name);
         defer lowered.deinit(rt);
         lowered.line_num = fd.line_num;
@@ -8127,20 +8135,46 @@ pub const pipeline_finalize = struct {
     }
 
     fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError!void {
-        for (fd.child_list) |child| {
-            const cpool_idx = child.parent_cpool_idx;
-            if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= fd.cpool.len) {
-                return error.InvalidBytecode;
+        const Frame = struct {
+            function_def: *function_def_mod.FunctionDef,
+            next_child: usize = 0,
+        };
+
+        var frames: std.ArrayList(Frame) = .empty;
+        defer frames.deinit(fd.memory.allocator);
+        try frames.append(fd.memory.allocator, .{ .function_def = fd });
+
+        while (frames.items.len != 0) {
+            const frame_index = frames.items.len - 1;
+            const current = frames.items[frame_index].function_def;
+            if (frames.items[frame_index].next_child < current.child_list.len) {
+                const child = current.child_list[frames.items[frame_index].next_child];
+                frames.items[frame_index].next_child += 1;
+                const cpool_idx = child.parent_cpool_idx;
+                if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= current.cpool.len) {
+                    return error.InvalidBytecode;
+                }
+                try frames.append(fd.memory.allocator, .{ .function_def = child });
+                continue;
             }
-            const fb_slice = try createFunctionBytecode(child, rt);
+
+            try installChildClassFieldInitializers(current, rt);
+            _ = frames.pop();
+            if (frames.items.len == 0) break;
+
+            const parent = frames.items[frames.items.len - 1].function_def;
+            const cpool_idx = current.parent_cpool_idx;
+            const idx: usize = @intCast(cpool_idx);
+            const fb_slice = try createFunctionBytecodeAfterChildren(current, rt);
             const fb = &fb_slice[0];
             const value = JSValue.functionBytecode(&fb.header);
-            const idx: usize = @intCast(cpool_idx);
-            const old_value = fd.cpool[idx];
-            fd.cpool[idx] = value;
+            const old_value = parent.cpool[idx];
+            parent.cpool[idx] = value;
             old_value.free(rt);
         }
+    }
 
+    fn installChildClassFieldInitializers(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError!void {
         for (fd.child_list) |child| {
             if (child.class_fields_init_cpool_idx < 0) continue;
             if (child.parent_cpool_idx < 0 or

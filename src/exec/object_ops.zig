@@ -2115,23 +2115,6 @@ pub fn importMetaObject(
     return value;
 }
 
-pub fn withObjectBindingValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    with_object_value: core.JSValue,
-    atom_id: core.Atom,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) !?core.JSValue {
-    if (with_object_value.isUndefined()) return null;
-    _ = property_ops.expectObject(with_object_value) catch return null;
-    const has_binding = try hasPropertyForWith(ctx, output, global, with_object_value, atom_id, function, frame);
-    if (!has_binding) return null;
-    if (try isBlockedByUnscopables(ctx, output, global, with_object_value, atom_id, function, frame)) return null;
-    return try getValueProperty(ctx, output, global, with_object_value, atom_id, function, frame);
-}
-
 pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval_in_class_field_initializer: bool) bool {
     if (eval_in_class_field_initializer) return true;
     const outer_frame = caller_frame orelse return false;

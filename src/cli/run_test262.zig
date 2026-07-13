@@ -1729,12 +1729,6 @@ fn runEmbeddedEngine(
 ) !bool {
     const rt = try zjs.JSRuntime.createWithOptions(allocator, .{});
     errdefer rt.destroy();
-    // Debug builds have materially larger native frames in the parser and VM.
-    // Keep the same logical recursion budget as optimized test262 runs rather
-    // than rejecting the harness prelude itself as StackOverflow.
-    if (@import("builtin").mode == .Debug) {
-        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
-    }
     const ctx = try zjs.JSContext.create(rt);
     errdefer ctx.destroy();
     var output_buffer: [64 * 1024]u8 = undefined;

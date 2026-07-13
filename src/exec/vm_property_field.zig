@@ -17,6 +17,7 @@ const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
 const objectFromValue = object_ops.objectFromValue;
 const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
@@ -449,11 +450,6 @@ pub const PropertyFastValue = union(enum) {
     proxy: *core.Object,
 };
 
-inline fn unsignedSizeValue(value: usize) core.JSValue {
-    if (value <= @as(usize, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(value));
-    return core.JSValue.float64(@floatFromInt(value));
-}
-
 inline fn typedArrayAccessorMethodId(atom_id: core.Atom) ?u32 {
     const TypedArrayAccessorMethod = method_ids.buffer.TypedArrayAccessorMethod;
     if (atom_id == core.atom.ids.length) return @intFromEnum(TypedArrayAccessorMethod.length);
@@ -478,15 +474,15 @@ inline fn typedArrayIntrinsicNamedValue(
 ) ?PropertyFastValue {
     if (atom_id == core.atom.ids.length) {
         const length = core.object.typedArrayLength(rt, receiver) catch return null;
-        return .{ .owned = unsignedSizeValue(@intCast(length)) };
+        return .{ .owned = array_ops.lengthIndexValue(@intCast(length)) };
     }
     if (atom_id == atom_byte_length) {
         const length = core.object.typedArrayByteLength(rt, receiver) catch return null;
-        return .{ .owned = unsignedSizeValue(length) };
+        return .{ .owned = array_ops.lengthIndexValue(length) };
     }
     if (atom_id == atom_byte_offset) {
         const offset = core.object.typedArrayEffectiveByteOffset(receiver) catch return null;
-        return .{ .owned = unsignedSizeValue(offset) };
+        return .{ .owned = array_ops.lengthIndexValue(offset) };
     }
     return null;
 }
@@ -581,7 +577,8 @@ pub inline fn typedArrayPropertyValueForFastPath(
 /// Arguments. Proxies become resident actions; unsupported exotic misses retain
 /// the existing slow machinery.
 pub inline fn qjsGetLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSValue) ?PropertyFastValue {
-    var object = objectFromValue(receiver) orelse return null;
+    const receiver_object = objectFromValue(receiver) orelse return null;
+    var object = receiver_object;
     while (true) {
         if (object.findProperty(core.atom.ids.length)) |index| {
             return switch (object.propKindAt(index)) {
@@ -596,7 +593,10 @@ pub inline fn qjsGetLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.
         // Proxy prototype chains keep their observable lookup semantics.
         if (core.object.isTypedArrayObject(object)) {
             const expected_id = typedArrayAccessorMethodId(core.atom.ids.length).?;
-            return typedArrayPrototypeNamedPropertyForFastPath(rt, object, core.atom.ids.length, expected_id);
+            // The intrinsic getter's brand check applies to the original
+            // receiver, not to the typed-array object where prototype walking
+            // happened to arrive (for example Object.create(typedArray)).
+            return typedArrayPrototypeNamedPropertyForFastPath(rt, receiver_object, core.atom.ids.length, expected_id);
         }
         if (object.proxyTarget() != null) return .{ .proxy = object };
         if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;
@@ -665,7 +665,7 @@ pub inline fn cachedStringPropertyValueForFastPath(
     receiver: core.JSValue,
     key: core.JSValue,
 ) ?PropertyFastValue {
-    const atom_id = cachedStringAtom(key) orelse return null;
+    const atom_id = string_ops.stringAtomId(key) orelse return null;
     if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
         if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
             const index_value = core.JSValue.int32(@intCast(index));
@@ -678,7 +678,7 @@ pub inline fn cachedStringPropertyValueForFastPath(
 }
 
 pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
-    return cachedStringAtom(value);
+    return string_ops.stringAtomId(value);
 }
 
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
@@ -776,7 +776,7 @@ pub noinline fn arrayElement(
                 };
                 unreachable;
             }
-            if (cachedStringAtom(key)) |atom_id| {
+            if (string_ops.stringAtomId(key)) |atom_id| {
                 // String.atom_id is a weak cache. A Proxy getter can re-enter,
                 // destroy the last shape that owns this atom, and intern a new
                 // key that reuses the id before invariant validation resumes.
@@ -955,12 +955,6 @@ pub noinline fn arrayElement(
         else => unreachable,
     }
     return .done;
-}
-
-inline fn cachedStringAtom(value: core.JSValue) ?core.Atom {
-    const string = value.asStringBody() orelse return null;
-    if (string.atom_id == core.string.String.no_atom_id) return null;
-    return string.atom_id;
 }
 
 // Inline typed-array element read for `obj[int]`, mirroring qjs's

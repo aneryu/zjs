@@ -4026,6 +4026,28 @@ test "F10.1b Nested function: cur_func stack management" {
     // properly cleaned up)
 }
 
+test "nested function declarations fit the QuickJS native parser stack budget" {
+    const depth = 250;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.ensureTotalCapacity(std.testing.allocator, depth * ("function f(){".len + 1) + "return 1;".len);
+    for (0..depth) |_| try source.appendSlice(std.testing.allocator, "function f(){");
+    try source.appendSlice(std.testing.allocator, "return 1;");
+    for (0..depth) |_| try source.append(std.testing.allocator, '}');
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.updateNativeStackTop();
+
+    var parsed = try parser.compile(rt, source.items, .{
+        .mode = .script,
+        .filename = "nested-functions.js",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
 test "F10.1c Nested function: bytecode dual-buffering" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

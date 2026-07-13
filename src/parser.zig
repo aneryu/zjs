@@ -479,15 +479,15 @@ pub const lexer = struct {
 
         // ---- internals ---------------------------------------------------
 
-        inline fn peek(self: LexerImpl) u8 {
+        inline fn peek(self: *const LexerImpl) u8 {
             return self.source[self.pos];
         }
 
-        inline fn peekAt(self: LexerImpl, n: usize) u8 {
+        inline fn peekAt(self: *const LexerImpl, n: usize) u8 {
             return if (self.pos + n < self.source.len) self.source[self.pos + n] else 0;
         }
 
-        inline fn remaining(self: LexerImpl) usize {
+        inline fn remaining(self: *const LexerImpl) usize {
             return self.source.len - self.pos;
         }
 
@@ -679,12 +679,12 @@ pub const lexer = struct {
             return error.UnterminatedComment;
         }
 
-        fn startsWithBytes(self: LexerImpl, lit: []const u8) bool {
+        fn startsWithBytes(self: *const LexerImpl, lit: []const u8) bool {
             if (self.remaining() < lit.len) return false;
             return std.mem.eql(u8, self.source[self.pos..][0..lit.len], lit);
         }
 
-        fn startsUnicodeEscape(self: LexerImpl) bool {
+        fn startsUnicodeEscape(self: *const LexerImpl) bool {
             return self.remaining() >= 2 and self.peek() == '\\' and self.peekAt(1) == 'u';
         }
 
@@ -4453,7 +4453,7 @@ pub const parser_core = struct {
             self.token = try self.lex.next();
         }
 
-        pub fn peekKind(self: State) tok.TokenKind {
+        pub fn peekKind(self: *const State) tok.TokenKind {
             return self.token.val;
         }
 
@@ -4499,12 +4499,12 @@ pub const parser_core = struct {
             }
         }
 
-        fn isPunct(self: State, ch: u8) bool {
+        fn isPunct(self: *const State, ch: u8) bool {
             return self.token.val == @as(tok.TokenKind, @intCast(ch));
         }
 
         /// Check if we got a line terminator before the current token (for ASI).
-        fn gotLineTerminator(self: State) bool {
+        fn gotLineTerminator(self: *const State) bool {
             return self.lex.gotLineTerminator();
         }
 
@@ -11918,6 +11918,32 @@ pub const parser_core = struct {
         s.features.insert(.statement);
         const tok_kind = s.peekKind();
 
+        // Keep recursive function declarations out of the large statement
+        // dispatcher. Debug codegen otherwise retains storage for every switch
+        // arm across every nested body and exhausts the native stack budget.
+        if (tok_kind == tok.TOK_FUNCTION) {
+            if (!decl_mask.func and !decl_mask.func_with_label) return Error.UnexpectedToken;
+            const source_start = s.currentTokenStartOffset();
+            try parseFunctionDecl(s, .normal, source_start);
+            return;
+        }
+        if (tok_kind == tok.TOK_IDENT and
+            s.isIdent("async") and
+            s.peekNextKindNoLineTerminator(tok.TOK_FUNCTION))
+        {
+            if (!decl_mask.func and !decl_mask.func_with_label) return Error.UnexpectedToken;
+            const source_start = s.currentTokenStartOffset();
+            try s.advance();
+            try parseFunctionDecl(s, .async, source_start);
+            return;
+        }
+
+        try parseStatementOrDeclSlow(s, decl_mask);
+    }
+
+    fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
+        const tok_kind = s.peekKind();
+
         if (s.labelStartAtom()) |label_atom| {
             if (s.isReservedLabelIdentifier(label_atom)) return Error.UnexpectedToken;
             if (s.hasActiveLabel(label_atom)) return Error.UnexpectedToken;
@@ -13104,7 +13130,7 @@ pub const parser_core = struct {
         return saved;
     }
 
-    fn leaveReturnFinallyFunctionBoundary(s: *State, saved: ReturnFinallyBoundary) void {
+    fn leaveReturnFinallyFunctionBoundary(s: *State, saved: *const ReturnFinallyBoundary) void {
         for (s.return_finally_frames.items) |*frame| {
             frame.deinit(s.function.memory.allocator);
         }
@@ -13610,6 +13636,8 @@ pub const parser_core = struct {
                     // Hoist `var` to function scope (level 0).
                     var hoisted_arguments_var_idx: ?i32 = null;
                     if (atomNameEquals(s, atom_id, "arguments") and
+                        s.cur_func().func_type != .arrow and
+                        s.cur_func().func_type != .class_static_init and
                         s.cur_func().has_parameter_expressions and
                         s.cur_func().arguments_var_idx >= 0 and
                         s.cur_func().arguments_arg_idx < 0)
@@ -15214,6 +15242,234 @@ pub const parser_core = struct {
 
     /// Parse function parameters and body
     /// Shared by function declarations, expressions, and methods
+    fn deinitParserList(comptime T: type, s: *State, list: *std.ArrayList(T)) void {
+        list.deinit(s.function.memory.allocator);
+    }
+
+    const FunctionParameters = struct {
+        simple_names: std.ArrayList(Atom) = .empty,
+        has_duplicate_simple: bool = false,
+        has_simple_list: bool = true,
+
+        fn deinit(self: *FunctionParameters, s: *State) void {
+            deinitParserList(Atom, s, &self.simple_names);
+        }
+    };
+
+    fn parseFunctionParameters(
+        s: *State,
+        func_kind: ParseFunctionKind,
+        capture_child: bool,
+    ) Error!FunctionParameters {
+        var parameters: FunctionParameters = .{};
+        errdefer parameters.deinit(s);
+
+        var pattern_names: std.ArrayList(Atom) = .empty;
+        defer deinitParserList(Atom, s, &pattern_names);
+        var all_names: std.ArrayList(?Atom) = .empty;
+        defer deinitParserList(?Atom, s, &all_names);
+
+        var param_count: u32 = 0;
+        var first_default_param: ?u32 = null;
+        var has_rest_parameter = false;
+        const is_class_static_block = func_kind == .class_static_block;
+
+        if (!is_class_static_block) {
+            const saved_reject_await = s.reject_await_in_parameter_initializer;
+            s.reject_await_in_parameter_initializer = func_kind == .async or func_kind == .async_generator;
+            defer s.reject_await_in_parameter_initializer = saved_reject_await;
+
+            try s.expectToken('(');
+            var parameter_scan = try scanParameterList(s);
+            defer deinitParserList(?Atom, s, &parameter_scan.names);
+            all_names = parameter_scan.names;
+            parameter_scan.names = .empty;
+            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
+            const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
+                try enterParameterExpressionScope(s)
+            else
+                null;
+
+            while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
+                var has_modifier = false;
+                if (s.lex.is_typescript and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
+                    while (s.isParameterModifier()) {
+                        has_modifier = true;
+                        try s.advance();
+                    }
+                }
+                if (isIdentifierLikeToken(s)) {
+                    const param_atom = identifierLikeAtom(s);
+                    if (has_modifier) {
+                        if (s.current_parameter_properties) |*props| {
+                            try props.append(s.function.memory.allocator, param_atom);
+                        }
+                    }
+                    const arg_index = param_count;
+                    const strict_params = s.is_strict or s.cur_func().is_strict_mode;
+                    if (func_kind == .set and strict_params and
+                        (atomNameEquals(s, param_atom, "eval") or atomNameEquals(s, param_atom, "arguments")))
+                    {
+                        return Error.UnexpectedToken;
+                    }
+                    for (parameters.simple_names.items) |existing| {
+                        if (existing == param_atom) {
+                            parameters.has_duplicate_simple = true;
+                            if (strict_params) return Error.UnexpectedToken;
+                            break;
+                        }
+                    }
+                    for (pattern_names.items) |existing| {
+                        if (existing == param_atom) return Error.UnexpectedToken;
+                    }
+                    try parameters.simple_names.append(s.function.memory.allocator, param_atom);
+                    if (capture_child) {
+                        if (parameter_scope != null) {
+                            try appendParameterExpressionBinding(s, param_atom);
+                        }
+                        _ = try s.cur_func().appendArg(.{
+                            .var_name = param_atom,
+                            .scope_level = 0,
+                            .is_lexical = false,
+                            .is_const = false,
+                            .var_kind = .normal,
+                        });
+                    }
+                    try s.advance();
+                    param_count += 1;
+
+                    if (s.peekKind() == '=') {
+                        parameters.has_simple_list = false;
+                        if (first_default_param == null) first_default_param = arg_index;
+                        try s.advance();
+                        if (capture_child) {
+                            try emitPushBindingSource(s, .{ .arg = arg_index });
+                            try s.emitOp(opcode.op.is_undefined);
+                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
+                            const saved_in_parameter_initializer = s.in_parameter_initializer;
+                            s.in_parameter_initializer = true;
+                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
+                            if (defaultInitializerHitsParameterTdz(s, all_names.items, arg_index)) {
+                                try emitSyntheticTdzReference(s);
+                                try s.advance();
+                            } else {
+                                try parseNamedBindingDefaultInitializer(s, param_atom);
+                            }
+                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
+                            try s.emitOp(opcode.op.drop);
+                            try patchForwardJump(s, keep_value);
+                        } else {
+                            const saved_in_parameter_initializer = s.in_parameter_initializer;
+                            s.in_parameter_initializer = true;
+                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
+                            try parseNamedBindingDefaultInitializer(s, param_atom);
+                            try s.emitOp(opcode.op.drop);
+                        }
+                    }
+                    if (parameter_scope != null) {
+                        try initializeParameterScopeBinding(s, param_atom, arg_index);
+                    }
+                } else if (s.peekKind() == '{') {
+                    parameters.has_simple_list = false;
+                    const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .object, &parameters.simple_names, &pattern_names);
+                    if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
+                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                    param_count += 1;
+                } else if (s.peekKind() == '[') {
+                    parameters.has_simple_list = false;
+                    const arg_index = param_count;
+                    try collectParamPatternDupNames(s, .array, &parameters.simple_names, &pattern_names);
+                    if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
+                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                    param_count += 1;
+                } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
+                    s.features.insert(.spread_rest);
+                    parameters.has_simple_list = false;
+                    const arg_index = param_count;
+                    try s.advance();
+                    has_rest_parameter = true;
+                    if (isIdentifierLikeToken(s)) {
+                        if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                        const rest_atom = identifierLikeAtom(s);
+                        for (parameters.simple_names.items) |existing| {
+                            if (existing == rest_atom) return Error.UnexpectedToken;
+                        }
+                        for (pattern_names.items) |existing| {
+                            if (existing == rest_atom) return Error.UnexpectedToken;
+                        }
+                        try parameters.simple_names.append(s.function.memory.allocator, rest_atom);
+                        if (capture_child) {
+                            if (parameter_scope != null) {
+                                try appendParameterExpressionBinding(s, rest_atom);
+                            }
+                            const idx = try s.cur_func().appendArg(.{
+                                .var_name = rest_atom,
+                                .scope_level = 0,
+                                .is_lexical = false,
+                                .is_const = false,
+                                .var_kind = .normal,
+                            });
+                            if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
+                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
+                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
+                            try s.emitOp(opcode.op.drop);
+                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                        }
+                        if (parameter_scope != null) {
+                            try initializeParameterScopeBinding(s, rest_atom, arg_index);
+                        }
+                        try s.advance();
+                    } else if (s.peekKind() == '[') {
+                        try collectParamPatternDupNames(s, .array, &parameters.simple_names, &pattern_names);
+                        if (capture_child) {
+                            try ensureDestructuringArgSlot(s, arg_index);
+                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
+                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
+                            try s.emitOp(opcode.op.drop);
+                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                        }
+                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                    } else if (s.peekKind() == '{') {
+                        try collectParamPatternDupNames(s, .object, &parameters.simple_names, &pattern_names);
+                        if (capture_child) {
+                            try ensureDestructuringArgSlot(s, arg_index);
+                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
+                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
+                            try s.emitOp(opcode.op.drop);
+                            s.cur_func().defined_arg_count = @intCast(arg_index);
+                        }
+                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                    } else {
+                        return Error.UnexpectedToken;
+                    }
+                    break;
+                } else {
+                    return Error.UnexpectedToken;
+                }
+
+                if (s.peekKind() == ',') {
+                    try s.advance();
+                } else if (s.peekKind() != ')') {
+                    return Error.UnexpectedToken;
+                }
+            }
+
+            try s.expectToken(')');
+            if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
+        }
+
+        if (func_kind == .get and (param_count != 0 or has_rest_parameter)) return Error.UnexpectedToken;
+        if (func_kind == .set and (param_count != 1 or has_rest_parameter)) return Error.UnexpectedToken;
+        if (capture_child) s.cur_func().has_simple_parameter_list = parameters.has_simple_list;
+        if (capture_child) {
+            if (first_default_param) |defined_count| {
+                s.cur_func().defined_arg_count = @intCast(defined_count);
+            }
+        }
+        return parameters;
+    }
+
     fn parseFunctionParamsAndBody(s: *State, func_kind: ParseFunctionKind, source_start: ?usize) Error!void {
         if (func_kind != .class_static_block) {
             s.features.insert(.function_);
@@ -15254,7 +15510,6 @@ pub const parser_core = struct {
         const saved_function_expr_name_binding = s.function_expr_name_binding;
         const saved_class_field_initializer_depth = s.class_field_initializer_depth;
         const saved_class_static_field_this_atom = s.class_static_field_this_atom;
-        const saved_reject_await_in_parameter_initializer = s.reject_await_in_parameter_initializer;
         const saved_in_constructor = s.in_constructor;
         s.in_constructor = func_kind == .class_constructor or func_kind == .derived_class_constructor;
         defer s.in_constructor = saved_in_constructor;
@@ -15279,7 +15534,7 @@ pub const parser_core = struct {
             s.new_target_allowed = saved_new_target_allowed;
         };
         const saved_return_finally = if (capture_child) enterReturnFinallyFunctionBoundary(s) else null;
-        defer if (saved_return_finally) |saved| leaveReturnFinallyFunctionBoundary(s, saved);
+        defer if (saved_return_finally) |*saved| leaveReturnFinallyFunctionBoundary(s, saved);
         if (func_kind != .arrow) s.class_field_initializer_depth = 0;
         if (func_kind != .arrow) s.class_static_field_this_atom = null;
         defer s.class_field_initializer_depth = saved_class_field_initializer_depth;
@@ -15610,224 +15865,8 @@ pub const parser_core = struct {
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
 
-        const is_class_static_block = func_kind == .class_static_block;
-        var param_count: u32 = 0;
-        var simple_param_names = std.ArrayList(Atom).empty;
-        defer simple_param_names.deinit(s.function.memory.allocator);
-        // Names bound inside destructuring parameter patterns. Any collision
-        // between these and any other parameter name is a SyntaxError
-        // regardless of strictness, mirroring js_parse_check_duplicate_parameter
-        // (quickjs.c:26276) and the post-parse arg-vs-var scan (quickjs.c:36455).
-        var pattern_param_names = std.ArrayList(Atom).empty;
-        defer pattern_param_names.deinit(s.function.memory.allocator);
-        var has_duplicate_simple_params = false;
-        var has_simple_parameter_list = true;
-        var first_default_param: ?u32 = null;
-        var has_rest_parameter = false;
-        var all_param_names = std.ArrayList(?Atom).empty;
-        defer all_param_names.deinit(s.function.memory.allocator);
-
-        if (!is_class_static_block) {
-            s.reject_await_in_parameter_initializer = func_kind == .async or func_kind == .async_generator;
-            defer s.reject_await_in_parameter_initializer = saved_reject_await_in_parameter_initializer;
-            try s.expectToken('(');
-            var parameter_scan = try scanParameterList(s);
-            defer parameter_scan.names.deinit(s.function.memory.allocator);
-            all_param_names = parameter_scan.names;
-            parameter_scan.names = .empty;
-            if (capture_child) s.cur_func().has_parameter_expressions = parameter_scan.has_parameter_expressions;
-            const parameter_scope = if (capture_child and parameter_scan.has_parameter_expressions)
-                try enterParameterExpressionScope(s)
-            else
-                null;
-
-            // Parse parameters, including default values, destructuring, and rest.
-            while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
-                var has_modifier = false;
-                if (s.lex.is_typescript and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
-                    while (s.isParameterModifier()) {
-                        has_modifier = true;
-                        try s.advance();
-                    }
-                }
-                if (isIdentifierLikeToken(s)) {
-                    // Simple parameter
-                    const param_atom = identifierLikeAtom(s);
-                    if (has_modifier) {
-                        if (s.current_parameter_properties) |*props| {
-                            try props.append(s.function.memory.allocator, param_atom);
-                        }
-                    }
-                    const arg_index = param_count;
-                    const strict_params = s.is_strict or s.cur_func().is_strict_mode;
-                    if (func_kind == .set and strict_params and
-                        (atomNameEquals(s, param_atom, "eval") or atomNameEquals(s, param_atom, "arguments")))
-                    {
-                        return Error.UnexpectedToken;
-                    }
-                    for (simple_param_names.items) |existing| {
-                        if (existing == param_atom) {
-                            has_duplicate_simple_params = true;
-                            if (strict_params) return Error.UnexpectedToken;
-                            break;
-                        }
-                    }
-                    // An argument that duplicates a name bound by an earlier
-                    // destructuring parameter is always an error (the pattern
-                    // makes the list non-simple). Mirrors the arg-vs-var scan
-                    // in js_parse_function_check_names (quickjs.c:36455-36462).
-                    for (pattern_param_names.items) |existing| {
-                        if (existing == param_atom) return Error.UnexpectedToken;
-                    }
-                    try simple_param_names.append(s.function.memory.allocator, param_atom);
-                    if (capture_child) {
-                        if (parameter_scope != null) {
-                            try appendParameterExpressionBinding(s, param_atom);
-                        }
-                        _ = try s.cur_func().appendArg(.{
-                            .var_name = param_atom,
-                            .scope_level = 0,
-                            .is_lexical = false,
-                            .is_const = false,
-                            .var_kind = .normal,
-                        });
-                    }
-                    try s.advance();
-                    param_count += 1;
-
-                    // Check for default value
-                    if (s.peekKind() == '=') {
-                        has_simple_parameter_list = false;
-                        if (first_default_param == null) first_default_param = arg_index;
-                        try s.advance();
-                        if (capture_child) {
-                            try emitPushBindingSource(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            const saved_in_parameter_initializer = s.in_parameter_initializer;
-                            s.in_parameter_initializer = true;
-                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                            if (defaultInitializerHitsParameterTdz(s, all_param_names.items, arg_index)) {
-                                try emitSyntheticTdzReference(s);
-                                try s.advance();
-                            } else {
-                                try parseNamedBindingDefaultInitializer(s, param_atom);
-                            }
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
-                            try patchForwardJump(s, keep_value);
-                        } else {
-                            const saved_in_parameter_initializer = s.in_parameter_initializer;
-                            s.in_parameter_initializer = true;
-                            defer s.in_parameter_initializer = saved_in_parameter_initializer;
-                            try parseNamedBindingDefaultInitializer(s, param_atom);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    }
-                    if (parameter_scope != null) {
-                        try initializeParameterScopeBinding(s, param_atom, arg_index);
-                    }
-                } else if (s.peekKind() == '{') {
-                    // Object destructuring parameter: {a, b}
-                    has_simple_parameter_list = false;
-                    const arg_index = param_count;
-                    try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
-                    if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
-                    param_count += 1;
-                } else if (s.peekKind() == '[') {
-                    // Array destructuring parameter: [a, b]
-                    has_simple_parameter_list = false;
-                    const arg_index = param_count;
-                    try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
-                    if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
-                    param_count += 1;
-                } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                    // Rest parameter
-                    s.features.insert(.spread_rest);
-                    has_simple_parameter_list = false;
-                    const arg_index = param_count;
-                    try s.advance();
-                    has_rest_parameter = true;
-                    if (isIdentifierLikeToken(s)) {
-                        if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
-                        const rest_atom = identifierLikeAtom(s);
-                        for (simple_param_names.items) |existing| {
-                            if (existing == rest_atom) return Error.UnexpectedToken;
-                        }
-                        for (pattern_param_names.items) |existing| {
-                            if (existing == rest_atom) return Error.UnexpectedToken;
-                        }
-                        try simple_param_names.append(s.function.memory.allocator, rest_atom);
-                        if (capture_child) {
-                            if (parameter_scope != null) {
-                                try appendParameterExpressionBinding(s, rest_atom);
-                            }
-                            const idx = try s.cur_func().appendArg(.{
-                                .var_name = rest_atom,
-                                .scope_level = 0,
-                                .is_lexical = false,
-                                .is_const = false,
-                                .var_kind = .normal,
-                            });
-                            if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
-                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
-                        }
-                        if (parameter_scope != null) {
-                            try initializeParameterScopeBinding(s, rest_atom, arg_index);
-                        }
-                        try s.advance();
-                    } else if (s.peekKind() == '[') {
-                        try collectParamPatternDupNames(s, .array, &simple_param_names, &pattern_param_names);
-                        if (capture_child) {
-                            try ensureDestructuringArgSlot(s, arg_index);
-                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
-                        }
-                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
-                    } else if (s.peekKind() == '{') {
-                        try collectParamPatternDupNames(s, .object, &simple_param_names, &pattern_param_names);
-                        if (capture_child) {
-                            try ensureDestructuringArgSlot(s, arg_index);
-                            try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
-                            s.cur_func().defined_arg_count = @intCast(arg_index);
-                        }
-                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
-                    } else {
-                        return Error.UnexpectedToken;
-                    }
-                    break;
-                } else {
-                    return Error.UnexpectedToken;
-                }
-
-                if (s.peekKind() == ',') {
-                    try s.advance();
-                } else if (s.peekKind() != ')') {
-                    return Error.UnexpectedToken;
-                }
-            }
-
-            try s.expectToken(')');
-            if (parameter_scope) |scope| try leaveParameterExpressionScope(s, scope);
-        }
-        if (func_kind == .get and (param_count != 0 or has_rest_parameter)) return Error.UnexpectedToken;
-        if (func_kind == .set and (param_count != 1 or has_rest_parameter)) return Error.UnexpectedToken;
-        if (capture_child) s.cur_func().has_simple_parameter_list = has_simple_parameter_list;
-        if (capture_child) {
-            if (first_default_param) |defined_count| {
-                s.cur_func().defined_arg_count = @intCast(defined_count);
-            }
-        }
-
+        var parameters = try parseFunctionParameters(s, func_kind, capture_child);
+        defer parameters.deinit(s);
         if (capture_child) try predeclareFunctionBodyVars(s);
         if (capture_child and (func_kind == .generator or func_kind == .async_generator)) {
             try s.emitOp(opcode.op.push_false);
@@ -15847,7 +15886,7 @@ pub const parser_core = struct {
         try parseBlock(s);
         if (s.is_strict) s.cur_func().is_strict_mode = true;
         if (s.cur_func().is_strict_mode) {
-            if (s.cur_func().has_use_strict and !has_simple_parameter_list) return Error.UnexpectedToken;
+            if (s.cur_func().has_use_strict and !parameters.has_simple_list) return Error.UnexpectedToken;
             switch (func_kind) {
                 .normal, .async, .generator, .async_generator => {
                     if (function_pending_name) |name| {
@@ -15856,7 +15895,7 @@ pub const parser_core = struct {
                 },
                 else => {},
             }
-            for (simple_param_names.items) |param_name| {
+            for (parameters.simple_names.items) |param_name| {
                 if (isInvalidStrictFunctionBindingName(s, param_name)) return Error.UnexpectedToken;
             }
         }
@@ -15865,12 +15904,12 @@ pub const parser_core = struct {
         // methods (incl. getters/setters/class elements) and arrows reject
         // duplicates; plain sloppy function/generator/async declarations and
         // expressions with a simple list keep them legal.
-        if (has_duplicate_simple_params and
+        if (parameters.has_duplicate_simple and
             (is_method_params or
                 func_kind == .method or func_kind == .get or func_kind == .set or
                 func_kind == .arrow or
                 func_kind == .class_constructor or func_kind == .derived_class_constructor or
-                !has_simple_parameter_list or s.is_strict or s.cur_func().is_strict_mode))
+                !parameters.has_simple_list or s.is_strict or s.cur_func().is_strict_mode))
             return Error.UnexpectedToken;
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
@@ -16034,7 +16073,7 @@ pub const parser_core = struct {
             s.new_target_allowed = saved_new_target_allowed;
         };
         const saved_return_finally = if (capture_child) enterReturnFinallyFunctionBoundary(s) else null;
-        defer if (saved_return_finally) |saved| leaveReturnFinallyFunctionBoundary(s, saved);
+        defer if (saved_return_finally) |*saved| leaveReturnFinallyFunctionBoundary(s, saved);
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
         defer {
@@ -16298,6 +16337,7 @@ pub const parser_core = struct {
         // Parse body (can be block or expression).
         // parseBlock consumes its own opening '{'.
         if (s.peekKind() == '{') {
+            if (capture_child) try predeclareFunctionBodyVars(s);
             if (has_non_simple_params and arrowBlockStartsUseStrict(s)) return Error.UnexpectedToken;
             if (!capture_child) s.return_depth += 1;
             defer {
@@ -20463,13 +20503,6 @@ pub const parser_core = struct {
         try s.expectToken('}');
     }
 
-    fn findFunctionDefClosureVarIndex(fd: *const function_def_mod.FunctionDef, atom_id: Atom) ?u16 {
-        for (fd.closure_var, 0..) |cv, idx| {
-            if (cv.var_name == atom_id) return @intCast(idx);
-        }
-        return null;
-    }
-
     fn isDirectEvalVarObjectAtom(atom_id: Atom) bool {
         return atom_id == atom_var_object or atom_id == atom_arg_var_object;
     }
@@ -20492,7 +20525,7 @@ pub const parser_core = struct {
     }
 
     fn directEvalCaptureAlreadyResolved(fd: *const function_def_mod.FunctionDef, atom_id: Atom) bool {
-        return findFunctionDefClosureVarIndex(fd, atom_id) != null;
+        return State.findClosureVarIndex(fd, atom_id) != null;
     }
 
     fn closureVarNeedsDirectEvalCapture(cv: function_def_mod.ClosureVar) bool {
@@ -20524,7 +20557,7 @@ pub const parser_core = struct {
             if (findFunctionDefClosureVarCaptureIndex(fd, cv)) |existing| return existing;
             return @intCast(fd.addClosureVar(cv) catch return error.OutOfMemory);
         }
-        if (findFunctionDefClosureVarIndex(fd, cv.var_name)) |existing| return existing;
+        if (State.findClosureVarIndex(fd, cv.var_name)) |existing| return existing;
         return @intCast(fd.addClosureVar(cv) catch return error.OutOfMemory);
     }
 
