@@ -583,14 +583,12 @@ inline fn fastNativeMethodCall(
     // non-table domains (`.atomics` / `.performance` / `.host`) and the
     // still-unmigrated Promise record ids already relied on.
     const function_object = property_ops.expectObject(func) catch return null;
-    // Structural .function proof (divergence C, mitigation): only a native c_function
-    // object has a FunctionPayload; a bound_function/proxy/other-class callable reaches
-    // here in method position (e.g. `obj.m()` where `obj.m = charCodeAt.bind(s)`) and
-    // must MISS so the caller falls to the generic value/bytecode dispatch. Guarding on
-    // class_payload_kind up front makes the following nativeFunctionIdSlot() and
-    // nativeFunctionRealmGlobalPtr() provably safe (both otherwise `unreachable` on a
-    // non-.function payload — a pre-existing latent UB that only benignly misses today).
-    if (function_object.class_payload_kind != core.class.PayloadKind.function) return null;
+    // This is specifically the native c_function fast path. Bytecode functions
+    // use the same FunctionPayload kind, but qjs discriminates their overlaid
+    // union by class before reading `u.cfunc`; do the same before interpreting
+    // the shared call-cache slot as an InternalRecord. Bound/proxy/closure
+    // callables likewise fall through to the generic dispatcher.
+    if (function_object.class_id != core.class.ids.c_function) return null;
     // Divergence B: cache the resolved `*const InternalRecord` on the func-object
     // payload so the hot call skips the per-call native-id DECODE + record-table
     // LOOKUP, mirroring qjs `func = p->u.cfunc.c_function` (the dispatchable

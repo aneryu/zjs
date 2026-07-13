@@ -120,20 +120,29 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
         new_target = bindings.new_target;
     }
     const rt = ctx.runtime;
-    // Point at the per-FB cached execution view (built once, pointer-stable).
-    // An FB with no cache slot (fixture/synthetic, no debug box) stays
-    // inline-eligible with `view = null`: `setupInlineEntry` rebuilds a fresh
-    // per-call view into an Entry-owned heap box, preserving the old
-    // rebuild-per-call semantics without a by-value `Bytecode` riding through
-    // the call machinery.
+    // qjs's JSObject.u overlays native and bytecode call payloads. The zjs
+    // FunctionPayload mirrors that arrangement with one non-owning call-cache
+    // slot: native functions store their InternalRecord there, while a bytecode
+    // closure memoizes the pointer-stable execution view after its first call.
+    // Cache-less fixture/synthetic FBs retain the existing null/general path.
+    const view: ?*const bytecode.Bytecode = if (function_payload.call_cache.bytecode_view) |cached|
+        @ptrCast(@alignCast(cached))
+    else
+        cacheBytecodeCallView(function_payload, fb, rt);
     return .{
         .captures = &function_payload.captures,
         .callable = func,
         .fb = fb,
-        .view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms),
+        .view = view,
         .this_value = this_value,
         .new_target = new_target,
     };
+}
+
+noinline fn cacheBytecodeCallView(function_payload: *core.object.FunctionPayload, fb: *const bytecode.FunctionBytecode, rt: *core.JSRuntime) ?*const bytecode.Bytecode {
+    const view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms) orelse return null;
+    function_payload.call_cache.bytecode_view = @ptrCast(view);
+    return view;
 }
 
 const ArrowBindings = struct {

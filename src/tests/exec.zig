@@ -1459,6 +1459,47 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
+test "bytecode call view memo occupies the callable-class call cache" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function memoizedBytecodeView(value) {
+        \\    return value + 1;
+        \\}
+        \\assert.sameValue(memoizedBytecodeView(1), 2);
+        \\assert.sameValue(memoizedBytecodeView(2), 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = js.context.global.?;
+    const name = try js.runtime.internAtom("memoizedBytecodeView");
+    defer js.runtime.atoms.free(name);
+    const function_value = global.getProperty(name);
+    defer function_value.free(js.runtime);
+    const function_object = engine.exec.object_ops.functionObjectFromValue(function_value) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+
+    _ = function_object.functionBytecodeSlot();
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view == null);
+    const rerun = try js.eval(
+        \\assert.sameValue(memoizedBytecodeView(3), 4);
+        \\Promise.resolve(4)
+        \\    .then(function(value) {
+        \\        var holder = { method: memoizedBytecodeView };
+        \\        return holder.method(value);
+        \\    })
+        \\    .then(function(value) {
+        \\        assert.sameValue(value, 5);
+        \\    });
+        \\undefined;
+    );
+    defer rerun.free(js.runtime);
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+}
+
 test "Math cproto dispatch preserves observable ToNumber semantics" {
     engine.builtins.registry.registerStandardGlobalsDefault();
     var js = try engine.harness.Engine.init(std.testing.allocator);

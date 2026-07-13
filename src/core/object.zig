@@ -956,6 +956,15 @@ pub const FunctionRarePayload = struct {
 };
 
 pub const FunctionPayload = struct {
+    pub const CallCache = extern union {
+        native_record: ?*const host_function.InternalRecord,
+        bytecode_view: ?*const anyopaque,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(CallCache) == @sizeOf(?*const anyopaque));
+    }
+
     host_function_kind: i32 = 0,
     native_function_id: i32 = 0,
     // Memoized resolved internal-record handle (divergence B), mirroring qjs
@@ -966,7 +975,12 @@ pub const FunctionPayload = struct {
     // comptime `pub const` in `rt.internal_builtins` (rodata), program-lifetime
     // stable and identical across runtimes — it can never go stale or dangle.
     // Reset for free by `destroy`'s `self.* = .{}`.
-    native_record: ?*const host_function.InternalRecord = null,
+    // qjs overlays bytecode-function and native-function payloads in JSObject.u.
+    // zjs shares FunctionPayload across both classes, so use the same 8-byte
+    // slot for their mutually-exclusive hot call cache: resolved InternalRecord
+    // for native functions, cached Bytecode execution view for bytecode
+    // functions. The view is non-owning and dies with the owning FB.
+    call_cache: CallCache = .{ .native_record = null },
     external_host_function_id: u32 = 0,
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
@@ -4240,13 +4254,15 @@ pub const Object = struct {
     // returns null when there is no function payload (matching nativeFunctionId's
     // 0 default) so a non-native callable simply misses the memo.
     pub fn nativeRecordSlot(self: *Object) *?*const host_function.InternalRecord {
-        if (self.functionPayload()) |payload| return &payload.native_record;
+        std.debug.assert(self.class_id == class.ids.c_function);
+        if (self.functionPayload()) |payload| return &payload.call_cache.native_record;
         std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
-        if (self.functionPayloadConst()) |payload| return payload.native_record;
+        if (self.class_id != class.ids.c_function) return null;
+        if (self.functionPayloadConst()) |payload| return payload.call_cache.native_record;
         return null;
     }
 
@@ -4526,7 +4542,16 @@ pub const Object = struct {
     }
 
     pub fn functionBytecodeSlot(self: *Object) *JSValue {
-        if (self.functionPayload()) |payload| return &payload.bytecode;
+        if (self.functionPayload()) |payload| {
+            // The writable slot is a zjs construction/embedding surface; qjs
+            // treats u.func.function_bytecode as immutable after closure
+            // creation. Invalidate the non-owning execution-view memo before a
+            // caller can replace and release the old FB.
+            if (self.class_id == class.ids.bytecode_function) {
+                payload.call_cache.bytecode_view = null;
+            }
+            return &payload.bytecode;
+        }
         std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
