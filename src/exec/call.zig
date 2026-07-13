@@ -30,7 +30,7 @@ const PrintError = HostError || error{InvalidRadix};
 // Construct ref for the String wrapper boxing path (`primitiveWrapper`). The
 // String constructor record's construct branch forwards `args`/`new_target` to
 // `constructWithPrototype`, so routing boxing through it (Phase 6b-3 STEP 6)
-// keeps exec free of a direct `builtins.string.constructWithPrototype` call.
+// keeps construction routed through the String native-record owner.
 const string_construct_ref = core.function.NativeBuiltinRef{
     .domain = .string,
     .id = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call),
@@ -1511,6 +1511,20 @@ pub fn callNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    if (function_object.nativeRecord()) |record| {
+        return try builtin_dispatch.callInternalRecordDirect(
+            ctx,
+            output,
+            global,
+            globals,
+            function_object,
+            this_value,
+            record,
+            args,
+            caller_function,
+            caller_frame,
+        );
+    }
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {
@@ -1754,14 +1768,14 @@ pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
 }
 
-/// Bare-runtime (no realm global) `Object.*` static fallback. Reached only via
-/// the `.object` builtins record handler (`builtins.object.objectCall`) when the
-/// host record path supplies no realm global; the realm path takes
-/// `builtins.object.objectCallForNativeRecord` instead. Stays in call.zig because
+/// Bare-runtime (no realm global) `Object.*` static fallback. Reached via the
+/// `.object` native-record handler in `exec/object_builtin_ops.zig` when the
+/// host record path supplies no realm global; the realm path takes the
+/// qjsObject* implementations in the same owner file. Stays in call.zig because
 /// it leans on the shared call.zig property/descriptor helper web
 /// (`expectObjectArg`, `descriptorFromObject`, `objectStaticToObjectValue`, ...)
 /// that the rest of this file owns — the BOTH split keeps the core here and the
-/// thin dispatch entry in builtins.
+/// thin dispatch entry in the Object native-record owner.
 pub fn callObjectStatic(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2252,7 +2266,7 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
     if (class_id == core.class.ids.string) {
         // Route `new String(primitive)` / `Object(stringPrimitive)` boxing
         // through the String construct record (Phase 6b-3 STEP 6) instead of
-        // naming `builtins.string.constructWithPrototype`: the record's
+        // naming `string_builtin_ops.constructWithPrototype`: the record's
         // construct branch forwards `args`/`new_target` straight to that body.
         return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, prototype, &.{primitive}, null, null)) orelse error.TypeError;
     }
@@ -2486,7 +2500,7 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
     const target = try core.function.nativeFunction(rt, "get [Symbol.species]", 0);
     defer target.free(rt);
     const target_object = thisObject(target) orelse return error.TypeError;
-    target_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter));
+    target_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)));
 
     var globals = [_]globals_mod.Slot{};
     const bound_value = try createBoundFunction(
@@ -2661,7 +2675,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
         return nativeFunctionSourceValue(rt, null);
     }
     if (object.class_id == core.class.ids.bytecode_function) {
-        const stored = object.functionBytecodeSlot().* orelse return nativeFunctionSourceValue(rt, object);
+        const stored = object.functionBytecode() orelse return nativeFunctionSourceValue(rt, object);
         const bytecode = functionBytecodeFromValue(stored) orelse return nativeFunctionSourceValue(rt, object);
         return functionBytecodeToStringValue(rt, bytecode, object);
     }

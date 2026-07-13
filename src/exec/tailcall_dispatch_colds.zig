@@ -36,17 +36,17 @@ const vm_property_private = @import("vm_property_private.zig");
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false), (if (vm.machine.depth == 0) vm.l0.is_eval_code else false), (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
 pub const h_checkedloc = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
     }
 }.b);
 pub const h_loc = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        try vm_property_locals.loc(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), vm.frame.evalVarRefNames(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        try vm_property_locals.loc(vm.ctx, vm.function, vm.frame, vm.stack, pc[0]);
     }
 }.b);
 pub const h_arg = coldStd(struct {
@@ -86,13 +86,13 @@ pub const h_array_element = coldStd(struct {
 }.b);
 pub const h_get_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_globals.getVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
     }
 }.b);
 pub const h_put_var = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
         _ = pc;
-        _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict)), (if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false), (if (vm.machine.depth == 0) vm.l0.is_eval_code else false), (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()));
+        _ = try vm_property_globals.putVar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.strictUnresolvedGetVar(vm), td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
     }
 }.b);
 pub const h_with_get_or_delete = coldStd(struct {
@@ -107,7 +107,7 @@ pub const h_make_slot_ref = coldStd(struct {
 }.b);
 pub const h_define_class = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try class_vm.defineClass(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs(), pc[0] == op.define_class_computed);
+        _ = try class_vm.defineClass(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0] == op.define_class_computed);
     }
 }.b);
 pub const h_for_of_start = coldStd(struct {
@@ -160,7 +160,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.push_i16] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try value_vm.pushI16OperandVm(vm.ctx, vm.stack, vm.function, vm.frame, .{ .global = vm.global, .eval_local_names = (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), .eval_var_ref_names = vm.frame.evalVarRefNames(), .eval_with_object = (if (vm.machine.depth == 0) vm.l0.eval_with_object else core.JSValue.undefinedValue()) });
+            try value_vm.pushI16Operand(vm.stack, vm.function, vm.frame);
         }
     }.b);
     t[op.push_i8] = h(struct {
@@ -190,7 +190,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.fclosure] = coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-            _ = try call_vm.closure(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0], (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            _ = try call_vm.closure(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, pc[0]);
         }
     }.b);
     t[op.fclosure8] = t[op.fclosure];
@@ -259,6 +259,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
 
     // --- arith / compare / unary ---
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
+    t[op.mod] = td.op_mod_cold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at a generator stop boundary. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
@@ -328,21 +329,25 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.if_false] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, false);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_true] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, true);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_false8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, false);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.if_true8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, true);
+            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
         }
     }.b);
     t[op.gosub] = h(struct {
@@ -363,7 +368,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref }) |o| t[o] = h_make_slot_ref;
     t[op.make_var_ref] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_ref.makeVarRefVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            _ = try vm_property_ref.makeVarRefVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.get_ref_value] = h(struct {
@@ -491,7 +496,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_var_init] = h_putvarinit(op.put_var_init);
     t[op.special_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
         }
     }.b);
     t[op.rest] = h(struct {
@@ -673,7 +678,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.delete_var] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try vm_property_ref.deleteVar(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, (if (vm.machine.depth == 0) vm.l0.eval_local_names else &.{}), (if (vm.machine.depth == 0) vm.l0.eval_local_slots else &.{}), vm.frame.evalVarRefNames(), vm.frame.evalVarRefs());
+            try vm_property_ref.deleteVar(vm.ctx, vm.global, vm.stack, vm.function, vm.frame);
         }
     }.b);
     t[op.delete] = h(struct {
@@ -780,6 +785,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     //     compiler can't devirtualize+inline it, so the fast handler stays a
     //     frameless leaf instead of carrying the cold 128B frame on its hot path). ---
     if (!fast) return t;
+    t[op.undefined] = td.op_undefined_fast;
+    t[op.null] = td.op_null_fast;
+    t[op.push_false] = td.op_push_false_fast;
+    t[op.push_true] = td.op_push_true_fast;
     t[op.push_i32] = td.op_push_i32;
     t[op.push_i16] = td.op_push_i16;
     t[op.push_i8] = td.op_push_i8;
@@ -807,14 +816,18 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }) |e| t[e.o] = e.h;
     // TDZ-checked locals: the per-iteration hot loc ops in `for (let i…)` loops
     // (quickjs.c emits OP_get_loc_check/OP_put_loc_check for every lexical var,
-    // 33072-33078). get_loc_checkthis / put_loc_check_init / set_loc_uninitialized
-    // stay on cold h_checkedloc (rare derived-ctor-this / block-entry init paths).
+    // 33072-33078). get_loc_checkthis stays on cold h_checkedloc; the plain-slot
+    // set_loc_uninitialized / put_loc_check_init cases have dedicated fast handlers.
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.get_loc_check, .h = td.opLocCheck(.get) },
         .{ .o = op.put_loc_check, .h = td.opLocCheck(.put) },
         .{ .o = op.set_loc_check, .h = td.opLocCheck(.set) },
     }) |e| t[e.o] = e.h;
+    t[op.set_loc_uninitialized] = td.op_set_loc_uninitialized;
+    t[op.put_loc_check_init] = td.op_put_loc_check_init;
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
+    t[op.push_atom_value] = td.op_push_atom_value;
+    t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).
@@ -853,7 +866,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_array_element
-    t[op.get_length] = td.op_get_length; // inline string-length read; non-string → cold getLength
+    t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
     // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without
     // these overrides they routed through the 224-byte coldStd publish shell EVERY

@@ -9,7 +9,7 @@
 //! placement keeps them one level above core, in exec, on top of the core
 //! ArrayBuffer storage primitives. They are reached only through the construct
 //! path (`exec/construct.zig`, the `new_array_buffer` / `new_shared_array_buffer`
-//! family); `builtins/buffer.zig` re-exports them under their original names for
+//! family); `exec/buffer_ops.zig` re-exports them under their original names for
 //! the install/test side.
 
 const core = @import("../core/root.zig");

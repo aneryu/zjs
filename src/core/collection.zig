@@ -12,12 +12,11 @@
 //! borrowed-reference holder registry) and `libs` (`bigint`, `number_format`). There is
 //! zero exec/builtins/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
-//! The builtins collection method bodies (`builtins/collection.zig`) call these
+//! The collection native method bodies (`exec/collection_ops.zig`) call these
 //! backend entry points directly; the VM Map-fusion fast paths
 //! (`mapSetLatin1PrefixInt32Range` / `mapGetLatin1PrefixIntValue`, consumed by
 //! `exec/vm_property_locals.zig`) and the WeakMap test-support mutator
-//! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too so neither
-//! consumer needs to import builtins.
+//! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too.
 
 const std = @import("std");
 
@@ -105,8 +104,8 @@ fn hashNumber(number: f64) u64 {
 }
 
 fn hashStringValue(value: core.JSValue) u64 {
-    const string = stringFromValue(value) orelse return hashRefPointer(value);
-    return mix64(@as(u64, string.contentHash()) ^ (@as(u64, string.len()) << 32));
+    const hash = core.string.stringValueContentHash(value) orelse return hashRefPointer(value);
+    return mix64(@as(u64, hash) ^ (@as(u64, core.string.stringValueLen(value)) << 32));
 }
 
 pub fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {

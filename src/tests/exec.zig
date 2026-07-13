@@ -23,12 +23,16 @@ pub const helpers = struct {
     /// through `rt.installStandardGlobals`, which needs the builtins installer
     /// registered first; exec source cannot name the builtins registry, so the
     /// test tree (which imports builtins) registers it here. Idempotent.
-    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+    pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void {
         const registry = engine.builtins.registry;
-        const exec_call = engine.exec.call;
         registry.registerStandardGlobalsDefault();
         rt.install_standard_globals_cb = registry.installStandardGlobals;
         rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    }
+
+    pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
+        const exec_call = engine.exec.call;
+        registerStandardGlobalsBare(rt);
         try exec_call.installHostGlobals(rt, global);
     }
 
@@ -37,12 +41,26 @@ pub const helpers = struct {
         defer rt.atoms.free(name);
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         errdefer function.deinit(rt);
+        try setCodeAndStackSize(&function, code);
+        return function;
+    }
+
+    pub fn makeUncheckedFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
+        const name = try rt.internAtom("exec");
+        defer rt.atoms.free(name);
+        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        errdefer function.deinit(rt);
         try function.setCode(code);
         return function;
     }
 
+    pub fn setCodeAndStackSize(function: *engine.bytecode.Bytecode, code: []const u8) !void {
+        try function.setCode(code);
+        function.stack_size = try engine.bytecode.pipeline.stack_size.compute(function.code, .{});
+    }
+
     pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const engine.bytecode.Bytecode) !core.JSValue {
-        _ = rt;
+        registerStandardGlobalsBare(rt);
         var vm_instance = engine.exec.Vm.init(ctx);
         defer vm_instance.deinit();
         return vm_instance.run(function);
@@ -97,7 +115,7 @@ pub const helpers = struct {
     //
     // Each `test "X" {}` block traditionally does:
     //
-    //     var js = try engine.harness.Engine.init(std.testing.allocator);
+    //     var js = try helpers.TestEngine.init(std.testing.allocator);
     //     defer js.deinit();
     //     ...
     //
@@ -121,7 +139,7 @@ pub const helpers = struct {
     // `installHostGlobals`. Tests that mutate built-in objects (e.g.
     // `Promise.resolve = ...`) or rely on freshly built closures
     // referencing the previous test's eval scope still need a fresh
-    // `engine.harness.Engine.init` per call; the shared-engine pattern is
+    // `helpers.TestEngine.init` per call; the shared-engine pattern is
     // safe for tests that only declare new locals / vars / functions
     // and read the standard globals.
     //
@@ -230,6 +248,8 @@ pub const helpers = struct {
                 .stack_size = options.limits.stack_bytes orelse core.runtime.default_stack_size,
             });
             errdefer rt.destroy();
+            registerStandardGlobalsBare(rt);
+            rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
             const ctx = try core.JSContext.create(rt);
             errdefer ctx.destroy();
             const event_loop = try options.allocator.create(engine.runtime.EventLoop);
@@ -591,6 +611,7 @@ pub const vm_helpers = struct {
         // put_var.
         try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -610,6 +631,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -646,6 +668,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -670,6 +693,7 @@ pub const vm_helpers = struct {
 
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
+        helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
         return vm.run(&function);
@@ -708,9 +732,7 @@ test "vm executes stack constants source locations and return_undef" {
     });
     defer function.deinit(rt);
 
-    var vm_instance = engine.exec.Vm.init(ctx);
-    defer vm_instance.deinit();
-    const result = try vm_instance.run(&function);
+    const result = try runFunction(rt, ctx, &function);
     defer result.free(rt);
     try std.testing.expect(result.isUndefined());
     try std.testing.expect(result.isUndefined());
@@ -737,6 +759,33 @@ test "frame setLocal handles self-assignment without dropping object" {
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
+test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+
+    const binding_name = try rt.internAtom("synthetic-var-ref");
+    defer rt.atoms.free(binding_name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(binding_name);
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
+    var var_refs = [_]*core.VarRef{cell};
+    var frame = engine.exec.frame.Frame.init(&function);
+    frame.var_refs = &var_refs;
+    defer frame.deinit(&rt.memory, rt);
+
+    const result = engine.exec.call_runtime.lookupFrameVarRef(ctx, global, &function, &frame, binding_name);
+    defer if (result) |value| value.free(rt);
+    try std.testing.expect(result == null);
+}
+
 test "VM roots frame this symbol before derived constructor var-ref allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -755,7 +804,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.stack_size = 1;
     function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
     function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
-    try function.setCode(&.{ op.get_loc0, op.drop, op.return_undef });
+    try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
     rt.setGCThreshold(0);
@@ -813,7 +862,7 @@ test "constant pool execution retains returned constants" {
     const value = str.value();
     _ = try function.addConstant(value);
     value.free(rt);
-    try function.setCode(&.{ op.push_const, 0, 0, 0, 0 });
+    try helpers.setCodeAndStackSize(&function, &.{ op.push_const, 0, 0, 0, 0 });
 
     const result = try runFunction(rt, ctx, &function);
     defer result.free(rt);
@@ -918,7 +967,7 @@ test "value ops own primitive VM semantics" {
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
     _ = try function.addConstant(one_string);
-    try function.setCode(&.{
+    try helpers.setCodeAndStackSize(&function, &.{
         op.push_i32,   1, 0, 0, 0,
         op.push_const, 0, 0, 0, 0,
         op.eq,
@@ -1022,7 +1071,7 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
 
 test "global closure get before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var let_output_buffer: [64]u8 = undefined;
@@ -1050,7 +1099,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
 
 test "global closure set before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1067,7 +1116,7 @@ test "global closure set before top-level lexical initialization honors TDZ" {
 
 test "global closure update before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1084,7 +1133,7 @@ test "global closure update before top-level lexical initialization honors TDZ" 
 
 test "Annex B block function updates existing global function binding" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1106,7 +1155,7 @@ test "Annex B block function updates existing global function binding" {
 
 test "Annex B eval block function updates global function binding mirrors" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var direct_output_buffer: [64]u8 = undefined;
@@ -1134,7 +1183,7 @@ test "Annex B eval block function updates global function binding mirrors" {
 
 test "Annex B direct eval global function does not block later script lexical declaration" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const eval_result = try js.eval(
@@ -1161,7 +1210,7 @@ test "Annex B direct eval global function does not block later script lexical de
 
 test "sloppy global assignment creates deletable object property" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var this_output_buffer: [64]u8 = undefined;
@@ -1359,6 +1408,18 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer abs_value.free(rt);
     const abs_object: *core.Object = @fieldParentPtr("header", abs_value.refHeader().?);
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
+    const abs_record = abs_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
+    try std.testing.expectEqual(core.host_function.NativeCProto.f_f, abs_record.cproto);
+    try std.testing.expect(abs_record.native_function != null);
+
+    const atan2_key = try rt.internAtom("atan2");
+    defer rt.atoms.free(atan2_key);
+    const atan2_value = math_object.getProperty(atan2_key);
+    defer atan2_value.free(rt);
+    const atan2_object: *core.Object = @fieldParentPtr("header", atan2_value.refHeader().?);
+    const atan2_record = atan2_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
+    try std.testing.expectEqual(core.host_function.NativeCProto.f_f_f, atan2_record.cproto);
+    try std.testing.expect(atan2_record.native_function != null);
 
     const fake = try engine.builtins.function.nativeFunction(rt, "notMathAbs", 1);
     defer fake.free(rt);
@@ -1374,6 +1435,14 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer result.free(rt);
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(result).?);
 
+    // Plain op_call must prefer the resolved record memo. The encoded id is a
+    // bootstrap key, not work to repeat after the function object is bound.
+    fake_object.nativeRecordSlot().* = abs_record;
+    fake_object.nativeFunctionIdSlot().* = 0;
+    const memo_result = try engine.exec.call.callValue(ctx, null, fake, &args);
+    defer memo_result.free(rt);
+    try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(memo_result).?);
+
     const fake_key = try rt.internAtom("fake");
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
@@ -1384,14 +1453,210 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
+test "bytecode call view memo occupies the callable-class call cache" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function memoizedBytecodeView(value) {
+        \\    return value + 1;
+        \\}
+        \\assert.sameValue(memoizedBytecodeView(1), 2);
+        \\assert.sameValue(memoizedBytecodeView(2), 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = js.context.global.?;
+    const name = try js.runtime.internAtom("memoizedBytecodeView");
+    defer js.runtime.atoms.free(name);
+    const function_value = global.getProperty(name);
+    defer function_value.free(js.runtime);
+    const function_object = engine.exec.object_ops.functionObjectFromValue(function_value) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+
+    _ = function_object.functionBytecodeSlot();
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view == null);
+    const rerun = try js.eval(
+        \\assert.sameValue(memoizedBytecodeView(3), 4);
+        \\Promise.resolve(4)
+        \\    .then(function(value) {
+        \\        var holder = { method: memoizedBytecodeView };
+        \\        return holder.method(value);
+        \\    })
+        \\    .then(function(value) {
+        \\        assert.sameValue(value, 5);
+        \\    });
+        \\undefined;
+    );
+    defer rerun.free(js.runtime);
+    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+}
+
+test "Math cproto dispatch preserves observable ToNumber semantics" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = "";
+        \\var lhs = { valueOf() { log += "l"; return -3; } };
+        \\var rhs = { valueOf() { log += "r"; return 4; } };
+        \\print(Math.abs(lhs));
+        \\print(Math.atan2(lhs, rhs) === Math.atan2(-3, 4));
+        \\print(log);
+        \\print(Number.isNaN(Math.abs()));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("3\ntrue\nllr\ntrue\n", stream.buffered());
+}
+
+test "cell-backed add_loc retains string snapshots while using a rope tail" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function build() {
+        \\  var text = "";
+        \\  for (var i = 0; i < 4096; i++) text += "ab";
+        \\  return text;
+        \\}
+        \\function verifySnapshot() {
+        \\  var text = "";
+        \\  var snapshot;
+        \\  for (var i = 0; i < 4096; i++) {
+        \\    if (i === 2048) snapshot = text;
+        \\    text += "ab";
+        \\  }
+        \\  return snapshot.length;
+        \\}
+        \\if (verifySnapshot() !== 4096) throw new Error("snapshot mutated");
+        \\globalThis.__rope_tail_probe = build();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = js.context.global orelse return error.TypeError;
+    const probe_atom = try js.runtime.internAtom("__rope_tail_probe");
+    defer js.runtime.atoms.free(probe_atom);
+    const text = global.getProperty(probe_atom);
+    defer text.free(js.runtime);
+    const rope = text.ropeBody() orelse return error.TypeError;
+    try std.testing.expectEqual(@as(usize, 8192), rope.len_());
+    try std.testing.expect(rope.tailLen() >= 2048);
+    var chain_depth: usize = 1;
+    var cursor = rope;
+    while (cursor.left.ropeBody()) |left| {
+        chain_depth += 1;
+        if (chain_depth > 8) break;
+        cursor = left;
+    }
+    try std.testing.expect(chain_depth <= 4);
+}
+
+test "checked lexical string accumulation keeps rope depth bounded" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function build() {
+        \\  let text = "";
+        \\  let snapshot;
+        \\  for (var i = 0; i < 8192; i++) {
+        \\    if (i === 4096) snapshot = text;
+        \\    text += "ab";
+        \\  }
+        \\  if (snapshot.length !== 8192) throw new Error("snapshot mutated");
+        \\  return text;
+        \\}
+        \\globalThis.__checked_lexical_rope_probe = build();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = js.context.global orelse return error.TypeError;
+    const probe_atom = try js.runtime.internAtom("__checked_lexical_rope_probe");
+    defer js.runtime.atoms.free(probe_atom);
+    const text = global.getProperty(probe_atom);
+    defer text.free(js.runtime);
+    const rope = text.ropeBody() orelse return error.TypeError;
+    try std.testing.expectEqual(@as(usize, 16384), rope.len_());
+
+    // QJS caps rope depth and rebalances; zjs may use its private growable tail,
+    // but must likewise avoid retaining one wrapper node per `+=` iteration.
+    var left_depth: usize = 1;
+    var cursor = rope;
+    while (cursor.left.ropeBody()) |left| {
+        left_depth += 1;
+        if (left_depth > 64) break;
+        cursor = left;
+    }
+    try std.testing.expect(left_depth <= 64);
+}
+
+test "computed reads with cached string atoms preserve exotic and prototype semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const proto = { get hot() { return 7; } };
+        \\const object = Object.create(proto);
+        \\assert.sameValue(object["hot"], 7);
+        \\let trapCalls = 0;
+        \\const proxy = new Proxy(object, {
+        \\  get(target, key, receiver) {
+        \\    trapCalls++;
+        \\    return Reflect.get(target, key, receiver);
+        \\  }
+        \\});
+        \\assert.sameValue(proxy["hot"], 7);
+        \\assert.sameValue(trapCalls, 1);
+        \\assert.sameValue([11]["0"], 11);
+        \\assert.sameValue("ab"["1"], "b");
+        \\assert.sameValue(new Uint8Array([9])["0"], 9);
+        \\const dynamic = "dynamic" + "Key";
+        \\const keyed = { dynamicKey: 13 };
+        \\assert.sameValue(keyed[dynamic], 13);
+        \\assert.sameValue(keyed[dynamic], 13);
+        \\let holder;
+        \\const recycledKey = "recycled_key_" + 12345;
+        \\holder = {};
+        \\holder[recycledKey] = 1;
+        \\const invariantTarget = {};
+        \\const recyclingProxy = new Proxy(invariantTarget, {
+        \\  get(target, key) {
+        \\    delete holder[recycledKey];
+        \\    holder = null;
+        \\    const replacementKey = "replacement_key_" + 67890;
+        \\    Object.defineProperty(target, replacementKey, {
+        \\      value: 123,
+        \\      configurable: false,
+        \\      writable: false
+        \\    });
+        \\    return 456;
+        \\  }
+        \\});
+        \\assert.sameValue(recyclingProxy[recycledKey], 456);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "native dispatch metadata is internal and ignores user properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1419,7 +1684,7 @@ test "native dispatch metadata is internal and ignores user properties" {
 
 test "scope resolver skips popped lexical shadow for destructured parameter" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1437,7 +1702,7 @@ test "scope resolver skips popped lexical shadow for destructured parameter" {
 }
 
 test "__zjs-prefixed user properties are ordinary own properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1460,7 +1725,7 @@ test "__zjs-prefixed user properties are ordinary own properties" {
 }
 
 test "array species fast path markers are internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1487,7 +1752,7 @@ test "array species fast path markers are internal" {
 }
 
 test "auto-init builtin markers are internal and ignore user properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1602,7 +1867,7 @@ test "auto-init builtin markers are internal and ignore user properties" {
 }
 
 test "immutable prototype marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1623,7 +1888,7 @@ test "immutable prototype marker is internal" {
 }
 
 test "builtin dispatch function markers are internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1665,7 +1930,7 @@ test "builtin dispatch function markers are internal" {
 }
 
 test "proxy revocation target is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1707,7 +1972,7 @@ test "proxy revocation target is internal" {
 }
 
 test "regexp accessor realm TypeError constructor is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1742,7 +2007,7 @@ test "regexp accessor realm TypeError constructor is internal" {
 }
 
 test "throw type error intrinsic marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1798,7 +2063,7 @@ test "throw type error intrinsic marker is internal" {
 }
 
 test "async generator prototype method marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1821,7 +2086,7 @@ test "async generator prototype method marker is internal" {
 }
 
 test "iterator helper method marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [1024]u8 = undefined;
@@ -1870,7 +2135,7 @@ test "iterator helper method marker is internal" {
 }
 
 test "Iterator.from follows QuickJS wrapper selection" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -2001,7 +2266,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
@@ -2052,7 +2317,7 @@ test "string static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("B\n", output.buffered());
@@ -2109,10 +2374,49 @@ test "string prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n", output.buffered());
+}
+
+test "String case conversion records preserve coercion and Unicode semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var hints = [];
+        \\var receiver = {};
+        \\receiver[Symbol.toPrimitive] = function(hint) {
+        \\    hints.push(hint);
+        \\    return "aßΣ";
+        \\};
+        \\assert.sameValue(String.prototype.toUpperCase.call(receiver), "ASSΣ");
+        \\assert.sameValue(hints.join(","), "string");
+        \\assert.sameValue("AΣ".toLowerCase(), "aς");
+        \\assert.sameValue("AΣA".toLowerCase(), "aσa");
+        \\assert.sameValue("\uD801\uDC28".toUpperCase(), "\uD801\uDC00");
+        \\assert.sameValue(String.prototype.toLowerCase.call(new String("ABC")), "abc");
+        \\var upper = String.prototype.toUpperCase;
+        \\Object.defineProperty(upper, "name", { value: "renamed" });
+        \\assert.sameValue(upper.call("ab"), "AB");
+        \\assert.throws(TypeError, function() {
+        \\    String.prototype.toUpperCase.call(Symbol("x"));
+        \\});
+        \\var other = $262.createRealm().global;
+        \\assert.throws(other.TypeError, function() {
+        \\    other.String.prototype.toUpperCase.call(Symbol("x"));
+        \\});
+    );
+    defer result.free(js.runtime);
+
+    const pure_source = try core.string.String.createUtf8(js.runtime, "ABC");
+    defer pure_source.value().free(js.runtime);
+    const pure_result = try engine.exec.string_ops.callStringBody(js.context, pure_source.value(), 3, &.{});
+    defer pure_result.free(js.runtime);
+    try std.testing.expect((pure_result.asStringBody() orelse return error.TestUnexpectedResult).eqlBytes("abc"));
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "date static native builtin records ignore dispatch names" {
@@ -2159,7 +2463,7 @@ test "date static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
@@ -2224,7 +2528,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
@@ -2305,7 +2609,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
@@ -2380,7 +2684,7 @@ test "array static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
@@ -2483,7 +2787,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
@@ -2608,7 +2912,7 @@ test "collection native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
@@ -2773,7 +3077,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
@@ -2867,7 +3171,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
@@ -2921,7 +3225,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
@@ -3037,7 +3341,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
@@ -3179,7 +3483,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
@@ -3263,7 +3567,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
@@ -3272,6 +3576,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
 test "vm collection constructors use registered prototype methods" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
@@ -3281,14 +3586,15 @@ test "vm collection constructors use registered prototype methods" {
     defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
-    var bytes: [6]u8 = undefined;
+    var bytes: [7]u8 = undefined;
     bytes[0] = op.get_var;
     std.mem.writeInt(u16, bytes[1..3], 0, .little);
-    bytes[3] = op.call_constructor;
-    std.mem.writeInt(u16, bytes[4..6], 0, .little);
+    bytes[3] = op.dup;
+    bytes[4] = op.call_constructor;
+    std.mem.writeInt(u16, bytes[5..7], 0, .little);
     function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
     function.var_ref_names[0] = rt.atoms.dup(map_atom);
-    try function.setCode(&bytes);
+    try helpers.setCodeAndStackSize(&function, &bytes);
 
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
@@ -3315,6 +3621,202 @@ test "finite number formatting keeps simple decimal fast path semantics" {
 }
 
 // ================== engine_smoke.zig ==================
+
+test "qjs alignment C1 for-head lexical self-reference observes TDZ" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let caught = false;
+        \\try {
+        \\  for (let i = i; false; ) {}
+        \\} catch (error) {
+        \\  caught = error instanceof ReferenceError;
+        \\}
+        \\assert.sameValue(caught, true);
+        \\let emptyHeadCaught = false;
+        \\try {
+        \\  for (let j = j; ; ) { break; }
+        \\} catch (error) {
+        \\  emptyHeadCaught = error instanceof ReferenceError;
+        \\}
+        \\assert.sameValue(emptyHeadCaught, true);
+        \\let closureCaught = false;
+        \\try {
+        \\  for (let k = (() => k)(); false; ) {}
+        \\} catch (error) {
+        \\  closureCaught = error instanceof ReferenceError;
+        \\}
+        \\assert.sameValue(closureCaught, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "qjs alignment C2 string for-of observes patched iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const saved = String.prototype[Symbol.iterator];
+        \\try {
+        \\  let calls = 0;
+        \\  String.prototype[Symbol.iterator] = function() {
+        \\    calls++;
+        \\    let done = false;
+        \\    return {
+        \\      next() {
+        \\        if (done) return { done: true };
+        \\        done = true;
+        \\        return { done: false, value: "X" };
+        \\      }
+        \\    };
+        \\  };
+        \\  let primitive = "";
+        \\  for (const value of "ab") primitive += value;
+        \\  let wrapped = "";
+        \\  for (const value of new String("cd")) wrapped += value;
+        \\  assert.sameValue(primitive, "X");
+        \\  assert.sameValue(wrapped, "X");
+        \\  assert.sameValue(calls, 2);
+        \\} finally {
+        \\  String.prototype[Symbol.iterator] = saved;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "qjs alignment C3 in operator respects null prototype" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const bare = Object.create(null);
+        \\assert.sameValue("toString" in bare, false);
+        \\assert.sameValue("toString" in {}, true);
+        \\bare.toString = 1;
+        \\assert.sameValue("toString" in bare, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "qjs alignment C4 Array instanceof follows prototype chain" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\Object.defineProperty(Array, Symbol.hasInstance, {
+        \\  value: undefined,
+        \\  configurable: true
+        \\});
+        \\try {
+        \\  const detached = [];
+        \\  Object.setPrototypeOf(detached, null);
+        \\  assert.sameValue(detached instanceof Array, false);
+        \\  assert.sameValue([] instanceof Array, true);
+        \\} finally {
+        \\  delete Array[Symbol.hasInstance];
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "local reference-tail lowering preserves binding semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function compoundAssignment() {
+        \\  var x = 1;
+        \\  function rhs() { x = 10; return 2; }
+        \\  x += rhs();
+        \\  return x;
+        \\}
+        \\assert.sameValue(compoundAssignment(), 3);
+        \\function declarationAssignment() {
+        \\  var x = 1;
+        \\  function rhs() { x = 10; return 2; }
+        \\  var x = rhs();
+        \\  return x;
+        \\}
+        \\assert.sameValue(declarationAssignment(), 2);
+        \\function capturedLocal() {
+        \\  var x = 0;
+        \\  const read = () => x;
+        \\  var x = 3;
+        \\  return read();
+        \\}
+        \\assert.sameValue(capturedLocal(), 3);
+        \\function dynamicWith() {
+        \\  var x = 1;
+        \\  const scope = { x: 2 };
+        \\  with (scope) { x = 3; }
+        \\  return x + ":" + scope.x;
+        \\}
+        \\assert.sameValue(dynamicWith(), "1:3");
+        \\function directEval() {
+        \\  var x = 1;
+        \\  var x = eval("x = 5; 2");
+        \\  return x;
+        \\}
+        \\assert.sameValue(directEval(), 2);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "qjs alignment const local writes throw from resolved bytecode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function beforeDeclaration() { x = 1; const x = 2; }
+        \\let beforeCaught = false;
+        \\let beforeMessage = "";
+        \\try { beforeDeclaration(); } catch (error) {
+        \\  beforeCaught = error instanceof TypeError;
+        \\  beforeMessage = error.message;
+        \\}
+        \\assert.sameValue(beforeCaught, true);
+        \\assert.sameValue(beforeMessage, "'x' is read-only");
+        \\let rhsCalls = 0;
+        \\let compoundCaught = false;
+        \\let compoundMessage = "";
+        \\function compoundConst() {
+        \\  const fixed = 1;
+        \\  try { fixed += (rhsCalls = 1); } catch (error) {
+        \\    compoundCaught = error instanceof TypeError;
+        \\    compoundMessage = error.message;
+        \\  }
+        \\}
+        \\compoundConst();
+        \\assert.sameValue(compoundCaught, true);
+        \\assert.sameValue(compoundMessage, "'fixed' is read-only");
+        \\assert.sameValue(rhsCalls, 1);
+        \\function sloppyName() {
+        \\  return (function named() { named = 0; return typeof named; })();
+        \\}
+        \\assert.sameValue(sloppyName(), "function");
+        \\let strictNameCaught = false;
+        \\try {
+        \\  (function named() { "use strict"; named = 0; })();
+        \\} catch (error) {
+        \\  strictNameCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictNameCaught, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
 
 test "Engine eval executes test262 helpers through generic call paths" {
     const js = helpers.sharedTestEngine();
@@ -3471,6 +3973,89 @@ test "Error stack uses object method runtime names" {
         \\var stack = object.return();
         \\assert.sameValue(stack.indexOf("at return") >= 0, true);
         \\assert.sameValue(stack.indexOf("    at return"), 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "native builtin errors capture a native callsite" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var defaultStack;
+        \\try {
+        \\    [].map(null);
+        \\} catch (error) {
+        \\    defaultStack = error.stack;
+        \\}
+        \\assert.sameValue(defaultStack.indexOf("    at map (native)"), 0);
+        \\var callStack;
+        \\try {
+        \\    Array.prototype.map.call([], null);
+        \\} catch (error) {
+        \\    callStack = error.stack;
+        \\}
+        \\assert.sameValue(callStack.indexOf("    at map (native)\n    at call (native)"), 0);
+        \\function forwardedCallTarget() { return new Error("forwarded").stack; }
+        \\var forwardedCallStack = forwardedCallTarget.call(undefined);
+        \\var forwardedFirstNewline = forwardedCallStack.indexOf("\n");
+        \\assert.sameValue(forwardedCallStack.indexOf("    at forwardedCallTarget"), 0);
+        \\assert.sameValue(forwardedCallStack.slice(forwardedFirstNewline + 1).indexOf("    at call (native)"), 0);
+        \\var applyStack;
+        \\try {
+        \\    Array.prototype.map.apply([], [null]);
+        \\} catch (error) {
+        \\    applyStack = error.stack;
+        \\}
+        \\assert.sameValue(applyStack.indexOf("    at map (native)\n    at apply (native)"), 0);
+        \\var rawErrorStack;
+        \\try {
+        \\    String.fromCharCode(Symbol());
+        \\} catch (error) {
+        \\    rawErrorStack = error.stack;
+        \\}
+        \\assert.sameValue(rawErrorStack.indexOf("    at fromCharCode (native)"), 0);
+        \\var nestedRawErrorStack;
+        \\try {
+        \\    [][Symbol.iterator]().next.call({});
+        \\} catch (error) {
+        \\    nestedRawErrorStack = error.stack;
+        \\}
+        \\assert.sameValue(nestedRawErrorStack.indexOf("    at next (native)\n    at call (native)"), 0);
+        \\var arrayConstructStack;
+        \\try { new Array(-1); } catch (error) { arrayConstructStack = error.stack; }
+        \\assert.sameValue(arrayConstructStack.indexOf("    at Array (native)"), 0);
+        \\var regexpConstructStack;
+        \\try { new RegExp("["); } catch (error) { regexpConstructStack = error.stack; }
+        \\assert.sameValue(regexpConstructStack.indexOf("    at RegExp (native)"), 0);
+        \\var regexpCallStack;
+        \\try { RegExp("["); } catch (error) { regexpCallStack = error.stack; }
+        \\assert.sameValue(regexpCallStack.indexOf("    at RegExp (native)"), 0);
+        \\assert.sameValue(regexpCallStack.indexOf("    at <anonymous> (native)"), -1);
+        \\var stringConstructStack;
+        \\try { new String(Symbol()); } catch (error) { stringConstructStack = error.stack; }
+        \\assert.sameValue(stringConstructStack.indexOf("    at String (native)"), 0);
+        \\var dateConstructStack;
+        \\try { new Date(Symbol()); } catch (error) { dateConstructStack = error.stack; }
+        \\assert.sameValue(dateConstructStack.indexOf("    at Date (native)"), 0);
+        \\Error.prepareStackTrace = function(error, sites) {
+        \\    assert.sameValue(sites[0].getFunctionName(), "map");
+        \\    assert.sameValue(sites[0].getFileName(), null);
+        \\    assert.sameValue(sites[0].getLineNumber(), null);
+        \\    assert.sameValue(sites[0].getColumnNumber(), null);
+        \\    assert.sameValue(sites[0].isNative(), true);
+        \\    assert.sameValue(sites[1].getFunctionName(), "call");
+        \\    assert.sameValue(sites[1].isNative(), true);
+        \\    assert.sameValue(sites[2].isNative(), false);
+        \\    return "native:map:call";
+        \\};
+        \\try {
+        \\    Array.prototype.map.call([], null);
+        \\} catch (error) {
+        \\    assert.sameValue(error.stack, "native:map:call");
+        \\}
+        \\Error.prepareStackTrace = undefined;
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -3792,7 +4377,7 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
 }
 
 test "Engine eval exit releases frame var-ref cycles before cycle collection" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -3863,12 +4448,12 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
 
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
-        var js = try engine.harness.Engine.init(std.testing.allocator);
+        var js = try helpers.TestEngine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("const obj = {}; obj.missing(\"a\", \"a\");"));
     }
     {
-        var js = try engine.harness.Engine.init(std.testing.allocator);
+        var js = try helpers.TestEngine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("RegExp.test(\"a\", \"a\");"));
     }
@@ -3877,6 +4462,7 @@ test "Engine eval TypeError with evaluated arguments does not double free consta
 test "vm call handler accepts allocator-backed argument lists" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
@@ -3902,7 +4488,7 @@ test "vm call handler accepts allocator-backed argument lists" {
     try bytes.append(rt.memory.allocator, op.call);
     const argc: u16 = 40;
     try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&argc));
-    try function.setCode(bytes.items);
+    try helpers.setCodeAndStackSize(&function, bytes.items);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -4084,6 +4670,380 @@ test "Engine eval preserves global lexical write fast path semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+}
+
+test "Engine eval preserves selected with references during updates" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function updateDeletedProperty() {
+        \\  var x = 0;
+        \\  var scope = { get x() { delete this.x; return 2; } };
+        \\  with (scope) { x *= 3; }
+        \\  print(scope.x, x);
+        \\}
+        \\updateDeletedProperty();
+        \\var probes = 0, outer = { x: 7 }, inner, flag = true;
+        \\with (outer) {
+        \\  with (inner = {
+        \\    x: 4,
+        \\    get [Symbol.unscopables]() {
+        \\      probes++;
+        \\      return { x: flag = !flag };
+        \\    }
+        \\  }) { x++; }
+        \\}
+        \\print(probes, outer.x, inner.x, flag);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("6 0\n1 7 5 false\n", stream.buffered());
+}
+
+test "Engine destructuring snapshots with binding references before property reads" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = [];
+        \\var sourceKey = { toString: function() { log.push('sourceKey'); return 'p'; } };
+        \\var source = { get p() { log.push('get source'); return undefined; } };
+        \\var env = new Proxy({}, { has: function(_, key) { log.push('binding::' + key); return false; } });
+        \\var defaultValue = 0;
+        \\var varTarget;
+        \\with (env) { var { [sourceKey]: varTarget = defaultValue } = source; }
+        \\print(varTarget, log.join('|'));
+        \\log = [];
+        \\var target = { selected: 'old' };
+        \\var selected = 'local';
+        \\var selectedSource = { get p() { log.push('get selected'); return 9; } };
+        \\var selectedEnv = new Proxy(target, {
+        \\  has: function(_, key) { log.push('has:' + key); return key === 'selected'; }
+        \\});
+        \\with (selectedEnv) { var { p: selected } = selectedSource; }
+        \\print(selected, target.selected, log.join('|'));
+        \\(function() {
+        \\  var [x, readX] = [1, function() { return x; }];
+        \\  print(x, readX());
+        \\})();
+        \\(function() {
+        \\  var [readY, { p: y }] = [function() { return y; }, { p: 13 }];
+        \\  print(y, readY());
+        \\})();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "0 binding::source|binding::sourceKey|sourceKey|binding::varTarget|get source|binding::defaultValue\n" ++
+            "local 9 has:selectedSource|has:selected|get selected|has:selected\n" ++
+            "1 1\n13 13\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine with destructuring assignment reaches const fallback at runtime" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallback() {
+        \\  const x = 0;
+        \\  with ({}) ({ x } = { x: 1 });
+        \\}
+        \\let caught = false;
+        \\try { fallback(); } catch (error) { caught = error instanceof TypeError; }
+        \\assert.sameValue(caught, true);
+        \\function dynamicBinding() {
+        \\  const x = 0;
+        \\  const scope = { x: 2 };
+        \\  with (scope) ({ x } = { x: 3 });
+        \\  return [x, scope.x];
+        \\}
+        \\const values = dynamicBinding();
+        \\assert.sameValue(values[0], 0);
+        \\assert.sameValue(values[1], 3);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine eval preserves assignment references across direct eval" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function simpleAssignment() {
+        \\  var x = 0;
+        \\  var inner = (function() {
+        \\    x = (eval("var x;"), 1);
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\function compoundAssignment() {
+        \\  var x = 3;
+        \\  var inner = (function() {
+        \\    x *= (eval("var x = 2;"), 4);
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\function initializerAssignment() {
+        \\  var x = 0;
+        \\  var inner = (function() {
+        \\    var value = (x = (eval("var x;"), 1));
+        \\    return [x, value];
+        \\  })();
+        \\  print(inner[0], inner[1], x);
+        \\}
+        \\function templateAssignment() {
+        \\  var x = 3;
+        \\  var inner = (function() {
+        \\    x += `${eval("var x = 2;")}`;
+        \\    return x;
+        \\  })();
+        \\  print(inner, x);
+        \\}
+        \\simpleAssignment();
+        \\compoundAssignment();
+        \\initializerAssignment();
+        \\templateAssignment();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine arrow eval preserves assignment references across direct eval" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer() {
+        \\  var x = 0;
+        \\  var simple = () => { x = (eval("var x;"), 1); return x; };
+        \\  print(simple(), x);
+        \\  x = 3;
+        \\  var compound = () => { x *= (eval("var x = 2;"), 4); return x; };
+        \\  print(compound(), x);
+        \\  x = 0;
+        \\  var initializer = () => {
+        \\    var value = (x = (eval("var x;"), 1));
+        \\    return [x, value];
+        \\  };
+        \\  var initialized = initializer();
+        \\  print(initialized[0], initialized[1], x);
+        \\  x = 3;
+        \\  var template = () => { x += `${eval("var x = 2;")}`; return x; };
+        \\  print(template(), x);
+        \\}
+        \\outer();
+        \\const parameterEval = (
+        \\  p = eval("var arguments = 'parameter'"),
+        \\  readParameterArguments = () => arguments
+        \\) => {
+        \\  var arguments = "body";
+        \\  return [arguments, readParameterArguments()];
+        \\};
+        \\const parameterEvalResult = parameterEval();
+        \\assert.sameValue(parameterEvalResult[0], "body");
+        \\assert.sameValue(parameterEvalResult[1], "parameter");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine direct eval captures the caller arguments binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function direct(value) { return eval("arguments[0]"); }
+        \\function throughArrow(value) { return (() => eval("arguments[0]"))(); }
+        \\function replace(value) {
+        \\  var old = arguments;
+        \\  var read = eval("arguments[0]");
+        \\  eval("arguments = ['replaced']");
+        \\  return [read, arguments[0], old === arguments];
+        \\}
+        \\function parameterShadow(arguments) {
+        \\  eval("arguments = 'updated'");
+        \\  return arguments;
+        \\}
+        \\function parameterClosure(h = () => arguments) {
+        \\  var arguments = 0;
+        \\  return arguments === h();
+        \\}
+        \\function parameterClosureNoInit(h = () => arguments) {
+        \\  var arguments;
+        \\  var before = [void 0 === arguments, h() === arguments];
+        \\  arguments = 0;
+        \\  return [before[0], before[1], arguments === h()];
+        \\}
+        \\var closed1, closed2, closedBody;
+        \\function parameterEvalClosed(
+        \\  _ = (eval("var scoped = 'inside'"), closed1 = function() { return scoped; }),
+        \\  __ = closed2 = function() { return scoped; }
+        \\) { closedBody = function() { return scoped; }; }
+        \\var open1, open2;
+        \\function parameterEvalOpen(
+        \\  _ = open1 = function() { return opened; },
+        \\  __ = (eval("var opened = 'inside'"), open2 = function() { return opened; })
+        \\) {}
+        \\var replaced = replace(41);
+        \\parameterEvalClosed();
+        \\parameterEvalOpen();
+        \\print(direct(41), throughArrow(42));
+        \\print(replaced[0], replaced[1], replaced[2], parameterShadow('old'));
+        \\print(closed1(), closed2(), closedBody());
+        \\print(open1(), open2());
+        \\var noInit = parameterClosureNoInit();
+        \\print(parameterClosure(), noInit[0], noInit[1], noInit[2]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "41 42\n41 replaced false updated\ninside inside inside\ninside inside\nfalse false true false\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine arguments writes prefer the current function binding over outer lexical bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let arguments = 'outer';
+        \\function ordinary() {
+        \\  arguments = 'ordinary';
+        \\  return arguments;
+        \\}
+        \\function parameterDefault(value = (arguments = 'parameter')) {
+        \\  return value + ' ' + arguments;
+        \\}
+        \\function parameterArrow(value = () => (arguments = 'parameter-arrow')) {
+        \\  return value() + ' ' + arguments;
+        \\}
+        \\function explicitParameter(arguments = 'old', value = (arguments = 'new')) {
+        \\  return arguments;
+        \\}
+        \\function destructuredParameter({ arguments } = { arguments: 'old' }, value = (arguments = 'new')) {
+        \\  return arguments;
+        \\}
+        \\var arrow = () => {
+        \\  arguments = 'arrow';
+        \\  return arguments;
+        \\};
+        \\print(ordinary(), arguments);
+        \\print(parameterDefault(), arguments);
+        \\print(parameterArrow(), arguments);
+        \\print(explicitParameter(), destructuredParameter());
+        \\print(arrow(), arguments);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "ordinary outer\nparameter parameter outer\nparameter-arrow parameter-arrow outer\nold new\narrow arrow\n",
+        stream.buffered(),
+    );
+}
+
+test "Engine direct eval shares top-level lexical cells across nested closures" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let x = 500;
+        \\function direct() { return eval("x"); }
+        \\function write() { eval("x = 501"); }
+        \\var nested = eval("() => eval('x')");
+        \\var env = { x: 9000, [Symbol.unscopables]: { x: true } };
+        \\function makeAdder() {
+        \\  with (env) return eval("y => eval('x + y')");
+        \\}
+        \\var catchValue = 'global';
+        \\var catchLog = '';
+        \\function catchEval() {
+        \\  try { throw 8; } catch (catchValue) {
+        \\    eval("var catchValue = 42");
+        \\    catchLog += catchValue;
+        \\  }
+        \\  catchValue = 'local';
+        \\  catchLog += catchValue;
+        \\}
+        \\function preserveEvalVar() {
+        \\  eval("var saved = 1");
+        \\  eval("var saved");
+        \\  return saved;
+        \\}
+        \\print(direct(), nested());
+        \\write();
+        \\print(x, makeAdder()(10));
+        \\catchEval();
+        \\print(catchValue, catchLog);
+        \\print(preserveEvalVar());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
+}
+
+test "Engine constructor parameter defaults use the initialized this binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\class A {
+        \\  #x = 'hello';
+        \\  constructor(value = this.#x) { this.value = value; }
+        \\}
+        \\var a = new A();
+        \\print(a.value);
+        \\class B extends A {
+        \\  constructor() { super(); print('value' in this, this.value); }
+        \\}
+        \\new B();
+        \\class C extends A {
+        \\  constructor(value = this) { super(value); }
+        \\}
+        \\try { new C(); } catch (error) { print(error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("hello\ntrue hello\nReferenceError\n", stream.buffered());
 }
 
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
@@ -4298,7 +5258,7 @@ test "Engine eval preserves regexp UTF-16 test host output semantics" {
 }
 
 test "Engine eval prepared RegExp call observes same-site property changes" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -4408,6 +5368,96 @@ test "Engine eval preserves ordinary array pop fast path semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n", stream.buffered());
+}
+
+test "empty native array pop fast arm preserves observable length writes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var frozen = Object.freeze([]);
+        \\var frozenError;
+        \\try { frozen.pop(); } catch (error) { frozenError = error; }
+        \\assert.sameValue(frozenError.name, "TypeError");
+        \\assert.sameValue(frozenError.message, "'length' is read-only");
+        \\
+        \\var log = [];
+        \\var target = [];
+        \\var proxy = new Proxy(target, {
+        \\    get: function(target, key, receiver) {
+        \\        if (key === "length") log.push("get");
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\    set: function(target, key, value, receiver) {
+        \\        if (key === "length") log.push("set:" + value);
+        \\        return Reflect.set(target, key, value, receiver);
+        \\    }
+        \\});
+        \\assert.sameValue(Array.prototype.pop.call(proxy), undefined);
+        \\assert.sameValue(log.join(","), "get,set:0");
+        \\assert.sameValue(target.length, 0);
+        \\
+        \\var gets = 0;
+        \\var sets = [];
+        \\var ordinary = {
+        \\    get length() { gets++; return 0; },
+        \\    set length(value) { sets.push(value); }
+        \\};
+        \\assert.sameValue(Array.prototype.pop.call(ordinary), undefined);
+        \\assert.sameValue(gets, 1);
+        \\assert.sameValue(sets.join(","), "0");
+        \\
+        \\class SubArray extends Array {}
+        \\var subclass = new SubArray();
+        \\assert.sameValue(subclass.pop(), undefined);
+        \\assert.sameValue(subclass.length, 0);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array pop length write removes elements added by the last-element getter" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var array = [];
+        \\array.length = 1;
+        \\Object.defineProperty(array, "0", {
+        \\    configurable: true,
+        \\    get: function() {
+        \\        array[5] = 9;
+        \\        return 7;
+        \\    }
+        \\});
+        \\assert.sameValue(array.pop(), 7);
+        \\assert.sameValue(array.length, 0);
+        \\assert.sameValue(0 in array, false);
+        \\assert.sameValue(5 in array, false);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array pop reports read-only length after deleting a configurable last element" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var array = [7];
+        \\Object.defineProperty(array, "length", { writable: false });
+        \\var thrown;
+        \\try { array.pop(); } catch (error) { thrown = error; }
+        \\assert.sameValue(thrown.name, "TypeError");
+        \\assert.sameValue(thrown.message, "'length' is read-only");
+        \\assert.sameValue(array.length, 1);
+        \\assert.sameValue(0 in array, false);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval preserves simple closure call host output semantics" {
@@ -4619,6 +5669,1037 @@ test "Engine eval executes simple functions and arrows" {
     try std.testing.expectEqualStrings("5\n42\n720\n12\nobject\n", stream.buffered());
 }
 
+test "strict plain calls preserve this arguments eval captures and backtraces" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function strictZero() {
+        \\    "use strict";
+        \\    assert.sameValue(this, undefined);
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(strictZero(), 0);
+        \\function strictArgs(value) {
+        \\    "use strict";
+        \\    arguments[0] = 9;
+        \\    return value;
+        \\}
+        \\assert.sameValue(strictArgs(1), 1);
+        \\function strictArgumentsIdentity() { "use strict"; return arguments === arguments; }
+        \\assert.sameValue(strictArgumentsIdentity(1), true);
+        \\function strictOriginalArgs(value) {
+        \\    "use strict";
+        \\    value = 17;
+        \\    return arguments[0];
+        \\}
+        \\assert.sameValue(strictOriginalArgs(1), 1);
+        \\function strictEval() {
+        \\    "use strict";
+        \\    eval("var hidden = 1");
+        \\    return typeof hidden;
+        \\}
+        \\assert.sameValue(strictEval(), "undefined");
+        \\function makeStrictClosure() {
+        \\    var captured = 4;
+        \\    return function strictClosure() { "use strict"; return captured; };
+        \\}
+        \\assert.sameValue(makeStrictClosure()(), 4);
+        \\function strictStack() { "use strict"; return new Error("x").stack; }
+        \\assert.sameValue(strictStack().indexOf("    at strictStack"), 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "strict arguments preserve qjs intrinsic metadata and dense element semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const savedValues = Array.prototype.values;
+        \\Array.prototype.values = function patchedValues() { throw new Error("observable lookup"); };
+        \\try {
+        \\    function capture(a, b, c) {
+        \\        "use strict";
+        \\        return { args: arguments, parameter: a };
+        \\    }
+        \\    const record = capture(1, 2, 3);
+        \\    const args = record.args;
+        \\    assert.sameValue(args[Symbol.iterator], savedValues);
+        \\    assert.sameValue(JSON.stringify(args), '{"0":1,"1":2,"2":3}');
+        \\    const keys = Reflect.ownKeys(args);
+        \\    assert.sameValue(keys.length, 6);
+        \\    assert.sameValue(keys[0], "0");
+        \\    assert.sameValue(keys[1], "1");
+        \\    assert.sameValue(keys[2], "2");
+        \\    assert.sameValue(keys[3], "length");
+        \\    assert.sameValue(keys[4], "callee");
+        \\    assert.sameValue(keys[5], Symbol.iterator);
+        \\    const lengthDesc = Object.getOwnPropertyDescriptor(args, "length");
+        \\    assert.sameValue(lengthDesc.value, 3);
+        \\    assert.sameValue(lengthDesc.writable, true);
+        \\    assert.sameValue(lengthDesc.enumerable, false);
+        \\    assert.sameValue(lengthDesc.configurable, true);
+        \\    const iteratorDesc = Object.getOwnPropertyDescriptor(args, Symbol.iterator);
+        \\    assert.sameValue(iteratorDesc.value, savedValues);
+        \\    assert.sameValue(iteratorDesc.writable, true);
+        \\    assert.sameValue(iteratorDesc.enumerable, false);
+        \\    assert.sameValue(iteratorDesc.configurable, true);
+        \\    const calleeDesc = Object.getOwnPropertyDescriptor(args, "callee");
+        \\    assert.sameValue(calleeDesc.get, calleeDesc.set);
+        \\    assert.sameValue(calleeDesc.enumerable, false);
+        \\    assert.sameValue(calleeDesc.configurable, false);
+        \\    let calleeThrew = false;
+        \\    try { void args.callee; } catch (error) { calleeThrew = error instanceof TypeError; }
+        \\    assert.sameValue(calleeThrew, true);
+        \\    args.length = 1;
+        \\    assert.sameValue(Array.prototype.join.call(args, "-"), "1");
+        \\    args[0] = 9;
+        \\    assert.sameValue(record.parameter, 1);
+        \\    assert.sameValue(args[0], 9);
+        \\    assert.sameValue(delete args[0], true);
+        \\    assert.sameValue(0 in args, false);
+        \\    Object.defineProperty(args, "1", { value: 7, writable: false, enumerable: false, configurable: false });
+        \\    assert.sameValue(args[1], 7);
+        \\    assert.sameValue(Object.keys(args).join(","), "2");
+        \\    Object.freeze(args);
+        \\    const frozen = Object.getOwnPropertyDescriptor(args, "2");
+        \\    assert.sameValue(frozen.value, 3);
+        \\    assert.sameValue(frozen.writable, false);
+        \\    assert.sameValue(frozen.enumerable, true);
+        \\    assert.sameValue(frozen.configurable, false);
+        \\    assert.sameValue(Object.isFrozen(args), true);
+        \\} finally {
+        \\    Array.prototype.values = savedValues;
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "mapped arguments use var-ref indexed storage and detach on descriptor changes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function mapped(first, second) {
+        \\    const args = arguments;
+        \\    first = 5;
+        \\    assert.sameValue(args[0], 5);
+        \\    args[1] = 7;
+        \\    assert.sameValue(second, 7);
+        \\    const keys = Reflect.ownKeys(args);
+        \\    assert.sameValue(keys[0], "0");
+        \\    assert.sameValue(keys[1], "1");
+        \\    assert.sameValue(keys[2], "length");
+        \\    assert.sameValue(keys[3], "callee");
+        \\    assert.sameValue(keys[4], Symbol.iterator);
+        \\    const initial = Object.getOwnPropertyDescriptor(args, "0");
+        \\    assert.sameValue(initial.value, 5);
+        \\    assert.sameValue(initial.writable, true);
+        \\    assert.sameValue(initial.enumerable, true);
+        \\    assert.sameValue(initial.configurable, true);
+        \\    assert.sameValue(delete args[0], true);
+        \\    first = 8;
+        \\    assert.sameValue(0 in args, false);
+        \\    assert.sameValue(args[0], undefined);
+        \\    Object.defineProperty(args, "1", { enumerable: false });
+        \\    second = 9;
+        \\    assert.sameValue(args[1], 9);
+        \\    assert.sameValue(Object.getOwnPropertyDescriptor(args, "1").enumerable, false);
+        \\    Object.defineProperty(args, "1", { writable: false });
+        \\    second = 10;
+        \\    assert.sameValue(args[1], 9);
+        \\    return args;
+        \\}
+        \\const mappedArgs = mapped(1, 2);
+        \\assert.sameValue(Object.keys(mappedArgs).length, 0);
+        \\function mappedArgumentsIdentity() {
+        \\    assert.sameValue(arguments, arguments);
+        \\    arguments.callee = 1;
+        \\    assert.sameValue(arguments.callee, 1);
+        \\}
+        \\mappedArgumentsIdentity({ callee: "argument" });
+        \\function annexBArgumentsBinding() {
+        \\    const outer = arguments;
+        \\    {
+        \\        assert.sameValue(arguments(), undefined);
+        \\        function arguments() {}
+        \\        assert.sameValue(arguments(), undefined);
+        \\    }
+        \\    assert.sameValue(arguments, outer);
+        \\}
+        \\annexBArgumentsBinding();
+        \\function extra(first) {
+        \\    const args = arguments;
+        \\    args[1] = 6;
+        \\    return args[1];
+        \\}
+        \\assert.sameValue(extra(1, 2), 6);
+        \\function duplicate(value, value) {
+        \\    const args = arguments;
+        \\    value = 7;
+        \\    assert.sameValue(args[0], 1);
+        \\    assert.sameValue(args[1], 7);
+        \\    args[0] = 8;
+        \\    assert.sameValue(value, 7);
+        \\    args[1] = 9;
+        \\    assert.sameValue(value, 9);
+        \\}
+        \\duplicate(1, 2);
+        \\function frozen(value) {
+        \\    const args = arguments;
+        \\    Object.freeze(args);
+        \\    value = 4;
+        \\    const desc = Object.getOwnPropertyDescriptor(args, "0");
+        \\    assert.sameValue(args[0], 1);
+        \\    assert.sameValue(desc.writable, false);
+        \\    assert.sameValue(desc.configurable, false);
+        \\    assert.sameValue(Object.isFrozen(args), true);
+        \\}
+        \\frozen(1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "get_length preserves qjs own-property-before-exotic ordering and actions" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const own = { length: 3 };
+        \\assert.sameValue(own.length, 3);
+        \\const inherited = Object.create({ length: 4 });
+        \\assert.sameValue(inherited.length, 4);
+        \\const self = {};
+        \\self.length = self;
+        \\assert.sameValue(self.length, self);
+        \\function strictLength(value) {
+        \\    "use strict";
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(strictLength(1), 1);
+        \\function mappedLength(value) {
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(mappedLength(1), 1);
+        \\function mappedComputedDescriptor(value) {
+        \\    const args = arguments;
+        \\    const key = "0";
+        \\    Object.defineProperty(args, key, { configurable: false });
+        \\    args[key] = 2;
+        \\    assert.sameValue(value, 2);
+        \\    assert.sameValue(args[key], 2);
+        \\    const desc = Object.getOwnPropertyDescriptor(args, key);
+        \\    assert.sameValue(desc.value, 2);
+        \\    assert.sameValue(desc.writable, true);
+        \\    assert.sameValue(desc.enumerable, true);
+        \\    assert.sameValue(desc.configurable, false);
+        \\}
+        \\mappedComputedDescriptor(1);
+        \\const typed = new Uint8Array(2);
+        \\assert.sameValue(typed.length, 2);
+        \\assert.sameValue(typed.byteLength, 2);
+        \\assert.sameValue(typed.byteOffset, 0);
+        \\const typedPrototypeImpostor = Object.create(typed);
+        \\let typedBrandRejected = false;
+        \\try {
+        \\    void typedPrototypeImpostor.length;
+        \\} catch (error) {
+        \\    typedBrandRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(typedBrandRejected, true);
+        \\const customPrototypeTyped = new Uint8Array(2);
+        \\Object.setPrototypeOf(customPrototypeTyped, { length: 15, byteLength: 16, byteOffset: 17 });
+        \\assert.sameValue(customPrototypeTyped.length, 15);
+        \\assert.sameValue(customPrototypeTyped.byteLength, 16);
+        \\assert.sameValue(customPrototypeTyped.byteOffset, 17);
+        \\assert.sameValue(Reflect.get(customPrototypeTyped, "length"), 15);
+        \\const nullPrototypeTyped = new Uint8Array(2);
+        \\Object.setPrototypeOf(nullPrototypeTyped, null);
+        \\assert.sameValue(nullPrototypeTyped.length, undefined);
+        \\assert.sameValue(nullPrototypeTyped.byteLength, undefined);
+        \\assert.sameValue(nullPrototypeTyped.byteOffset, undefined);
+        \\assert.sameValue(Reflect.get(nullPrototypeTyped, "length"), undefined);
+        \\Object.defineProperty(typed, "length", { value: 9, configurable: true });
+        \\assert.sameValue(typed.length, 9);
+        \\let typedGetterCount = 0;
+        \\Object.defineProperty(typed, "length", {
+        \\    configurable: true,
+        \\    get() {
+        \\        typedGetterCount++;
+        \\        return 12;
+        \\    },
+        \\});
+        \\assert.sameValue(typed.length, 12);
+        \\const lengthKey = "length";
+        \\assert.sameValue(typed[lengthKey], 12);
+        \\assert.sameValue(Reflect.get(typed, lengthKey), 12);
+        \\assert.sameValue(typedGetterCount, 3);
+        \\Object.defineProperty(typed, "byteLength", {
+        \\    configurable: true,
+        \\    get() { return 13; },
+        \\});
+        \\assert.sameValue(typed.byteLength, 13);
+        \\assert.sameValue(Reflect.get(typed, "byteLength"), 13);
+        \\Object.defineProperty(typed, "byteOffset", { configurable: true, value: 14 });
+        \\assert.sameValue(typed.byteOffset, 14);
+        \\assert.sameValue(Reflect.get(typed, "byteOffset"), 14);
+        \\let getterCount = 0;
+        \\let getterReceiver;
+        \\const accessorPrototype = {
+        \\    get length() {
+        \\        getterCount++;
+        \\        getterReceiver = this;
+        \\        return 5;
+        \\    },
+        \\};
+        \\const accessor = Object.create(accessorPrototype);
+        \\assert.sameValue(accessor.length, 5);
+        \\assert.sameValue(getterCount, 1);
+        \\assert.sameValue(getterReceiver, accessor);
+        \\const accessorAlias = { get length() { return this; } };
+        \\assert.sameValue(accessorAlias.length, accessorAlias);
+        \\const undefinedAccessor = {};
+        \\Object.defineProperty(undefinedAccessor, "length", { get: undefined });
+        \\assert.sameValue(undefinedAccessor.length, undefined);
+        \\const thrownMarker = {};
+        \\const throwingAccessor = { get length() { throw thrownMarker; } };
+        \\try {
+        \\    void throwingAccessor.length;
+        \\    throw new Error("unreachable");
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, thrownMarker);
+        \\}
+        \\let trapCount = 0;
+        \\let trapReceiver;
+        \\const proxy = new Proxy({}, {
+        \\    get(target, key, receiver) {
+        \\        trapCount++;
+        \\        trapReceiver = receiver;
+        \\        return key === "length" ? 6 : Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\assert.sameValue(proxy.length, 6);
+        \\assert.sameValue(trapCount, 1);
+        \\assert.sameValue(trapReceiver, proxy);
+        \\let targetGetterReceiver;
+        \\const proxyTarget = {};
+        \\Object.defineProperty(proxyTarget, "length", {
+        \\    configurable: true,
+        \\    get() {
+        \\        targetGetterReceiver = this;
+        \\        return 7;
+        \\    },
+        \\});
+        \\const noTrapProxy = new Proxy(proxyTarget, {});
+        \\assert.sameValue(noTrapProxy.length, 7);
+        \\assert.sameValue(targetGetterReceiver, noTrapProxy);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, "length", { value: 1, writable: false, configurable: false });
+        \\try {
+        \\    void new Proxy(frozenTarget, { get() { return 2; } }).length;
+        \\    throw new Error("unreachable");
+        \\} catch (error) {
+        \\    assert.sameValue(error instanceof TypeError, true);
+        \\}
+        \\const revocable = Proxy.revocable({}, {});
+        \\revocable.revoke();
+        \\try {
+        \\    void revocable.proxy.length;
+        \\    throw new Error("unreachable");
+        \\} catch (error) {
+        \\    assert.sameValue(error instanceof TypeError, true);
+        \\}
+        \\function mappedAccessor(value) {
+        \\    const args = arguments;
+        \\    Object.defineProperty(args, "length", {
+        \\        configurable: true,
+        \\        get() { return 11; },
+        \\    });
+        \\    return args.length;
+        \\}
+        \\assert.sameValue(mappedAccessor(1), 11);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "missing-argument plain calls preserve parameter and arguments ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function sloppyMissing(first, second) {
+        \\    assert.sameValue(arguments.length, 0);
+        \\    assert.sameValue(arguments.hasOwnProperty("0"), false);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.hasOwnProperty("0"), false);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(sloppyMissing(), 15);
+        \\function sloppyPartial(first, second) {
+        \\    assert.sameValue(arguments.length, 1);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments[0], 7);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(sloppyPartial(1), 15);
+        \\function strictPartial(first, second) {
+        \\    "use strict";
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.length, 1);
+        \\    assert.sameValue(arguments[0], 1);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return first + second;
+        \\}
+        \\assert.sameValue(strictPartial(1), 15);
+        \\function captureMissing(value) {
+        \\    return function readCaptured() { return value; };
+        \\}
+        \\assert.sameValue(captureMissing()(), undefined);
+        \\function evalMissing(value) {
+        \\    return eval("value");
+        \\}
+        \\assert.sameValue(evalMissing(), undefined);
+        \\const marker = {};
+        \\function keepActual(first, second) { return first; }
+        \\assert.sameValue(keepActual(marker), marker);
+        \\function escapeMapped(first, second) { return arguments; }
+        \\const mapped = escapeMapped(marker);
+        \\assert.sameValue(mapped.length, 1);
+        \\assert.sameValue(mapped[0], marker);
+        \\assert.sameValue(mapped.hasOwnProperty("1"), false);
+        \\function escapeStrict(first, second) {
+        \\    "use strict";
+        \\    first = 9;
+        \\    return arguments;
+        \\}
+        \\const unmapped = escapeStrict(marker);
+        \\assert.sameValue(unmapped.length, 1);
+        \\assert.sameValue(unmapped[0], marker);
+        \\assert.sameValue(unmapped.hasOwnProperty("1"), false);
+        \\try {
+        \\    (function throwMissing(first, second) { throw first; })(marker);
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, marker);
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "method calls preserve receiver arguments eval captures and abrupt ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const receiver = { value: 4 };
+        \\receiver.sloppy = function sloppy(first, second) {
+        \\    assert.sameValue(this, receiver);
+        \\    assert.sameValue(arguments.length, 1);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments[0], 7);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return this;
+        \\};
+        \\assert.sameValue(receiver.sloppy(1), receiver);
+        \\receiver.strict = function strict(first, second) {
+        \\    "use strict";
+        \\    assert.sameValue(this, receiver);
+        \\    first = 7;
+        \\    second = 8;
+        \\    assert.sameValue(arguments.length, 1);
+        \\    assert.sameValue(arguments[0], 1);
+        \\    assert.sameValue(arguments.hasOwnProperty("1"), false);
+        \\    return this;
+        \\};
+        \\assert.sameValue(receiver.strict(1), receiver);
+        \\receiver.capture = function capture(value) {
+        \\    return () => this;
+        \\};
+        \\assert.sameValue(receiver.capture()(), receiver);
+        \\receiver.evalThis = function evalThis(value) {
+        \\    return eval("this");
+        \\};
+        \\assert.sameValue(receiver.evalThis(), receiver);
+        \\receiver.escape = function escape(first, second) { return arguments; };
+        \\const escaped = receiver.escape(receiver);
+        \\assert.sameValue(escaped.length, 1);
+        \\assert.sameValue(escaped[0], receiver);
+        \\assert.sameValue(escaped.hasOwnProperty("1"), false);
+        \\receiver.thrower = function thrower(first, second) { throw this; };
+        \\try {
+        \\    receiver.thrower(receiver);
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, receiver);
+        \\}
+        \\let getterReceiver;
+        \\const accessor = {
+        \\    get method() {
+        \\        getterReceiver = this;
+        \\        return function selected() { return this; };
+        \\    }
+        \\};
+        \\assert.sameValue(accessor.method(), accessor);
+        \\assert.sameValue(getterReceiver, accessor);
+        \\const proxy = new Proxy(receiver, {});
+        \\assert.sameValue(proxy.capture()(), proxy);
+        \\String.prototype.strictReceiver = function strictReceiver() {
+        \\    "use strict";
+        \\    return this;
+        \\};
+        \\assert.sameValue("x".strictReceiver(), "x");
+        \\delete String.prototype.strictReceiver;
+        \\Number.prototype.sloppyReceiver = function sloppyReceiver() {
+        \\    return Object.getPrototypeOf(this) === Number.prototype && this.valueOf();
+        \\};
+        \\assert.sameValue((4).sloppyReceiver(), 4);
+        \\delete Number.prototype.sloppyReceiver;
+        \\Number.prototype.arrowReceiver = function arrowReceiver() {
+        \\    return () => this;
+        \\};
+        \\const readArrowReceiver = (5).arrowReceiver();
+        \\const arrowBox = readArrowReceiver();
+        \\assert.sameValue(Object.getPrototypeOf(arrowBox), Number.prototype);
+        \\assert.sameValue(arrowBox.valueOf(), 5);
+        \\assert.sameValue(readArrowReceiver(), arrowBox);
+        \\delete Number.prototype.arrowReceiver;
+        \\Number.prototype.evalReceiver = function evalReceiver() {
+        \\    return eval("this");
+        \\};
+        \\const evalBox = (6).evalReceiver();
+        \\assert.sameValue(Object.getPrototypeOf(evalBox), Number.prototype);
+        \\assert.sameValue(evalBox.valueOf(), 6);
+        \\delete Number.prototype.evalReceiver;
+        \\function sloppyViaCall() { return this; }
+        \\const callBox = sloppyViaCall.call(7);
+        \\assert.sameValue(Object.getPrototypeOf(callBox), Number.prototype);
+        \\assert.sameValue(callBox.valueOf(), 7);
+        \\assert.sameValue(sloppyViaCall.call(null), globalThis);
+        \\assert.sameValue(sloppyViaCall.call(undefined), globalThis);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const dataKey = "__zjs_primitive_data_probe__";
+        \\const inheritedKey = "__zjs_primitive_inherited_probe__";
+        \\const strictGetterKey = "__zjs_primitive_strict_getter_probe__";
+        \\const sloppyGetterKey = "__zjs_primitive_sloppy_getter_probe__";
+        \\const proxyKey = "__zjs_primitive_proxy_probe__";
+        \\const staticDataKey = "__zjs_primitive_static_data_probe__";
+        \\const staticGetterKey = "__zjs_primitive_static_getter_probe__";
+        \\const staticProxyKey = "__zjs_primitive_static_proxy_probe__";
+        \\const originalNumberParent = Object.getPrototypeOf(Number.prototype);
+        \\const intrinsicBigInt = BigInt;
+        \\const intrinsicSymbol = Symbol;
+        \\const bigintPrototype = BigInt.prototype;
+        \\const symbolPrototype = Symbol.prototype;
+        \\const symbolValue = Symbol("s");
+        \\try {
+        \\    Number.prototype[dataKey] = 11;
+        \\    Boolean.prototype[dataKey] = 12;
+        \\    String.prototype[dataKey] = 13;
+        \\    bigintPrototype[dataKey] = 14;
+        \\    symbolPrototype[dataKey] = 15;
+        \\    Object.prototype[inheritedKey] = 16;
+        \\    Number.prototype[staticDataKey] = 19;
+        \\    assert.sameValue((1)[dataKey], 11);
+        \\    assert.sameValue(true[dataKey], 12);
+        \\    assert.sameValue("x"[dataKey], 13);
+        \\    assert.sameValue((1n)[dataKey], 14);
+        \\    assert.sameValue(symbolValue[dataKey], 15);
+        \\    assert.sameValue((2)[inheritedKey], 16);
+        \\    assert.sameValue("x"[inheritedKey], 16);
+        \\    assert.sameValue((2).__zjs_primitive_static_data_probe__, 19);
+        \\    globalThis.BigInt = function ReplacementBigInt() {};
+        \\    globalThis.Symbol = function ReplacementSymbol() {};
+        \\    assert.sameValue((1n)[dataKey], 14);
+        \\    assert.sameValue(symbolValue[dataKey], 15);
+        \\    Object.defineProperty(Number.prototype, strictGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveStrictGetter() {
+        \\            "use strict";
+        \\            return this;
+        \\        },
+        \\    });
+        \\    Object.defineProperty(Number.prototype, sloppyGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveSloppyGetter() {
+        \\            return Object.getPrototypeOf(this) === Number.prototype && this.valueOf();
+        \\        },
+        \\    });
+        \\    Object.defineProperty(Number.prototype, staticGetterKey, {
+        \\        configurable: true,
+        \\        get: function primitiveStaticGetter() {
+        \\            "use strict";
+        \\            return this;
+        \\        },
+        \\    });
+        \\    assert.sameValue((3)[strictGetterKey], 3);
+        \\    assert.sameValue((4)[sloppyGetterKey], 4);
+        \\    assert.sameValue((5).__zjs_primitive_static_getter_probe__, 5);
+        \\    const parent = Object.create(originalNumberParent);
+        \\    parent[inheritedKey] = 17;
+        \\    Object.setPrototypeOf(Number.prototype, parent);
+        \\    assert.sameValue((5)[inheritedKey], 17);
+        \\    let seenReceiver;
+        \\    let trapCount = 0;
+        \\    const proxy = new Proxy(parent, {
+        \\        get(target, key, receiver) {
+        \\            trapCount++;
+        \\            if (key === proxyKey || key === staticProxyKey) {
+        \\                seenReceiver = receiver;
+        \\                return 18;
+        \\            }
+        \\            return Reflect.get(target, key, receiver);
+        \\        },
+        \\    });
+        \\    Object.setPrototypeOf(Number.prototype, proxy);
+        \\    assert.sameValue((6)[proxyKey], 18);
+        \\    assert.sameValue(seenReceiver, 6);
+        \\    assert.sameValue(trapCount, 1);
+        \\    assert.sameValue((6).__zjs_primitive_static_proxy_probe__, 18);
+        \\    assert.sameValue(seenReceiver, 6);
+        \\    assert.sameValue(trapCount, 2);
+        \\    assert.sameValue((7).__zjs_primitive_missing_probe__, undefined);
+        \\    String.prototype[0] = "prototype";
+        \\    assert.sameValue("a"[0], "a");
+        \\    assert.sameValue("a".length, 1);
+        \\} finally {
+        \\    globalThis.BigInt = intrinsicBigInt;
+        \\    globalThis.Symbol = intrinsicSymbol;
+        \\    Object.setPrototypeOf(Number.prototype, originalNumberParent);
+        \\    delete Number.prototype[dataKey];
+        \\    delete Boolean.prototype[dataKey];
+        \\    delete String.prototype[dataKey];
+        \\    delete bigintPrototype[dataKey];
+        \\    delete symbolPrototype[dataKey];
+        \\    delete Object.prototype[inheritedKey];
+        \\    delete Number.prototype[strictGetterKey];
+        \\    delete Number.prototype[sloppyGetterKey];
+        \\    delete Number.prototype[staticDataKey];
+        \\    delete Number.prototype[staticGetterKey];
+        \\    delete String.prototype[0];
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "computed named reads preserve prototype accessors proxies and operand ownership" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const dataKey = "__zjs_computed_data_probe__";
+        \\const getterKey = "__zjs_computed_getter_probe__";
+        \\const emptyGetterKey = "__zjs_computed_empty_getter_probe__";
+        \\const throwingGetterKey = "__zjs_computed_throwing_getter_probe__";
+        \\const proxyKey = "__zjs_computed_proxy_probe__";
+        \\const selfKey = "__zjs_computed_self_probe__";
+        \\const prototype = {};
+        \\prototype[dataKey] = 11;
+        \\const object = Object.create(prototype);
+        \\assert.sameValue(object[dataKey], 11);
+        \\let getterReceiver;
+        \\let getterCount = 0;
+        \\Object.defineProperty(prototype, getterKey, {
+        \\    configurable: true,
+        \\    get() {
+        \\        getterReceiver = this;
+        \\        getterCount++;
+        \\        return 12;
+        \\    },
+        \\});
+        \\assert.sameValue(object[getterKey], 12);
+        \\assert.sameValue(getterReceiver, object);
+        \\assert.sameValue(getterCount, 1);
+        \\Object.defineProperty(prototype, emptyGetterKey, {
+        \\    configurable: true,
+        \\    get: undefined,
+        \\});
+        \\assert.sameValue(object[emptyGetterKey], undefined);
+        \\Object.defineProperty(prototype, throwingGetterKey, {
+        \\    configurable: true,
+        \\    get() { throw new Error("computed getter sentinel"); },
+        \\});
+        \\let caughtMessage;
+        \\try {
+        \\    object[throwingGetterKey];
+        \\} catch (error) {
+        \\    caughtMessage = error.message;
+        \\}
+        \\assert.sameValue(caughtMessage, "computed getter sentinel");
+        \\let proxyReceiver;
+        \\let proxyCount = 0;
+        \\const proxy = new Proxy(prototype, {
+        \\    get(target, key, receiver) {
+        \\        proxyReceiver = receiver;
+        \\        proxyCount++;
+        \\        if (key === proxyKey) return 13;
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\const proxyObject = Object.create(proxy);
+        \\assert.sameValue(proxyObject[proxyKey], 13);
+        \\assert.sameValue(proxyReceiver, proxyObject);
+        \\assert.sameValue(proxyCount, 1);
+        \\object[selfKey] = object;
+        \\assert.sameValue(object[selfKey], object);
+        \\object[dataKey] = dataKey;
+        \\assert.sameValue(object[dataKey], dataKey);
+        \\assert.sameValue(Object.create(null)[dataKey], undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "static named getter and proxy fast paths preserve receivers throws and invariants" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const prototype = {};
+        \\let getterReceiver;
+        \\let getterCount = 0;
+        \\Object.defineProperty(prototype, "__zjs_static_getter_probe__", {
+        \\    get() {
+        \\        getterReceiver = this;
+        \\        getterCount++;
+        \\        return 21;
+        \\    },
+        \\});
+        \\const object = Object.create(prototype);
+        \\assert.sameValue(object.__zjs_static_getter_probe__, 21);
+        \\assert.sameValue(getterReceiver, object);
+        \\assert.sameValue(getterCount, 1);
+        \\Object.defineProperty(prototype, "__zjs_static_throw_probe__", {
+        \\    get() { throw new Error("static getter sentinel"); },
+        \\});
+        \\let getterThrow;
+        \\try {
+        \\    object.__zjs_static_throw_probe__;
+        \\} catch (error) {
+        \\    getterThrow = error.message;
+        \\}
+        \\assert.sameValue(getterThrow, "static getter sentinel");
+        \\let primitiveReceiver;
+        \\Object.defineProperty(Number.prototype, "__zjs_static_primitive_probe__", {
+        \\    configurable: true,
+        \\    get: function staticPrimitiveGetter() {
+        \\        "use strict";
+        \\        primitiveReceiver = this;
+        \\        return 22;
+        \\    },
+        \\});
+        \\assert.sameValue((1).__zjs_static_primitive_probe__, 22);
+        \\assert.sameValue(primitiveReceiver, 1);
+        \\delete Number.prototype.__zjs_static_primitive_probe__;
+        \\let forwardedReceiver;
+        \\const forwardedTarget = {};
+        \\Object.defineProperty(forwardedTarget, "__zjs_static_forward_probe__", {
+        \\    get() {
+        \\        forwardedReceiver = this;
+        \\        return 23;
+        \\    },
+        \\});
+        \\const forwardedProxy = new Proxy(forwardedTarget, {});
+        \\assert.sameValue(forwardedProxy.__zjs_static_forward_probe__, 23);
+        \\assert.sameValue(forwardedReceiver, forwardedProxy);
+        \\let handlerGetterReceiver;
+        \\const handler = {};
+        \\Object.defineProperty(handler, "get", {
+        \\    get() {
+        \\        handlerGetterReceiver = this;
+        \\        return function (target, key, receiver) {
+        \\            assert.sameValue(receiver, trappedProxy);
+        \\            return 24;
+        \\        };
+        \\    },
+        \\});
+        \\const trappedProxy = new Proxy({}, handler);
+        \\assert.sameValue(trappedProxy.__zjs_static_trap_probe__, 24);
+        \\assert.sameValue(handlerGetterReceiver, handler);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, "frozen", {
+        \\    value: 25,
+        \\    writable: false,
+        \\    configurable: false,
+        \\});
+        \\assert.sameValue(new Proxy(frozenTarget, { get() { return 25; } }).frozen, 25);
+        \\let frozenRejected = false;
+        \\try {
+        \\    new Proxy(frozenTarget, { get() { return 26; } }).frozen;
+        \\} catch (error) {
+        \\    frozenRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(frozenRejected, true);
+        \\const mutationTarget = { marker: 1 };
+        \\const mutationProxy = new Proxy(mutationTarget, {
+        \\    get(target, key) {
+        \\        Object.defineProperty(target, key, {
+        \\            value: 1,
+        \\            writable: false,
+        \\            configurable: false,
+        \\        });
+        \\        return 2;
+        \\    },
+        \\});
+        \\let mutationRejected = false;
+        \\try {
+        \\    mutationProxy.marker;
+        \\} catch (error) {
+        \\    mutationRejected = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(mutationRejected, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "proxy bytecode get continuation does not require spare operand capacity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function readX(object) { return object.x; }
+        \\const proxy = new Proxy({ x: 1 }, {
+        \\    get(target, key, receiver) {
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\assert.sameValue(readX(proxy), 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
+    engine.builtins.registry.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const key = ["__zjs_computed_", "proxy_probe__"].join("");
+        \\let trapCount = 0;
+        \\let seenTarget;
+        \\let seenKey;
+        \\let seenReceiver;
+        \\const basicTarget = {};
+        \\const basicProxy = new Proxy(basicTarget, {
+        \\    get(target, propertyKey, receiver) {
+        \\        trapCount++;
+        \\        seenTarget = target;
+        \\        seenKey = propertyKey;
+        \\        seenReceiver = receiver;
+        \\        return 31;
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(basicProxy[key], 31);
+        \\}
+        \\assert.sameValue(trapCount, 3);
+        \\assert.sameValue(seenTarget, basicTarget);
+        \\assert.sameValue(seenKey, key);
+        \\assert.sameValue(seenReceiver, basicProxy);
+        \\const falloffProxy = new Proxy({}, {
+        \\    get() {},
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(falloffProxy[key], undefined);
+        \\}
+        \\let throwCount = 0;
+        \\const throwingProxy = new Proxy({}, {
+        \\    get() { throw new Error("computed proxy sentinel"); },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        throwingProxy[key];
+        \\    } catch (error) {
+        \\        assert.sameValue(error.message, "computed proxy sentinel");
+        \\        throwCount++;
+        \\    }
+        \\}
+        \\assert.sameValue(throwCount, 3);
+        \\let innerCount = 0;
+        \\let outerCount = 0;
+        \\const innerProxy = new Proxy({}, {
+        \\    get() {
+        \\        innerCount++;
+        \\        return 32;
+        \\    },
+        \\});
+        \\const outerProxy = new Proxy({}, {
+        \\    get() {
+        \\        outerCount++;
+        \\        return innerProxy[key];
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(outerProxy[key], 32);
+        \\}
+        \\assert.sameValue(innerCount, 3);
+        \\assert.sameValue(outerCount, 3);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, key, {
+        \\    value: 33,
+        \\    writable: false,
+        \\    configurable: false,
+        \\});
+        \\const correctFrozenProxy = new Proxy(frozenTarget, {
+        \\    get() { return 33; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(correctFrozenProxy[key], 33);
+        \\}
+        \\const rejectedFrozenProxy = new Proxy(frozenTarget, {
+        \\    get() { return 34; },
+        \\});
+        \\let frozenRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        rejectedFrozenProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) frozenRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(frozenRejected, 3);
+        \\function tailWrongFrozenValue() { return 34; }
+        \\const tailRejectedProxy = new Proxy(frozenTarget, {
+        \\    get() { return tailWrongFrozenValue(); },
+        \\});
+        \\let tailRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        tailRejectedProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) tailRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(tailRejected, 3);
+        \\const catchingProxy = new Proxy({}, {
+        \\    get() {
+        \\        try {
+        \\            return rejectedFrozenProxy[key];
+        \\        } catch (error) {
+        \\            assert.sameValue(error instanceof TypeError, true);
+        \\            return 35;
+        \\        }
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(catchingProxy[key], 35);
+        \\}
+        \\const mutationTarget = { marker: 1 };
+        \\const mutationProxy = new Proxy(mutationTarget, {
+        \\    get(target, propertyKey) {
+        \\        Object.defineProperty(target, propertyKey, {
+        \\            value: 36,
+        \\            writable: false,
+        \\            configurable: false,
+        \\        });
+        \\        return 37;
+        \\    },
+        \\});
+        \\let mutationRejected = 0;
+        \\for (let i = 0; i < 3; i++) {
+        \\    try {
+        \\        mutationProxy[key];
+        \\    } catch (error) {
+        \\        if (error instanceof TypeError) mutationRejected++;
+        \\    }
+        \\}
+        \\assert.sameValue(mutationRejected, 3);
+        \\const targetAlias = {};
+        \\const targetAliasProxy = new Proxy(targetAlias, {
+        \\    get(target) { return target; },
+        \\});
+        \\const receiverAliasProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver) { return receiver; },
+        \\});
+        \\const keyAliasProxy = new Proxy({}, {
+        \\    get(target, propertyKey) { return propertyKey; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(targetAliasProxy[key], targetAlias);
+        \\    assert.sameValue(receiverAliasProxy[key], receiverAliasProxy);
+        \\    assert.sameValue(keyAliasProxy[key], key);
+        \\}
+        \\const paddedProxy = new Proxy({}, {
+        \\    get(target, propertyKey, receiver, missing) {
+        \\        assert.sameValue(missing, undefined);
+        \\        return 38;
+        \\    },
+        \\});
+        \\const snapshotPaddedProxy = new Proxy({}, {
+        \\    get: function (target, propertyKey, receiver, missing) {
+        \\        "use strict";
+        \\        assert.sameValue(arguments.length, 3);
+        \\        assert.sameValue(arguments[0], target);
+        \\        assert.sameValue(arguments[1], propertyKey);
+        \\        assert.sameValue(arguments[2], receiver);
+        \\        assert.sameValue(missing, undefined);
+        \\        target = null;
+        \\        assert.notSameValue(arguments[0], target);
+        \\        return 39;
+        \\    },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(paddedProxy[key], 38);
+        \\    assert.sameValue(snapshotPaddedProxy[key], 39);
+        \\}
+        \\let handlerLookupCount = 0;
+        \\const accessorHandler = {};
+        \\Object.defineProperty(accessorHandler, "get", {
+        \\    get() {
+        \\        handlerLookupCount++;
+        \\        return function () { return 40; };
+        \\    },
+        \\});
+        \\const accessorHandlerProxy = new Proxy({}, accessorHandler);
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(accessorHandlerProxy[key], 40);
+        \\}
+        \\assert.sameValue(handlerLookupCount, 3);
+        \\let descriptorCount = 0;
+        \\const descriptorTarget = new Proxy({}, {
+        \\    getOwnPropertyDescriptor(target, propertyKey) {
+        \\        descriptorCount++;
+        \\        return Reflect.getOwnPropertyDescriptor(target, propertyKey);
+        \\    },
+        \\});
+        \\const descriptorProxy = new Proxy(descriptorTarget, {
+        \\    get() { return 41; },
+        \\});
+        \\for (let i = 0; i < 3; i++) {
+        \\    assert.sameValue(descriptorProxy[key], 41);
+        \\}
+        \\assert.sameValue(descriptorCount, 3);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -4666,6 +6747,7 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
         \\function make() { return () => this.tag; }
         \\const bound = make.call(lex);
         \\print(bound());
+        \\print(bound.call());
         \\const carrier = { tag: "CARRIER", m: bound };
         \\print(carrier.m());
         \\const obj = { name: "outer", run() { const a = () => this.name; return a(); } };
@@ -4674,7 +6756,89 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("LEX\nLEX\nouter\n", stream.buffered());
+    try std.testing.expectEqualStrings("LEX\nLEX\nLEX\nouter\n", stream.buffered());
+}
+
+test "forwarded call releases ignored arrow thisArg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\const strictArrowForCall = (function () {
+        \\    "use strict";
+        \\    return () => 0;
+        \\})();
+        \\strictArrowForCall.call({ marker: 0 });
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval(
+        \\for (let i = 0; i < 256; i++) {
+        \\    strictArrowForCall.call({ marker: i });
+        \\}
+    );
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "function inherited data lookup preserves own and exotic semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function target() {}
+        \\var intrinsicCall = Function.prototype.call;
+        \\assert.sameValue(target.call, intrinsicCall);
+        \\assert.sameValue(target.bind(null).call, intrinsicCall);
+        \\
+        \\var ownReads = 0;
+        \\var ownCall = function ownCall() {};
+        \\Object.defineProperty(target, "call", {
+        \\    configurable: true,
+        \\    get: function() { ownReads++; return ownCall; }
+        \\});
+        \\assert.sameValue(target.call, ownCall);
+        \\assert.sameValue(ownReads, 1);
+        \\delete target.call;
+        \\
+        \\var inheritedCall = function inheritedCall() {};
+        \\var proto = { call: inheritedCall };
+        \\Object.setPrototypeOf(target, proto);
+        \\assert.sameValue(target.call, inheritedCall);
+        \\
+        \\var inheritedReads = 0;
+        \\Object.defineProperty(proto, "call", {
+        \\    configurable: true,
+        \\    get: function() { inheritedReads++; return ownCall; }
+        \\});
+        \\assert.sameValue(target.call, ownCall);
+        \\assert.sameValue(inheritedReads, 1);
+        \\
+        \\var proxyReads = 0;
+        \\var proxyProto = new Proxy({ call: inheritedCall }, {
+        \\    get: function(object, key, receiver) {
+        \\        if (key === "call") proxyReads++;
+        \\        return Reflect.get(object, key, receiver);
+        \\    }
+        \\});
+        \\Object.setPrototypeOf(target, proxyProto);
+        \\assert.sameValue(target.call, inheritedCall);
+        \\assert.sameValue(proxyReads, 1);
+        \\
+        \\var grandparentCall = function grandparentCall() {};
+        \\Object.setPrototypeOf(target, Object.create({ call: grandparentCall }));
+        \\assert.sameValue(target.call, grandparentCall);
+        \\
+        \\function strictFunction() { "use strict"; }
+        \\assert.throws(TypeError, function() { return strictFunction.caller; });
+        \\assert.throws(TypeError, function() { return strictFunction.arguments; });
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval Function.prototype.toString returns source or native text" {
@@ -4757,7 +6921,7 @@ test "Engine eval Function.prototype.toString returns method and class source" {
 }
 
 test "Engine eval releases arrow destructuring iterator closures cleanly" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -4832,6 +6996,72 @@ test "Engine eval preserves local string substring host output semantics" {
     try std.testing.expectEqualStrings("bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n", stream.buffered());
 }
 
+test "String index-read native records preserve primitive fast paths and observable coercion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let log = "";
+        \\const receiver = { toString() { log += "s"; return "A😀Z"; } };
+        \\const index = { valueOf() { log += "i"; return 1; } };
+        \\print(String.prototype.charCodeAt.call(receiver, index));
+        \\print(String.prototype.at.call(receiver, -1));
+        \\print(String.prototype.codePointAt.call(receiver, index));
+        \\print(log);
+        \\for (const method of ["charCodeAt", "at", "codePointAt"]) {
+        \\  try { String.prototype[method].call(null, 0); }
+        \\  catch (error) { print(method, error.name); }
+        \\  try { String.prototype[method].call("x", Symbol()); }
+        \\  catch (error) { print(method + "-index", error.name); }
+        \\}
+        \\print(String.prototype.charCodeAt.call(42, 1));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "55357\nZ\n128512\nsissi\n" ++
+            "charCodeAt TypeError\ncharCodeAt-index TypeError\n" ++
+            "at TypeError\nat-index TypeError\n" ++
+            "codePointAt TypeError\ncodePointAt-index TypeError\n50\n",
+        stream.buffered(),
+    );
+}
+
+test "mod cold handler preserves fmod and ToNumeric fallbacks" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const out = [];
+        \\const show = value => Object.is(value, -0) ? "-0" : String(value);
+        \\for (const pair of [[5.5, 2], [5, 2.5], [-4, 2], [4, -2],
+        \\                       [1, 0], [Infinity, 2], [2, Infinity], [NaN, 2]]) {
+        \\  out.push(show(pair[0] % pair[1]));
+        \\}
+        \\let log = "";
+        \\const left = { valueOf() { log += "l"; return 8.5; } };
+        \\const right = { valueOf() { log += "r"; return 3; } };
+        \\out.push(show(left % right), log, String(12345678901234567890n % 97n));
+        \\function* generator() { yield "pause"; return 9.5 % 2; }
+        \\const iterator = generator();
+        \\out.push(iterator.next().value, show(iterator.next().value));
+        \\try { 1 % Symbol(); } catch (error) { out.push(error.name); }
+        \\print(out.join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "1.5|0|-0|0|NaN|NaN|2|NaN|2.5|lr|3|pause|1.5|TypeError\n",
+        stream.buffered(),
+    );
+}
+
 test "Engine eval preserves ASCII string integer literal concat semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -4847,6 +7077,100 @@ test "Engine eval preserves ASCII string integer literal concat semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("a1\na-1\n12345\n", stream.buffered());
+}
+
+test "Engine eval preserves resolve-label peephole semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function probe(v, u) {
+        \\  let x = 0;
+        \\  let y;
+        \\  y = (x = v);
+        \\  const z = x && y && 9;
+        \\  function fn() {}
+        \\  function early() { return; print("dead"); }
+        \\  early();
+        \\  print([x, y, z, x === null, u === undefined,
+        \\    typeof u === "undefined", typeof fn === "function",
+        \\    typeof Math.abs === "function",
+        \\    typeof new Proxy(fn, {}) === "function"].join(","));
+        \\}
+        \\probe(3, undefined);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3,3,9,false,true,true,true,true,true\n", stream.buffered());
+}
+
+test "Engine generator return keeps finally rethrow control marker" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var obj = { foo: "not modified" };
+        \\function* g() {
+        \\  try { obj.foo = yield; }
+        \\  finally { return 1; }
+        \\}
+        \\var iter = g();
+        \\iter.next();
+        \\var resumed = iter.return(45);
+        \\assert.sameValue(obj.foo, "not modified");
+        \\assert.sameValue(resumed.value, 1);
+        \\assert.sameValue(resumed.done, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine generator return propagates an explicit finally throw" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var syncError = new Error('sync');
+        \\function* syncGenerator() {
+        \\  try { yield 1; } finally { throw syncError; }
+        \\}
+        \\var syncIterator = syncGenerator();
+        \\syncIterator.next();
+        \\try {
+        \\  syncIterator.return('sent');
+        \\  print('sync-resolved');
+        \\} catch (error) {
+        \\  print('sync-rejected', error === syncError);
+        \\}
+        \\var asyncError = new Error('async');
+        \\async function* asyncGenerator() {
+        \\  try { yield 1; } finally { throw asyncError; }
+        \\}
+        \\var asyncIterator = asyncGenerator();
+        \\asyncIterator.next().then(function() {
+        \\  return asyncIterator.return('sent');
+        \\}).then(function() {
+        \\  print('async-resolved');
+        \\}, function(error) {
+        \\  print('async-rejected', error === asyncError);
+        \\  return asyncIterator.next();
+        \\}).then(function(result) {
+        \\  print('async-closed', result.value, result.done);
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "sync-rejected true\nasync-rejected true\nasync-closed undefined true\n",
+        stream.buffered(),
+    );
 }
 
 test "Engine eval preserves simple for-in mutation semantics" {
@@ -4881,7 +7205,7 @@ test "Engine eval preserves simple for-in mutation semantics" {
 }
 
 test "Engine runJobs preserves pending JS exceptions for callers" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     js.context.preserve_uncaught_exception = true;
 
@@ -4903,7 +7227,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
 }
 
 test "host module graph syntax diagnostics do not write to program output" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -4933,7 +7257,7 @@ test "host module graph syntax diagnostics do not write to program output" {
 }
 
 test "host commonjs wrapper passes directory dirname" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -4970,7 +7294,7 @@ test "host commonjs wrapper passes directory dirname" {
 }
 
 test "module graph evaluates block var declarations as module bindings" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -4998,8 +7322,160 @@ test "module graph evaluates block var declarations as module bindings" {
     try std.testing.expectEqualStrings("object\ntrue\n", output.buffered());
 }
 
+test "module evaluation does not skip a body-leading function expression" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\print((function () { return 42; })());
+    ,
+        &output,
+        "module-leading-function-expression.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        2048,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("42\n", output.buffered());
+}
+
+test "module top-level await resumes in Promise reaction FIFO order" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\var actual = [];
+        \\Promise.resolve(0)
+        \\  .then(() => actual.push("tick 1"))
+        \\  .then(() => actual.push("tick 2"))
+        \\  .then(() => actual.push("tick 3"))
+        \\  .then(() => actual.push("tick 4"))
+        \\  .then(() => print("done:" + actual.join(",")));
+        \\await 1;
+        \\actual.push("await 1");
+        \\await 2;
+        \\actual.push("await 2");
+        \\await 3;
+        \\actual.push("await 3");
+        \\await 4;
+        \\actual.push("await 4");
+    ,
+        &output,
+        "module-tla-promise-fifo.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings(
+        "done:tick 1,await 1,tick 2,await 2,tick 3,await 3,tick 4,await 4\n",
+        output.buffered(),
+    );
+}
+
+test "module await reaction keeps its position on the awaited Promise" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\let resolveAwaited;
+        \\const awaited = new Promise((resolve) => resolveAwaited = resolve);
+        \\const actual = [];
+        \\awaited.then(() => actual.push("before"));
+        \\Promise.resolve().then(() => {
+        \\  awaited.then(() => actual.push("after"));
+        \\  resolveAwaited();
+        \\});
+        \\await awaited;
+        \\actual.push("module");
+        \\Promise.resolve().then(() => print(actual.join(",")));
+    ,
+        &output,
+        "module-await-reaction-position.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("before,module,after\n", output.buffered());
+}
+
+test "async module dependency does not preempt an independent sibling" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.builtins.registry;
+    registry.registerStandardGlobalsDefault();
+    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
+    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+
+    const dir = ".zig-cache/module-async-sibling-order-test";
+    const main_path = dir ++ "/main.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/b.mjs",
+        .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
+            "globalThis.__moduleOrder.push('b-start');\n" ++
+            "await 0;\n" ++
+            "globalThis.__moduleOrder.push('b-end');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/a.mjs",
+        .data = "import './b.mjs';\nglobalThis.__moduleOrder.push('a');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/c.mjs",
+        .data = "globalThis.__moduleOrder = globalThis.__moduleOrder || [];\n" ++
+            "globalThis.__moduleOrder.push('c');\n",
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = main_path,
+        .data = "import './a.mjs';\n" ++
+            "import './c.mjs';\n" ++
+            "print(globalThis.__moduleOrder.join(','));\n",
+    });
+
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, main_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(source);
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        source,
+        &output,
+        main_path,
+        std.testing.io,
+        std.testing.allocator,
+        4096,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("b-start,c,b-end,a\n", output.buffered());
+}
+
 test "import bytes module creates immutable ArrayBuffer backing store" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-import-bytes-immutable-test";
@@ -5035,7 +7511,7 @@ const HostFixtureModule = struct {
     specifier: []const u8,
     path: []const u8,
     source: []const u8,
-    kind: engine.harness.Engine.HostHooks.ModuleKind,
+    kind: helpers.TestEngine.HostHooks.ModuleKind,
 };
 
 const HostFixture = struct {
@@ -5056,7 +7532,7 @@ const HostFixture = struct {
     }
 };
 
-fn hostHooks(host: *const HostFixture) engine.harness.Engine.HostHooks {
+fn hostHooks(host: *const HostFixture) helpers.TestEngine.HostHooks {
     return .{
         .ptr = @constCast(host),
         .resolveModule = resolveFixtureModule,
@@ -5069,7 +7545,7 @@ fn resolveFixtureModule(
     specifier: []const u8,
     referrer: ?[]const u8,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.ResolvedModule {
+) anyerror!helpers.TestEngine.HostHooks.ResolvedModule {
     _ = referrer;
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findBySpecifierOrPath(specifier) orelse return error.ModuleNotFound;
@@ -5082,9 +7558,9 @@ fn resolveFixtureModule(
 
 fn loadFixtureModule(
     ptr: *anyopaque,
-    resolved: engine.harness.Engine.HostHooks.ResolvedModule,
+    resolved: helpers.TestEngine.HostHooks.ResolvedModule,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.LoadedModule {
+) anyerror!helpers.TestEngine.HostHooks.LoadedModule {
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findByPath(resolved.path) orelse return error.ModuleNotFound;
     return .{

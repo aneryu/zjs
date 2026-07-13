@@ -723,6 +723,15 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
 }
 
+test "ordinary rope nodes keep accumulator state out of line" {
+    // QJS's node is just u32/u8/u8 plus two JSValues. zjs additionally needs
+    // one runtime pointer for its context-free borrowed-string API; generic
+    // ropes must not regress to embedding the private tail pointer/union,
+    // cached-flat/hash, or destroy link.
+    const compact_limit = 2 * @sizeOf(core.JSValue) + @sizeOf(*anyopaque) + 8;
+    try std.testing.expect(@sizeOf(core.string.StringRope) <= compact_limit);
+}
+
 test "rope tail append extends an unmaterialized rope in place" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -731,7 +740,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     const right = try core.string.String.createLatin1(rt, "def");
     // A rope is a standalone `StringRope` reached through a `Tag.string_rope`
     // value; createRope retains its children, so drop our own references.
-    const rope = try core.string.String.createRope(rt, left.value(), right.value());
+    const rope = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const rope_value = rope.value();
@@ -740,7 +749,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "ghi" }, 1));
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "jkl" }, 1));
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "" }, 1));
-    try std.testing.expectEqual(@as(usize, 12), rope.len);
+    try std.testing.expectEqual(@as(usize, 12), rope.len_());
     try std.testing.expect(!rope.isWide());
 
     // Length growth in a loop exercises the amortized-doubling regrowth.
@@ -748,7 +757,7 @@ test "rope tail append extends an unmaterialized rope in place" {
     while (round < 100) : (round += 1) {
         try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "0123456789" }, 1));
     }
-    try std.testing.expectEqual(@as(usize, 1012), rope.len);
+    try std.testing.expectEqual(@as(usize, 1012), rope.len_());
 
     // Content reads flatten the rope including the tail segment.
     const flat = try rope.flatten();
@@ -759,12 +768,12 @@ test "rope tail append extends an unmaterialized rope in place" {
 
     // Materialized ropes refuse tail appends: their content is captured.
     try std.testing.expect(!try core.string.appendRopeTail(rope, rt, .{ .latin1 = "nope" }, 1));
-    try std.testing.expectEqual(@as(usize, 1012), rope.len);
+    try std.testing.expectEqual(@as(usize, 1012), rope.len_());
 
     // An unflattened rope destroyed with a pending tail releases it.
     const l2 = try core.string.String.createLatin1(rt, "xy");
     const r2 = try core.string.String.createLatin1(rt, "z");
-    const dropped = try core.string.String.createRope(rt, l2.value(), r2.value());
+    const dropped = try core.string.String.createAccumulatorRope(rt, l2.value(), r2.value());
     l2.value().free(rt);
     r2.value().free(rt);
     try std.testing.expect(try core.string.appendRopeTail(dropped, rt, .{ .latin1 = "tail" }, 1));
@@ -777,7 +786,7 @@ test "rope tail append widens for utf16 suffixes" {
 
     const left = try core.string.String.createLatin1(rt, "ab");
     const right = try core.string.String.createLatin1(rt, "cd");
-    const rope = try core.string.String.createRope(rt, left.value(), right.value());
+    const rope = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const rope_value = rope.value();
@@ -790,7 +799,7 @@ test "rope tail append widens for utf16 suffixes" {
     try std.testing.expect(rope.isWide());
     // Narrow content keeps landing in the widened tail.
     try std.testing.expect(try core.string.appendRopeTail(rope, rt, .{ .latin1 = "z" }, 1));
-    try std.testing.expectEqual(@as(usize, 8), rope.len);
+    try std.testing.expectEqual(@as(usize, 8), rope.len_());
 
     const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 'c', 'd', '1', '2', 0x0100, 'z' });
     defer expected.value().free(rt);
@@ -799,13 +808,51 @@ test "rope tail append widens for utf16 suffixes" {
     try std.testing.expectEqual(expected.contentHash(), rope.contentHash());
 }
 
+test "rope index compare and hash traverse nested leaves without flattening" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "ab");
+    const right = try core.string.String.createUtf16(rt, &.{ 0x0100, 'c' });
+    const inner = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
+    left.value().free(rt);
+    right.value().free(rt);
+    const inner_value = inner.value();
+    defer inner_value.free(rt);
+    try std.testing.expect(try core.string.appendRopeTail(inner, rt, .{ .latin1 = "xy" }, 1));
+
+    const suffix = try core.string.String.createLatin1(rt, "!");
+    const outer = try core.string.String.createRope(rt, inner_value, suffix.value());
+    suffix.value().free(rt);
+    const outer_value = outer.value();
+    defer outer_value.free(rt);
+
+    const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 0x0100, 'c', 'x', 'y', '!' });
+    defer expected.value().free(rt);
+
+    try std.testing.expectEqual(@as(?u16, 'a'), core.string.stringValueCodeUnitAt(outer_value, 0));
+    try std.testing.expectEqual(@as(?u16, 0x0100), core.string.stringValueCodeUnitAt(outer_value, 2));
+    try std.testing.expectEqual(@as(?u16, 'x'), core.string.stringValueCodeUnitAt(outer_value, 4));
+    try std.testing.expectEqual(@as(?u16, '!'), core.string.stringValueCodeUnitAt(outer_value, 6));
+    try std.testing.expectEqual(@as(?u16, null), core.string.stringValueCodeUnitAt(outer_value, 7));
+
+    try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), false));
+    try std.testing.expectEqual(@as(?i32, 0), core.string.compareStringValues(outer_value, expected.value(), true));
+    try std.testing.expectEqual(expected.contentHash(), core.string.stringValueContentHash(outer_value).?);
+    try std.testing.expectEqual(expected.contentHash(), outer.contentHash());
+
+    // These QJS-style readers must leave both levels as ropes.
+    try std.testing.expect(!inner.isLinearized());
+    try std.testing.expect(!outer.isLinearized());
+}
+
 test "rope child snapshots content: shared child refuses tail appends" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const left = try core.string.String.createLatin1(rt, "abc");
     const right = try core.string.String.createLatin1(rt, "def");
-    const inner = try core.string.String.createRope(rt, left.value(), right.value());
+    const inner = try core.string.String.createAccumulatorRope(rt, left.value(), right.value());
     left.value().free(rt);
     right.value().free(rt);
     const inner_value = inner.value();
@@ -857,6 +904,13 @@ test "atom table retains its cached string until the atom dies" {
     const again = try core.string.String.createAtomBacked(rt, atom_id);
     try std.testing.expect(again == atom_string);
     again.value().free(rt);
+    // OP_push_atom_value's QJS-like direct entry path returns the same cached
+    // body and performs no allocation after the first materialization.
+    const allocations = rt.memory.allocation_count;
+    const pushed = try rt.atoms.toStringValueForPush(rt, atom_id);
+    try std.testing.expect(pushed.asStringBodyRaw() == atom_string);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+    pushed.free(rt);
     // Releasing the string does not release the atom: `atom_id` is a weak
     // back-pointer, and the table keeps its own string reference.
     atom_string.value().free(rt);
@@ -1426,7 +1480,7 @@ test "mapped arguments binding update defers value finalizer reentry" {
     const value = try core.Object.create(rt, reentrant_id, null);
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = value.value().dup();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1468,7 +1522,7 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const cell = try core.VarRef.createClosed(rt, value.value().dup());
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = cell.valueRef();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1508,7 +1562,7 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     const key = core.atom.atomFromUInt32(0);
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = core.JSValue.uninitialized();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     const value = try core.Object.create(rt, reentrant_id, null);
@@ -2116,23 +2170,81 @@ test "proxy state uses payload storage" {
     try std.testing.expectEqual(@as(?i32, 66), proxy.proxyHandler().?.asInt32());
 }
 
-test "arguments state uses payload storage" {
+test "mapped arguments state uses inline var-ref storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     defer arguments.value().free(rt);
 
-    try std.testing.expect(arguments.u.payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.arguments, arguments.class_payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, arguments.class_payload_kind);
     const refs = try rt.memory.alloc(core.JSValue, 2);
     refs[0] = core.JSValue.int32(77);
     refs[1] = core.JSValue.int32(88);
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
 
+    try std.testing.expectEqual(refs.ptr, arguments.u.array_values);
+    try std.testing.expect(arguments.externalClassPayload() == null);
     try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
     try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].asInt32());
+}
+
+test "unmapped arguments share a prepared shape and use dense element storage" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const template = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.arguments, null, 3);
+    defer template.value().free(rt);
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.length,
+        core.Descriptor.data(core.JSValue.int32(0), true, false, true),
+    );
+    const iterator_key = comptime core.atom.predefinedId("Symbol.iterator", .symbol).?;
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        iterator_key,
+        core.Descriptor.data(core.JSValue.int32(17), true, false, true),
+    );
+    const callee_key = comptime core.atom.predefinedId("callee", .string).?;
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        callee_key,
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false),
+    );
+
+    const arguments = try core.Object.createFromPropertyTemplate(rt, template);
+    defer arguments.value().free(rt);
+    try std.testing.expectEqual(template.shape_ref, arguments.shape_ref);
+    try std.testing.expectEqual(core.class.ids.arguments, arguments.class_id);
+    try std.testing.expectEqual(core.class.PayloadKind.none, arguments.class_payload_kind);
+    try std.testing.expect(!arguments.flags.is_array);
+
+    arguments.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, core.JSValue.int32(2));
+    const elements = try rt.memory.alloc(core.JSValue, 2);
+    elements[0] = core.JSValue.int32(31);
+    elements[1] = core.JSValue.int32(32);
+    arguments.adoptDenseUnmappedArgumentsElementsAssumingEmpty(rt, elements);
+
+    try std.testing.expect(arguments.flags.fast_array);
+    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, arguments.arrayElementStorageMode());
+    try std.testing.expectEqual(@as(?i32, 2), arguments.getProperty(core.atom.ids.length).asInt32());
+    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 32), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
+    try std.testing.expect(arguments.externalClassPayload() == null);
+
+    // Redefining a dense numeric property materializes the run into ordinary
+    // shape entries, exactly like qjs's arguments define-own-property exotic.
+    try arguments.defineOwnProperty(
+        rt,
+        core.atom.atomFromUInt32(1),
+        core.Descriptor.data(core.JSValue.int32(41), false, false, false),
+    );
+    try std.testing.expect(!arguments.flags.fast_array);
+    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), template.getProperty(core.atom.ids.length).asInt32());
 }
 
 test "object data state uses payload storage" {
@@ -2238,12 +2350,6 @@ test "native function state uses payload storage" {
     const captures = try rt.memory.alloc(*core.VarRef, 1);
     captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     function.functionCapturesSlot().* = captures;
-    const names = try rt.memory.alloc(core.Atom, 1);
-    names[0] = try rt.internAtom("evalLocal");
-    (try function.functionEvalLocalNamesSlot(rt)).* = names;
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = core.JSValue.int32(66);
-    (try function.functionEvalLocalRefsSlot(rt)).* = refs;
     (try function.functionLexicalThisSlot(rt)).* = core.JSValue.int32(77);
     try function.setFunctionHomeObject(rt, home);
     const remap_from = try rt.memory.alloc(core.Atom, 1);
@@ -2261,8 +2367,6 @@ test "native function state uses payload storage" {
     try std.testing.expectEqual(@as(?i32, 33), function.functionBytecode().?.asInt32());
     try std.testing.expectEqual(@as(?i32, 44), function.functionClassFieldsInit().?.asInt32());
     try std.testing.expectEqual(@as(?i32, 55), function.functionCaptures()[0].varRefValue().asInt32());
-    try std.testing.expectEqual(@as(usize, 1), function.functionEvalLocalNames().len);
-    try std.testing.expectEqual(@as(?i32, 66), function.functionEvalLocalRefs()[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 77), function.functionLexicalThis().?.asInt32());
     try std.testing.expectEqual(home, function.functionHomeObject().?);
     try std.testing.expectEqual(@as(usize, 1), function.privateRemapFrom().len);
@@ -2438,6 +2542,30 @@ test "shape registry hash grows and reuses object root shapes" {
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
 
+test "reserved object root shapes reuse only an exact property capacity" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const four = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    const eight = try rt.shapes.createObjectRootWithPropertyCapacity(null, 8);
+    const four_again = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    defer rt.shapes.release(four);
+    defer rt.shapes.release(eight);
+    defer rt.shapes.release(four_again);
+
+    try std.testing.expectEqual(four, four_again);
+    try std.testing.expect(four != eight);
+    try std.testing.expectEqual(@as(u32, 4), four.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight.prop_size);
+
+    const four_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 4);
+    defer four_object.value().free(rt);
+    const eight_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 8);
+    defer eight_object.value().free(rt);
+    try std.testing.expectEqual(@as(u32, 4), four_object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 8), eight_object.shape_ref.prop_size);
+}
+
 test "ordinary object additions reuse transition shapes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2463,6 +2591,51 @@ test "ordinary object additions reuse transition shapes" {
     try std.testing.expectEqual(@as(?i32, 4), second.getProperty(b).asInt32());
 }
 
+test "unique transition shape appends in place across FAM relocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // A fresh prototype identity guarantees that this object's empty root shape
+    // has no other owner. QuickJS mutates such rc==1 transition misses in place.
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    defer object.value().free(rt);
+
+    const names = [_][]const u8{ "unique_0", "unique_1", "unique_2", "unique_3", "unique_4" };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    const initial_shape = object.shape_ref;
+    const initial_hashed_count = rt.shapes.shape_hash_count;
+    for (atoms[0..4], 0..) |name, index| {
+        try object.defineOwnProperty(
+            rt,
+            name,
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+        );
+        try std.testing.expectEqual(initial_shape, object.shape_ref);
+    }
+    try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
+
+    // The fifth append grows the inline FAM, so the allocation moves while the
+    // logical shape ownership and hashed/live registry counts stay unchanged.
+    const before_relocation = object.shape_ref;
+    try object.defineOwnProperty(
+        rt,
+        atoms[4],
+        core.Descriptor.data(core.JSValue.int32(4), true, true, true),
+    );
+    try std.testing.expect(before_relocation != object.shape_ref);
+    try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(@as(u32, atoms.len), object.shape_ref.prop_count);
+    for (atoms, 0..) |name, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), object.getProperty(name).asInt32());
+        try std.testing.expect(object.shape_ref.firstPropertyIndex(name) != core.shape.no_property_index);
+    }
+}
+
 test "failed new property definition rolls back retained entry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2476,30 +2649,83 @@ test "failed new property definition rolls back retained entry" {
     const b = try rt.internAtom("rollback_b");
     const c = try rt.internAtom("rollback_c");
     const d = try rt.internAtom("rollback_d");
+    const e = try rt.internAtom("rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     const retained_refs = retained.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, d, core.Descriptor.data(retained.value(), true, true, true)));
+    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
+}
+
+test "unique shape append OOM rolls back shape and value storage together" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // A unique prototype keeps the named-property transition on the rc==1
+    // in-place path. Four tombstones force the fifth append to grow both the
+    // property FAM and its deleted-inclusive hash table.
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    defer object.value().free(rt);
+
+    const names = [_][]const u8{ "oom_shape_a", "oom_shape_b", "oom_shape_c", "oom_shape_d", "oom_shape_e" };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |name| rt.atoms.free(name);
+
+    for (atoms[0..4], 0..) |name, index| {
+        try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+    }
+    for (atoms[0..4]) |name| try std.testing.expect(object.deleteProperty(rt, name));
+
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.deleted_prop_count);
+
+    // Permit the value-buffer grow and the old two-step implementation's first
+    // (8 props / 8 buckets) shape relocation, but not its second (16 buckets).
+    // The fixed implementation requests the final shape layout in one fallible
+    // allocation, so either implementation must report OOM without committing
+    // only one side of the object layout.
+    const grown_value_bytes = @sizeOf(core.property.Entry) * 8;
+    const first_shape_bytes = @sizeOf(core.shape.Shape) +
+        @sizeOf(u32) * 8 + @sizeOf(core.shape.Property) * 8;
+    rt.setMemoryLimit(rt.memory.allocated_bytes + grown_value_bytes + first_shape_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(4), true, true, true)),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
+    try std.testing.expect(!object.hasOwnProperty(atoms[4]));
+
+    // A retry on the same object proves its value buffer still agrees with the
+    // shape capacity and catches the former out-of-bounds write on index four.
+    try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+    try std.testing.expectEqual(@as(?i32, 5), object.getProperty(atoms[4]).asInt32());
 }
 
 test "context lexicals property alias releases context strong reference" {
@@ -2532,31 +2758,32 @@ test "failed auto-init property definition rolls back retained entry" {
     const b = try rt.internAtom("auto_rollback_b");
     const c = try rt.internAtom("auto_rollback_c");
     const d = try rt.internAtom("auto_rollback_d");
+    const e = try rt.internAtom("auto_rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineAutoInitProperty(rt, d, "auto_rollback_d", 0, core.property.Flags.data(true, false, true)),
+        object.defineAutoInitProperty(rt, e, "auto_rollback_e", 0, core.property.Flags.data(true, false, true)),
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
 }
 
 test "failed realm auto-init property definition rolls back borrowed holder registration" {
@@ -2573,32 +2800,34 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const b = try rt.internAtom("realm_auto_rollback_b");
     const c = try rt.internAtom("realm_auto_rollback_c");
     const d = try rt.internAtom("realm_auto_rollback_d");
+    const e = try rt.internAtom("realm_auto_rollback_e");
     defer rt.atoms.free(a);
     defer rt.atoms.free(b);
     defer rt.atoms.free(c);
+    defer rt.atoms.free(d);
 
     try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     const old_holder_count = rt.borrowed_reference_holders.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(
         error.OutOfMemory,
-        object.definePerformanceAutoInitProperty(rt, d, core.property.Flags.data(true, false, true), global),
+        object.definePerformanceAutoInitProperty(rt, e, core.property.Flags.data(true, false, true), global),
     );
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
-    try std.testing.expect(!object.hasOwnProperty(d));
+    try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
+    try std.testing.expect(!object.hasOwnProperty(e));
 
-    rt.atoms.free(d);
-    try std.testing.expect(rt.atoms.name(d) == null);
+    rt.atoms.free(e);
+    try std.testing.expect(rt.atoms.name(e) == null);
 }
 
-test "failed property replacement preserves existing entry" {
+test "property replacement preserves references under memory cap" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2619,17 +2848,17 @@ test "failed property replacement preserves existing entry" {
     const old_refs = old_value.header.meta().rc;
     const replacement_refs = replacement.header.meta().rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true)));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs, old_value.header.meta().rc);
-    try std.testing.expectEqual(replacement_refs, replacement.header.meta().rc);
+    try std.testing.expectEqual(old_refs - 1, old_value.header.meta().rc);
+    try std.testing.expectEqual(replacement_refs + 1, replacement.header.meta().rc);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
     const stored = object.getProperty(key);
     defer stored.free(rt);
-    try std.testing.expectEqual(&old_value.header, stored.refHeader().?);
+    try std.testing.expectEqual(&replacement.header, stored.refHeader().?);
 }
 
 test "object data property self-assignment keeps stored object alive" {
@@ -3020,7 +3249,11 @@ test "runtime exposes stable gc stats snapshot" {
     try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
 
     const snapshot = rt.gcStats();
-    const expected_gc_bytes = @sizeOf(core.Object) * 2 + @sizeOf(core.shape.Shape) * 2;
+    const expected_gc_bytes =
+        owner.allocationSize(&rt) +
+        child.allocationSize(&rt) +
+        owner.shape_ref.allocationSize() +
+        child.shape_ref.allocationSize();
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), snapshot.old_live_bytes);
@@ -3058,7 +3291,7 @@ test "gc live heap stats drop when object is released" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
     const allocated = rt.gcStats();
-    const expected_gc_bytes = @sizeOf(core.Object) + @sizeOf(core.shape.Shape);
+    const expected_gc_bytes = object.allocationSize(rt) + object.shape_ref.allocationSize();
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, expected_gc_bytes), allocated.old_live_bytes);
@@ -3344,10 +3577,9 @@ test "gc heap accounting verifier catches missing allocation entries" {
     defer obj.value().free(rt);
     try rt.gc.verifyHeapAccounting(rt);
 
-    const old_size_class = obj.header.meta().size_class;
-    obj.header.meta().size_class = 0;
+    obj.header.meta().flags.heap_accounted = false;
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
-    obj.header.meta().size_class = old_size_class;
+    obj.header.meta().flags.heap_accounted = true;
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -3443,7 +3675,7 @@ test "gc object release does not allocate after refcount reaches zero" {
 
 const live_empty_object_gc_count: usize = 2;
 const single_object_self_cycle_reclaimed_count: usize = 2;
-const closed_property_cycle_reclaimed_count: usize = 5;
+const closed_property_cycle_reclaimed_count: usize = 4;
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -3458,8 +3690,9 @@ fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, act
 }
 
 fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
-    // Shape is now a GC object. This graph collects the two JS objects plus
-    // the shared empty root shape and the two one-property transition shapes.
+    // Shape is a GC object. This graph collects the two JS objects plus the two
+    // one-property transition shapes; the shared empty root shape is released
+    // when both objects leave it.
     try std.testing.expectEqual(@as(usize, closed_property_cycle_reclaimed_count), freed);
     try expectNoLiveGc(rt);
 }
@@ -3697,9 +3930,9 @@ test "weak persistent value clears object cycle target during gc" {
     defer weak.deinit();
 
     target.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, single_object_self_cycle_reclaimed_count), rt.gc.liveCount());
 
-    try expectCycleReclaimedIncludingShapes(rt, 3, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
     try std.testing.expect(weak.get().isUndefined());
     try std.testing.expectEqual(@as(usize, 0), clear_count);
     _ = rt.runObjectCycleRemoval();
@@ -4102,7 +4335,7 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     second.value().free(rt);
     captured.value().free(rt);
 
-    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "nested function bytecode constant object cycle is released by runtime cycle removal" {
@@ -4314,6 +4547,22 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
+test "borrowed realm bookkeeping does not force ordinary property slow paths" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    global.flags.is_global = true;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+
+    try std.testing.expect(!holder.needsSlowPropertyAccess());
+    try holder.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expect(rt.borrowedReferenceHolderRegistered(holder));
+    try std.testing.expect(!holder.needsSlowPropertyAccess());
+}
+
 test "cleared realm pointer unregisters empty borrowed holder" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4330,6 +4579,43 @@ test "cleared realm pointer unregisters empty borrowed holder" {
     try holder.setFunctionRealmGlobalPtr(rt, null);
     try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+}
+
+test "function borrowed holder cache follows swap removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    global.flags.is_global = true;
+
+    const first = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+    const second = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+    const third = try core.Object.create(rt, core.class.ids.bytecode_function, null);
+
+    try first.setFunctionRealmGlobalPtr(rt, global);
+    try second.setFunctionRealmGlobalPtr(rt, global);
+    try third.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
+
+    // Removing the first entry swaps the tail into its slot and must repair the
+    // moved function's cached index. Removing that moved entry repeats the same
+    // edge, exercising the FIFO teardown shape that used to be quadratic.
+    first.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+
+    try third.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
+    third.value().free(rt);
+
+    try second.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    second.value().free(rt);
 }
 
 test "replaced realm auto-init unregisters empty borrowed holder" {
@@ -5143,7 +5429,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 
     left.value().free(rt);
     right.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 5), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(i32, 1), external.header.meta().rc);
     external.value().free(rt);
     try expectNoLiveGc(rt);
@@ -5187,7 +5473,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
 
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = target.value().dup();
-    arguments.argumentsVarRefsSlot().* = refs;
+    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
 
     arguments.value().free(rt);

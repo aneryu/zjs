@@ -8,7 +8,7 @@ const std = @import("std");
 
 // `new Object(stringPrimitive)` builds a String wrapper through the String
 // construct record (Phase 6b-3 STEP 4) rather than naming
-// `builtins.string.constructWithPrototype`; the record's construct branch is
+// `string_builtin_ops.constructWithPrototype`; the record's construct branch is
 // pure (reads only `args`/`new_target`).
 const string_construct_ref = core.function.NativeBuiltinRef{
     .domain = .string,
@@ -41,7 +41,7 @@ fn constructCollectionRecord(ctx: *core.JSContext, kind: u32, prototype: ?*core.
 /// construct iterable-fill) through the record table instead of naming the
 /// builtin. No function object and `global == null` reach the collection
 /// record handler's primitive path (`methodCallWithCallbackHost`), reproducing
-/// the retired `builtins.collection.methodCall(rt, value, id, args)`. `globals`
+/// the retired direct collection primitive call. `globals`
 /// is forwarded so a legacy-closure adder resolved by name keeps its callback
 /// host; the prepared set/add ids never consult it.
 fn collectionPrimitiveMethodCall(
@@ -133,7 +133,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         defer rt.memory.allocator.free(name);
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return constructCollectionValue(ctx, kind, prototype, rooted_args, globals);
         if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt, constructor);
-        if (std.mem.eql(u8, name, "Object")) return constructObjectValue(ctx, rooted_args, constructor);
+        if (std.mem.eql(u8, name, "Object")) return objectConstructorValue(ctx, rooted_args, constructor);
         if (std.mem.eql(u8, name, "Array")) return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, constructor, array_construct_ref, prototype, rooted_args, null, null)) orelse error.TypeError;
         if (std.mem.eql(u8, name, "Iterator")) return error.TypeError;
         if (std.mem.eql(u8, name, "Symbol")) return error.TypeError;
@@ -652,7 +652,11 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn constructObjectValue(ctx: *core.JSContext, args: []const core.JSValue, constructor: *core.Object) !core.JSValue {
+/// Shared Object constructor body for the native record and the generic
+/// construct fallback. In the record path the caller has already distinguished
+/// a custom new.target, matching QuickJS `js_object_constructor` before it
+/// reaches the nullish/ToObject switch below.
+pub fn objectConstructorValue(ctx: *core.JSContext, args: []const core.JSValue, constructor: *core.Object) !core.JSValue {
     const rt = ctx.runtime;
     if (args.len >= 1) {
         const value = args[0];

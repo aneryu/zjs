@@ -13,10 +13,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var end_index: usize = test_fns.len;
     var fail_fast = false;
     var list_only = false;
+    var require_tests = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--list")) {
             list_only = true;
+        } else if (std.mem.eql(u8, arg, "--require-tests")) {
+            require_tests = true;
         } else if (std.mem.eql(u8, arg, "--fail-fast")) {
             fail_fast = true;
         } else if (std.mem.eql(u8, arg, "--range")) {
@@ -125,6 +128,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     std.debug.print("\nSummary: {} passed; {} skipped; {} failed; {} filtered.\n", .{ ok_count, skip_count, fail_count, filtered_count });
+    if (require_tests and ok_count + skip_count + fail_count == 0) {
+        std.debug.print("FAIL: test selection matched no tests.\n", .{});
+        std.process.exit(1);
+    }
     if (fail_count > 0) {
         std.process.exit(1);
     }

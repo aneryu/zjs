@@ -11,6 +11,7 @@ const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const op = bytecode.opcode.op;
+const special_object_subtype = bytecode.opcode.special_object_subtype;
 
 pub const Step = enum { done, continue_loop };
 
@@ -178,31 +179,6 @@ fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
         },
         else => null,
     };
-}
-
-fn canUseFastGlobalUndefinedLookup(
-    function: *const bytecode.Bytecode,
-    frame: *const frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    if (!eval_with_object.isUndefined()) return false;
-    if (!frame.current_function.isUndefined()) return false;
-    if (frameHasVarRefBinding(function, frame, core.atom.ids.undefined_)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
-    return true;
-}
-
-fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.varRefNamesLen());
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
-        const name = function.varRefName(idx);
-        if (name == atom_id) return true;
-    }
-    return false;
 }
 
 pub noinline fn defineField(
@@ -530,16 +506,11 @@ pub noinline fn specialObject(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !void {
     const subtype = function.code[frame.pc];
     frame.pc += 1;
     if (subtype == 0 or subtype == 1) {
-        const arguments = object_ops.capturedArgumentsObject(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame) orelse
-            try object_ops.frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
+        const arguments = try object_ops.frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
         errdefer arguments.free(ctx.runtime);
         try stack.pushOwned(arguments);
     } else if (subtype == 2) {
@@ -556,6 +527,12 @@ pub noinline fn specialObject(
         const import_meta = try object_ops.importMetaObject(ctx, global, function, frame);
         errdefer import_meta.free(ctx.runtime);
         try stack.pushOwned(import_meta);
+    } else if (subtype == special_object_subtype.var_object) {
+        const var_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+        var_object.flags.null_prototype = true;
+        const value = var_object.value();
+        errdefer value.free(ctx.runtime);
+        try stack.pushOwned(value);
     } else if (try object_ops.internalSpecialObjectValue(ctx.runtime, subtype)) |value| {
         try stack.pushOwned(value);
     } else {

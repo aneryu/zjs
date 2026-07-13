@@ -8,6 +8,21 @@ const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+
+pub const LegacyStaticMethod = core.host_function.builtin_method_ids.promise.LegacyStaticMethod;
+
+pub fn legacyStaticMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "resolve")) return @intFromEnum(LegacyStaticMethod.resolve);
+    if (std.mem.eql(u8, name, "all")) return @intFromEnum(LegacyStaticMethod.all);
+    if (std.mem.eql(u8, name, "race")) return @intFromEnum(LegacyStaticMethod.race);
+    if (std.mem.eql(u8, name, "reject")) return @intFromEnum(LegacyStaticMethod.reject);
+    if (std.mem.eql(u8, name, "allSettled")) return @intFromEnum(LegacyStaticMethod.all_settled);
+    if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
+    if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
+    if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
+    return null;
+}
+
 const HostError = exceptions.HostError;
 const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
 const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;
@@ -2039,10 +2054,30 @@ pub fn qjsPromiseResolveIdentity(
 ) !?core.JSValue {
     const promise_object = objectFromValue(value) orelse return null;
     if (promise_object.class_id != core.class.ids.promise) return null;
+    if (promiseConstructorDataValueForFastPath(promise_object)) |constructor| {
+        if (constructor.sameValue(constructor_value)) return value.dup();
+        return null;
+    }
     const constructor = try getValueProperty(ctx, output, global, value, core.atom.ids.constructor, caller_function, caller_frame);
     defer constructor.free(ctx.runtime);
     if (constructor.sameValue(constructor_value)) return value.dup();
     return null;
+}
+
+/// QuickJS's `JS_GetProperty(..., JS_ATOM_constructor)` reaches the Promise's
+/// ordinary shape/prototype chain directly. zjs's general resolver must also
+/// support legacy class-name fallback for prototype-less internal promises,
+/// so keep that authority for missing/accessor/exotic shapes while letting the
+/// normal Promise.prototype data hit take the same direct walk as qjs.
+fn promiseConstructorDataValueForFastPath(promise: *core.Object) ?core.JSValue {
+    var cursor = promise;
+    while (true) {
+        if (cursor.needsSlowPropertyAccess()) return null;
+        var slow_property = false;
+        if (cursor.findOwnDataValueFast(core.atom.ids.constructor, &slow_property)) |value| return value;
+        if (slow_property) return null;
+        cursor = cursor.getPrototype() orelse return null;
+    }
 }
 
 pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
@@ -2461,6 +2496,40 @@ pub fn qjsPromiseKeyedCombinatorCall(
     return capability.releaseCallbacks(ctx.runtime);
 }
 
+/// Per-method body for `Promise.resolve`, matching qjs
+/// `js_promise_resolve(..., magic = 0)`. Keeping it separate prevents the
+/// identity hot path from inheriting the combinator/reject/try/withResolvers
+/// frame and register pressure of `qjsPromiseStaticCall`.
+pub fn qjsPromiseResolveStaticCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (!constructor_value.isObject()) return error.TypeError;
+
+    // qjs `js_promise_resolve` reads a native Promise's observable
+    // `constructor` and returns an identity match before asking whether
+    // `this_val` is a constructor. NewPromiseCapability performs that check
+    // only after the identity arm misses. Besides matching the observable
+    // getter/error order, this keeps the overwhelmingly common
+    // `Promise.resolve(existingPromise)` path out of capability validation.
+    const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (try qjsPromiseResolveIdentity(ctx, output, global, constructor_value, payload, caller_function, caller_frame)) |same_promise| {
+        return same_promise;
+    }
+
+    if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
+    var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
+    errdefer capability.deinit(ctx.runtime);
+    const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
+    resolve_result.free(ctx.runtime);
+    return capability.releaseCallbacks(ctx.runtime);
+}
+
 pub fn qjsPromiseStaticCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2471,6 +2540,7 @@ pub fn qjsPromiseStaticCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    if (mode == .resolve) return qjsPromiseResolveStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
     if (!constructor_value.isObject()) return error.TypeError;
     if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
 
@@ -2485,17 +2555,7 @@ pub fn qjsPromiseStaticCall(
     }
 
     switch (mode) {
-        .resolve => {
-            const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            if (try qjsPromiseResolveIdentity(ctx, output, global, constructor_value, payload, caller_function, caller_frame)) |same_promise| {
-                return same_promise;
-            }
-            var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
-            errdefer capability.deinit(ctx.runtime);
-            const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.resolve, &.{payload}, caller_function, caller_frame);
-            resolve_result.free(ctx.runtime);
-            return capability.releaseCallbacks(ctx.runtime);
-        },
+        .resolve => unreachable,
         .reject => {
             const reason = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
@@ -2804,13 +2864,11 @@ pub fn qjsAsyncFunctionStart(
     var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) HostError!core.JSValue {
     const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
 
-    const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, false);
+    const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, false);
     defer continuation_value.free(ctx.runtime);
     const continuation = objectFromValue(continuation_value) orelse return error.TypeError;
     try continuation.setOptionalValueSlot(ctx.runtime, continuation.generatorAsyncPromiseSlot(), promise.dup());
@@ -2828,7 +2886,7 @@ pub fn qjsAsyncFunctionRunState(
     resume_rejected: bool,
 ) HostError!core.JSValue {
     if (continuation.generatorExecuting()) return error.TypeError;
-    const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
+    const function_value = continuation.functionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
     var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     const nested = &nested_view;
@@ -2852,8 +2910,6 @@ pub fn qjsAsyncFunctionRunState(
         .output = output,
         .global = async_global,
         .strict_unresolved_get_var = fb_runtime_strict,
-        .eval_var_ref_names = continuation.functionEvalLocalNames(),
-        .eval_var_refs = continuation.functionEvalLocalRefs(),
         .generator_state = continuation,
         .resume_value = resume_value,
         .current_function_value = current_function_value,
@@ -3835,58 +3891,68 @@ pub fn drainPendingPromiseJobs(
     global: *core.Object,
 ) !void {
     while (true) {
-        try processExpiredAtomicsWaiters(ctx);
-        while (true) {
-            const promise_sequence = ctx.peekPendingPromiseJobSequence();
-            const finalization_sequence = ctx.runtime.peekPendingFinalizationJobSequence();
-            if (promise_sequence == null and finalization_sequence == null) break;
-
-            if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
-                var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
-                defer cleanup_job.deinit(ctx.runtime);
-                var root_values = [_]core.runtime.ValueRootValue{
-                    .{ .value = &cleanup_job.callback },
-                    .{ .value = &cleanup_job.held_value },
-                };
-                const root_frame = core.runtime.ValueRootFrame{
-                    .previous = ctx.runtime.active_value_roots,
-                    .values = &root_values,
-                };
-                ctx.runtime.active_value_roots = &root_frame;
-                defer ctx.runtime.active_value_roots = root_frame.previous;
-
-                const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
-                result.free(ctx.runtime);
-                try pollGCSafePoint(ctx);
-                continue;
-            }
-
-            var pending_job = ctx.takePendingPromiseJob().?;
-            defer pending_job.deinit(ctx.runtime);
-            const job = pending_job.value;
-            const promise = objectFromValue(job) orelse {
-                if (isCallableValue(job)) {
-                    const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-                    result.free(ctx.runtime);
-                    try pollGCSafePoint(ctx);
-                }
-                continue;
-            };
-            if (promise.class_id == core.class.ids.promise) {
-                try settlePendingPromiseReaction(ctx, output, global, promise);
-                try pollGCSafePoint(ctx);
-                continue;
-            }
-            if (isCallableValue(job)) {
-                const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-                result.free(ctx.runtime);
-                try pollGCSafePoint(ctx);
-            }
-        }
+        while (try drainOnePendingJob(ctx, output, global)) {}
         if (try call_mod.runNextOsSignalHandler(ctx, output, global)) continue;
         if (try runNextOsRwHandler(ctx, output, global)) continue;
         if (!try runNextOsTimer(ctx, output, global)) break;
     }
+}
+
+/// Execute exactly one promise/finalization job, preserving the global job
+/// sequence. The ordinary host drain loops over this helper; the module
+/// evaluator alternates it with TLA resume reactions.
+pub fn drainOnePendingJob(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+) !bool {
+    try processExpiredAtomicsWaiters(ctx);
+    const promise_sequence = ctx.peekPendingPromiseJobSequence();
+    const finalization_sequence = ctx.runtime.peekPendingFinalizationJobSequence();
+    if (promise_sequence == null and finalization_sequence == null) return false;
+
+    if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
+        var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
+        defer cleanup_job.deinit(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &cleanup_job.callback },
+            .{ .value = &cleanup_job.held_value },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+
+        const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
+        result.free(ctx.runtime);
+        try pollGCSafePoint(ctx);
+        return true;
+    }
+
+    var pending_job = ctx.takePendingPromiseJob().?;
+    defer pending_job.deinit(ctx.runtime);
+    const job = pending_job.value;
+    const promise = objectFromValue(job) orelse {
+        if (isCallableValue(job)) {
+            const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
+            result.free(ctx.runtime);
+            try pollGCSafePoint(ctx);
+        }
+        return true;
+    };
+    if (promise.class_id == core.class.ids.promise) {
+        try settlePendingPromiseReaction(ctx, output, global, promise);
+        try pollGCSafePoint(ctx);
+        return true;
+    }
+    if (isCallableValue(job)) {
+        const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
+        result.free(ctx.runtime);
+        try pollGCSafePoint(ctx);
+    }
+    return true;
 }
 
 pub fn enqueuePendingPromiseJob(ctx: *core.JSContext, promise: core.JSValue) !void {

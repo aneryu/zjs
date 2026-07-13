@@ -37,6 +37,7 @@ pub noinline fn directEval(
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
+    const eval_scope_index = eval_scope & ~(class_field_initializer_flag | parameter_initializer_flag);
     return switch (try eval_ops.execDirectEval(
         ctx,
         stack,
@@ -46,6 +47,7 @@ pub noinline fn directEval(
         argc,
         output,
         global,
+        eval_scope_index,
         (eval_scope & class_field_initializer_flag) != 0,
         (eval_scope & parameter_initializer_flag) != 0,
         allow_tail_inline,
@@ -69,6 +71,7 @@ pub noinline fn applyEval(
 ) !Step {
     const eval_scope = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
+    const eval_scope_index = eval_scope & ~(class_field_initializer_flag | parameter_initializer_flag);
     return switch (try eval_ops.execApplyEval(
         ctx,
         stack,
@@ -77,6 +80,7 @@ pub noinline fn applyEval(
         catch_target,
         output,
         global,
+        eval_scope_index,
         (eval_scope & class_field_initializer_flag) != 0,
         (eval_scope & parameter_initializer_flag) != 0,
     )) {
@@ -116,23 +120,11 @@ pub noinline fn dynamicImport(
     // statement after import() runs before any module side effect. All
     // options validation, attribute-string enforcement, and attribute
     // threading live in module_graph.evaluateImportCall.
-    // Referrer = the active script/module's name (spec GetActiveScriptOrModule,
-    // qjs JS_GetScriptOrModuleName quickjs.c:30854). Eval code is NOT its own
-    // script/module: its body compiles with filename "<eval>" (eval_ops.zig), so
-    // walk the direct-eval caller chain to the enclosing real script/module and
-    // resolve a relative import() specifier against IT, not the runner cwd.
-    var referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
-    if (std.mem.eql(u8, referrer_path, "<eval>") or referrer_path.len == 0) {
-        var caller = frame.evalCallerFrame();
-        while (caller) |cf| {
-            const caller_name = ctx.runtime.atoms.name(cf.function.filename) orelse "";
-            if (caller_name.len != 0 and !std.mem.eql(u8, caller_name, "<eval>")) {
-                referrer_path = caller_name;
-                break;
-            }
-            caller = cf.evalCallerFrame();
-        }
-    }
+    // Referrer = the stable active ScriptOrModule identity (spec
+    // GetActiveScriptOrModule, qjs JS_GetScriptOrModuleName quickjs.c:30854).
+    // Direct eval retains this separately from its "<eval>" display filename,
+    // so escaped eval-created functions do not depend on live caller frames.
+    const referrer_path = ctx.runtime.atoms.name(function.script_or_module) orelse "";
     const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);

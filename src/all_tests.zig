@@ -28,9 +28,6 @@ pub const RuntimeMemoryUsage = kernel_api.RuntimeMemoryUsage;
 pub const ContextOptions = kernel_api.context.Options;
 pub const GCPolicy = core.GCPolicy;
 pub const GCStats = core.GCStats;
-pub const harness = struct {
-    pub const Engine = @import("tests/exec.zig").helpers.TestEngine;
-};
 pub const EvalOptions = kernel_api.context.EvalOptions;
 pub const EvalMode = kernel_api.context.EvalMode;
 pub const EvalTiming = kernel_api.context.EvalTiming;
@@ -109,7 +106,6 @@ test {
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
-    std.testing.refAllDecls(@import("tests/smoke_test.zig"));
     std.testing.refAllDecls(@import("cli/zjs.zig"));
     std.testing.refAllDecls(@import("cli/run_test262.zig"));
 }

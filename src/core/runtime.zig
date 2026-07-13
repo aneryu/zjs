@@ -30,8 +30,15 @@ pub const default_gc_threshold = 256 * 1024;
 /// catchable error. 1 MiB leaves ample headroom under the real thread stack
 /// (the main thread has only a few MiB free below the eval entry after the CLI
 /// call chain; worker threads have ~16 MiB) while sitting far above any
-/// legitimate nesting depth — the same value QuickJS passes test262 with.
+/// legitimate nesting depth — the same value QuickJS uses for conformance runs.
 pub const default_native_stack_size = 1024 * 1024;
+// Debug codegen has materially larger parser/VM frames. Scale the physical
+// allowance so it represents the same logical recursion budget as optimized
+// builds; Release modes retain QuickJS's exact 1 MiB native budget.
+const initial_native_stack_size = if (builtin.mode == .Debug)
+    default_native_stack_size * 4
+else
+    default_native_stack_size;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
@@ -102,6 +109,14 @@ pub const VmStackArena = struct {
                 return self.chunks[self.active][used .. used + n];
             }
         }
+        return self.carveSlow(account, n);
+    }
+
+    /// Switch to or allocate another arena chunk.  The active chunk satisfies
+    /// virtually every ordinary call after the first one; keeping backing
+    /// allocation and its memory-accounting/error machinery out of `carve`
+    /// lets that steady arm remain a leaf, like QJS's `alloca` bump.
+    noinline fn carveSlow(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
         const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
         if (next_index >= max_chunks) return null;
         if (next_index >= self.chunk_count) {
@@ -899,7 +914,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
-        rt.native_stack_size = default_native_stack_size;
+        rt.native_stack_size = initial_native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
         // entry path (eval / evalScript / ES module graph) even those that do not
@@ -907,9 +922,9 @@ pub const JSRuntime = struct {
         // shallow call level, so this baseline is valid. Outermost eval/module
         // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
         // per-thread base — required when execution runs on a different thread
-        // than construction (test262 workers).
+        // than construction (conformance worker runtimes).
         rt.native_stack_top = @frameAddress();
-        rt.native_stack_limit = if (default_native_stack_size == 0) 0 else rt.native_stack_top -| default_native_stack_size;
+        rt.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.native_stack_top -| initial_native_stack_size;
         rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
@@ -1113,6 +1128,19 @@ pub const JSRuntime = struct {
         return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
     }
 
+    /// QJS runs its allocation-threshold GC trigger from object creation, not
+    /// from JSString/JSStringRope allocation. Production string churn therefore
+    /// bypasses the per-allocation threshold bookkeeping. Test builds must keep
+    /// the injected allocation callback, and force-GC builds must still collect
+    /// before every runtime allocation, so those comptime modes retain the full
+    /// request path.
+    pub inline fn allocStringAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (comptime builtin.is_test or memory.force_gc_on_allocation_enabled) {
+            if (byte_count != 0) self.requestGCForAllocation(byte_count);
+        }
+        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
+    }
+
     pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
         self.memory.freeAlignedBytes(bytes, alignment);
     }
@@ -1134,12 +1162,12 @@ pub const JSRuntime = struct {
 
     /// Same as `registerObject` but with the object's allocation size supplied by
     /// the caller. `createInternal` already computes the inline-class-payload
-    /// layout to size/place the allocation; reusing its `total_size` here avoids a
+    /// layout to size/place the allocation; reusing its `object_size` here avoids a
     /// second record-table lookup + inline-layout recompute on the object-creation
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
-        try self.gc.addWithSize(&object.header, bytes);
+        try self.gc.addInitializedWithSize(&object.header, bytes);
         if (self.gc.hasPendingMajorRequest()) {
             _ = self.pollGC(null, .normal) catch {};
         }
@@ -1151,7 +1179,7 @@ pub const JSRuntime = struct {
 
     /// Same as `unregisterObject` but with the object's allocation size supplied
     /// by the caller. `destroyFromHeader` already computes the inline-class-payload
-    /// layout (for the tail `freeObjectAllocation`); its `total_size` is bit-for-bit
+    /// layout (for the tail `freeObjectAllocation`); its `object_size` is bit-for-bit
     /// the value `allocationSize` would recompute here (both go through
     /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
     /// between the two calls). Reusing it drops a redundant record-table lookup +
@@ -1165,9 +1193,14 @@ pub const JSRuntime = struct {
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
         if (object.flags.is_borrowed_reference_holder) return;
+        const index = self.borrowed_reference_holders.len;
         try appendRuntimeObject(&self.memory, &self.borrowed_reference_holders, &self.borrowed_reference_holders_capacity, object);
+        object.setBorrowedReferenceHolderIndex(index);
         object.flags.is_borrowed_reference_holder = true;
-        object.flags.needs_slow_property = true;
+        // This table is lifetime bookkeeping only. A borrowed realm/weak
+        // pointer does not add exotic [[Get]]/[[Set]] semantics, so it must not
+        // poison the object's ordinary shape fast paths. Semantic slow-path
+        // eligibility is established by the class/exotic flags at creation.
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {
@@ -1177,10 +1210,11 @@ pub const JSRuntime = struct {
 
     pub fn unregisterBorrowedReferenceHolder(self: *JSRuntime, object: *Object) void {
         if (!object.flags.is_borrowed_reference_holder) return;
-        if (self.borrowed_reference_holders.len != 0 and self.borrowed_reference_holders[self.borrowed_reference_holders.len - 1] == object) {
-            self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
-            object.flags.is_borrowed_reference_holder = false;
-            return;
+        if (object.borrowedReferenceHolderIndex()) |cached_index| {
+            if (cached_index < self.borrowed_reference_holders.len and self.borrowed_reference_holders[cached_index] == object) {
+                self.removeBorrowedReferenceHolderAt(cached_index);
+                return;
+            }
         }
         var found: ?usize = null;
         for (self.borrowed_reference_holders, 0..) |candidate, index| {
@@ -1190,11 +1224,21 @@ pub const JSRuntime = struct {
             }
         }
         const index = found orelse return;
-        if (index + 1 < self.borrowed_reference_holders.len) {
-            std.mem.copyForwards(*Object, self.borrowed_reference_holders[index .. self.borrowed_reference_holders.len - 1], self.borrowed_reference_holders[index + 1 ..]);
+        self.removeBorrowedReferenceHolderAt(index);
+    }
+
+    fn removeBorrowedReferenceHolderAt(self: *JSRuntime, index: usize) void {
+        std.debug.assert(index < self.borrowed_reference_holders.len);
+        const removed = self.borrowed_reference_holders[index];
+        const last_index = self.borrowed_reference_holders.len - 1;
+        if (index != last_index) {
+            const moved = self.borrowed_reference_holders[last_index];
+            self.borrowed_reference_holders[index] = moved;
+            moved.setBorrowedReferenceHolderIndex(index);
         }
-        self.borrowed_reference_holders = self.borrowed_reference_holders[0 .. self.borrowed_reference_holders.len - 1];
-        object.flags.is_borrowed_reference_holder = false;
+        self.borrowed_reference_holders = self.borrowed_reference_holders[0..last_index];
+        removed.setBorrowedReferenceHolderIndex(null);
+        removed.flags.is_borrowed_reference_holder = false;
     }
 
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
@@ -1724,7 +1768,7 @@ pub const JSRuntime = struct {
         const records = self.internal_builtins[domain_index];
         if (id >= records.len) return null;
         const record = &records[id];
-        if (record.call == null) return null;
+        if (!record.hasCallable()) return null;
         return record;
     }
 
@@ -2207,6 +2251,11 @@ pub const JSRuntime = struct {
         return self.stack_size;
     }
 
+    pub fn setNativeStackSize(self: *JSRuntime, size: usize) void {
+        self.native_stack_size = size;
+        self.updateNativeStackTop();
+    }
+
     /// Capture the current native frame pointer as the recursion base and derive
     /// the lower limit. Mirrors QuickJS `JS_UpdateStackTop` + `update_stack_limit`
     /// (quickjs.c:2841-2860). Must be called at the outermost JS entry on the
@@ -2419,6 +2468,10 @@ pub const JSRuntime = struct {
         return self.deferred_native_cleanups.len != 0 or self.deferred_class_payload_finalizers.len != 0;
     }
 
+    pub fn hasPendingDeferredClassPayloadFinalizers(self: JSRuntime) bool {
+        return self.deferred_class_payload_finalizers.len != 0;
+    }
+
     pub fn runDeferredNativeCleanupBudgeted(self: *JSRuntime, max_jobs: usize) usize {
         if (max_jobs == 0) return 0;
         if (self.draining_deferred_native_cleanups) return 0;
@@ -2460,6 +2513,7 @@ pub const JSRuntime = struct {
         }
 
         self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+        if (ran != 0 and self.deferred_class_payload_finalizers.len == 0) object_mod.Object.drainCycleDeferredFrees(self);
         return ran;
     }
 

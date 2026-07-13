@@ -102,10 +102,24 @@ const NanBox = struct {
     /// Dense 1-based tag index; index 0 is reserved so that no boxed encoding
     /// can collide with the canonical float range.
     fn indexOf(comptime tag: i32) u64 {
-        for (boxed_tags, 1..) |candidate, index| {
-            if (candidate == tag) return index;
-        }
-        @compileError("tag is not representable in the NaN-boxed encoding");
+        return switch (tag) {
+            Tag.big_int => 1,
+            Tag.symbol => 2,
+            Tag.string => 3,
+            Tag.string_rope => 4,
+            Tag.module => 5,
+            Tag.object => 6,
+            Tag.function_bytecode => 7,
+            Tag.int => 8,
+            Tag.boolean => 9,
+            Tag.null_value => 10,
+            Tag.undefined_value => 11,
+            Tag.uninitialized => 12,
+            Tag.catch_offset => 13,
+            Tag.exception => 14,
+            Tag.short_big_int => 15,
+            else => @compileError("tag is not representable in the NaN-boxed encoding"),
+        };
     }
 
     /// High 16 bits of a boxed encoding for `tag`.
@@ -144,7 +158,7 @@ pub const JSValue = extern struct {
         // i32 load at offset 8 from the 16-byte store only PARTIALLY overlaps and
         // stalls (no clean store-forwarding); a full 8-byte load forwards cleanly.
         // Widening i32+pad → i64 cut the int+float `s=s+i` loop's backend-stall
-        // cycles ~63% (713ms→566ms) with zero test262 change.
+        // cycles ~63% (713ms→566ms) with zero conformance-suite change.
         tag: i64,
     };
 
@@ -349,10 +363,12 @@ pub const JSValue = extern struct {
             const p = NanBox.prefixBits(self.repr.bits);
             return p >= NanBox.refcount_min and p <= NanBox.refcount_max;
         }
-        switch (self.tagOf()) {
-            Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
-            else => return false,
-        }
+        // QuickJS deliberately uses one unsigned range comparison here:
+        // negative refcounted tags [-9..-1] (including the unreachable -5/-4
+        // holes) compare above every non-negative immediate tag.
+        const tag: u64 = @bitCast(self.repr.tag);
+        const first: u64 = @bitCast(@as(i64, Tag.first));
+        return tag >= first;
     }
 
     pub fn asInt32(self: JSValue) ?i32 {
@@ -528,6 +544,16 @@ pub const JSValue = extern struct {
         };
     }
 
+    /// Direct payload access for call sites that have already classified the
+    /// tag as string/symbol/string_rope. Mirrors QJS's JS_VALUE_GET_STRING*
+    /// macros and avoids repeating the tag switch while collecting multiple
+    /// rope operand fields.
+    pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.StringHeader {
+        const tag = self.tagOf();
+        std.debug.assert(tag == Tag.string or tag == Tag.symbol or tag == Tag.string_rope);
+        return ptrFromPayload(gc.StringHeader, self.payloadOf()).?;
+    }
+
     pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader {
         return switch (self.tagOf()) {
             Tag.function_bytecode => ptrFromPayload(gc.GCObjectHeader, self.payloadOf()),
@@ -578,7 +604,9 @@ pub const JSValue = extern struct {
             // deinit-phase skip for {module, object, function_bytecode} — the
             // contiguous tail [deinit_skip_min, refcount_max].
             if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return;
-            if (rt.opcode_profile) |prof| prof.recordValueFree();
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
             if (p == NanBox.prefixOf(Tag.string_rope)) {
                 releaseRopeValue(rt, self);
             } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
@@ -595,7 +623,9 @@ pub const JSValue = extern struct {
                 else => {},
             }
         }
-        if (rt.opcode_profile) |prof| prof.recordValueFree();
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
         switch (self.tagOf()) {
             Tag.string_rope => {
                 releaseRopeValue(rt, self);
@@ -611,7 +641,7 @@ pub const JSValue = extern struct {
     }
 
     /// Refcount release for a `.string_rope` value: decrement the rope's
-    /// refcount and, at 0, iteratively destroy the rope object (never through
+    /// refcount and, at 0, destroy the depth-bounded rope object (never through
     /// the flat-`String` `releaseFromHeader` path, whose `@fieldParentPtr` cast
     /// assumes a `*String` layout).
     fn releaseRopeValue(rt: anytype, self: JSValue) void {
@@ -702,10 +732,7 @@ fn isNegativeZero(value: f64) bool {
 }
 
 fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
-    if (!a.isString() or !b.isString()) return null;
-    const a_string = a.asStringBody() orelse return null;
-    const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string);
+    return string_mod.compareStringValues(a, b, true);
 }
 
 fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {

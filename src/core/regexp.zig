@@ -10,7 +10,7 @@
 //!
 //! The class-range parsing primitives (`readClassRangeAtom` / `ClassRangeAtom` /
 //! `consumeUnicodePropertyEscape` / `isCharacterClassEscape`) are shared with the
-//! RegExp pattern validators that stay in `builtins/regexp.zig`; that module
+//! RegExp pattern validators that stay in `exec/regexp_ops.zig`; that module
 //! re-exports them so the validation cluster keeps a single source of truth here.
 
 const std = @import("std");
@@ -238,7 +238,7 @@ fn isAsciiWordUnit(unit: u16) bool {
 /// Advances `index` past a `\p{...}` / `\P{...}` Unicode-property escape,
 /// returning `true` (an "invalid" signal in the validator convention) when the
 /// escape is malformed or names an unsupported property. Shared with the RegExp
-/// pattern validators in `builtins/regexp.zig`.
+/// pattern validators in `exec/regexp_ops.zig`.
 pub fn consumeUnicodePropertyEscape(pattern: []const u8, index: *usize) bool {
     if (index.* + 3 >= pattern.len or pattern[index.* + 2] != '{') return true;
     var scan = index.* + 3;

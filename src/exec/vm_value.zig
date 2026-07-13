@@ -4,6 +4,7 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
+const object_ops = @import("object_ops.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
@@ -13,7 +14,7 @@ const op = bytecode.opcode.op;
 
 // `ToObject(string)` (the `with`-statement / Object coercion) builds its String
 // wrapper through the String construct record (Phase 6b-3 STEP 4) rather than
-// naming `builtins.string.constructWithPrototype`; the construct branch is pure
+// naming `string_builtin_ops.constructWithPrototype`; the construct branch is pure
 // (reads only `args`/`new_target`).
 const string_construct_ref = core.function.NativeBuiltinRef{
     .domain = .string,
@@ -26,13 +27,6 @@ pub const DropResult = union(enum) {
 };
 
 pub const Step = enum { done, continue_loop };
-
-pub const GlobalFastPathEnv = struct {
-    global: *core.Object,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-};
 
 pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const value = readInt(i32, function.code[frame.pc..][0..4]);
@@ -50,18 +44,6 @@ pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecod
     const value = readInt(i16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
-}
-
-pub fn pushI16OperandVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    fast_paths: GlobalFastPathEnv,
-) !void {
-    _ = ctx;
-    _ = fast_paths;
-    try pushI16Operand(stack, function, frame);
 }
 
 pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -159,7 +141,14 @@ pub noinline fn pushThisVm(
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
-    pushThis(stack, frame.this_value) catch |err| switch (err) {
+    const this_value = object_ops.materializeFrameThisBinding(ctx, global, frame) catch |err| switch (err) {
+        error.TypeError => {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            return error.TypeError;
+        },
+        else => return err,
+    };
+    pushThis(stack, this_value) catch |err| switch (err) {
         error.ReferenceError => {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
@@ -234,7 +223,14 @@ pub noinline fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) 
 pub noinline fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    const is_func = value.isFunctionBytecode() or functionObjectFromValue(value) != null;
+    // Keep the short comparison opcode exactly aligned with `typeOf`: native
+    // c_functions, external host functions, and callable proxies all report
+    // "function", not only bytecode function objects.
+    const is_func = !value_ops.isHTMLDDA(value) and
+        (value.isFunctionBytecode() or
+            functionObjectFromValue(value) != null or
+            callableObjectFromValue(value) != null or
+            proxyTargetIsCallable(value));
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(is_func));
 }
 

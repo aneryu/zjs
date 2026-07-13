@@ -29,7 +29,6 @@ const coercion_ops = @import("coercion_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const slot_ops = @import("slot_ops.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
@@ -46,7 +45,6 @@ const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
 const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
 const arraySpeciesCreate = array_ops.arraySpeciesCreate;
 const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
-const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
 const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
@@ -836,6 +834,11 @@ pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, sk
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
+        if (entry.is_native) {
+            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+            emitted += 1;
+            continue;
+        }
         const filename = ctx.runtime.atoms.name(entry.filename) orelse "<anonymous>";
         const location = entry.location();
         const line_num = if (location.line_num > 0) location.line_num else 1;
@@ -868,6 +871,11 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
         if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
         try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
         try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
+        if (site.callSiteIsNative()) {
+            try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+            emitted += 1;
+            continue;
+        }
 
         var filename_bytes: std.ArrayList(u8) = .empty;
         defer filename_bytes.deinit(ctx.runtime.memory.allocator);
@@ -2295,10 +2303,9 @@ pub fn advanceStringIndexNumber(
         return value_ops.numberToValue(index_number + 1);
     }
     const index: usize = @intFromFloat(index_number);
-    const string_object = string_value.asStringBody() orelse return value_ops.numberToValue(index_number + 1);
-    if (index + 1 >= string_object.len()) return value_ops.numberToValue(index_number + 1);
-    const first = string_object.codeUnitAt(index);
-    const second = string_object.codeUnitAt(index + 1);
+    if (!string_value.isString() or index + 1 >= core.string.stringValueLenUnchecked(string_value)) return value_ops.numberToValue(index_number + 1);
+    const first = core.string.stringValueCodeUnitAtUnchecked(string_value, index);
+    const second = core.string.stringValueCodeUnitAtUnchecked(string_value, index + 1);
     if (isHighSurrogateUnit(first) and isLowSurrogateUnit(second)) {
         return value_ops.numberToValue(index_number + 2);
     }
@@ -2324,9 +2331,8 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     const is_id_start = std.mem.startsWith(u8, source, "(?:[A-Za-z");
     const is_id_continue = std.mem.startsWith(u8, source, "(?:[0-9A-Z_a-z");
     if (!is_id_start and !is_id_continue) return null;
-    const string_object = string_value.asStringBody() orelse return null;
-    if (string_object.len() != 1) return null;
-    const unit = string_object.codeUnitAt(0);
+    if (!string_value.isString() or core.string.stringValueLenUnchecked(string_value) != 1) return null;
+    const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, 0);
     if (unit > 0x7f) return null;
     const byte: u8 = @intCast(unit);
     if (unicode_lib.isAsciiAlphaByte(byte)) return true;
@@ -2399,12 +2405,11 @@ pub fn unicodePropertyOnlyClassCodePointMatches(source: []const u8, code_point: 
 /// Route a reused String method *body* through the record table's
 /// func-object-free arm. `decoded_method_id` is the legacy selector the builtin
 /// string bodies switch on; it is re-encoded to its `PrototypeMethod` record id
-/// so the dispatch lands on `builtins/string.zig` `stringCall`, whose
+/// so the dispatch lands on `string_builtin_ops.zig` `stringCall`, whose
 /// `func_obj == null` arm runs the pure `methodCall` (or, for `charAt`,
 /// `charAtValue`) body directly. `string_value` is the resolved receiver and
 /// `args` are already coerced. This replaces the former direct
-/// `builtins.string.methodCall`/`charAtValue` calls so exec carries no
-/// compile-time String body knowledge.
+/// direct String body calls while the record owner was still outside exec.
 pub fn callStringBody(
     ctx: *core.JSContext,
     string_value: core.JSValue,
@@ -2479,7 +2484,8 @@ pub fn qjsStringPrototypeMethod(
         return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     // Pad / Html / Normalize / LocaleCompare / NumericArgs bodies live in this
-    // file (Phase 6b-3 STEP 3B moved them back from `builtins/string.zig`): they
+    // file (Phase 6b-3 STEP 3B moved them back from the transitional String
+    // owner): they
     // are exec-only, reachable solely through this dispatcher. The RegExp-coupled
     // bodies (search/match/split/replaceAll/matchAll and
     // `qjsStringSearchPositionMethod`, which observes RegExp via
@@ -2695,7 +2701,7 @@ pub fn qjsStringRegExpCreateAndInvoke(
     defer ctx.runtime.atoms.free(regexp_key);
     const constructor = global.getProperty(regexp_key);
     defer constructor.free(ctx.runtime);
-    const rx = try qjsRegExpConstructCall(ctx, output, global, constructor, &.{regexp}, caller_function, caller_frame);
+    const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{regexp}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
     // Mirrors js_string_match (quickjs.c:45881): the tail is
@@ -3711,7 +3717,7 @@ pub fn qjsErrorToStringCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    _ = objectFromValue(this_value) orelse return error.TypeError;
+    _ = objectFromValue(this_value) orelse return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
 
     const name_value = try getValueProperty(ctx, output, global, this_value, core.atom.ids.name, caller_function, caller_frame);
     defer name_value.free(ctx.runtime);
@@ -4093,20 +4099,6 @@ pub const KeywordMatch = struct {
     keyword: []const u8,
 };
 
-pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) void {
-    const count = @min(frame.function.varRefNamesLen(), frame.var_refs.len);
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
-        const name = frame.function.varRefName(idx);
-        if (!atomIdOrNameEql(rt, name, atom_id)) continue;
-        const next = value.dup();
-        const old_value = slot_ops.varRefSlot(frame, idx);
-        slot_ops.storeVarRefSlot(frame, idx, next);
-        old_value.free(rt);
-        return;
-    }
-}
-
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const string_value = value.asStringBody() orelse return error.TypeError;
     try string_value.ensureFlat(rt);
@@ -4294,10 +4286,9 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
-    const string_value = value.asStringBody() orelse return null;
-    if (index >= string_value.len()) return core.JSValue.undefinedValue();
-    try string_value.ensureFlat(rt);
-    const unit = string_value.codeUnitAt(index);
+    if (!value.isString()) return null;
+    if (index >= core.string.stringValueLenUnchecked(value)) return core.JSValue.undefinedValue();
+    const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
     if (unit <= 0x7f) {
         // ASCII fast path: reuse the runtime's cached single-byte
         // strings. Hot loops like `decimalToPercentHexString` in URI sweeps
@@ -4562,10 +4553,11 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // Realm-aware String.prototype method bodies (pad / HTML wrappers / normalize /
 // localeCompare / numeric-arg methods). These are reachable ONLY through the
 // `qjsStringPrototypeMethod` dispatcher above (the `.string` builtin record
-// handler `stringCall` routes every prototype method to it), never from a
-// builtin dispatch table entry, so they are exec-only. They were briefly hosted
-// in `builtins/string.zig` (Phase 6b-2) and were moved back here in Phase 6b-3
-// STEP 3B to keep the dependency edge exec -> builtins out of these bodies. They
+// handler `stringCall` routes the remaining shared prototype methods to it),
+// never from a dedicated builtin table entry, so they are exec-only. They were
+// briefly hosted in the transitional String owner (Phase 6b-2) and were moved
+// back here in Phase 6b-3 STEP 3B to keep the dependency edge exec -> builtins
+// out of these bodies. They
 // reuse the file-local rope/UTF helpers (`toStringForAnnexB`,
 // `appendStringValueUnits`, `appendUtf32FromStringValue`, `appendUtf16CodePoint`,
 // `appendAsciiUnits`) plus the shared `value_ops`/`coercion_ops`/`builtin_glue`

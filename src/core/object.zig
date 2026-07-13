@@ -214,6 +214,7 @@ pub const OrdinaryPayload = struct {
     callsite_line: i32 = 1,
     callsite_column: i32 = 1,
     is_callsite: bool = false,
+    callsite_is_native: bool = false,
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
     realm_global_ptr: ?*Object = null,
@@ -623,9 +624,12 @@ pub const RealmValueSlot = enum(u8) {
     throw_type_error_intrinsic,
     object_prototype,
     array_prototype,
+    array_prototype_values,
     string_prototype,
     number_prototype,
     boolean_prototype,
+    bigint_prototype,
+    symbol_prototype,
     async_function_constructor,
     async_function_prototype,
     generator_prototype,
@@ -643,6 +647,8 @@ pub const RealmValueSlot = enum(u8) {
     promise_constructor,
     callsite_prototype,
     regexp_match_result_template,
+    unmapped_arguments_template,
+    mapped_arguments_template,
     count,
 };
 
@@ -736,8 +742,6 @@ pub const GeneratorPayload = struct {
     // Slot-typed closure captures (`JSVarRef **`, qjs JSObject.u.func.var_refs
     // quickjs.c:17277; VARREFS-SLOT-TYPING-BLUEPRINT phase D).
     captures: []*var_ref_mod.VarRef = &.{},
-    eval_local_names: []atom.Atom = &.{},
-    eval_local_refs: []JSValue = &.{},
     home_object: ?*Object = null,
     realm_global_ptr: ?*Object = null,
     this_value: ?JSValue = null,
@@ -774,8 +778,6 @@ pub const GeneratorPayload = struct {
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.bytecode);
         destroyVarRefCellSlice(rt, &self.captures);
-        destroyAtomSlice(rt, &self.eval_local_names);
-        destroyValueSlice(rt, &self.eval_local_refs);
         destroyOptionalObjectRef(rt, &self.home_object);
         destroyOptionalValue(rt, &self.this_value);
         destroyValueSlice(rt, &self.args);
@@ -876,9 +878,6 @@ pub const FunctionRarePayload = struct {
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
     class_fields_init: ?JSValue = null,
-    eval_local_names: []atom.Atom = &.{},
-    eval_local_refs: []JSValue = &.{},
-    eval_parent_function: ?JSValue = null,
     import_meta: ?JSValue = null,
     lexical_this: ?JSValue = null,
     arrow_constructor_this: ?JSValue = null,
@@ -921,9 +920,6 @@ pub const FunctionRarePayload = struct {
     pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
         destroyOptionalValue(rt, &self.class_fields_init);
-        destroyAtomSlice(rt, &self.eval_local_names);
-        destroyValueSlice(rt, &self.eval_local_refs);
-        destroyOptionalValue(rt, &self.eval_parent_function);
         destroyOptionalValue(rt, &self.import_meta);
         destroyOptionalValue(rt, &self.lexical_this);
         destroyOptionalValue(rt, &self.arrow_constructor_this);
@@ -960,6 +956,15 @@ pub const FunctionRarePayload = struct {
 };
 
 pub const FunctionPayload = struct {
+    pub const CallCache = extern union {
+        native_record: ?*const host_function.InternalRecord,
+        bytecode_view: ?*const anyopaque,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(CallCache) == @sizeOf(?*const anyopaque));
+    }
+
     host_function_kind: i32 = 0,
     native_function_id: i32 = 0,
     // Memoized resolved internal-record handle (divergence B), mirroring qjs
@@ -970,12 +975,30 @@ pub const FunctionPayload = struct {
     // comptime `pub const` in `rt.internal_builtins` (rodata), program-lifetime
     // stable and identical across runtimes — it can never go stale or dangle.
     // Reset for free by `destroy`'s `self.* = .{}`.
-    native_record: ?*const host_function.InternalRecord = null,
+    // qjs overlays bytecode-function and native-function payloads in JSObject.u.
+    // zjs shares FunctionPayload across both classes, so use the same 8-byte
+    // slot for their mutually-exclusive hot call cache: resolved InternalRecord
+    // for native functions, cached Bytecode execution view for bytecode
+    // functions. The view is non-owning and dies with the owning FB.
+    call_cache: CallCache = .{ .native_record = null },
     external_host_function_id: u32 = 0,
     native_dispatch_name: atom.Atom = atom.null_atom,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    bytecode: ?JSValue = null,
+    /// Dense-index cache for the runtime's borrowed-reference-holder registry.
+    /// Stored as a little-endian 24-bit index+1 so zero is the uncached
+    /// sentinel. Three byte fields consume FunctionPayload's existing tail
+    /// padding without making Zig round a `u24` field up to a larger payload.
+    /// Registries beyond 16M entries fall back to the generic lookup without
+    /// truncating the index.
+    borrowed_holder_index_lo: u8 = 0,
+    borrowed_holder_index_mid: u8 = 0,
+    borrowed_holder_index_hi: u8 = 0,
+    /// Owning function-bytecode edge. Undefined is the construction-time empty
+    /// value; a live bytecode-function object carries the tagged pointer
+    /// directly, matching qjs `p->u.func.function_bytecode` without Zig's 16B
+    /// optional wrapper or a second memo pointer.
+    bytecode: JSValue = JSValue.undefinedValue(),
     // Slot-typed closure captures — qjs `JSVarRef **var_refs`
     // (JSObject.u.func.var_refs, quickjs.c:17277). Every element is a live
     // cell by construction (js_closure2, 17297-17331), so the former
@@ -986,8 +1009,17 @@ pub const FunctionPayload = struct {
     realm_global_ptr: ?*Object = null,
     rare: ?*FunctionRarePayload = null,
 
+    pub inline fn functionBytecodePtr(self: *const FunctionPayload) *const FunctionBytecode {
+        const header = self.bytecode.objectHeader() orelse unreachable;
+        std.debug.assert(header.meta().kind == .function_bytecode);
+        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
+        return @fieldParentPtr("header", aligned);
+    }
+
     pub fn destroy(self: *FunctionPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.bytecode);
+        const bytecode_value = self.bytecode;
+        self.bytecode = JSValue.undefinedValue();
+        bytecode_value.free(rt);
         const native_dispatch_name = self.native_dispatch_name;
         self.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
@@ -1193,7 +1225,7 @@ pub const BindingExistence = enum { absent, present, uninitialized };
 
 /// The single 8-byte slot qjs's JSObject union `u` occupies for either a class
 /// payload pointer OR the fast-array element base pointer. An object is EITHER a
-/// fast array (uses `array_values`, gated by `flags.is_array`) OR a class-payload
+/// dense-element object (uses `array_values`, gated by `flags.fast_array`) OR a class-payload
 /// object (uses `payload`, gated by `class_payload_kind`/class_id) — never both,
 /// so the two pointers are physically mutually exclusive. Untagged (`extern
 /// union`): the active arm is chosen by the external discriminant, exactly as qjs
@@ -1201,7 +1233,8 @@ pub const BindingExistence = enum { absent, present, uninitialized };
 pub const ObjectStorage = extern union {
     /// `class_payload` for non-array classes (Map/Proxy/TypedArray/function/...).
     payload: class.Payload,
-    /// Dense element base pointer for fast arrays (qjs `u.array.u.values`).
+    /// Dense element base pointer for arrays and unmapped arguments objects
+    /// (qjs `u.array.u.values`).
     array_values: [*]JSValue,
 };
 
@@ -1235,7 +1268,9 @@ pub const Object = struct {
     /// with the slots `[array_count, array_length)` being HOLES (resolve up the
     /// prototype chain; never own; not enumerated). Semantically mirrors qjs
     /// `p->prop[0].u.value` (set_array_length / add_fast_array_element). Invariant:
-    /// `array_length >= array_count` for arrays. Unused for non-arrays.
+    /// `array_length >= array_count` for arrays. Unmapped arguments keep it
+    /// equal to `array_count` solely as dense-storage metadata; their visible
+    /// `length` remains an ordinary own property in the shared arguments shape.
     array_length: u32 = 0,
     class_id: class.ClassId,
     flags: ObjectFlags = .{},
@@ -1249,12 +1284,37 @@ pub const Object = struct {
     }
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
-        return createInternal(rt, class_id, prototype, 0);
+        return createInternal(rt, class_id, prototype, 0, null);
     }
 
     pub fn createWithOwnPropertyCapacity(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, capacity: usize) !*Object {
-        return createInternal(rt, class_id, prototype, capacity);
+        return createInternal(rt, class_id, prototype, capacity, null);
     }
+
+    /// Create a fresh object with the same class, prototype, shared shape, and
+    /// own-property slots as a realm-pinned template. This is the zjs analogue
+    /// of qjs `JS_NewObjectFromShape`: the caller has already paid the property
+    /// transition cost once while building `template`; each later object only
+    /// retains that final shape and duplicates its value slots.
+    ///
+    /// Object state outside the fixed property layout (array elements, class
+    /// payload contents, extensibility, and rare flags) is intentionally not
+    /// cloned. Templates must therefore be freshly-built ordinary class
+    /// instances whose only reusable state is their own-property layout.
+    pub fn createFromPropertyTemplate(rt: *JSRuntime, template: *const Object) !*Object {
+        std.debug.assert(!template.flags.is_array);
+        std.debug.assert(!template.flags.is_proxy);
+        std.debug.assert(!template.flags.is_borrowed_reference_holder);
+        return createInternal(rt, template.class_id, template.shape_ref.proto, 0, .{
+            .shape_ref = template.shape_ref,
+            .entries = template.propertyEntries(),
+        });
+    }
+
+    const PropertyTemplate = struct {
+        shape_ref: *shape.Shape,
+        entries: []const property.Entry,
+    };
 
     fn markObjectAsPrototype(rt: *JSRuntime, prototype: ?*Object) void {
         if (prototype) |proto| {
@@ -1265,7 +1325,13 @@ pub const Object = struct {
         }
     }
 
-    fn createInternal(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, own_property_capacity: usize) !*Object {
+    fn createInternal(
+        rt: *JSRuntime,
+        class_id: class.ClassId,
+        prototype: ?*Object,
+        own_property_capacity: usize,
+        property_template: ?PropertyTemplate,
+    ) !*Object {
         // qjs JS_NewObjectFromShape reads class metadata in place from
         // `ctx->rt->class_array[class_id]` — it never copies the whole JSClass
         // onto the stack. Mirror that with a pointer-only view so the plain
@@ -1275,8 +1341,8 @@ pub const Object = struct {
         const class_record = rt.classes.recordPtr(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         const self = if (inline_layout) |layout| blk: {
-            const bytes = try rt.allocRuntimeAlignedBytes(layout.total_size, layout.allocation_alignment);
-            break :blk @as(*Object, @ptrCast(@alignCast(bytes.ptr)));
+            const bytes = try rt.allocRuntimeAlignedBytes(layout.allocation_size, layout.allocation_alignment);
+            break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
         } else try rt.createRuntime(Object);
         var initialized = false;
         errdefer {
@@ -1293,8 +1359,16 @@ pub const Object = struct {
         // createObjectRootWithPropertyCapacity → ~1:1 shapes + per-object
         // appendProperty/rehashShape). The property VALUE array is still
         // pre-reserved below; only the SHAPE is shared.
-        const property_capacity = shape.propertyCapacityForNeeded(own_property_capacity);
-        const shape_ref = if (property_capacity == 0)
+        const property_capacity: usize = if (property_template) |template|
+            template.shape_ref.prop_size
+        else
+            shape.propertyCapacityForNeeded(own_property_capacity);
+        const shape_ref = if (property_template) |template| blk: {
+            std.debug.assert(template.shape_ref.proto == prototype);
+            std.debug.assert(template.entries.len == template.shape_ref.prop_count);
+            template.shape_ref.retain();
+            break :blk template.shape_ref;
+        } else if (property_capacity == 0)
             try rt.shapes.createObjectRoot(prototype)
         else
             try rt.shapes.createObjectRootWithPropertyCapacity(prototype, property_capacity);
@@ -1359,6 +1433,14 @@ pub const Object = struct {
             .shape_ref = shape_ref,
             .prop_values = property_storage.ptr,
         };
+        if (property_template) |template| {
+            const props = template.shape_ref.props();
+            for (template.entries, 0..) |entry, index| {
+                const entry_flags = property.Flags.fromBits(props[index].flags);
+                self.prop_values[index] = .{ .slot = entry.slot.dup(entry_flags) };
+            }
+        }
+        if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
         property_storage_owned = false;
         reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
@@ -1371,7 +1453,7 @@ pub const Object = struct {
         // Reuse the inline-layout size computed at the top of createInternal
         // instead of recomputing it inside registerObject (mirror of the free
         // path's unregisterObjectWithBytes). Same value allocationSize derives.
-        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         try rt.registerObjectWithBytes(self, alloc_size);
         initialized = false;
         return self;
@@ -1513,8 +1595,10 @@ pub const Object = struct {
     }
 
     const InlineClassPayloadLayout = struct {
+        object_offset: usize,
         payload_offset: usize,
-        total_size: usize,
+        object_size: usize,
+        allocation_size: usize,
         allocation_alignment: std.mem.Alignment,
     };
 
@@ -1524,13 +1608,24 @@ pub const Object = struct {
         const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
+        const object_offset = std.mem.alignForward(usize, 8, allocation_alignment.toByteUnits());
         const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), payload_align.toByteUnits());
-        const total_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        const object_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        const allocation_size = std.math.add(usize, object_offset, object_size) catch return null;
         return .{
+            .object_offset = object_offset,
             .payload_offset = payload_offset,
-            .total_size = total_size,
+            .object_size = object_size,
+            .allocation_size = allocation_size,
             .allocation_alignment = allocation_alignment,
         };
+    }
+
+    fn initInlineClassPayloadGcPrefix(self: *Object) void {
+        const meta: [*]u8 = @ptrFromInt(@intFromPtr(self) - 8);
+        @memset(meta[0..8], 0);
+        meta[2] = Object.gc_kind_tag;
+        meta[4] = 1;
     }
 
     fn inlineClassPayloadPtr(self: *Object, layout: InlineClassPayloadLayout) *anyopaque {
@@ -1540,15 +1635,15 @@ pub const Object = struct {
 
     fn freeObjectAllocation(rt: *JSRuntime, self: *Object, inline_layout: ?InlineClassPayloadLayout) void {
         if (inline_layout) |layout| {
-            const bytes: [*]u8 = @ptrCast(self);
-            rt.memory.freeAlignedBytes(bytes[0..layout.total_size], layout.allocation_alignment);
+            const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
+            rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
             return;
         }
         rt.memory.destroy(Object, self);
     }
 
     pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
-        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.total_size;
+        if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.object_size;
         return @sizeOf(Object);
     }
 
@@ -1702,14 +1797,15 @@ pub const Object = struct {
     }
 
     pub fn externalClassPayload(self: *Object) ?*anyopaque {
-        // A fast array's `u` holds `array_values`, not a payload; only a
-        // non-array object with kind==.none carries an external payload pointer.
-        if (self.flags.is_array or self.class_payload_kind != .none) return null;
+        // A dense-element object's `u` holds `array_values`, not a payload;
+        // only an object with kind==.none and no dense storage can carry an
+        // external payload pointer.
+        if (self.flags.is_array or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.class_payload_kind != .none) return null;
         return self.u.payload;
     }
 
     pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
-        if (self.flags.is_array or self.class_payload_kind != .none) return null;
+        if (self.flags.is_array or self.flags.fast_array or self.class_id == class.ids.mapped_arguments or self.class_payload_kind != .none) return null;
         return self.u.payload;
     }
 
@@ -1831,10 +1927,10 @@ pub const Object = struct {
         const class_record = rt.classes.recordPtr(self.class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
         // Size for GC free-accounting is the same value `allocationSize` derives
-        // from `inline_layout` (total_size for inline-payload classes, else
+        // from `inline_layout` (object_size for inline-payload classes, else
         // @sizeOf(Object)) — reuse the layout we just computed instead of a second
         // record-table lookup + inline-layout recompute inside unregisterObject.
-        const alloc_size = if (inline_layout) |layout| layout.total_size else @sizeOf(Object);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         rt.unregisterObjectWithBytes(self, alloc_size);
         // qjs free_object keeps no borrowed-ref / std-file side tables, so the
         // plain-object hot free path must not call into either scan. Hoist each
@@ -2062,9 +2158,11 @@ pub const Object = struct {
             const current = rt.borrowed_reference_holders[read_index];
             if (current.header.meta().rc != 0) {
                 if (write_index != read_index) rt.borrowed_reference_holders[write_index] = current;
+                current.setBorrowedReferenceHolderIndex(write_index);
                 write_index += 1;
                 continue;
             }
+            current.setBorrowedReferenceHolderIndex(null);
             current.flags.is_borrowed_reference_holder = false;
         }
         rt.borrowed_reference_holders = rt.borrowed_reference_holders.ptr[0..write_index];
@@ -2072,8 +2170,14 @@ pub const Object = struct {
 
     fn runtimeBorrowedReferenceHolderIndex(rt: *JSRuntime, object: *Object) ?usize {
         if (!object.flags.is_borrowed_reference_holder) return null;
+        if (object.borrowedReferenceHolderIndex()) |cached_index| {
+            if (cached_index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[cached_index] == object) return cached_index;
+        }
         for (rt.borrowed_reference_holders, 0..) |candidate, index| {
-            if (candidate == object) return index;
+            if (candidate == object) {
+                object.setBorrowedReferenceHolderIndex(index);
+                return index;
+            }
         }
         return null;
     }
@@ -3425,15 +3529,27 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn argumentsVarRefsSlot(self: *Object) *[]JSValue {
-        if (self.argumentsPayload()) |payload| return &payload.var_refs;
-        std.debug.assert(self.class_id == class.ids.arguments or self.class_id == class.ids.mapped_arguments);
-        unreachable;
+    pub fn adoptMappedArgumentsVarRefsAssumingEmpty(self: *Object, rt: *JSRuntime, refs: []JSValue) void {
+        std.debug.assert(self.class_id == class.ids.mapped_arguments);
+        std.debug.assert(self.class_payload_kind == .none);
+        std.debug.assert(self.array_count == 0 and self.array_capacity == 0);
+        if (refs.len != 0) self.u.array_values = refs.ptr;
+        self.array_count = @intCast(refs.len);
+        self.array_capacity = @intCast(refs.len);
+        self.array_length = @intCast(refs.len);
+        if (refs.len != 0) self.markIndexedProperties(rt);
     }
 
     pub fn argumentsVarRefs(self: *const Object) []JSValue {
-        if (self.argumentsPayloadConst()) |payload| return payload.var_refs;
-        return &.{};
+        if (self.class_id != class.ids.mapped_arguments or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
+    }
+
+    pub fn argumentsVarRefsMut(self: *Object) []JSValue {
+        if (self.class_id != class.ids.mapped_arguments or self.array_count == 0) return &.{};
+        std.debug.assert(self.array_capacity >= self.array_count);
+        return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     pub fn objectDataSlot(self: *Object) *?JSValue {
@@ -3493,30 +3609,29 @@ pub const Object = struct {
     }
 
     pub fn arrayElementStorageMode(self: *const Object) ArrayStorageMode {
-        return if (self.flags.is_array and self.flags.fast_array) .dense else .sparse;
+        return if (self.flags.fast_array) .dense else .sparse;
     }
 
     pub fn arrayElements(self: *const Object) []JSValue {
-        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        if (!self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
         std.debug.assert(self.array_length >= self.array_count);
         return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn arrayElementsMut(self: *Object) []JSValue {
-        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        if (!self.flags.fast_array or self.array_count == 0) return &.{};
         std.debug.assert(self.array_capacity >= self.array_count);
         std.debug.assert(self.array_length >= self.array_count);
         return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
     fn allocatedArrayElements(self: *Object) []JSValue {
-        if (!self.flags.is_array or self.array_capacity == 0) return &.{};
+        if (self.array_capacity == 0) return &.{};
         return self.u.array_values[0..@as(usize, @intCast(self.array_capacity))];
     }
 
     pub fn arrayElementsCapacity(self: *const Object) usize {
-        if (!self.flags.is_array) return 0;
         return @intCast(self.array_capacity);
     }
 
@@ -3525,7 +3640,7 @@ pub const Object = struct {
     }
 
     pub fn isFastArrayIndexInBounds(self: *const Object, index: u32) bool {
-        return self.isFastArray() and index < self.array_count;
+        return self.flags.fast_array and index < self.array_count;
     }
 
     pub fn fastArrayElementAt(self: *const Object, index: u32) JSValue {
@@ -3562,6 +3677,24 @@ pub const Object = struct {
         // Fully-dense adoption: the logical length equals the dense extent.
         self.array_length = @intCast(elements.len);
         self.flags.fast_array = true;
+    }
+
+    /// Adopt a fully initialized qjs-style dense element buffer for an
+    /// unmapped arguments object. The visible `length` property lives in the
+    /// prepared shape; `array_length` is only the dense-extent invariant used
+    /// by the shared storage machinery.
+    pub fn adoptDenseUnmappedArgumentsElementsAssumingEmpty(self: *Object, rt: *JSRuntime, elements: []JSValue) void {
+        std.debug.assert(self.class_id == class.ids.arguments);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.class_payload_kind == .none);
+        std.debug.assert(self.array_count == 0);
+        std.debug.assert(self.array_capacity == 0);
+        if (elements.len != 0) self.u.array_values = elements.ptr;
+        self.array_count = @intCast(elements.len);
+        self.array_capacity = @intCast(elements.len);
+        self.array_length = @intCast(elements.len);
+        self.flags.fast_array = true;
+        if (elements.len != 0) self.markIndexedProperties(rt);
     }
 
     pub fn clearFastArray(self: *Object) void {
@@ -3618,7 +3751,16 @@ pub const Object = struct {
     }
 
     fn destroyArrayElements(self: *Object, rt: *JSRuntime) void {
-        if (!self.flags.is_array) return;
+        if (self.class_id == class.ids.mapped_arguments) {
+            for (self.argumentsVarRefs()) |stored| stored.free(rt);
+            const allocated = self.allocatedArrayElements();
+            self.array_count = 0;
+            self.array_capacity = 0;
+            self.array_length = 0;
+            if (allocated.len != 0) rt.memory.free(JSValue, allocated);
+            return;
+        }
+        if (!self.flags.fast_array and self.array_capacity == 0) return;
         if (self.flags.fast_array) {
             var index: usize = 0;
             const count: usize = @intCast(self.array_count);
@@ -3635,7 +3777,6 @@ pub const Object = struct {
     }
 
     fn freeArrayElementBufferAfterMove(self: *Object, rt: *JSRuntime) void {
-        std.debug.assert(self.flags.is_array);
         std.debug.assert(!self.flags.fast_array or self.array_count == 0);
         const allocated = self.allocatedArrayElements();
         self.array_capacity = 0;
@@ -3704,7 +3845,7 @@ pub const Object = struct {
     }
 
     pub fn fastArrayCapacity(self: *const Object) u32 {
-        return if (self.flags.is_array) self.array_capacity else 0;
+        return self.array_capacity;
     }
 
     pub fn fastArrayValues(self: *const Object) []JSValue {
@@ -3716,7 +3857,7 @@ pub const Object = struct {
     }
 
     pub fn arrayElementsForCount(self: *const Object) []const JSValue {
-        if (!self.flags.is_array or !self.flags.fast_array or self.array_count == 0) return &.{};
+        if (!self.flags.fast_array or self.array_count == 0) return &.{};
         return self.u.array_values[0..@as(usize, @intCast(self.array_count))];
     }
 
@@ -4098,19 +4239,30 @@ pub const Object = struct {
         return 0;
     }
 
+    pub fn setNativeBuiltinIdAndRecord(self: *Object, rt: *JSRuntime, native_id: i32) void {
+        self.nativeFunctionIdSlot().* = native_id;
+        const record = if (function.decodeNativeBuiltinId(native_id)) |native_ref|
+            rt.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)
+        else
+            null;
+        self.nativeRecordSlot().* = record;
+    }
+
     // Divergence B: on-object memo of the resolved internal record. `Slot`
     // returns a mutable pointer to the payload field so the hot call site can
     // lazily populate it after its first DECODE+LOOKUP; the read-only accessor
     // returns null when there is no function payload (matching nativeFunctionId's
     // 0 default) so a non-native callable simply misses the memo.
     pub fn nativeRecordSlot(self: *Object) *?*const host_function.InternalRecord {
-        if (self.functionPayload()) |payload| return &payload.native_record;
+        std.debug.assert(self.class_id == class.ids.c_function);
+        if (self.functionPayload()) |payload| return &payload.call_cache.native_record;
         std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn nativeRecord(self: *const Object) ?*const host_function.InternalRecord {
-        if (self.functionPayloadConst()) |payload| return payload.native_record;
+        if (self.class_id != class.ids.c_function) return null;
+        if (self.functionPayloadConst()) |payload| return payload.call_cache.native_record;
         return null;
     }
 
@@ -4292,11 +4444,10 @@ pub const Object = struct {
         return true;
     }
 
-    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addThrowTypeErrorIntrinsicFunction(self: *Object, rt: *JSRuntime) !void {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.throw_type_error_intrinsic = true;
         payload.internal_callable_tag = .throw_type_error_intrinsic;
-        return true;
     }
 
     pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) bool {
@@ -4390,15 +4541,50 @@ pub const Object = struct {
         return class.invalid_class_id;
     }
 
-    pub fn functionBytecodeSlot(self: *Object) *?JSValue {
-        if (self.functionPayload()) |payload| return &payload.bytecode;
-        if (self.generatorPayload()) |payload| return &payload.bytecode;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
+    pub fn functionBytecodeSlot(self: *Object) *JSValue {
+        if (self.functionPayload()) |payload| {
+            // The writable slot is a zjs construction/embedding surface; qjs
+            // treats u.func.function_bytecode as immutable after closure
+            // creation. Invalidate the non-owning execution-view memo before a
+            // caller can replace and release the old FB.
+            if (self.class_id == class.ids.bytecode_function) {
+                payload.call_cache.bytecode_view = null;
+            }
+            return &payload.bytecode;
+        }
+        std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
+    pub fn generatorBytecodeSlot(self: *Object) *?JSValue {
+        if (self.generatorPayload()) |payload| return &payload.bytecode;
+        std.debug.assert(self.class_payload_kind == .generator);
+        unreachable;
+    }
+
+    pub fn setFunctionBytecodeValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
+        errdefer next_value.free(rt);
+        if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
+        const slot = self.functionBytecodeSlot();
+        const old_value = slot.*;
+        slot.* = next_value;
+        old_value.free(rt);
+    }
+
+    /// Direct payload for a proven bytecode-function object. QJS keeps the
+    /// function bytecode, closure var_refs and realm in the same `u.func`
+    /// union; exposing that already-proven payload lets call entry load it once
+    /// and reuse all three fields.
+    pub inline fn bytecodeFunctionPayloadPtr(self: *Object) *FunctionPayload {
+        std.debug.assert(self.class_id == class.ids.bytecode_function);
+        std.debug.assert(self.class_payload_kind == .function);
+        return @ptrCast(@alignCast(self.u.payload.?));
+    }
+
     pub fn functionBytecode(self: *const Object) ?JSValue {
-        if (self.functionPayloadConst()) |payload| return payload.bytecode;
+        if (self.functionPayloadConst()) |payload| {
+            return if (payload.bytecode.isUndefined()) null else payload.bytecode;
+        }
         if (self.generatorPayloadConst()) |payload| return payload.bytecode;
         return null;
     }
@@ -4409,15 +4595,6 @@ pub const Object = struct {
 
     pub fn functionClassFieldsInit(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.class_fields_init;
-        return null;
-    }
-
-    pub fn functionEvalParentFunctionSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).eval_parent_function;
-    }
-
-    pub fn functionEvalParentFunction(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_parent_function;
         return null;
     }
 
@@ -4712,32 +4889,6 @@ pub const Object = struct {
         slot.* = next_cells;
     }
 
-    pub fn functionEvalLocalNamesSlot(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
-        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_names;
-        if (self.generatorPayload()) |payload| return &payload.eval_local_names;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
-        unreachable;
-    }
-
-    pub fn functionEvalLocalNames(self: *const Object) []atom.Atom {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_names;
-        if (self.generatorPayloadConst()) |payload| return payload.eval_local_names;
-        return &.{};
-    }
-
-    pub fn functionEvalLocalRefsSlot(self: *Object, rt: *JSRuntime) !*[]JSValue {
-        if (self.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).eval_local_refs;
-        if (self.generatorPayload()) |payload| return &payload.eval_local_refs;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
-        unreachable;
-    }
-
-    pub fn functionEvalLocalRefs(self: *const Object) []JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.eval_local_refs;
-        if (self.generatorPayloadConst()) |payload| return payload.eval_local_refs;
-        return &.{};
-    }
-
     pub fn functionLexicalThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
         return &(try self.ensureFunctionRarePayload(rt)).lexical_this;
     }
@@ -4818,6 +4969,7 @@ pub const Object = struct {
         function_name: JSValue,
         line: i32,
         column: i32,
+        is_native: bool,
     ) !void {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_file = file.dup();
@@ -4831,6 +4983,7 @@ pub const Object = struct {
         payload.callsite_line = line;
         payload.callsite_column = column;
         payload.is_callsite = true;
+        payload.callsite_is_native = is_native;
         if (old_file) |stored| stored.free(rt);
         if (old_function) |stored| stored.free(rt);
     }
@@ -4858,6 +5011,11 @@ pub const Object = struct {
     pub fn callSiteColumn(self: *const Object) i32 {
         if (self.ordinaryPayloadConst()) |payload| return payload.callsite_column;
         return 1;
+    }
+
+    pub fn callSiteIsNative(self: *const Object) bool {
+        if (self.ordinaryPayloadConst()) |payload| return payload.is_callsite and payload.callsite_is_native;
+        return false;
     }
 
     pub fn setErrorStack(self: *Object, rt: *JSRuntime, stack_value: JSValue) !void {
@@ -5153,6 +5311,34 @@ pub const Object = struct {
             slot.* = realm_global;
             if (realm_global == null) self.pruneBorrowedReferenceHolderIfEmpty(rt);
         }
+    }
+
+    pub fn borrowedReferenceHolderIndex(self: *const Object) ?usize {
+        const payload = self.functionPayloadConst() orelse return null;
+        const encoded = @as(u32, payload.borrowed_holder_index_lo) |
+            (@as(u32, payload.borrowed_holder_index_mid) << 8) |
+            (@as(u32, payload.borrowed_holder_index_hi) << 16);
+        return if (encoded == 0) null else @as(usize, encoded - 1);
+    }
+
+    pub fn setBorrowedReferenceHolderIndex(self: *Object, index: ?usize) void {
+        const payload = self.functionPayload() orelse return;
+        const holder_index = index orelse {
+            payload.borrowed_holder_index_lo = 0;
+            payload.borrowed_holder_index_mid = 0;
+            payload.borrowed_holder_index_hi = 0;
+            return;
+        };
+        if (holder_index >= std.math.maxInt(u24)) {
+            payload.borrowed_holder_index_lo = 0;
+            payload.borrowed_holder_index_mid = 0;
+            payload.borrowed_holder_index_hi = 0;
+            return;
+        }
+        const encoded: u32 = @intCast(holder_index + 1);
+        payload.borrowed_holder_index_lo = @truncate(encoded);
+        payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
+        payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
     }
 
     /// Realm-global pointer for a PROVEN bytecode-function object (the caller
@@ -6073,10 +6259,12 @@ pub const Object = struct {
         }
 
         // Pass B: now every garbage object's resources are gone AND every shape
-        // (whose teardown re-releases protos) has run, so no deferred struct can
-        // still be dereferenced. Free the parked struct memory (qjs gc_free_cycles
-        // second loop, quickjs.c:6797).
-        drainCycleDeferredFrees(rt);
+        // (whose teardown re-releases protos) has run. If class-payload
+        // finalizers were deferred, keep the resource-stripped object husks until
+        // those finalizers drain: payloads may still hold JSValues into the
+        // condemned cycle and must be able to release them without dereferencing
+        // freed object memory.
+        if (!rt.hasPendingDeferredClassPayloadFinalizers()) drainCycleDeferredFrees(rt);
 
         return freed;
     }
@@ -6084,7 +6272,7 @@ pub const Object = struct {
     /// Free the struct memory of every cycle-deferred GC object (objects /
     /// var_refs / function-bytecodes whose resources were torn down during the
     /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
-    fn drainCycleDeferredFrees(rt: *JSRuntime) void {
+    pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         for (rt.gc.cycle_deferred_frees.items) |h| {
             switch (h.meta().kind) {
                 .object => {
@@ -6460,7 +6648,7 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.data);
         }
         if (self.functionPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.bytecode);
+            try Helper.callVisitValue(visitor, &payload.bytecode);
             // Slot-typed captures: visit each cell through its JSValue view —
             // same header edge as qjs `mark_func(rt, &var_refs[i]->header)`
             // (js_bytecode_function_mark, quickjs.c:16211) and bit-identical
@@ -6473,8 +6661,6 @@ pub const Object = struct {
             if (payload.rare) |rare| {
                 try Helper.traceOptValue(visitor, &rare.source);
                 try Helper.traceOptValue(visitor, &rare.class_fields_init);
-                for (rare.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
-                try Helper.traceOptValue(visitor, &rare.eval_parent_function);
                 try Helper.traceOptValue(visitor, &rare.import_meta);
                 try Helper.traceOptValue(visitor, &rare.lexical_this);
                 try Helper.traceOptValue(visitor, &rare.arrow_constructor_this);
@@ -6563,7 +6749,6 @@ pub const Object = struct {
                 var cell_value = cell.valueRef();
                 try Helper.callVisitValue(visitor, &cell_value);
             }
-            for (payload.eval_local_refs) |*stored| try Helper.callVisitValue(visitor, stored);
             try Helper.traceOptValue(visitor, &payload.this_value);
             for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
             for (payload.stack) |*stored| try Helper.callVisitValue(visitor, stored);
@@ -6589,8 +6774,8 @@ pub const Object = struct {
         if (self.varRefPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.value);
         }
-        if (self.argumentsPayload()) |payload| {
-            for (payload.var_refs) |*stored| try Helper.callVisitValue(visitor, stored);
+        if (self.class_id == class.ids.mapped_arguments) {
+            for (self.argumentsVarRefsMut()) |*stored| try Helper.callVisitValue(visitor, stored);
         }
         if (self.proxyPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.target);
@@ -7033,8 +7218,6 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.functionBytecode(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
         for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-        for (self.functionEvalLocalRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionEvalParentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionLexicalThis(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionArrowConstructorThis(), function_bytecode);
@@ -7180,6 +7363,16 @@ pub const Object = struct {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
             if (self.regexpLastIndex()) |stored| return descriptor.Descriptor.data(stored.dup(), self.regexpLastIndexWritable(), false, false);
         }
+        if (self.mappedArgumentsBindingIndexFromAtom(rt, atom_id)) |mapped_index| {
+            const mapped_value = self.mappedArgumentsBindingValue(mapped_index) orelse return null;
+            if (self.findProperty(atom_id)) |property_index| {
+                const flags = self.propFlagsAt(property_index);
+                if (!flags.deleted and flags.kind == .data) {
+                    return descriptor.Descriptor.data(mapped_value, flags.writable, flags.enumerable, flags.configurable);
+                }
+            }
+            return descriptor.Descriptor.data(mapped_value, true, true, true);
+        }
         if (self.findProperty(atom_id)) |index| {
             const entry = self.prop_values[index];
             const entry_flags = self.propFlagsAt(index);
@@ -7265,6 +7458,7 @@ pub const Object = struct {
         if (self.findProperty(atom_id)) |index| {
             return if (self.propFlagsAt(index).enumerable) .enumerable else .not_enumerable;
         }
+        if (self.mappedArgumentsBindingIndexFromAtom(rt, atom_id) != null) return .enumerable;
         // Dense array elements are always enumerable (data, w/e/c).
         if (self.denseArrayElement(atom_id) != null) return .enumerable;
         // Key vanished between key enumeration and now: QuickJS's
@@ -7274,7 +7468,9 @@ pub const Object = struct {
 
     pub fn hasOwnProperty(self: *const Object, atom_id: atom.Atom) bool {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
-        return self.findProperty(atom_id) != null or self.denseArrayElement(atom_id) != null;
+        return self.findProperty(atom_id) != null or
+            self.denseArrayElement(atom_id) != null or
+            self.mappedArgumentsTaggedBindingIndex(atom_id) != null;
     }
 
     /// Complete existence-only own-property probe -- the desc==NULL mode of
@@ -7324,6 +7520,7 @@ pub const Object = struct {
             return true;
         }
         if (self.denseArrayElement(atom_id) != null) return true;
+        if (self.mappedArgumentsBindingIndexFromAtom(rt, atom_id) != null) return true;
         return false;
     }
 
@@ -7348,6 +7545,7 @@ pub const Object = struct {
         // qjs's fast_array (the GPN walk includes them unconditionally
         // under ENUM_ONLY).
         if (self.denseArrayElement(atom_id) != null) return true;
+        if (self.mappedArgumentsTaggedBindingIndex(atom_id) != null) return true;
         return null;
     }
 
@@ -7362,6 +7560,9 @@ pub const Object = struct {
         profile.recordPropLookup(self.flags.is_global);
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
         if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
+        if (self.mappedArgumentsTaggedBindingIndex(atom_id)) |mapped_index| {
+            if (self.mappedArgumentsBindingValue(mapped_index)) |mapped| return mapped;
+        }
         if (self.findProperty(atom_id)) |index| {
             const entry = self.prop_values[index];
             return switch (self.propKindAt(index)) {
@@ -7646,7 +7847,7 @@ pub const Object = struct {
         if (native_builtin_id != 0) {
             if (function_value.refHeader()) |header| {
                 const obj: *Object = @fieldParentPtr("header", header);
-                obj.nativeFunctionIdSlot().* = native_builtin_id;
+                obj.setNativeBuiltinIdAndRecord(info.rt, native_builtin_id);
             }
         }
         if (apply_markers) {
@@ -7911,7 +8112,7 @@ pub const Object = struct {
         defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
             const getter_object: *Object = @fieldParentPtr("header", getter_header);
-            getter_object.nativeFunctionIdSlot().* = function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get));
+            getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
         const user_agent = rt.internAtom("userAgent") catch return null;
         defer rt.atoms.free(user_agent);
@@ -8737,7 +8938,6 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayValues(self: *Object, rt: *JSRuntime, start: u32, values: []const JSValue) !bool {
-        if (values.len == 0) return true;
         // Dense append gate keys off the dense extent (array_count), not the
         // logical length: a holey array appends at count. See add_fast_array_element.
         if (!self.flags.is_array or start != self.array_count or !self.flags.length_writable) return false;
@@ -8750,6 +8950,12 @@ pub const Object = struct {
         const indexed_proto = if (self.getPrototype()) |proto| blk: {
             break :blk if (arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) null else proto;
         } else null;
+        // Apply the eligibility checks above even for an empty append. qjs
+        // `js_array_push` admits `push()` to its fast case only
+        // when the receiver is the same extendable, fully-dense Array shape
+        // used for non-empty pushes; otherwise it performs the required
+        // ordinary length Set through the generic path.
+        if (values.len == 0) return true;
         var guard_index = start;
         while (guard_index < limit) : (guard_index += 1) {
             const atom_id = atom.atomFromUInt32(guard_index);
@@ -9356,6 +9562,11 @@ pub const Object = struct {
             return self.deleteOrdinaryPropertyAt(rt, atom_id, index);
         }
 
+        if (self.mappedArgumentsBindingIndexFromAtom(rt, atom_id)) |mapped_index| {
+            self.deleteMappedArgumentsBinding(rt, mapped_index);
+            return true;
+        }
+
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
@@ -9396,7 +9607,7 @@ pub const Object = struct {
         var keys: []atom.Atom = &.{};
         errdefer freeKeys(rt, keys);
 
-        const has_property_index_keys = hasPropertyIndexKeys(self, rt);
+        const has_property_index_keys = hasPropertyIndexKeys(self, rt) or self.class_id == class.ids.mapped_arguments;
         if (!has_property_index_keys) {
             var dense_index: u32 = 0;
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
@@ -9405,6 +9616,15 @@ pub const Object = struct {
         } else {
             var index_keys = std.ArrayList(IndexKey).empty;
             defer index_keys.deinit(rt.memory.allocator);
+            if (self.class_id == class.ids.mapped_arguments) {
+                for (self.argumentsVarRefs(), 0..) |mapped, mapped_index| {
+                    if (mapped.isUninitialized()) continue;
+                    try index_keys.append(rt.memory.allocator, .{
+                        .index = @intCast(mapped_index),
+                        .atom_id = atom.atomFromUInt32(@intCast(mapped_index)),
+                    });
+                }
+            }
             var dense_index: u32 = 0;
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
                 try index_keys.append(rt.memory.allocator, .{
@@ -9460,6 +9680,14 @@ pub const Object = struct {
     }
 
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
+        // qjs materializes fast elements before changing integrity-level
+        // descriptor flags. This is required for both Arrays and unmapped
+        // arguments: dense slots implicitly have writable/enumerable/
+        // configurable=true and need real shape entries before sealing.
+        if (self.flags.fast_array and self.array_count != 0) {
+            try self.convertDenseArrayElementsToSparseProperties(rt);
+        }
+        try self.materializeAllMappedArgumentsProperties(rt);
         self.flags.extensible = false;
         try self.ensureUniqueShapeForMutation(rt);
         for (0..self.shape_ref.prop_count) |index| {
@@ -9472,6 +9700,7 @@ pub const Object = struct {
 
     pub fn freeze(self: *Object, rt: *JSRuntime) !void {
         try self.seal(rt);
+        self.detachAllMappedArgumentsBindings(rt);
         for (0..self.shape_ref.prop_count) |index| {
             var entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted or entry_flags.isAccessor() or !entry_flags.writable) continue;
@@ -9482,6 +9711,7 @@ pub const Object = struct {
     }
 
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        try self.materializeMappedArgumentsProperty(rt, atom_id);
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |array_index| {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
@@ -9598,12 +9828,12 @@ pub const Object = struct {
     }
 
     pub fn convertDenseArrayElementsToSparseProperties(self: *Object, rt: *JSRuntime) !void {
-        if (!self.flags.is_array or !self.flags.fast_array) return;
-        // Preserve the JS-observable length, not the dense extent. qjs
+        if (!self.flags.fast_array) return;
+        // Preserve the JS-observable Array length, not the dense extent. qjs
         // convert_fast_array_to_array (quickjs.c:9244) materializes only the
-        // live `[0, count)` slots into index properties; the holes in
-        // `[count, length)` stay genuinely absent on the sparse array. Length
-        // is unchanged by the conversion.
+        // live `[0, count)` slots into index properties; Array holes in
+        // `[count, length)` stay absent. For arguments this internal length is
+        // unobservable; their own `length` property is already in the shape.
         const saved_length = self.array_length;
         const elements = self.arrayElements();
         for (elements, 0..) |stored, index| {
@@ -9619,7 +9849,7 @@ pub const Object = struct {
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
-        if (!self.flags.is_array or !self.flags.fast_array) return null;
+        if (!self.flags.fast_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
         const index = atom.atomToUInt32(atom_id);
         if (index >= self.array_count) return null;
@@ -9631,7 +9861,7 @@ pub const Object = struct {
     }
 
     fn setDenseArrayElement(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.flags.is_array) return false;
+        if (!self.flags.fast_array) return false;
         if (!self.setFastArrayElementDup(rt, index, new_value)) return false;
         self.markIndexedProperties(rt);
         return true;
@@ -9808,25 +10038,16 @@ pub const Object = struct {
         // below. A second dup/free here just duplicated that root — qjs
         // add_property likewise relies on the single caller-held atom ref
         // through add_shape_property (which does the one owning JS_DupAtom).
-        // The shape is rc==1 here (made unique above / never shared), so the
-        // FAM grow inside reserveProperties/addProperty may relocate it; pass
-        // &self.shape_ref so the new address flows back (qjs resize_properties
-        // updates p->shape through `JSShape **psh`).
+        // Indexed properties mutate a unique sparse shape in place. Named
+        // properties use the qjs transition triage: cache hit, shared clone, or
+        // rc==1 in-place append. transitionProperty owns replacement releases
+        // and threads relocation back through self.shape_ref.
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
-            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        if (!self.shapeNeedsMutationCopy()) {
-            try rt.shapes.reserveProperties(&self.shape_ref, property_capacity);
-            try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
-            return;
-        }
-        const next_shape = try rt.shapes.transitionProperty(self.shape_ref, atom_id, flags);
-        const old_shape = self.shape_ref;
-        self.shape_ref = next_shape;
-        rt.shapes.release(old_shape);
+        try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
@@ -9923,6 +10144,20 @@ pub const Object = struct {
         const flags = self.propFlagsAt(index);
         if (flags.deleted or flags.kind != .data) return null;
         return self.prop_values[index].slot.data;
+    }
+
+    /// Replace a known data slot by index, transferring ownership of
+    /// `new_value`. Intended for freshly cloned property templates whose shape
+    /// fixes both the key and descriptor flags (for example qjs's arguments
+    /// shape, where only the per-call `length` value changes).
+    pub inline fn replaceOwnDataPropertyValueAtAssumingShapeOwned(self: *Object, rt: *JSRuntime, index: usize, new_value: JSValue) void {
+        std.debug.assert(index < self.shape_ref.prop_count);
+        const prop = self.shape_ref.props()[index];
+        const flags = property.Flags.fromBits(prop.flags);
+        std.debug.assert(!flags.deleted and flags.kind == .data);
+        const old_slot = self.prop_values[index].slot;
+        self.prop_values[index].slot = .{ .data = new_value };
+        destroyPropertySlot(rt, prop.atom_id, flags, old_slot);
     }
 
     /// The stored accessor at `index`, or null if not an accessor property.
@@ -10118,8 +10353,8 @@ pub const Object = struct {
 
     fn setMappedArgumentsBindingValue(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         const slot_index: usize = @intCast(index);
-        const refs = self.argumentsVarRefsSlot();
-        if (varRefCellFromValue(refs.*[slot_index])) |cell| {
+        const refs = self.argumentsVarRefsMut();
+        if (varRefCellFromValue(refs[slot_index])) |cell| {
             const next_value = new_value.dup();
             errdefer next_value.free(rt);
             try cell.setVarRefValue(rt, next_value);
@@ -10127,7 +10362,7 @@ pub const Object = struct {
         }
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
-        const value_slot = &refs.*[slot_index];
+        const value_slot = &refs[slot_index];
         const old_value = value_slot.*;
         value_slot.* = next_value;
         old_value.free(rt);
@@ -10135,13 +10370,13 @@ pub const Object = struct {
 
     fn deleteMappedArgumentsBinding(self: *Object, rt: *JSRuntime, index: u32) void {
         const slot_index: usize = @intCast(index);
-        const refs = self.argumentsVarRefsSlot();
-        const old_value = refs.*[slot_index];
-        refs.*[slot_index] = JSValue.uninitialized();
+        const refs = self.argumentsVarRefsMut();
+        const old_value = refs[slot_index];
+        refs[slot_index] = JSValue.uninitialized();
         old_value.free(rt);
     }
 
-    fn mappedArgumentsBindingValue(self: *Object, index: u32) ?JSValue {
+    fn mappedArgumentsBindingValue(self: *const Object, index: u32) ?JSValue {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefs();
         if (slot_index >= refs.len) return null;
@@ -10151,6 +10386,48 @@ pub const Object = struct {
             return cell.varRefValue().dup();
         }
         return mapped.dup();
+    }
+
+    fn mappedArgumentsBindingIndexFromAtom(self: *const Object, rt: *const JSRuntime, atom_id: atom.Atom) ?u32 {
+        if (self.class_id != class.ids.mapped_arguments) return null;
+        const index = array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
+        return if (self.hasMappedArgumentsBinding(index)) index else null;
+    }
+
+    fn mappedArgumentsTaggedBindingIndex(self: *const Object, atom_id: atom.Atom) ?u32 {
+        if (self.class_id != class.ids.mapped_arguments or !atom.isTaggedInt(atom_id)) return null;
+        const index = atom.atomToUInt32(atom_id);
+        return if (self.hasMappedArgumentsBinding(index)) index else null;
+    }
+
+    fn hasMappedArgumentsBinding(self: *const Object, index: u32) bool {
+        const slot_index: usize = @intCast(index);
+        const refs = self.argumentsVarRefs();
+        return slot_index < refs.len and !refs[slot_index].isUninitialized();
+    }
+
+    fn materializeMappedArgumentsProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom) !void {
+        const index = self.mappedArgumentsBindingIndexFromAtom(rt, atom_id) orelse return;
+        if (self.findProperty(atom_id) != null) return;
+        const mapped_value = self.mappedArgumentsBindingValue(index) orelse return;
+        defer mapped_value.free(rt);
+        try self.addProperty(rt, atom_id, descriptor.Descriptor.data(mapped_value, true, true, true));
+    }
+
+    fn materializeAllMappedArgumentsProperties(self: *Object, rt: *JSRuntime) !void {
+        if (self.class_id != class.ids.mapped_arguments) return;
+        for (self.argumentsVarRefs(), 0..) |mapped, index| {
+            if (mapped.isUninitialized()) continue;
+            try self.materializeMappedArgumentsProperty(rt, atom.atomFromUInt32(@intCast(index)));
+        }
+    }
+
+    fn detachAllMappedArgumentsBindings(self: *Object, rt: *JSRuntime) void {
+        if (self.class_id != class.ids.mapped_arguments) return;
+        for (self.argumentsVarRefs(), 0..) |mapped, index| {
+            if (mapped.isUninitialized()) continue;
+            self.deleteMappedArgumentsBinding(rt, @intCast(index));
+        }
     }
 };
 
@@ -10228,8 +10505,8 @@ fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
 // the VM consults directly. The element read/write *value coercion*
 // (ToNumber/ToBigInt over primitives, shared with the DataView and ArrayBuffer
 // paths) and the buffer storage operations live in `src/core/typed_array.zig`,
-// which imports these predicates. `src/builtins/buffer.zig` re-exports both
-// blocks under their original names.
+// which imports these predicates. `src/exec/buffer_ops.zig` owns the
+// JS-visible record surface that uses both blocks.
 
 fn typedArrayBackingBufferObject(object: *Object) !*Object {
     const value = object.typedArrayBuffer() orelse return error.TypeError;
@@ -10529,7 +10806,8 @@ fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
 // `ownEntriesArray` builds the result array for the bare-runtime
 // Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
 // STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
-// `builtins/object.zig` re-exports `EntriesMode`/`ownEntriesArray` unchanged.
+// `exec/object_builtin_ops.zig` re-exports `EntriesMode`/`ownEntriesArray`
+// unchanged for Object native records.
 
 /// Selects which projection `ownEntriesArray` produces.
 pub const EntriesMode = enum {
@@ -10633,7 +10911,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
 // touches only core string/object/function primitives (no exec/VM deps and no
 // realm/global state). The produced iterator's `next` carries the
 // `(.string, iterator_next)` native id, so the actual `next` body still
-// dispatches through the record table into `builtins/string.zig`.
+// dispatches through the record table into `exec/string_builtin_ops.zig`.
 
 /// Extract the primitive string value from a string or String-wrapper receiver.
 fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
@@ -10667,7 +10945,7 @@ fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
     const next_object = (next.refHeader() orelse return error.TypeError);
     if (!next.isObject()) return error.TypeError;
     const next_function: *Object = @fieldParentPtr("header", next_object);
-    next_function.nativeFunctionIdSlot().* = function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next));
+    next_function.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
     try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, true, false, true));
     return specific;
 }

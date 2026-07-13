@@ -50,6 +50,22 @@ Prior phase plans, percentage-gate plans, snapshot ledgers, one-off analyses,
 and detailed error catalogs were removed from the active tree and remain
 available only through git history.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as local Markdown under `.scratch/<feature>/`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical local status strings. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
+
 ## Repository Layout
 
 - `src/root.zig`: public engine entrypoint.
@@ -75,10 +91,23 @@ available only through git history.
 ### Build
 
 - `zig build zjs --summary all`
+- `zig build zjs-dev --summary all` (Debug CLI used by the inner-loop smoke gate)
 - `zig build run-test262 --summary all`
+- `zig build run-test262-dev --summary all` (Debug runner used by `test262-smoke`)
 
 ### Regression
 
+- `zig build quick-check --summary all` (fast inner-loop gate: build the Debug
+  `zjs-dev` and run CLI smoke fixtures; use while iterating, then add the
+  changed-area Zig test or test262 slice)
+- `zig build checkpoint-check --summary all` (medium checkpoint gate: unified
+  Debug tests, Debug CLI smoke, architecture, Debug `test262-smoke`, and
+  OOM-cap coverage inside the unified suite; use before handing off non-trivial
+  code-bearing changes when full test262 is not yet justified)
+- `zig build test-{core,parser,bytecode,exec,builtins,runtime,runner} --summary all`
+  (explicit changed-area targets; choose the narrowest matching subsystem)
+- `mise run quick-watch` (persistent incremental quick-check loop; stop it
+  before running a checkpoint or production gate)
 - `zig build test --summary all` (Debug full unit/integration suite; during the
   current large refactor, do NOT run this after every small edit. Prefer
   targeted compile checks, focused unit tests, or changed-area slices while
@@ -100,10 +129,12 @@ available only through git history.
 ### test262
 
 Run a targeted slice based on the changed area. For runner, parser, execution, or
-semantic compatibility changes, prefer the relevant `-d` / `-f` / index range
-command. Use the full local gate when final confirmation is needed:
+semantic compatibility changes, prefer `test262-smoke` plus the relevant `-d` /
+`-f` / index range command. Use the full local gate when final confirmation is
+needed:
 
 ```bash
+zig build test262-smoke --summary all
 zig build test262-gate --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```

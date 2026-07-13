@@ -43,6 +43,7 @@ pub noinline fn withGetOrDelete(
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
+    const is_with = function.code[frame.pc + 8] != 0;
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
@@ -56,7 +57,7 @@ pub noinline fn withGetOrDelete(
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    const blocked = if (has_binding)
+    const blocked = if (is_with and has_binding)
         call_runtime.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
@@ -68,34 +69,52 @@ pub noinline fn withGetOrDelete(
         dropped.free(ctx.runtime);
         return .continue_loop;
     }
-    const still_has_binding = if (opc == op.with_make_ref)
-        true
-    else
+    const still_has_binding = if (opc == op.with_get_var or opc == op.with_get_ref)
         object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
-        };
-    if (opc == op.with_get_var and !still_has_binding) {
-        const dropped = try stack.pop();
-        dropped.free(ctx.runtime);
-        if (function.flags.is_strict) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-            return error.ReferenceError;
         }
-        try stack.pushOwned(core.JSValue.undefinedValue());
-        frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
-        return .continue_loop;
+    else
+        true;
+    if (opc == op.with_get_var and !still_has_binding and (function.flags.is_strict or function.flags.runtime_strict)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        return error.ReferenceError;
     }
     switch (opc) {
         op.with_get_var => {
-            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
+            const value = if (still_has_binding)
+                try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
+            else
+                core.JSValue.undefinedValue();
             errdefer value.free(ctx.runtime);
             const dropped = try stack.pop();
             dropped.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         op.with_delete_var => {
+            var deleted_cell_value = core.JSValue.undefinedValue();
+            var has_deleted_cell = false;
+            if (!is_with) {
+                if (object.findProperty(atom_id)) |index| {
+                    if (object.asVarRefAt(index)) |cell| {
+                        if (cell.varRefIsDeletableSlot().*) {
+                            deleted_cell_value = cell.valueRef().dup();
+                            has_deleted_cell = true;
+                        }
+                    }
+                }
+            }
+            defer if (has_deleted_cell) deleted_cell_value.free(ctx.runtime);
             const deleted = object.deleteProperty(ctx.runtime, atom_id);
+            if (deleted and has_deleted_cell) {
+                if (varRefCellFromValue(deleted_cell_value)) |cell| {
+                    const old_value = cell.varRefValueSlot().*;
+                    cell.varRefValueSlot().* = core.JSValue.uninitialized();
+                    cell.is_lexical = false;
+                    cell.varRefIsConstSlot().* = false;
+                    old_value.free(ctx.runtime);
+                }
+            }
             if (!deleted and function.flags.is_strict) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
@@ -105,7 +124,10 @@ pub noinline fn withGetOrDelete(
             try stack.pushOwned(core.JSValue.boolean(deleted));
         },
         op.with_get_ref => {
-            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
+            const value = if (still_has_binding)
+                try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame)
+            else
+                core.JSValue.undefinedValue();
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
@@ -161,47 +183,9 @@ pub fn makeVarRef(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (try makeEvalBindingRef(ctx, eval_local_names, eval_local_slots, atom_id)) |ref_value| {
-        defer ref_value.free(ctx.runtime);
-        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-        errdefer key_value.free(ctx.runtime);
-        try stack.push(ref_value);
-        try stack.pushOwned(key_value);
-        return;
-    }
-    if (!frame.evalVarRefsRepublished()) {
-        if (makeEvalVarRef(ctx.runtime, eval_var_ref_names, eval_var_refs, atom_id)) |ref_value| {
-            defer ref_value.free(ctx.runtime);
-            const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-            errdefer key_value.free(ctx.runtime);
-            try stack.push(ref_value);
-            try stack.pushOwned(key_value);
-            return;
-        }
-    }
-    if (try makeEvalBindingRef(ctx, frame.evalLocalNames(), frame.evalLocalSlots(), atom_id)) |ref_value| {
-        defer ref_value.free(ctx.runtime);
-        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-        errdefer key_value.free(ctx.runtime);
-        try stack.push(ref_value);
-        try stack.pushOwned(key_value);
-        return;
-    }
-    if (makeEvalVarRef(ctx.runtime, frame.evalVarRefNames(), frame.evalVarRefs(), atom_id)) |ref_value| {
-        defer ref_value.free(ctx.runtime);
-        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-        errdefer key_value.free(ctx.runtime);
-        try stack.push(ref_value);
-        try stack.pushOwned(key_value);
-        return;
-    }
     const global_value = global.value();
     const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
     const object_value = if (call_runtime.existingGlobalLexicalEnv(ctx)) |env|
@@ -229,45 +213,12 @@ pub noinline fn makeVarRefVm(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !Step {
-    makeVarRef(ctx, output, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs) catch |err| {
+    makeVarRef(ctx, output, global, stack, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
-}
-
-fn makeEvalBindingRef(
-    ctx: *core.JSContext,
-    names: []const core.Atom,
-    slots: []core.JSValue,
-    atom_id: core.Atom,
-) !?core.JSValue {
-    for (names, 0..) |name, idx| {
-        if (idx >= slots.len) continue;
-        if (!call_runtime.atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
-        return try slot_ops.ensureVarRefCell(ctx, &slots[idx]);
-    }
-    return null;
-}
-
-fn makeEvalVarRef(
-    rt: *core.JSRuntime,
-    names: []const core.Atom,
-    refs: []const core.JSValue,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    for (names, 0..) |name, idx| {
-        if (idx >= refs.len) continue;
-        if (!call_runtime.atomIdOrNameEql(rt, name, atom_id)) continue;
-        if (varRefCellFromValue(refs[idx]) == null) return null;
-        return refs[idx].dup();
-    }
-    return null;
 }
 
 pub fn getRefValue(
@@ -357,10 +308,9 @@ pub fn putRefValue(
     defer value.free(ctx.runtime);
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
-    if (runtime_strict) {
-        const object = try property_ops.expectObject(obj);
-        if (!try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame)) return error.ReferenceError;
-    }
+    const object = try property_ops.expectObject(obj);
+    const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
+    if (!still_exists and runtime_strict) return error.ReferenceError;
     const result = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
     result.free(ctx.runtime);
 }
@@ -392,17 +342,41 @@ pub noinline fn withPut(
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
+    const mode: bytecode.opcode.WithPutMode = switch (function.code[frame.pc + 8]) {
+        @intFromEnum(bytecode.opcode.WithPutMode.var_object_probe) => .var_object_probe,
+        @intFromEnum(bytecode.opcode.WithPutMode.selected_reference) => .selected_reference,
+        @intFromEnum(bytecode.opcode.WithPutMode.with_probe) => .with_probe,
+        else => return error.InvalidBytecode,
+    };
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
     if (obj.isUndefined()) return .continue_loop;
-    const value = try stack.pop();
-    defer value.free(ctx.runtime);
-    _ = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
+    if (mode != .selected_reference) {
+        const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
+        if (!has_binding) return .continue_loop;
+        if (mode == .with_probe) {
+            const blocked = call_runtime.isBlockedByUnscopables(ctx, output, global, obj, atom_id, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
+            if (blocked) return .continue_loop;
+        }
+    }
+    const still_exists = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    if (!still_exists and (function.flags.is_strict or function.flags.runtime_strict)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        return error.ReferenceError;
+    }
+    const value = try stack.pop();
+    defer value.free(ctx.runtime);
     const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -418,22 +392,19 @@ pub noinline fn deleteVar(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (call_runtime.deleteDirectEvalGlobalVarLocalBinding(ctx.runtime, global, function, frame, atom_id)) |deleted| {
-        try stack.pushOwned(core.JSValue.boolean(deleted));
-    } else if (call_runtime.deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
-        try stack.pushOwned(core.JSValue.boolean(deleted));
-    } else if (global.hasProperty(atom_id)) {
-        try stack.pushOwned(core.JSValue.boolean(global.deleteProperty(ctx.runtime, atom_id)));
-    } else {
-        try stack.pushOwned(core.JSValue.boolean(true));
-    }
+    // qjs JS_DeleteGlobalVar: declarative globals are not deletable; every
+    // object-environment binding goes through the ordinary global property
+    // delete, which also parks a captured VARREF cell at UNINITIALIZED.
+    const deleted = if (call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id))
+        false
+    else if (global.hasProperty(atom_id))
+        global.deleteProperty(ctx.runtime, atom_id)
+    else
+        true;
+    try stack.pushOwned(core.JSValue.boolean(deleted));
 }
 
 pub noinline fn deletePropertyVm(

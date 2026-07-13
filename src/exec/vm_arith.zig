@@ -578,7 +578,7 @@ pub fn addLocal(
         // stops them from inflating the hot number path's spill set — LLVM does
         // not coalesce the two branches' spill slots, so an inline string block
         // makes every float `s = s + i` iteration pay its stack frame.
-        return addLocalString(ctx, output, global, frame, idx, rhs, cell_opt == null);
+        return addLocalString(ctx, output, global, frame, idx, rhs);
     }
 
     // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
@@ -647,7 +647,6 @@ noinline fn addLocalString(
     frame: *frame_mod.Frame,
     idx: u16,
     rhs: core.JSValue,
-    cell_is_null: bool,
 ) !void {
     const lhs = slot_ops.slotValueDup(frame.locals[idx]);
     defer lhs.free(ctx.runtime);
@@ -655,12 +654,12 @@ noinline fn addLocalString(
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
 
-    // QuickJS OP_add_loc appends into the local's string storage when the
-    // accumulator is unshared. Reference accounting: the local slot plus our dup
-    // hold exactly two references to the accumulator. This keeps `s += part`
-    // loops on a flat growable buffer instead of chaining rope nodes per
-    // iteration.
-    if (cell_is_null and rhs_primitive.isString()) {
+    // QuickJS OP_add_loc appends into the binding's string storage when the
+    // accumulator is unshared. Whether the binding is a raw local or a VarRef
+    // cell, it owns one string reference and `lhs` owns the second. Captured
+    // closures share the cell rather than duplicating its string; an actual
+    // independent string snapshot raises rc above 2 and makes the append bail.
+    if (rhs_primitive.isString()) {
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
@@ -717,7 +716,7 @@ pub fn addLocalAt(
     const cell_opt = slot_ops.varRefCellFromValue(slot.*);
     const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else slot.*;
     if (lhs_borrowed.isString()) {
-        return addLocalStringAt(ctx, output, global, slot, rhs, cell_opt == null);
+        return addLocalStringAt(ctx, output, global, slot, rhs);
     }
 
     const lhs = slot_ops.slotValueDup(slot.*);
@@ -766,7 +765,6 @@ noinline fn addLocalStringAt(
     global: *core.Object,
     slot: *core.JSValue,
     rhs: core.JSValue,
-    cell_is_null: bool,
 ) !void {
     const lhs = slot_ops.slotValueDup(slot.*);
     defer lhs.free(ctx.runtime);
@@ -774,7 +772,7 @@ noinline fn addLocalStringAt(
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
 
-    if (cell_is_null and rhs_primitive.isString()) {
+    if (rhs_primitive.isString()) {
         if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, 2)) {
             return;
         }
@@ -786,41 +784,6 @@ noinline fn addLocalStringAt(
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
     try slot_ops.setSlotValue(ctx, slot, updated);
-}
-
-/// Fuses `add; dup? put_var s; (put_locN | drop)?` when the add is a string
-/// append whose stack lhs *is* the global data slot's current value: the
-/// known references are that slot, the stack copy this fusion pops, and
-/// (when the previous statement's completion local still holds the
-/// accumulator) the completion slot — all aliases of the accumulator the
-/// pattern overwrites. The append then extends lhs storage in place (flat
-/// capacity append or rope tail append) instead of copying or chaining a
-/// rope node per iteration, keeping top-level `s += part` loops O(1) per
-/// step in nodes and bytes.
-fn canFuseGlobalDataWrite(
-    function: *const bytecode.Bytecode,
-    frame: *const frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) bool {
-    if (!eval_with_object.isUndefined()) return false;
-    if (!frame.current_function.isUndefined()) return false;
-    if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
-    if (frame.evalLocalNames().len != 0 or frame.evalVarRefNames().len != 0) return false;
-    return true;
-}
-
-fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const count = @min(frame.var_refs.len, function.varRefNamesLen());
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
-        const name = function.varRefName(idx);
-        if (name == atom_id) return true;
-    }
-    return false;
 }
 
 const ImmediateInt32 = struct {

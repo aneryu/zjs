@@ -449,7 +449,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
 
         ids.array => .none,
-        ids.arguments, ids.mapped_arguments => .arguments,
+        ids.arguments, ids.mapped_arguments => .ordinary,
         ids.number, ids.string, ids.boolean, ids.symbol, ids.date, ids.big_int => .object_data,
         ids.module_ns => .module_namespace,
         ids.c_function,

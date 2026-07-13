@@ -113,7 +113,7 @@ function violationReason(source, target) {
       'src/parser.zig',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'builtins may import core/libs/exec/builtins only (Phase 6 client model: builtins implement methods on top of exec VM ops); runtime/parser/bytecode/CLI dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'transitional builtins may import core/libs/exec/builtins only while standard-global tables move into exec; runtime/parser/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
   if (source.startsWith('src/libs/')) {
@@ -159,7 +159,7 @@ function violationReason(source, target) {
       'src/cli/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'exec must not depend on builtins, runtime, binding, or CLI (Phase 6 terminal: builtins are clients of exec — they import exec VM ops; exec dispatches to them only through the core-owned internal record table, never by importing builtins). Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
+    return targetStarts(target, disallowed) ? 'exec must not depend on transitional builtins, runtime, binding, or CLI; standard-global bootstrap is moving into exec, and the old builtins directory must not become an engine dependency. Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
   }
 
   if (source.startsWith('src/runtime/')) {

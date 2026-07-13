@@ -42,6 +42,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         .filename = options.filename,
         .source_kind = parserSourceKind(options.source_kind),
         .strict = options.parse_strict,
+        .runtime_strict = options.runtime_strict,
         .return_completion = options.mode == .script and options.return_completion,
     });
     if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
@@ -111,7 +112,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         defer stack.deinit(rt);
         try stack.reserveAdditional(compiled.function.stack_size);
         // `.eval_direct`/`.eval_indirect` run through the EVAL runner contract
-        // (is_eval_code = true, sync_global_lexical_locals = false) — qjs
+        // (`is_eval_code = true` with eval declaration instantiation) — qjs
         // JS_EVAL_TYPE_DIRECT/INDIRECT — so a top-level let/const/class stays a
         // pure eval frame-local (no redundant ctx.lexicals property). `.script`
         // keeps the script runner (JS_EVAL_TYPE_GLOBAL → global_decl cell).
@@ -249,8 +250,9 @@ fn forceFunctionBytecodeRuntimeStrict(rt: *core.JSRuntime, value: core.JSValue) 
     const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", aligned);
     function_bytecode.flags.runtime_strict_mode = true;
-    // No cached execution view to refresh: the VM rebuilds the `Bytecode` view
-    // per call (`makeBytecodeView`), so the updated flag is read fresh next call.
+    // No cached execution view to refresh: runtime-strict forcing happens
+    // before the script's first execution, so the lazy cached view observes
+    // this flag when it is materialized for the first call.
     for (function_bytecode.cpoolSlice()) |child| forceFunctionBytecodeRuntimeStrict(rt, child);
 }
 

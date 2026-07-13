@@ -4,9 +4,9 @@
 //! "Atomics 等待机制留 exec" decision). The slow-path dispatcher
 //! (`call_runtime.qjsAtomicsCallForNativeRecord`) switches on this
 //! `StaticMethod` selector, and the wait/notify state machine lives beside it
-//! in `call_runtime.zig`. The install-time name->id mapping (`methodId`) stays
-//! in `builtins/atomics.zig`, which re-exports this enum (builtins -> exec is
-//! the Phase 6 client model), so the registry keeps binding the namespace.
+//! in `call_runtime.zig`. The install-time name->id mapping (`methodId`) lives
+//! in `exec/atomics_ops.zig`, so the registry binds the namespace without a
+//! builtins -> exec detour.
 
 const std = @import("std");
 

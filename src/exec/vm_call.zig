@@ -87,12 +87,19 @@ pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuar
 /// Depth accounting for inline (same interpreter loop) call frames.
 pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
     if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        // QuickJS JS_CallInternal stack guard -> InternalError "stack overflow"
-        // (quickjs.c:17837, 7789-7791).
-        _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
-        return error.StackOverflow;
+        return inlineCallDepthOverflow(ctx, global);
     }
     ctx.call_depth += 1;
+}
+
+/// Stack exhaustion is exceptional and constructs a JS error.  Keep it out of
+/// the same-native-stack inline-call prologue: otherwise LLVM couples the
+/// thrower's large error-union frame and callee-saved register set to every
+/// ordinary JS call.  QJS likewise keeps this behind the unlikely
+/// `js_check_stack_overflow` arm of `JS_CallInternal`.
+noinline fn inlineCallDepthOverflow(ctx: *core.JSContext, global: *core.Object) !void {
+    _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
+    return error.StackOverflow;
 }
 
 pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
@@ -127,8 +134,6 @@ pub inline fn initFrameLocals(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
     use_inline_storage: bool,
     windows: frame_mod.FrameStorageWindows,
 ) !void {
@@ -149,9 +154,6 @@ pub inline fn initFrameLocals(
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    if (eval_local_names.len != 0 and value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) {
-        call_runtime.initializeEvalFrameLocals(ctx, function, frame, eval_local_names, eval_local_slots);
-    }
     if (function.flags.is_derived_class_constructor) {
         try linkDerivedConstructorThisLocal(ctx, function, frame);
     }
@@ -311,10 +313,6 @@ pub noinline fn closure(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
-    eval_local_names: []const core.Atom,
-    eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.JSValue,
 ) !Step {
     _ = output;
     _ = catch_target;
@@ -327,95 +325,8 @@ pub noinline fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
+    try collection_vm.pushFunctionClosure(ctx, frame, stack, function, global, index, opc);
     return .done;
-}
-
-fn tryFastMathCall(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    argc: u16,
-) !bool {
-    if (stack.values.len < @as(usize, argc) + 1) return false;
-    const base = stack.values.len - (@as(usize, argc) + 1);
-    const func = stack.values[base];
-    if (!func.isObject()) return false;
-    const object = object_ops.functionObjectFromValue(func) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    if (native_ref.domain != .math) return false;
-
-    const result = switch (native_ref.id) {
-        1 => blk: { // Math.abs
-            if (argc != 1) return false;
-            const arg = stack.values[base + 1];
-            if (arg.asInt32()) |val| {
-                if (val == std.math.minInt(i32)) {
-                    break :blk core.JSValue.float64(@abs(@as(f64, @floatFromInt(val))));
-                } else {
-                    break :blk core.JSValue.int32(@intCast(@abs(val)));
-                }
-            }
-            if (arg.asFloat64()) |val| break :blk core.JSValue.float64(@abs(val));
-            return false;
-        },
-        2 => blk: { // Math.floor
-            if (argc != 1) return false;
-            const arg = stack.values[base + 1];
-            if (arg.asInt32()) |val| break :blk core.JSValue.int32(val);
-            if (arg.asFloat64()) |val| break :blk core.JSValue.float64(@floor(val));
-            return false;
-        },
-        7 => blk: { // Math.min
-            if (argc == 1) {
-                const arg = stack.values[base + 1];
-                if (arg.isNumber()) break :blk arg.dup();
-            } else if (argc == 2) {
-                const arg0 = stack.values[base + 1];
-                const arg1 = stack.values[base + 2];
-                if (arg0.asInt32()) |v0| {
-                    if (arg1.asInt32()) |v1| {
-                        break :blk core.JSValue.int32(@min(v0, v1));
-                    }
-                }
-                if (arg0.asFloat64()) |v0| {
-                    if (arg1.asFloat64()) |v1| {
-                        break :blk core.JSValue.float64(@min(v0, v1));
-                    }
-                }
-            }
-            return false;
-        },
-        8 => blk: { // Math.max
-            if (argc == 1) {
-                const arg = stack.values[base + 1];
-                if (arg.isNumber()) break :blk arg.dup();
-            } else if (argc == 2) {
-                const arg0 = stack.values[base + 1];
-                const arg1 = stack.values[base + 2];
-                if (arg0.asInt32()) |v0| {
-                    if (arg1.asInt32()) |v1| {
-                        break :blk core.JSValue.int32(@max(v0, v1));
-                    }
-                }
-                if (arg0.asFloat64()) |v0| {
-                    if (arg1.asFloat64()) |v1| {
-                        break :blk core.JSValue.float64(@max(v0, v1));
-                    }
-                }
-            }
-            return false;
-        },
-        else => return false,
-    };
-
-    var remaining = @as(usize, argc) + 1;
-    while (remaining > 0) {
-        remaining -= 1;
-        const val = try stack.pop();
-        val.free(ctx.runtime);
-    }
-    try stack.pushOwned(result);
-    return true;
 }
 
 pub fn call(
@@ -669,17 +580,15 @@ inline fn fastNativeMethodCall(
     // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
     // name-based TypedArray slice/subarray path that has no native-builtin id)
     // and then the generic value/bytecode dispatch — the same fall-through the
-    // non-table domains (`.atomics` / `.performance` / `.host` / `.promise`)
-    // already relied on.
+    // non-table domains (`.atomics` / `.performance` / `.host`) and the
+    // still-unmigrated Promise record ids already relied on.
     const function_object = property_ops.expectObject(func) catch return null;
-    // Structural .function proof (divergence C, mitigation): only a native c_function
-    // object has a FunctionPayload; a bound_function/proxy/other-class callable reaches
-    // here in method position (e.g. `obj.m()` where `obj.m = charCodeAt.bind(s)`) and
-    // must MISS so the caller falls to the generic value/bytecode dispatch. Guarding on
-    // class_payload_kind up front makes the following nativeFunctionIdSlot() and
-    // nativeFunctionRealmGlobalPtr() provably safe (both otherwise `unreachable` on a
-    // non-.function payload — a pre-existing latent UB that only benignly misses today).
-    if (function_object.class_payload_kind != core.class.PayloadKind.function) return null;
+    // This is specifically the native c_function fast path. Bytecode functions
+    // use the same FunctionPayload kind, but qjs discriminates their overlaid
+    // union by class before reading `u.cfunc`; do the same before interpreting
+    // the shared call-cache slot as an InternalRecord. Bound/proxy/closure
+    // callables likewise fall through to the generic dispatcher.
+    if (function_object.class_id != core.class.ids.c_function) return null;
     // Divergence B: cache the resolved `*const InternalRecord` on the func-object
     // payload so the hot call skips the per-call native-id DECODE + record-table
     // LOOKUP, mirroring qjs `func = p->u.cfunc.c_function` (the dispatchable

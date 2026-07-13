@@ -17,6 +17,7 @@ const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
 const objectFromValue = object_ops.objectFromValue;
 const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
@@ -70,6 +71,8 @@ const globalOwnDataPropertyValue = property_ic.globalOwnDataPropertyValue;
 const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
 const ownDataPropertyValueMaterializedForFastPath = property_ic.ownDataPropertyValueMaterializedForFastPath;
 const op = bytecode.opcode.op;
+const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
+const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 
 const RegExpMatchGet = union(enum) {
     binding: BindingGet,
@@ -348,7 +351,12 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     return core.JSValue.float64(@floatFromInt(len));
 }
 
-pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+inline fn qjsGetFieldFastWithExoticOrder(
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    comptime own_before_slow: bool,
+) ?core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
@@ -356,10 +364,11 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     var object = objectFromValue(receiver) orelse return null;
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
-        if (object.needsSlowPropertyAccess()) return null;
+        if (!own_before_slow and object.needsSlowPropertyAccess()) return null;
         var slow_property = false;
         if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
         if (slow_property) return null;
+        if (own_before_slow and object.needsSlowPropertyAccess()) return null;
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
         // class objects via a by-class-name global fallback (object_ops.getValueProperty),
@@ -369,6 +378,307 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
         // returns a genuine `undefined` for truly-absent properties.
         object = object.getPrototype() orelse return null;
     }
+}
+
+pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+    // The generic zjs fast path must stop before inspecting a slow object:
+    // mapped Arguments numeric bindings live in separate var-ref storage rather
+    // than qjs's shape-level JS_PROP_VARREF entries, so their materialized data
+    // slots cannot bypass the mapped resolver.
+    return qjsGetFieldFastWithExoticOrder(rt, receiver, atom_id, false);
+}
+
+/// qjs GET_FIELD_INLINE probes an own shape entry before `p->is_exotic`.
+/// This ordering is safe for the constant `length` atom because it can never
+/// alias zjs's out-of-shape mapped Arguments numeric bindings. It lets ordinary
+/// own `length` data on Arguments and typed arrays hit before their slow class
+/// semantics while misses and accessor entries still defer to the resolver.
+pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
+    return qjsGetFieldFastWithExoticOrder(rt, receiver, core.atom.ids.length, true);
+}
+
+/// Primitive twin of qjsGetFieldFast. QuickJS selects
+/// `ctx->class_proto[primitive_tag]` inside JS_GetPropertyInternal and then
+/// performs the same shape walk as an object receiver. Realm prototype slots
+/// are the zjs class_proto equivalent; only ordinary data hits are returned.
+/// Accessors, auto-init/var-ref properties, exotic/proxy holders, and string
+/// own index/length semantics fall back to the full resolver.
+pub inline fn primitivePrototypeDataPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?core.JSValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
+    while (true) {
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+        var slow_property = false;
+        if (object.findOwnDataValueFast(atom_id, &slow_property)) |value| return value;
+        if (slow_property) return null;
+        object = object.getPrototype() orelse return null;
+    }
+}
+
+inline fn primitivePrototypeObjectForFastPath(
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?*core.Object {
+    const slot: core.object.RealmValueSlot = if (receiver.isString()) blk: {
+        if (atom_id == core.atom.ids.length or core.atom.isTaggedInt(atom_id)) return null;
+        break :blk .string_prototype;
+    } else if (receiver.isNumber())
+        .number_prototype
+    else if (receiver.isBool())
+        .boolean_prototype
+    else if (receiver.isBigInt())
+        .bigint_prototype
+    else if (receiver.isSymbol())
+        .symbol_prototype
+    else
+        return null;
+
+    const prototype_value = global.cachedRealmValue(slot) orelse return null;
+    return objectFromValue(prototype_value);
+}
+
+pub const PropertyFastValue = union(enum) {
+    borrowed: core.JSValue,
+    owned: core.JSValue,
+    getter: core.JSValue,
+    proxy: *core.Object,
+};
+
+inline fn typedArrayAccessorMethodId(atom_id: core.Atom) ?u32 {
+    const TypedArrayAccessorMethod = method_ids.buffer.TypedArrayAccessorMethod;
+    if (atom_id == core.atom.ids.length) return @intFromEnum(TypedArrayAccessorMethod.length);
+    if (atom_id == atom_byte_length) return @intFromEnum(TypedArrayAccessorMethod.byte_length);
+    if (atom_id == atom_byte_offset) return @intFromEnum(TypedArrayAccessorMethod.byte_offset);
+    return null;
+}
+
+pub inline fn isTypedArrayPayloadAtomForFastPath(atom_id: core.Atom) bool {
+    return atom_id == core.atom.ids.length or atom_id == atom_byte_length or atom_id == atom_byte_offset;
+}
+
+inline fn typedArrayNativeAccessorIdMatches(encoded_id: i32, expected_id: u32) bool {
+    const native_ref = core.function.decodeNativeBuiltinId(encoded_id) orelse return false;
+    return native_ref.domain == .buffer and native_ref.id == expected_id;
+}
+
+inline fn typedArrayIntrinsicNamedValue(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (atom_id == core.atom.ids.length) {
+        const length = core.object.typedArrayLength(rt, receiver) catch return null;
+        return .{ .owned = array_ops.lengthIndexValue(@intCast(length)) };
+    }
+    if (atom_id == atom_byte_length) {
+        const length = core.object.typedArrayByteLength(rt, receiver) catch return null;
+        return .{ .owned = array_ops.lengthIndexValue(length) };
+    }
+    if (atom_id == atom_byte_offset) {
+        const offset = core.object.typedArrayEffectiveByteOffset(receiver) catch return null;
+        return .{ .owned = array_ops.lengthIndexValue(offset) };
+    }
+    return null;
+}
+
+inline fn typedArrayShapePropertyForFastPath(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    holder: *core.Object,
+    index: usize,
+    atom_id: core.Atom,
+    expected_id: u32,
+) ?PropertyFastValue {
+    return switch (holder.propKindAt(index)) {
+        .data => .{ .borrowed = holder.prop_values[index].slot.data },
+        .accessor => accessor: {
+            const getter = holder.prop_values[index].slot.accessor.getterValue();
+            if (objectFromValue(getter)) |getter_object| {
+                if (typedArrayNativeAccessorIdMatches(getter_object.nativeFunctionId(), expected_id)) {
+                    break :accessor typedArrayIntrinsicNamedValue(rt, receiver, atom_id);
+                }
+            }
+            break :accessor .{ .getter = getter };
+        },
+        .auto_init => auto_init: {
+            const info = core.property.autoInitAt(rt, holder.prop_values[index].slot.auto_init).*;
+            if (info.kind == .native_accessor and typedArrayNativeAccessorIdMatches(info.native_builtin_id, expected_id)) {
+                break :auto_init typedArrayIntrinsicNamedValue(rt, receiver, atom_id);
+            }
+            break :auto_init null;
+        },
+        .var_ref => null,
+    };
+}
+
+noinline fn typedArrayPrototypeNamedPropertyForFastPath(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    atom_id: core.Atom,
+    expected_id: u32,
+) ?PropertyFastValue {
+    var holder = receiver.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
+    while (true) {
+        if (holder.findProperty(atom_id)) |index| {
+            return typedArrayShapePropertyForFastPath(rt, receiver, holder, index, atom_id, expected_id);
+        }
+        if (holder.proxyTarget() != null) return .{ .proxy = holder };
+        if (holder.needsSlowPropertyAccess() or holder.hasExoticMethods()) return null;
+        holder = holder.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
+    }
+}
+
+noinline fn typedArrayNamedPropertyForFastPath(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    const expected_id = typedArrayAccessorMethodId(atom_id) orelse return null;
+    if (object.findProperty(atom_id)) |index| {
+        return typedArrayShapePropertyForFastPath(rt, object, object, index, atom_id, expected_id);
+    }
+    return typedArrayPrototypeNamedPropertyForFastPath(rt, object, atom_id, expected_id);
+}
+
+/// Cheap routing guard used only after the ordinary static-field data lookup
+/// misses. TypedArray instance class ids are a contiguous range; checking that
+/// range avoids probing the out-of-line payload on every ordinary accessor
+/// miss. Keeping the test in the opcode handler prevents the larger typed-array
+/// action classifier from changing the shared ordinary accessor/Proxy tail.
+pub inline fn typedArrayReceiverForFastPath(receiver: core.JSValue) ?*core.Object {
+    const object = objectFromValue(receiver) orelse return null;
+    if (object.class_id < core.class.ids.uint8c_array or object.class_id > core.class.ids.float64_array) return null;
+    return object;
+}
+
+/// Static named-property action classifier for TypedArray instances. This is
+/// deliberately outlined from atomPropertyValueForFastPath: ordinary static
+/// accessor/Proxy reads should retain the same resident handler shape whether
+/// or not TypedArray payload accessors are accelerated.
+pub inline fn typedArrayPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    return typedArrayNamedPropertyForFastPath(rt, object, atom_id);
+}
+
+/// Action half of qjs GET_FIELD_INLINE for the constant `length` atom. The
+/// data-only helper above already settles the hot case; after that misses, qjs
+/// still inspects an own accessor before consulting `p->is_exotic`. That order
+/// matters for user-defined `length` accessors on typed arrays and mapped
+/// Arguments. Proxies become resident actions; unsupported exotic misses retain
+/// the existing slow machinery.
+pub inline fn qjsGetLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSValue) ?PropertyFastValue {
+    const receiver_object = objectFromValue(receiver) orelse return null;
+    var object = receiver_object;
+    while (true) {
+        if (object.findProperty(core.atom.ids.length)) |index| {
+            return switch (object.propKindAt(index)) {
+                .data => .{ .borrowed = object.prop_values[index].slot.data },
+                .accessor => .{ .getter = object.prop_values[index].slot.accessor.getterValue() },
+                .var_ref, .auto_init => null,
+            };
+        }
+        // qjs continues from the typed-array exotic object into its current
+        // prototype chain for this non-numeric name. The helper recognizes the
+        // unmodified intrinsic accessor without calling it, but custom/null/
+        // Proxy prototype chains keep their observable lookup semantics.
+        if (core.object.isTypedArrayObject(object)) {
+            const expected_id = typedArrayAccessorMethodId(core.atom.ids.length).?;
+            // The intrinsic getter's brand check applies to the original
+            // receiver, not to the typed-array object where prototype walking
+            // happened to arrive (for example Object.create(typedArray)).
+            return typedArrayPrototypeNamedPropertyForFastPath(rt, receiver_object, core.atom.ids.length, expected_id);
+        }
+        if (object.proxyTarget() != null) return .{ .proxy = object };
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;
+        object = object.getPrototype() orelse return null;
+    }
+}
+
+inline fn primitivePrototypePropertyForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
+    while (true) {
+        if (object.proxyTarget() != null) return .{ .proxy = object };
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;
+        if (object.findProperty(atom_id)) |index| {
+            return switch (object.propKindAt(index)) {
+                .data => .{ .borrowed = object.prop_values[index].slot.data },
+                .accessor => .{ .getter = object.prop_values[index].slot.accessor.getterValue() },
+                .var_ref, .auto_init => null,
+            };
+        }
+        object = object.getPrototype() orelse return null;
+    }
+}
+
+/// Atom-keyed counterpart shared by static and computed property handlers.
+/// Ordinary receivers return a semantically complete data/getter/Proxy/missing
+/// result. Class-specific exotics and primitive index/length cases remain on
+/// the general resolver. Returned data/getter values are borrowed from their
+/// holder and must be duplicated before the caller releases the receiver.
+pub inline fn atomPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (objectFromValue(receiver)) |object| {
+        if (object.class_id == core.class.ids.object or object.flags.is_array or object.flags.is_global) {
+            return switch (property_ic.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
+                .value => |value| .{ .borrowed = value },
+                .getter => |getter| .{ .getter = getter },
+                .proxy => |proxy| .{ .proxy = proxy },
+                .undefined => .{ .borrowed = core.JSValue.undefinedValue() },
+                .slow => null,
+            };
+        }
+        const value = qjsGetFieldFast(rt, receiver, atom_id) orelse return null;
+        return .{ .borrowed = value };
+    }
+    return primitivePrototypePropertyForFastPath(rt, global, receiver, atom_id);
+}
+
+/// Computed-property twin of the field fast paths. qjs strings are atoms,
+/// so JS_ValueToAtom can pass an already-interned key straight into
+/// JS_GetProperty. zjs keeps a weak atom back-pointer on materialized strings;
+/// when it is present, indexed storage or an ordinary data hit can be resolved
+/// without publishing the VM or entering the allocating/general computed-key
+/// resolver. The operation cannot re-enter, so borrowing the weak id is safe.
+pub inline fn cachedStringPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    key: core.JSValue,
+) ?PropertyFastValue {
+    const atom_id = string_ops.stringAtomId(key) orelse return null;
+    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+        if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
+            const index_value = core.JSValue.int32(@intCast(index));
+            if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
+            if (fastStringIndexValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+            if (fastTypedArrayElementValue(rt, receiver, index_value)) |value| return .{ .owned = value };
+        }
+    }
+    return atomPropertyValueForFastPath(rt, global, receiver, atom_id);
+}
+
+pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
+    return string_ops.stringAtomId(value);
 }
 
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
@@ -465,6 +775,21 @@ pub noinline fn arrayElement(
                     return err;
                 };
                 unreachable;
+            }
+            if (string_ops.stringAtomId(key)) |atom_id| {
+                // String.atom_id is a weak cache. A Proxy getter can re-enter,
+                // destroy the last shape that owns this atom, and intern a new
+                // key that reuses the id before invariant validation resumes.
+                // Retain it across the complete (potentially re-entrant) lookup.
+                const retained_atom = ctx.runtime.atoms.dup(atom_id);
+                defer ctx.runtime.atoms.free(retained_atom);
+                const value = object_ops.getValueProperty(ctx, output, global, obj, retained_atom, function, frame) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                errdefer value.free(ctx.runtime);
+                try stack.pushOwned(value);
+                return .done;
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
@@ -775,10 +1100,9 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
     if (!value.isString() or !key.isInt()) return null;
     const index_i32 = key.asInt32().?;
     if (index_i32 < 0) return null;
-    const string_value = value.asStringBody() orelse return null;
     const index: usize = @intCast(index_i32);
-    if (index >= string_value.len()) return null;
-    const unit = string_value.codeUnitAt(index);
+    if (index >= core.string.stringValueLenUnchecked(value)) return null;
+    const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
     if (unit <= 0x7f) {
         const cached = rt.cachedSingleByteString(@intCast(unit)) orelse return null;
         return cached.value().dup();

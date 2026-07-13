@@ -12,6 +12,24 @@ const atom = core.atom;
 const string = core.string;
 const runtime_mod = core.runtime;
 
+fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
+    if (rt.materialize_context_global_cb == null) {
+        rt.materialize_context_global_cb = struct {
+            fn cb(c: *core.JSContext) anyerror!*core.Object {
+                return try exec.zjs_vm.contextGlobal(c);
+            }
+        }.cb;
+    }
+    // The context-global materializer above bootstraps the standard globals
+    // through `rt.installStandardGlobals`; wire the installer here so exec
+    // never names the registry directly.
+    if (rt.install_standard_globals_cb == null) {
+        builtins.registry.registerStandardGlobalsDefault();
+        rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
+        rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
+    }
+}
+
 pub const JSContext = struct {
     core: core.JSContext,
 
@@ -22,41 +40,13 @@ pub const JSContext = struct {
     pub fn createWithOptions(rt: *JSRuntime, options: core.ContextOptions) !*JSContext {
         const ctx = try rt.memory.create(JSContext);
         errdefer rt.memory.destroy(JSContext, ctx);
-        if (rt.materialize_context_global_cb == null) {
-            rt.materialize_context_global_cb = struct {
-                fn cb(c: *core.JSContext) anyerror!*core.Object {
-                    return try exec.zjs_vm.contextGlobal(c);
-                }
-            }.cb;
-        }
-        // The context-global materializer above bootstraps the standard globals
-        // through `rt.installStandardGlobals`; wire the builtins installer so
-        // exec never names the registry directly (Phase 6b-3 STEP 7B).
-        if (rt.install_standard_globals_cb == null) {
-            builtins.registry.registerStandardGlobalsDefault();
-            rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
-            rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
-        }
+        ensureStandardGlobalsRegistered(rt);
         try ctx.core.init(rt, options);
         return ctx;
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
-        if (rt.materialize_context_global_cb == null) {
-            rt.materialize_context_global_cb = struct {
-                fn cb(c: *core.JSContext) anyerror!*core.Object {
-                    return try exec.zjs_vm.contextGlobal(c);
-                }
-            }.cb;
-        }
-        // The context-global materializer above bootstraps the standard globals
-        // through `rt.installStandardGlobals`; wire the builtins installer so
-        // exec never names the registry directly (Phase 6b-3 STEP 7B).
-        if (rt.install_standard_globals_cb == null) {
-            builtins.registry.registerStandardGlobalsDefault();
-            rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
-            rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
-        }
+        ensureStandardGlobalsRegistered(rt);
         try self.core.init(rt, options);
     }
 
@@ -240,6 +230,7 @@ pub const JSContext = struct {
 
     // --- Execution / VM / Builtins Helpers (Moved from core/context.zig) ---
     pub fn globalObject(self: *JSContext) !*Object {
+        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.zjs_vm.contextGlobal(&self.core);
     }
 
@@ -490,14 +481,17 @@ pub const JSContext = struct {
     }
 
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
+        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.eval_entry.evalScriptSource(&self.core, source_text, options);
     }
 
     pub fn evalScriptValue(self: *JSContext, source_value: JSValue, options: core.ScriptEvalOptions) !JSValue {
+        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.eval_entry.evalScriptValue(&self.core, source_value, options);
     }
 
     pub fn eval(self: *JSContext, source_text: []const u8, options: core.EvalOptions) !JSValue {
+        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.eval_entry.eval(&self.core, source_text, options);
     }
 

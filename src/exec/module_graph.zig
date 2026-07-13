@@ -42,6 +42,9 @@ pub const ModuleContinuation = struct {
     keep_result: bool,
     track_module_status: bool,
     completed: bool = false,
+    deferred_start: bool = false,
+    awaited_normalized: bool = false,
+    ready: bool = false,
     symbol_root_mask: u2 = 0,
 
     fn registerSymbolRoots(self: *ModuleContinuation, runtime: *core.JSRuntime) !void {
@@ -55,6 +58,31 @@ pub const ModuleContinuation = struct {
         if ((self.symbol_root_mask & 0b01) != 0) runtime.unregisterExternalValueSymbolRoot(self.continuation);
         if ((self.symbol_root_mask & 0b10) != 0) runtime.unregisterExternalValueSymbolRoot(self.awaited);
         self.symbol_root_mask = 0;
+    }
+
+    fn replaceAwaited(self: *ModuleContinuation, runtime: *core.JSRuntime, replacement: core.JSValue) !void {
+        errdefer replacement.free(runtime);
+        const replacement_rooted = try runtime.registerExternalValueSymbolRoot(replacement);
+        if ((self.symbol_root_mask & 0b10) != 0) {
+            runtime.unregisterExternalValueSymbolRoot(self.awaited);
+            self.symbol_root_mask &= ~@as(u2, 0b10);
+        }
+        const old = self.awaited;
+        self.awaited = replacement;
+        if (replacement_rooted) self.symbol_root_mask |= 0b10;
+        old.free(runtime);
+    }
+};
+
+const ModuleEvaluationWaiter = struct {
+    path: []const u8,
+    resolve: core.JSValue,
+    reject: core.JSValue,
+
+    fn deinit(self: ModuleEvaluationWaiter, runtime: *core.JSRuntime, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.resolve.free(runtime);
+        self.reject.free(runtime);
     }
 };
 
@@ -91,12 +119,47 @@ pub const DynamicImportState = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     max_source_size: usize,
+    continuations: ?*std.ArrayList(ModuleContinuation) = null,
+    waiters: ?*std.ArrayList(ModuleEvaluationWaiter) = null,
+    owned_continuations: std.ArrayList(ModuleContinuation) = .empty,
+    owned_waiters: std.ArrayList(ModuleEvaluationWaiter) = .empty,
     /// Load-relevant import attribute (`type`) for the job currently being
     /// dispatched, set by dynamicImportJobCall before invoking the callback
     /// (jobs run one at a time on this thread, so a single slot suffices —
     /// mirrors qjs threading `attributes` through js_dynamic_import_job to
     /// js_module_loader, quickjs.c:31059 / quickjs-libc.c:703).
     pending_import_type: ImportLoaderType = .none,
+
+    fn continuationList(self: *DynamicImportState) *std.ArrayList(ModuleContinuation) {
+        return self.continuations orelse &self.owned_continuations;
+    }
+
+    fn waiterList(self: *DynamicImportState) *std.ArrayList(ModuleEvaluationWaiter) {
+        return self.waiters orelse &self.owned_waiters;
+    }
+
+    /// Drain Promise/finalization/host jobs and module TLA resumptions through
+    /// one QuickJS-style FIFO. Script-mode dynamic imports use the state-owned
+    /// lists because they do not have an enclosing static module evaluator.
+    pub fn runJobs(self: *DynamicImportState) !void {
+        drainModuleJobLoop(
+            self.runtime,
+            self.context,
+            self.output,
+            self.allocator,
+            self.continuationList(),
+        ) catch |err| {
+            if (self.context.hasException() or self.context.hasUnhandledRejection()) return;
+            return err;
+        };
+    }
+
+    /// Release only state-owned scheduling data. Static module graph runners
+    /// pass external lists whose lifetime they continue to manage themselves.
+    pub fn deinit(self: *DynamicImportState) void {
+        freeModuleContinuations(self.runtime, self.allocator, &self.owned_continuations);
+        freeModuleEvaluationWaiters(self.runtime, self.allocator, &self.owned_waiters);
+    }
 
     fn load(
         userdata: ?*anyopaque,
@@ -110,14 +173,10 @@ pub const DynamicImportState = struct {
         _ = global;
         const state: *DynamicImportState = @ptrCast(@alignCast(userdata orelse return error.ModuleNotFound));
         return evalDynamicImportModule(
-            state.runtime,
-            state.context,
+            state,
             output,
             referrer_path,
             specifier,
-            state.io,
-            state.allocator,
-            state.max_source_size,
             state.pending_import_type,
         ) catch |err| {
             // Any pending JS exception must reach the import() promise as-is
@@ -127,6 +186,200 @@ pub const DynamicImportState = struct {
         };
     }
 };
+
+fn activeDynamicImportState(context: *core.JSContext) ?*DynamicImportState {
+    if (context.dynamic_import_callback != DynamicImportState.load) return null;
+    const userdata = context.dynamic_import_userdata orelse return null;
+    return @ptrCast(@alignCast(userdata));
+}
+
+fn createModuleEvaluationWaiter(
+    state: *DynamicImportState,
+    global: *core.Object,
+    path: []const u8,
+) !core.JSValue {
+    const waiters = state.waiterList();
+    const rt = state.runtime;
+    const resolvers_value = try core.promise.withResolvers(rt, exec.promise_ops.promisePrototypeFromGlobal(rt, global));
+    defer resolvers_value.free(rt);
+    const resolvers = try exec.property_ops.expectObject(resolvers_value);
+    const promise_atom = try rt.internAtom("promise");
+    defer rt.atoms.free(promise_atom);
+    const resolve_atom = try rt.internAtom("resolve");
+    defer rt.atoms.free(resolve_atom);
+    const reject_atom = try rt.internAtom("reject");
+    defer rt.atoms.free(reject_atom);
+
+    const promise = resolvers.getProperty(promise_atom);
+    errdefer promise.free(rt);
+    const resolve = resolvers.getProperty(resolve_atom);
+    errdefer resolve.free(rt);
+    const reject = resolvers.getProperty(reject_atom);
+    errdefer reject.free(rt);
+    const owned_path = try state.allocator.dupe(u8, path);
+    errdefer state.allocator.free(owned_path);
+    try waiters.append(state.allocator, .{
+        .path = owned_path,
+        .resolve = resolve,
+        .reject = reject,
+    });
+    return promise;
+}
+
+fn settleModuleEvaluationWaiters(
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+    path: []const u8,
+    rejected: bool,
+    reason: ?core.JSValue,
+) !void {
+    const state = activeDynamicImportState(context) orelse return;
+    const waiters = state.waiterList();
+    const global = try exec.zjs_vm.contextGlobal(context);
+    var namespace = core.JSValue.undefinedValue();
+    defer namespace.free(state.runtime);
+    if (!rejected) {
+        const module_name = try state.runtime.internAtom(path);
+        defer state.runtime.atoms.free(module_name);
+        namespace = try exec.module.moduleNamespaceValue(context, module_name);
+    }
+
+    var index: usize = 0;
+    while (index < waiters.items.len) {
+        if (!std.mem.eql(u8, waiters.items[index].path, path)) {
+            index += 1;
+            continue;
+        }
+        const waiter = waiters.orderedRemove(index);
+        defer waiter.deinit(state.runtime, state.allocator);
+        const callback = if (rejected) waiter.reject else waiter.resolve;
+        const payload = if (rejected) reason orelse core.JSValue.undefinedValue() else namespace;
+        const result = try exec.call_runtime.callValueOrBytecode(
+            context,
+            output,
+            global,
+            core.JSValue.undefinedValue(),
+            callback,
+            &.{payload},
+            null,
+            null,
+        );
+        result.free(state.runtime);
+    }
+}
+
+fn takeRecordedModuleEvaluationRejection(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    path: []const u8,
+) !?core.JSValue {
+    const module_name = try runtime.internAtom(path);
+    defer runtime.atoms.free(module_name);
+    const record = runtime.modules.find(module_name) orelse return null;
+    if (record.status != .errored) return null;
+    if (context.hasException()) return context.takeException();
+    if (record.eval_exception) |reason| return reason.dup();
+    return null;
+}
+
+fn moduleDependencyRejection(
+    runtime: *core.JSRuntime,
+    path: []const u8,
+) !?core.JSValue {
+    const module_name = try runtime.internAtom(path);
+    defer runtime.atoms.free(module_name);
+    const record = runtime.modules.find(module_name) orelse return null;
+    var visited = std.ArrayList(core.Atom).empty;
+    defer visited.deinit(runtime.memory.allocator);
+    try visited.append(runtime.memory.allocator, module_name);
+    return recordDependencyRejection(runtime, record, &visited);
+}
+
+fn recordDependencyRejection(
+    runtime: *core.JSRuntime,
+    record: *const core.module.ModuleRecord,
+    visited: *std.ArrayList(core.Atom),
+) !?core.JSValue {
+    for (record.requested_modules) |request| {
+        const dependency = runtime.modules.find(request) orelse continue;
+        if (dependency.status == .errored) {
+            if (dependency.eval_exception) |reason| return reason.dup();
+        }
+        var already_visited = false;
+        for (visited.items) |seen| {
+            if (seen == request) {
+                already_visited = true;
+                break;
+            }
+        }
+        if (already_visited) continue;
+        try visited.append(runtime.memory.allocator, request);
+        if (try recordDependencyRejection(runtime, dependency, visited)) |reason| return reason;
+    }
+    return null;
+}
+
+fn recordModuleEvaluationRejection(
+    runtime: *core.JSRuntime,
+    path: []const u8,
+    reason: core.JSValue,
+) !void {
+    const module_name = try runtime.internAtom(path);
+    defer runtime.atoms.free(module_name);
+    const record = runtime.modules.find(module_name) orelse return error.ModuleNotFound;
+    record.status = .errored;
+    if (record.eval_exception == null) record.setEvalException(runtime, reason.dup());
+}
+
+fn createModuleAwaitReactionPromise(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    awaited: core.JSValue,
+) !core.JSValue {
+    const promise_constructor = try exec.promise_ops.qjsPromiseDefaultConstructor(context, global);
+    defer promise_constructor.free(runtime);
+    const awaited_promise = try exec.promise_ops.qjsPromiseStaticCall(
+        context,
+        output,
+        global,
+        promise_constructor,
+        &.{awaited},
+        .resolve,
+        null,
+        null,
+    );
+    defer awaited_promise.free(runtime);
+
+    const resolvers_value = try core.promise.withResolvers(runtime, exec.promise_ops.promisePrototypeFromGlobal(runtime, global));
+    defer resolvers_value.free(runtime);
+    const resolvers = try exec.property_ops.expectObject(resolvers_value);
+    const promise_atom = try runtime.internAtom("promise");
+    defer runtime.atoms.free(promise_atom);
+    const resolve_atom = try runtime.internAtom("resolve");
+    defer runtime.atoms.free(resolve_atom);
+    const reject_atom = try runtime.internAtom("reject");
+    defer runtime.atoms.free(reject_atom);
+
+    const reaction_promise = resolvers.getProperty(promise_atom);
+    errdefer reaction_promise.free(runtime);
+    const resolve = resolvers.getProperty(resolve_atom);
+    defer resolve.free(runtime);
+    const reject = resolvers.getProperty(reject_atom);
+    defer reject.free(runtime);
+    try exec.promise_ops.qjsPerformPromiseThen(
+        context,
+        output,
+        global,
+        awaited_promise,
+        resolve,
+        reject,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    return reaction_promise;
+}
 
 pub const DynamicImportHostState = struct {
     runtime: *core.JSRuntime,
@@ -453,6 +706,25 @@ fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) an
 
     if (load_result) |namespace| {
         defer namespace.free(rt);
+        if (namespace.isObject()) {
+            const object = try exec.property_ops.expectObject(namespace);
+            if (object.class_id == core.class.ids.promise) {
+                // A TLA module returns its shared evaluation promise. Chain the
+                // import() capability instead of resolving it with the promise
+                // object itself (ContinueDynamicImport → PerformPromiseThen).
+                try exec.promise_ops.qjsPerformPromiseThen(
+                    ctx,
+                    call.output,
+                    global,
+                    namespace,
+                    resolve_value,
+                    reject_value,
+                    core.JSValue.undefinedValue(),
+                    core.JSValue.undefinedValue(),
+                );
+                return core.JSValue.undefinedValue();
+            }
+        }
         const settle = try exec.call_runtime.callValueOrBytecode(ctx, call.output, global, core.JSValue.undefinedValue(), resolve_value, &.{namespace}, null, null);
         settle.free(rt);
     } else |err| {
@@ -543,6 +815,10 @@ pub fn evalFileModuleGraphWithOutput(
     };
     try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
     try initializePreloadedModuleFunctionDeclarations(runtime, context, source_text, normalized_filename, io, allocator, max_source_size, module_postorder.items);
+    var continuations = std.ArrayList(ModuleContinuation).empty;
+    defer freeModuleContinuations(runtime, allocator, &continuations);
+    var module_waiters = std.ArrayList(ModuleEvaluationWaiter).empty;
+    defer freeModuleEvaluationWaiters(runtime, allocator, &module_waiters);
     var dynamic_import_state = DynamicImportState{
         .runtime = runtime,
         .context = context,
@@ -550,6 +826,8 @@ pub fn evalFileModuleGraphWithOutput(
         .io = io,
         .allocator = allocator,
         .max_source_size = max_source_size,
+        .continuations = &continuations,
+        .waiters = &module_waiters,
     };
     const prev_dynamic_import_callback = context.dynamic_import_callback;
     const prev_dynamic_import_userdata = context.dynamic_import_userdata;
@@ -559,31 +837,34 @@ pub fn evalFileModuleGraphWithOutput(
         context.dynamic_import_callback = prev_dynamic_import_callback;
         context.dynamic_import_userdata = prev_dynamic_import_userdata;
     }
-    var continuations = std.ArrayList(ModuleContinuation).empty;
-    defer freeModuleContinuations(runtime, allocator, &continuations);
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, normalized_filename)) continue;
         if (!preloadedModuleNeedsEvaluation(runtime, path)) continue;
-        try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
         const dep_source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(dep_source);
+        if (try hasActiveAsyncDependency(runtime, &continuations, path)) {
+            try enqueueDeferredModuleStart(runtime, allocator, &continuations, dep_source, path, false, true);
+            continue;
+        }
         const dep_step = try evalPreloadedFileModuleStep(runtime, context, dep_source, output, path, null, null, true);
         try handleModuleEvalStep(runtime, allocator, &continuations, dep_step, dep_source, path, false, true);
-        try runJobs(runtime, context, output);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
-    try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, normalized_filename);
     var result = core.JSValue.undefinedValue();
     if (preloadedModuleNeedsEvaluation(runtime, normalized_filename)) {
-        const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, normalized_filename, null, null, true);
-        try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, normalized_filename, true, true);
+        if (try hasActiveAsyncDependency(runtime, &continuations, normalized_filename)) {
+            try enqueueDeferredModuleStart(runtime, allocator, &continuations, source_text, normalized_filename, true, true);
+        } else {
+            const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, normalized_filename, null, null, true);
+            try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, normalized_filename, true, true);
+        }
         result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
     }
-    // Drain jobs enqueued by a synchronously-completing root (dynamic-import
-    // jobs in particular) while this runner's dynamic-import state is still
-    // installed and alive.
+    // Dynamic-import jobs may add TLA continuations to the shared scheduler.
+    // Alternate one queued reaction with one ready module resume until both
+    // queues quiesce while the loader state is still alive.
     errdefer result.free(runtime);
-    try runJobs(runtime, context, output);
+    try drainModuleJobLoop(runtime, context, output, allocator, &continuations);
     return result;
 }
 
@@ -685,7 +966,6 @@ pub fn evalFileModuleGraphWithHostHooks(
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, filename)) continue;
         if (!preloadedModuleNeedsEvaluation(runtime, path)) continue;
-        try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
 
         const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
         defer allocator.free(resolved.specifier);
@@ -699,17 +979,23 @@ pub fn evalFileModuleGraphWithHostHooks(
         const module_source = try wrapSourceByKind(allocator, loaded.kind, loaded.source, path, &module_source_allocated);
         defer if (module_source_allocated) allocator.free(module_source);
 
+        if (try hasActiveAsyncDependency(runtime, &continuations, path)) {
+            try enqueueDeferredModuleStart(runtime, allocator, &continuations, module_source, path, false, true);
+            continue;
+        }
         const dep_step = try evalPreloadedFileModuleStep(runtime, context, module_source, output, path, null, null, true);
         try handleModuleEvalStep(runtime, allocator, &continuations, dep_step, module_source, path, false, true);
-        try runJobs(runtime, context, output);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
 
-    try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, filename);
     var result = core.JSValue.undefinedValue();
     if (preloadedModuleNeedsEvaluation(runtime, filename)) {
-        const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, filename, null, null, true);
-        try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, filename, true, true);
+        if (try hasActiveAsyncDependency(runtime, &continuations, filename)) {
+            try enqueueDeferredModuleStart(runtime, allocator, &continuations, source_text, filename, true, true);
+        } else {
+            const root_step = try evalPreloadedFileModuleStep(runtime, context, source_text, output, filename, null, null, true);
+            try handleModuleEvalStep(runtime, allocator, &continuations, root_step, source_text, filename, true, true);
+        }
         result = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
     }
     // Drain jobs enqueued by a synchronously-completing root (dynamic-import
@@ -795,7 +1081,7 @@ fn evalPreloadedFileModuleStep(
 
     const module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(module_name);
-    if (runtime.modules.find(module_name) == null) return error.ModuleNotFound;
+    const module_record = runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     runtime.modules.linkModule(runtime, module_name) catch |err| {
         try throwModuleLinkError(runtime, context, filename, err);
         return moduleResolutionError(err);
@@ -835,7 +1121,11 @@ fn evalPreloadedFileModuleStep(
     const continuation = try exec.property_ops.expectObject(owned_continuation);
     var stack = exec.stack.Stack.init(&runtime.memory, context.stack_limit);
     defer stack.deinit(runtime);
-    const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return moduleResolutionError(err);
+    const initial_pc = if (continuation_value == null and module_record.function_declarations_initialized)
+        try exec.module.moduleFunctionDeclarationBodyStart(&compiled.function)
+    else
+        0;
+    const result = exec.zjs_vm.runModuleWithOutputAndVarRefsStateAtPc(context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value, initial_pc) catch |err| return moduleResolutionError(err);
     if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
         return .{ .suspended = .{
             .continuation = owned_continuation,
@@ -907,6 +1197,40 @@ fn handleModuleEvalStep(
     }
 }
 
+fn enqueueDeferredModuleStart(
+    runtime: *core.JSRuntime,
+    allocator: std.mem.Allocator,
+    continuations: *std.ArrayList(ModuleContinuation),
+    source_text: []const u8,
+    filename: []const u8,
+    keep_result: bool,
+    track_module_status: bool,
+) !void {
+    const module_name = if (track_module_status) try runtime.internAtom(filename) else core.atom.null_atom;
+    defer if (track_module_status) runtime.atoms.free(module_name);
+    const module_record = if (track_module_status)
+        runtime.modules.find(module_name) orelse return error.ModuleNotFound
+    else
+        null;
+    const source_copy = try allocator.dupe(u8, source_text);
+    errdefer allocator.free(source_copy);
+    const path_copy = try allocator.dupe(u8, filename);
+    errdefer allocator.free(path_copy);
+    var continuation = ModuleContinuation{
+        .source = source_copy,
+        .path = path_copy,
+        .continuation = core.JSValue.undefinedValue(),
+        .awaited = core.JSValue.undefinedValue(),
+        .keep_result = keep_result,
+        .track_module_status = track_module_status,
+        .deferred_start = true,
+    };
+    try continuation.registerSymbolRoots(runtime);
+    errdefer continuation.unregisterSymbolRoots(runtime);
+    try continuations.append(allocator, continuation);
+    if (module_record) |record| record.status = .evaluating;
+}
+
 fn drainModuleContinuations(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
@@ -916,11 +1240,16 @@ fn drainModuleContinuations(
 ) !core.JSValue {
     var kept_result: core.JSValue = core.JSValue.undefinedValue();
     var has_kept_result = false;
+    errdefer if (has_kept_result) kept_result.free(runtime);
     while (continuations.items.len != 0) {
-        if (try drainOneModuleContinuation(runtime, context, output, allocator, continuations)) |value| {
-            if (has_kept_result) kept_result.free(runtime);
-            kept_result = value;
-            has_kept_result = true;
+        switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+            .stalled => if (!try drainOneModuleHostEvent(context, output)) return error.OperationUnsupported,
+            .progressed => {},
+            .value => |value| {
+                if (has_kept_result) kept_result.free(runtime);
+                kept_result = value;
+                has_kept_result = true;
+            },
         }
     }
     if (has_kept_result) return kept_result;
@@ -936,8 +1265,142 @@ fn drainModuleContinuationsForDependencies(
     filename: []const u8,
 ) !void {
     while (try hasActiveAsyncDependency(runtime, continuations, filename)) {
-        if (try drainOneModuleContinuation(runtime, context, output, allocator, continuations)) |value| value.free(runtime);
+        switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+            .stalled => if (!try drainOneModuleHostEvent(context, output)) return error.OperationUnsupported,
+            .progressed => {},
+            .value => |value| value.free(runtime),
+        }
     }
+    if (try moduleDependencyRejection(runtime, filename)) |reason| {
+        try recordModuleEvaluationRejection(runtime, filename, reason);
+        _ = context.throwValue(reason);
+        return error.JSException;
+    }
+}
+
+fn drainModuleJobLoop(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+    allocator: std.mem.Allocator,
+    continuations: *std.ArrayList(ModuleContinuation),
+) !void {
+    while (true) {
+        if (continuations.items.len != 0) {
+            switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+                .stalled => {},
+                .progressed => continue,
+                .value => |value| {
+                    value.free(runtime);
+                    continue;
+                },
+            }
+        }
+
+        if (try drainOneModuleQueuedOrHostJob(runtime, context, output)) continue;
+        return;
+    }
+}
+
+fn drainOneModuleQueuedOrHostJob(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+) !bool {
+    runtime.job_queue.runAll();
+    const global = try exec.zjs_vm.contextGlobal(context);
+    if (try exec.promise_ops.drainOnePendingJob(context, output, global)) return true;
+    return drainOneModuleHostEvent(context, output);
+}
+
+fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool {
+    const global = try exec.zjs_vm.contextGlobal(context);
+    if (try exec.call.runNextOsSignalHandler(context, output, global)) return true;
+    if (try exec.call_runtime.runNextOsRwHandler(context, output, global)) return true;
+    return exec.call_runtime.runNextOsTimer(context, output, global);
+}
+
+const ModuleDrainResult = union(enum) {
+    stalled,
+    progressed,
+    value: core.JSValue,
+};
+
+fn prepareModuleContinuationAwait(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+    continuations: *const std.ArrayList(ModuleContinuation),
+    continuation: *ModuleContinuation,
+) !void {
+    if (continuation.completed or continuation.ready) return;
+    if (continuation.deferred_start) {
+        if (!try hasActiveAsyncDependency(runtime, continuations, continuation.path)) {
+            // GatherAvailableAncestors executes newly-unblocked synchronous
+            // parents in the current fulfillment job, before the next queued
+            // Promise reaction.
+            continuation.ready = true;
+        }
+        return;
+    }
+    const global_object = try exec.zjs_vm.contextGlobal(context);
+    if (!continuation.awaited_normalized) {
+        const reaction_promise = try createModuleAwaitReactionPromise(runtime, context, output, global_object, continuation.awaited);
+        try continuation.replaceAwaited(runtime, reaction_promise);
+        continuation.awaited_normalized = true;
+    }
+
+    const promise = try exec.property_ops.expectObject(continuation.awaited);
+    if (promise.class_id != core.class.ids.promise) return error.TypeError;
+    if (promise.promiseResult() == null) return;
+    if (promise.promiseIsRejected()) core.promise.markHandled(context, promise);
+    // The internal reaction promise settles while its Promise reaction job is
+    // running. Resume before the next queued job, exactly as QuickJS executes
+    // the async-module continuation inside that reaction.
+    continuation.ready = true;
+}
+
+fn nextReadyModuleContinuation(continuations: *const std.ArrayList(ModuleContinuation)) ?usize {
+    for (continuations.items, 0..) |continuation, index| {
+        if (continuation.completed) return index;
+        if (continuation.ready) return index;
+    }
+    return null;
+}
+
+fn drainOneScheduledModuleWork(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    output: ?*std.Io.Writer,
+    allocator: std.mem.Allocator,
+    continuations: *std.ArrayList(ModuleContinuation),
+) !ModuleDrainResult {
+    // Preserve the legacy internal job queue, but do not bulk-drain the
+    // Promise queue: TLA resumptions share its global sequence one item at a
+    // time, exactly like QuickJS promise-reaction jobs.
+    runtime.job_queue.runAll();
+    for (continuations.items) |*continuation| {
+        try prepareModuleContinuationAwait(runtime, context, output, continuations, continuation);
+    }
+
+    const ready_index = nextReadyModuleContinuation(continuations);
+    if (ready_index) |index| {
+        const continuation = continuations.items[index];
+        if (continuation.completed) {
+            if (try drainOneModuleContinuation(runtime, context, output, allocator, continuations, index)) |value| {
+                return .{ .value = value };
+            }
+            return .progressed;
+        }
+        if (try drainOneModuleContinuation(runtime, context, output, allocator, continuations, index)) |value| {
+            return .{ .value = value };
+        }
+        return .progressed;
+    }
+
+    const global_object = try exec.zjs_vm.contextGlobal(context);
+    if (try exec.promise_ops.drainOnePendingJob(context, output, global_object)) return .progressed;
+    return .stalled;
 }
 
 fn drainOneModuleContinuation(
@@ -946,8 +1409,9 @@ fn drainOneModuleContinuation(
     output: ?*std.Io.Writer,
     allocator: std.mem.Allocator,
     continuations: *std.ArrayList(ModuleContinuation),
+    index: usize,
 ) !?core.JSValue {
-    var current = continuations.orderedRemove(0);
+    var current = continuations.orderedRemove(index);
     var current_roots_registered = true;
     errdefer if (current_roots_registered) current.unregisterSymbolRoots(runtime);
     defer allocator.free(current.source);
@@ -959,9 +1423,45 @@ fn drainOneModuleContinuation(
         current.awaited.free(runtime);
         return null;
     }
-    const awaited_value = current.awaited;
+    if (current.deferred_start) {
+        current.unregisterSymbolRoots(runtime);
+        current_roots_registered = false;
+        if (try moduleDependencyRejection(runtime, current.path)) |reason| {
+            defer reason.free(runtime);
+            try recordModuleEvaluationRejection(runtime, current.path, reason);
+            try settleModuleEvaluationWaiters(context, output, current.path, true, reason);
+            if (current.keep_result) {
+                _ = context.throwValue(reason.dup());
+                return error.JSException;
+            }
+            return null;
+        }
+        const step = evalPreloadedFileModuleStep(runtime, context, current.source, output, current.path, null, null, current.track_module_status) catch |err| {
+            if (err == error.OutOfMemory or err == error.ProcessExit) return err;
+            if (try takeRecordedModuleEvaluationRejection(runtime, context, current.path)) |reason| {
+                defer reason.free(runtime);
+                try settleModuleEvaluationWaiters(context, output, current.path, true, reason);
+                if (current.keep_result) {
+                    _ = context.throwValue(reason.dup());
+                    return error.JSException;
+                }
+                return null;
+            }
+            return err;
+        };
+        var step_owned = true;
+        errdefer if (step_owned) freeModuleEvalStep(runtime, step);
+        switch (step) {
+            .completed => try settleModuleEvaluationWaiters(context, output, current.path, false, null),
+            .suspended => {},
+        }
+        step_owned = false;
+        try handleModuleEvalStep(runtime, allocator, continuations, step, current.source, current.path, current.keep_result, current.track_module_status);
+        return null;
+    }
+    const awaited_promise = current.awaited;
     var awaited_owned = true;
-    errdefer if (awaited_owned) awaited_value.free(runtime);
+    errdefer if (awaited_owned) awaited_promise.free(runtime);
     const continuation = current.continuation;
     var continuation_owned = true;
     errdefer if (continuation_owned) continuation.free(runtime);
@@ -969,17 +1469,38 @@ fn drainOneModuleContinuation(
     const path = current.path;
     const keep_result = current.keep_result;
     const track_module_status = current.track_module_status;
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    try exec.zjs_vm.drainPendingPromiseJobs(context, output, global_object);
-    continuation_owned = false;
-    const step = try evalPreloadedFileModuleStep(runtime, context, module_source, output, path, continuation, awaited_value, track_module_status);
-    awaited_value.free(runtime);
-    awaited_owned = false;
+    const promise = try exec.property_ops.expectObject(awaited_promise);
+    if (promise.class_id != core.class.ids.promise) return error.TypeError;
+    const resume_value = if (promise.promiseResult()) |stored| stored.dup() else return error.OperationUnsupported;
+    defer resume_value.free(runtime);
+    const continuation_object = try exec.property_ops.expectObject(continuation);
+    try exec.call_runtime.setGeneratorResumeCompletionType(runtime, continuation_object, if (promise.promiseIsRejected()) 2 else 0);
     current.unregisterSymbolRoots(runtime);
     current_roots_registered = false;
+    continuation_owned = false;
+    const step = evalPreloadedFileModuleStep(runtime, context, module_source, output, path, continuation, resume_value, track_module_status) catch |err| {
+        awaited_promise.free(runtime);
+        awaited_owned = false;
+        if (err == error.OutOfMemory or err == error.ProcessExit) return err;
+        if (try takeRecordedModuleEvaluationRejection(runtime, context, path)) |reason| {
+            defer reason.free(runtime);
+            try settleModuleEvaluationWaiters(context, output, path, true, reason);
+            if (keep_result) {
+                _ = context.throwValue(reason.dup());
+                return error.JSException;
+            }
+            return null;
+        }
+        return err;
+    };
+    awaited_promise.free(runtime);
+    awaited_owned = false;
     var step_owned = true;
     errdefer if (step_owned) freeModuleEvalStep(runtime, step);
-    try runJobs(runtime, context, output);
+    switch (step) {
+        .completed => try settleModuleEvaluationWaiters(context, output, path, false, null),
+        .suspended => {},
+    }
     if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     step_owned = false;
     try handleModuleEvalStep(runtime, allocator, continuations, step, module_source, path, keep_result, track_module_status);
@@ -996,13 +1517,14 @@ fn hasActiveAsyncDependency(
     const record = runtime.modules.find(module_name) orelse return false;
     var visited = std.ArrayList(core.Atom).empty;
     defer visited.deinit(runtime.memory.allocator);
-    return recordHasActiveAsyncDependency(runtime, continuations, record, &visited);
+    return recordHasActiveAsyncDependency(runtime, continuations, record, filename, &visited);
 }
 
 fn recordHasActiveAsyncDependency(
     runtime: *core.JSRuntime,
     continuations: *const std.ArrayList(ModuleContinuation),
     record: *const core.module.ModuleRecord,
+    ignored_path: []const u8,
     visited: *std.ArrayList(core.Atom),
 ) !bool {
     for (visited.items) |seen| {
@@ -1012,10 +1534,11 @@ fn recordHasActiveAsyncDependency(
     for (record.requested_modules) |request| {
         const request_name = runtime.atoms.name(request) orelse continue;
         for (continuations.items) |continuation| {
+            if (std.mem.eql(u8, continuation.path, ignored_path)) continue;
             if (!continuation.completed and std.mem.eql(u8, continuation.path, request_name)) return true;
         }
         const requested_record = runtime.modules.find(request) orelse continue;
-        if (try recordHasActiveAsyncDependency(runtime, continuations, requested_record, visited)) return true;
+        if (try recordHasActiveAsyncDependency(runtime, continuations, requested_record, ignored_path, visited)) return true;
     }
     return false;
 }
@@ -1033,6 +1556,15 @@ fn freeModuleContinuations(
         item.awaited.free(runtime);
     }
     continuations.deinit(allocator);
+}
+
+fn freeModuleEvaluationWaiters(
+    runtime: *core.JSRuntime,
+    allocator: std.mem.Allocator,
+    waiters: *std.ArrayList(ModuleEvaluationWaiter),
+) void {
+    for (waiters.items) |waiter| waiter.deinit(runtime, allocator);
+    waiters.deinit(allocator);
 }
 
 fn freeModuleEvalStep(runtime: *core.JSRuntime, step: ModuleEvalStep) void {
@@ -1053,16 +1585,17 @@ fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
 }
 
 fn evalDynamicImportModule(
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
+    state: *DynamicImportState,
     output: ?*std.Io.Writer,
     referrer_path: []const u8,
     specifier: []const u8,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_source_size: usize,
     import_type: ImportLoaderType,
 ) !core.JSValue {
+    const runtime = state.runtime;
+    const context = state.context;
+    const io = state.io;
+    const allocator = state.allocator;
+    const max_source_size = state.max_source_size;
     if (referrer_path.len == 0) {
         try exec.module.throwCouldNotLoadModule(context, specifier);
         return error.JSException;
@@ -1096,6 +1629,13 @@ fn evalDynamicImportModule(
     defer runtime.atoms.free(module_name);
 
     var did_preload_graph = false;
+    var preloaded_source: ?[]u8 = null;
+    defer if (preloaded_source) |source| allocator.free(source);
+    var preload_postorder = std.ArrayList([]const u8).empty;
+    defer {
+        for (preload_postorder.items) |item| allocator.free(item);
+        preload_postorder.deinit(allocator);
+    }
     if (runtime.modules.find(module_name) == null) {
         if (!is_json) {
             const source = std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
@@ -1105,12 +1645,7 @@ fn evalDynamicImportModule(
                 },
                 else => |e| return e,
             };
-            defer allocator.free(source);
-            var preload_postorder = std.ArrayList([]const u8).empty;
-            defer {
-                for (preload_postorder.items) |item| allocator.free(item);
-                preload_postorder.deinit(allocator);
-            }
+            preloaded_source = source;
             // skip-existing preload: records already in the registry keep
             // their live bindings and status (re-instantiating them would
             // reset already-evaluated modules).
@@ -1128,6 +1663,11 @@ fn evalDynamicImportModule(
     // never re-run their body.
     if (runtime.modules.find(module_name)) |record| {
         if (record.status == .errored) return throwCachedModuleEvalException(runtime, context, record);
+        if (record.status == .evaluated) return exec.module.moduleNamespaceValue(context, module_name);
+        if (record.status == .evaluating) {
+            const global = try exec.zjs_vm.contextGlobal(context);
+            return createModuleEvaluationWaiter(state, global, target_path);
+        }
     } else return error.ModuleNotFound;
 
     runtime.modules.linkModule(runtime, module_name) catch |err| {
@@ -1153,6 +1693,16 @@ fn evalDynamicImportModule(
         _ = try exec.module.initializeSyntheticFileModule(context, global_object, module_name, module_source);
     } else if (did_preload_graph) {
         try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
+        try initializePreloadedModuleFunctionDeclarations(
+            runtime,
+            context,
+            preloaded_source.?,
+            target_path,
+            io,
+            allocator,
+            max_source_size,
+            preload_postorder.items,
+        );
     }
 
     var postorder = std.ArrayList([]const u8).empty;
@@ -1164,8 +1714,7 @@ fn evalDynamicImportModule(
     defer seen.deinit(allocator);
     try appendPendingModuleEvalPostorder(runtime, allocator, module_name, &seen, &postorder);
 
-    var continuations = std.ArrayList(ModuleContinuation).empty;
-    defer freeModuleContinuations(runtime, allocator, &continuations);
+    const continuations = state.continuationList();
 
     for (postorder.items) |path| {
         const module_atom = try runtime.internAtom(path);
@@ -1179,8 +1728,6 @@ fn evalDynamicImportModule(
         }
         if (!moduleNeedsEvaluation(record)) continue;
 
-        try drainModuleContinuationsForDependencies(runtime, context, output, allocator, &continuations, path);
-
         const dep_source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size)) catch |err| switch (err) {
             error.FileNotFound => {
                 try exec.module.throwCouldNotLoadModule(context, path);
@@ -1189,16 +1736,21 @@ fn evalDynamicImportModule(
             else => |e| return e,
         };
         defer allocator.free(dep_source);
+        if (try hasActiveAsyncDependency(runtime, continuations, path)) {
+            try enqueueDeferredModuleStart(runtime, allocator, continuations, dep_source, path, false, true);
+            continue;
+        }
         const step = try evalPreloadedFileModuleStep(runtime, context, dep_source, output, path, null, null, true);
-        try handleModuleEvalStep(runtime, allocator, &continuations, step, dep_source, path, false, true);
-        try runJobs(runtime, context, output);
+        try handleModuleEvalStep(runtime, allocator, continuations, step, dep_source, path, false, true);
         if (context.hasException()) return error.JSException;
     }
 
-    _ = try drainModuleContinuations(runtime, context, output, allocator, &continuations);
-
     if (runtime.modules.find(module_name)) |record| {
         if (record.status == .errored) return throwCachedModuleEvalException(runtime, context, record);
+        if (record.status != .evaluated) {
+            const global = try exec.zjs_vm.contextGlobal(context);
+            return createModuleEvaluationWaiter(state, global, target_path);
+        }
     }
     return exec.module.moduleNamespaceValue(context, module_name);
 }
@@ -1316,7 +1868,6 @@ fn evalDynamicImportModuleWithHostHooks(
 
         const step = try evalPreloadedFileModuleStep(runtime, context, module_source, output, path, null, null, true);
         try handleModuleEvalStep(runtime, allocator, &continuations, step, module_source, path, false, true);
-        try runJobs(runtime, context, output);
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
 

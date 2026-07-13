@@ -753,6 +753,23 @@ test "production embedding interrupt handler aborts unbounded execution" {
     try std.testing.expect(state.hits > 0);
 }
 
+test "production embedding interrupt handler aborts conditional-only backedge" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var state = InterruptState{};
+    rt.setInterruptHandler(InterruptState.stop, &state);
+    defer rt.setInterruptHandler(null, null);
+
+    // A do/while loop closes with OP_if_true8 rather than OP_goto8. Conditional
+    // branches must therefore poll just like unconditional backedges do.
+    try std.testing.expectError(error.Interrupted, ctx.eval("do {} while (true);", .{}));
+    try std.testing.expect(state.hits > 0);
+}
+
 test "production embedding takeException captures exception snapshot without leaking" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

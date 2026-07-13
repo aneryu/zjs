@@ -4,7 +4,7 @@
 //! QuickJS source map: the typed-array element read/write fabric, the DataView
 //! get/set primitives, and the ArrayBuffer resize/slice/transfer/grow storage
 //! operations all live in the engine core (quickjs.c), with the JS-visible
-//! builtin methods (`builtins/buffer.zig`) and the VM opcode handlers as
+//! native method bodies (`exec/buffer_ops.zig`) and the VM opcode handlers as
 //! clients. These functions operate purely on the core typed-array storage
 //! slots (`Object.typedArrayBuffer()`, `typedArrayByteOffset()`,
 //! `typedArrayElementSize()`, `typedArrayFixedLength()`, `byteStorage()`,
@@ -27,8 +27,8 @@
 //! (`exec/typed_array_construct.zig`). The `*MethodId` / `*FromRecordId` /
 //! `*NameFromRecordId` name machinery and its method-id enums live in
 //! `core/host_function.zig` (`builtin_method_ids` + `builtin_method_id_lookup`);
-//! `builtins/buffer.zig` re-exports both. The record dispatch table stays in
-//! `builtins/buffer.zig`.
+//! `exec/buffer_ops.zig` re-exports both. The record dispatch table is owned by
+//! `exec/buffer_ops.zig`.
 
 const std = @import("std");
 
@@ -194,7 +194,7 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
             // Mirrors js_array_buffer_transfer (quickjs.c:57141-57142):
             // "invalid array buffer length" is a TypeError in qjs when the
             // preserved-resizability transfer target exceeds maxByteLength
-            // (spec AllocateArrayBuffer says RangeError; test262 has no
+            // (spec AllocateArrayBuffer says RangeError; the conformance suite has no
             // coverage, so the qjs behavior wins per the mainline principle).
             if (new_length > max) return error.TypeError;
         }

@@ -153,6 +153,52 @@ pub fn throwError(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) T
     };
 }
 
+fn createAtomError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    error_name: []const u8,
+    atom_id: u32,
+    prefix: []const u8,
+    suffix: []const u8,
+) !core.JSValue {
+    const atom_name = ctx.runtime.atoms.name(atom_id) orelse "lexical variable";
+    const prefix_name_len = std.math.add(usize, prefix.len, atom_name.len) catch return error.OutOfMemory;
+    const message_len = std.math.add(usize, prefix_name_len, suffix.len) catch return error.OutOfMemory;
+    const message = try ctx.runtime.allocRuntime(u8, message_len);
+    defer ctx.runtime.memory.free(u8, message);
+    @memcpy(message[0..prefix.len], prefix);
+    @memcpy(message[prefix.len..prefix_name_len], atom_name);
+    @memcpy(message[prefix_name_len..], suffix);
+    return exception_ops.createNamedError(ctx, global, error_name, message);
+}
+
+fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: u32, error_type: u8) !core.JSValue {
+    return switch (error_type) {
+        0 => createAtomError(ctx, global, "TypeError", atom_id, "'", "' is read-only"),
+        1 => createAtomError(ctx, global, "SyntaxError", atom_id, "redeclaration of '", "'"),
+        2 => createAtomError(ctx, global, "ReferenceError", atom_id, "", " is not initialized"),
+        3 => exception_ops.createNamedError(ctx, global, "ReferenceError", "unsupported reference to 'super'"),
+        4 => exception_ops.createNamedError(ctx, global, "TypeError", "iterator does not have a throw method"),
+        else => blk: {
+            var message_buffer: [64]u8 = undefined;
+            const message = try std.fmt.bufPrint(&message_buffer, "invalid throw var type {d}", .{error_type});
+            break :blk exception_ops.createNamedError(ctx, global, "InternalError", message);
+        },
+    };
+}
+
+fn deliverPendingThrow(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime err: anytype,
+) !ThrowResult {
+    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+    return err;
+}
+
 pub noinline fn throwErrorVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -161,19 +207,20 @@ pub noinline fn throwErrorVm(
     catch_target: *?usize,
     global: *core.Object,
 ) !ThrowResult {
+    const atom_id = std.mem.readInt(u32, function.code[frame.pc..][0..4], .little);
     const error_type = function.code[frame.pc + 4];
-    if (error_type == 4) {
-        // JS_THROW_ERROR_ITERATOR_THROW (quickjs.c:18356): the yield*
-        // missing-throw path carries a typed message.
-        frame.pc += 5;
-        const err_value = try exception_ops.createNamedError(ctx, global, "TypeError", "iterator does not have a throw method");
-        _ = ctx.throwValue(err_value);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.JSException)) return .handled;
-        return error.JSException;
-    }
-    const err = throwError(function, frame);
-    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
-    return err;
+    frame.pc += 5;
+    const error_value = try createThrowErrorValue(ctx, global, atom_id, error_type);
+    _ = ctx.throwValue(error_value);
+    // Preserve the typed sentinel while carrying the richer pending exception.
+    // Inline-call unwinding uses the sentinel to find a catch in an outer frame;
+    // pendingExceptionMatchesError then transfers this exact Error object.
+    return switch (error_type) {
+        0, 4 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.TypeError),
+        1 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.SyntaxError),
+        2, 3 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.ReferenceError),
+        else => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.JSException),
+    };
 }
 
 pub noinline fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {

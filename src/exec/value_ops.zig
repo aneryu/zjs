@@ -66,7 +66,7 @@ pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !co
 
 pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isString() and b.isString()) {
-        const cmp: i32 = if (a.same(b)) 0 else compareStringValues(a, b) orelse return error.TypeError;
+        const cmp: i32 = if (a.same(b)) 0 else compareStringValues(a, b, false) orelse return error.TypeError;
         const out = switch (op) {
             bytecode.opcode.op.lt => cmp < 0,
             bytecode.opcode.op.lte => cmp <= 0,
@@ -925,7 +925,7 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     if (string_value.ropeBody()) |node| {
         if (node.len == 0) return try toStringValue(rt, core.JSValue.int32(int_value));
         if (position == .suffix) {
-            if (node.header().rc == 1 and node.flat == null) {
+            if (node.header().rc == 1 and !node.isLinearized()) {
                 var digits_buf: [16]u8 = undefined;
                 const digits = dtoa.formatInt32(&digits_buf, int_value);
                 if (try core.string.appendRopeTail(node, rt, .{ .latin1 = digits }, 1)) {
@@ -936,12 +936,12 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
         const left = if (position == .prefix) digits_value else string_value;
         const right = if (position == .prefix) string_value else digits_value;
-        const out = core.string.String.createRope(rt, left, right) catch |err| {
+        const out = core.string.String.createBalancedRope(rt, left, right) catch |err| {
             digits_value.free(rt);
             return err;
         };
         digits_value.free(rt);
-        return out.value();
+        return out;
     }
 
     const string = stringObject(string_value) orelse return null;
@@ -972,43 +972,151 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
 }
 
 fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
-    const a_len = core.string.stringValueLen(a);
-    const b_len = core.string.stringValueLen(b);
-    if (a_len == 0) return b.dup();
-    if (b_len == 0) return a.dup();
+    // The generic coercion path still borrows its inputs. Duplicate them once,
+    // then share the QJS-style consuming implementation used by direct OP_add.
+    return stringAddStringsOwned(rt, a.dup(), b.dup());
+}
 
-    const a_is_rope = a.ropeBody() != null;
-    const b_is_rope = b.ropeBody() != null;
+/// QuickJS `OP_add`'s direct both-string leg consumes both stack operands in
+/// `JS_ConcatString` and returns one owned result. Keeping that ownership
+/// contract here lets the register-resident dispatcher bypass the generic
+/// stack-pop/coercion shell without leaking or double-freeing on OOM.
+pub fn addStringsOwned(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
+    return stringAddStringsOwned(rt, lhs, rhs);
+}
 
-    // rc==1: the caller holds the only reference, so the lhs is consumed by
-    // this add and may be extended in place (rope tail append when the lhs is
-    // an unmaterialized rope). A rope rhs keeps the deferred rope-of-rope
-    // linking below instead of being copied.
-    if (!b_is_rope) {
-        if (a.ropeBody()) |node| {
-            // Generic binary add: the only known alias is `a` itself, so the
-            // rope may be extended in place only when it is exclusively held.
-            if (node.header().rc == 1 and try appendRopeTailValue(rt, node, b, 1)) {
-                return a.dup();
+/// Consumes two known string values, mirroring `JS_ConcatString` rather than
+/// retaining children into a result and then freeing the input owners again.
+fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
+    const b_rope = b.ropeBody();
+    if (b_rope == null) {
+        const b_string = b.asStringBodyRaw() orelse {
+            a.free(rt);
+            b.free(rt);
+            return error.TypeError;
+        };
+        const b_len = b_string.len();
+        if (b_len == 0) {
+            b.free(rt);
+            return a;
+        }
+
+        const a_rope = a.ropeBody();
+        if (a_rope) |node| {
+            if (node.len == 0) {
+                a.free(rt);
+                return b;
+            }
+
+            // zjs's measured add_loc extension: if the consumed lhs is truly
+            // exclusive, preserve the O(1) private-tail win. A checked lexical
+            // also has its binding owner, so it follows QJS's rope path below.
+            if (node.header().rc == 1) {
+                const appended = core.string.appendRopeTail(node, rt, b_string.resolveData(), 1) catch |err| {
+                    a.free(rt);
+                    b.free(rt);
+                    return err;
+                };
+                if (appended) {
+                    b.free(rt);
+                    return a;
+                }
+            }
+
+            if (b_len <= core.string.String.rope_short_len and
+                !node.isLinearized() and !node.hasTail())
+            {
+                if (node.right.asStringBodyRaw()) |right_string| {
+                    if (right_string.len() <= core.string.String.rope_short_len) {
+                        // QJS: ConcatString2(Dup(r1->right), op2), then
+                        // new_string_rope(Dup(r1->left), merged), Free(op1).
+                        right_string.retain();
+                        const merged = concatFlatStringBodiesOwned(rt, right_string, b_string) catch |err| {
+                            a.free(rt);
+                            return err;
+                        };
+                        const result = core.string.String.createBalancedRopeOwned(rt, node.left.dup(), merged) catch |err| {
+                            a.free(rt);
+                            return err;
+                        };
+                        a.free(rt);
+                        return result;
+                    }
+                }
+            }
+        } else {
+            const a_string = a.asStringBodyRaw() orelse {
+                a.free(rt);
+                b.free(rt);
+                return error.TypeError;
+            };
+            const a_len = a_string.len();
+            if (a_len == 0) {
+                a.free(rt);
+                return b;
+            }
+            if (b_len <= core.string.String.rope_short_len and a_len <= core.string.String.rope_short2_len) {
+                return concatFlatStringBodiesOwned(rt, a_string, b_string);
+            }
+        }
+    } else {
+        const node = b_rope.?;
+        if (node.len == 0) {
+            b.free(rt);
+            return a;
+        }
+        if (a.ropeBody() == null) {
+            const a_string = a.asStringBodyRaw() orelse {
+                a.free(rt);
+                b.free(rt);
+                return error.TypeError;
+            };
+            if (a_string.len() == 0) {
+                a.free(rt);
+                return b;
+            }
+            if (!node.isLinearized() and !node.hasTail()) {
+                if (node.left.asStringBodyRaw()) |left_string| {
+                    if (left_string.len() <= core.string.String.rope_short_len) {
+                        left_string.retain();
+                        const merged = concatFlatStringBodiesOwned(rt, a_string, left_string) catch |err| {
+                            b.free(rt);
+                            return err;
+                        };
+                        const result = core.string.String.createBalancedRopeOwned(rt, merged, node.right.dup()) catch |err| {
+                            b.free(rt);
+                            return err;
+                        };
+                        b.free(rt);
+                        return result;
+                    }
+                }
             }
         }
     }
-    // If either operand already is a rope, concatenating eagerly would flatten
-    // it; chain another rope node instead (ropes are always >= rope_min_len).
-    if (a_is_rope or b_is_rope) {
-        const out = try core.string.String.createRope(rt, a, b);
-        return out.value();
-    }
-    // Long concatenations defer the copy through a rope node (QuickJS
-    // JSStringRope analogue); content materializes lazily on first read.
-    if (a_len + b_len >= core.string.String.rope_min_len) {
-        const out = try core.string.String.createRope(rt, a, b);
-        return out.value();
-    }
 
-    // Both operands are flat from here.
-    const a_string = stringObject(a) orelse return error.TypeError;
-    const b_string = stringObject(b) orelse return error.TypeError;
+    // Inputs transfer directly into the final node; on allocation/rebalance
+    // failure createBalancedRopeOwned releases both.
+    return core.string.String.createBalancedRopeOwned(rt, a, b);
+}
+
+fn concatFlatStringValues(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
+    const a_string = a.asStringBodyRaw() orelse return error.TypeError;
+    const b_string = b.asStringBodyRaw() orelse return error.TypeError;
+    a_string.retain();
+    b_string.retain();
+    return concatFlatStringBodiesOwned(rt, a_string, b_string);
+}
+
+fn concatFlatStringBodiesOwned(
+    rt: *core.JSRuntime,
+    a_string: *core.string.String,
+    b_string: *core.string.String,
+) !core.JSValue {
+    defer core.string.String.releaseFromHeader(rt, a_string.header());
+    defer core.string.String.releaseFromHeader(rt, b_string.header());
+    const total_len = try std.math.add(usize, a_string.len(), b_string.len());
+    if (total_len > core.string.max_length) return error.StringTooLong;
     // Fast path: both operands are latin1. We allocate the result string
     // directly and memcpy in place, skipping the ArrayList intermediate
     // and the latin1→utf16 fallback when both sides fit in 8 bits.
@@ -1033,7 +1141,7 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
         .latin1 => {},
     }
     // Mixed widths fall back to the slower ArrayList path.
-    var units = try std.ArrayList(u16).initCapacity(rt.memory.allocator, a_len + b_len);
+    var units = try std.ArrayList(u16).initCapacity(rt.memory.allocator, total_len);
     defer units.deinit(rt.memory.allocator);
     try appendStringUtf16Units(rt, &units, a_string);
     try appendStringUtf16Units(rt, &units, b_string);
@@ -1045,7 +1153,7 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
 /// deferred content stays lazy through rope-of-rope linking instead).
 fn appendRopeTailValue(rt: *core.JSRuntime, node: *core.string.StringRope, rhs: core.JSValue, max_ref_count: usize) !bool {
     if (rhs.ropeBody() != null) return false;
-    if (node.flat != null) return false;
+    if (node.isLinearized()) return false;
     const rhs_string = stringObject(rhs) orelse return false;
     return core.string.appendRopeTail(node, rt, rhs_string.resolveData(), max_ref_count);
 }
@@ -1081,7 +1189,7 @@ pub fn startAccumulatorRope(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JS
     if (rhs.ropeBody() != null) return null; // rope rhs: keep deferred via rope-of-rope chaining
     if (core.string.stringValueLen(lhs) == 0) return null; // "" + x -> stringAddStrings returns x
     if (core.string.stringValueLen(rhs) == 0) return null; // x + "" -> stringAddStrings returns x
-    const rope = try core.string.String.createRope(rt, lhs, rhs);
+    const rope = try core.string.String.createAccumulatorRope(rt, lhs, rhs);
     return rope.value();
 }
 
@@ -1219,7 +1327,7 @@ fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isNull() or a.isUndefined()) return a.same(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
-        return (compareStringValues(a, b) orelse 1) == 0;
+        return (compareStringValues(a, b, true) orelse 1) == 0;
     }
     return a.same(b);
 }
@@ -1295,10 +1403,8 @@ fn parseIntString(bytes: []const u8) ?i32 {
     return std.fmt.parseInt(i32, trimmed, 10) catch null;
 }
 
-fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
-    const a_string = a.asStringBody() orelse return null;
-    const b_string = b.asStringBody() orelse return null;
-    return a_string.compare(b_string);
+fn compareStringValues(a: core.JSValue, b: core.JSValue, eq_only: bool) ?i32 {
+    return core.string.compareStringValues(a, b, eq_only);
 }
 
 fn jsMathPow(lhs: f64, rhs: f64) f64 {

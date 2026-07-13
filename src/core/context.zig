@@ -25,6 +25,7 @@ pub const BacktraceFrame = struct {
     /// backtrace is materialized. Undefined when `function_name` is already
     /// authoritative. Resolution caches into `function_name` and clears this.
     function_value: JSValue = JSValue.undefinedValue(),
+    is_native: bool = false,
 
     pub fn currentPc(self: BacktraceFrame) usize {
         return if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
@@ -53,6 +54,7 @@ pub const ActiveBacktraceSnapshot = struct {
     location_resolver: ?BacktraceLocationResolver = null,
     function_value: JSValue = JSValue.undefinedValue(),
     backtrace_barrier: bool = false,
+    is_native: bool = false,
 };
 
 /// Resolves the active frame at `index` within this node's frame group
@@ -955,6 +957,7 @@ pub const JSContext = struct {
             .location_data = frame.location_data,
             .location_resolver = frame.location_resolver,
             .function_value = if (frame.function_value.isObject()) frame.function_value.dup() else JSValue.undefinedValue(),
+            .is_native = frame.is_native,
         };
     }
 
@@ -968,6 +971,7 @@ pub const JSContext = struct {
             .location_data = snapshot.location_data,
             .location_resolver = snapshot.location_resolver,
             .function_value = if (snapshot.function_value.isObject()) snapshot.function_value.dup() else JSValue.undefinedValue(),
+            .is_native = snapshot.is_native,
         };
     }
 

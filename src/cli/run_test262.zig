@@ -4,6 +4,7 @@ const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 const parser = test262_root.parser;
 const unicode = test262_root.libs.unicode;
+const core_runtime = test262_root.core.runtime;
 
 extern "c" fn getpid() c_int;
 
@@ -1757,6 +1758,7 @@ fn runEmbeddedEngine(
         .allocator = allocator,
         .max_source_size = 16 * 1024 * 1024,
     };
+    defer dynamic_import_state.deinit();
     test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
     var value = (if (run_as_module)
         runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
@@ -1782,7 +1784,7 @@ fn runEmbeddedEngine(
     defer value.free(rt);
 
     if (!value.isException()) {
-        try ctx.runJobs(&output);
+        try dynamic_import_state.runJobs();
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
             const async_exception = ctx.takePendingException();
@@ -3998,6 +4000,38 @@ test "embedded runner passes async test that completes via $DONE" {
     try std.testing.expect(passed);
 }
 
+test "embedded Debug runner executes a representative test262 harness within its native stack budget" {
+    const allocator = std.testing.allocator;
+    const test_path = "test262/test/language/types/null/S8.2_A1_T1.js";
+    const test_source = try readTestSource(allocator, std.testing.io, test_path);
+    defer allocator.free(test_source);
+    var metadata = try parseMetadataText(allocator, test_source);
+    defer metadata.deinit(allocator);
+    const harness_prelude = try makeHarnessPrelude(allocator, std.testing.io, "test262/harness");
+    defer allocator.free(harness_prelude);
+    var harness_cache = HarnessCache.init(allocator, std.testing.io, "test262/harness");
+    defer harness_cache.deinit();
+    const source = try makeTestSourceFromBytes(allocator, &harness_cache, harness_prelude, test_source, metadata);
+    defer allocator.free(source);
+
+    var stderr_storage: [stderr_storage_len]u8 = undefined;
+    var stderr: []const u8 = "";
+    const passed = try runEmbeddedEngine(
+        allocator,
+        std.testing.io,
+        source,
+        test_path,
+        false,
+        true,
+        false,
+        &stderr_storage,
+        &stderr,
+    );
+
+    try std.testing.expectEqualStrings("", stderr);
+    try std.testing.expect(passed);
+}
+
 test "test262 metadata parses includes in order plus features flags and negative data" {
     var metadata = try parseMetadataText(std.testing.allocator,
         \\/*---
@@ -4140,6 +4174,7 @@ test "test262 typed array iterator staging source parses after installing global
     {
         const rt = try zjs.JSRuntime.create(allocator);
         defer rt.destroy();
+        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         _ = try ctx.globalObject();
@@ -4155,6 +4190,7 @@ test "test262 typed array iterator staging source parses after installing global
     {
         const rt = try zjs.JSRuntime.create(allocator);
         defer rt.destroy();
+        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         const global = try ctx.globalObject();

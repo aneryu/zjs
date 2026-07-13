@@ -10,32 +10,6 @@ const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
 const stack_mod = @import("stack.zig");
 
-pub const EvalVarRefSnapshot = struct {
-    names: []Atom = &.{},
-    refs: runtime.ValueRootBuffer = .{},
-
-    pub fn init(rt: *JSRuntime, names: []const Atom, refs: []const JSValue) !EvalVarRefSnapshot {
-        var snapshot = EvalVarRefSnapshot{};
-        errdefer snapshot.deinit(rt);
-
-        snapshot.names = try dupAtomSlice(rt, names);
-        snapshot.refs = try runtime.ValueRootBuffer.initCopy(rt, refs);
-        return snapshot;
-    }
-
-    pub fn install(self: *EvalVarRefSnapshot, cold: *Frame.FrameCold) void {
-        cold.eval_var_ref_names = self.names;
-        cold.eval_var_refs = self.refs.values;
-    }
-
-    pub fn deinit(self: *EvalVarRefSnapshot, rt: *JSRuntime) void {
-        const names = self.names;
-        self.names = &.{};
-        self.refs.deinit(rt);
-        freeAtomSlice(rt, names);
-    }
-};
-
 pub const FrameSlab = struct {
     storage: []JSValue = &.{},
     args: []JSValue = &.{},
@@ -166,14 +140,6 @@ pub const CallBindingInputs = struct {
     current_function_value: JSValue,
     new_target_value: JSValue,
     constructor_this_value: JSValue,
-    eval_local_names: []const Atom,
-    eval_local_slots: []JSValue,
-    input_eval_var_ref_names: []const Atom,
-    input_eval_var_refs: []const JSValue,
-    inherited_eval_local_names: []const Atom,
-    inherited_eval_local_slots: []JSValue,
-    inherited_eval_var_ref_names: []const Atom,
-    inherited_eval_var_refs: []const JSValue,
 };
 
 pub const CallBindingValueMode = enum {
@@ -254,7 +220,7 @@ pub const Frame = struct {
     /// True when `var_refs` aliases the callee's closure captures array
     /// (`functionCapturesSlot`) instead of an owned per-frame copy — qjs's
     /// `var_refs = p->u.func.var_refs` borrow (quickjs.c:17844). Set only for a
-    /// no-eval, no-global-var inline call, so every var_ref write goes through
+    /// no-global-var inline call, so every var_ref write goes through
     /// a cell (never the array element) and the shared array is never
     /// mutated/realloced. Teardown then skips the per-element release (the
     /// closure still owns the cells).
@@ -263,39 +229,21 @@ pub const Frame = struct {
     storage_values: []JSValue = &.{},
     storage_on_heap: bool = false,
     /// Lazily-allocated side-struct holding the cold per-frame state a plain
-    /// inline call (fib, ordinary closures) never touches: direct-eval bindings,
-    /// global-lexical-sync, the derived-constructor `this`, and the `arguments`
-    /// object / original-args snapshot. `null` on the common path, so `Frame.init`
-    /// writes one null pointer instead of ~13 default fields and the hot Frame is
-    /// ~190B narrower — qjs keeps these off its 72B JSStackFrame (quickjs.c:407).
+    /// inline call (fib, ordinary closures) never touches: the
+    /// derived-constructor `this`, the `arguments` object, and the original-args
+    /// snapshot. `null` on the common path, so `Frame.init` writes one null
+    /// pointer and keeps this state off the hot frame.
     cold: ?*FrameCold = null,
     this_value_owned: bool = true,
 
     pub const FrameCold = struct {
-        eval_local_names: []const Atom = &.{},
-        eval_local_slots: []JSValue = &.{},
-        eval_var_ref_names: []const Atom = &.{},
-        eval_var_refs: []JSValue = &.{},
-        eval_var_refs_republished: bool = false,
-        /// Set only on a direct-eval frame: the live frame of the scope the
-        /// eval was called from (an enclosing direct-eval frame or the
-        /// function frame owning the variable environment). Mirrors qjs's
-        /// eval closure containing all enclosing variables — every nested
-        /// direct eval reaches the function's `_var_` variable object
-        /// transitively (resolve_scope_var `_var_`/`_arg_var_` forwarding,
-        /// quickjs.c:33216-33235). Valid for the frame's lifetime: the caller
-        /// frame sits below this eval's runWithArgsState invocation on the
-        /// native stack (direct eval executes synchronously and cannot
-        /// suspend), so the pointer never outlives its target.
-        eval_caller_frame: ?*Frame = null,
         constructor_this_value: JSValue = JSValue.undefinedValue(),
         constructor_this_value_owned: bool = false,
         arguments_object: ?JSValue = null,
         original_args: []JSValue = &.{},
     };
 
-    /// Allocate `cold` on first use (a frame that takes the eval / sync / ctor /
-    /// arguments path). The new struct is fully defaulted.
+    /// Allocate `cold` on first use. The new struct is fully defaulted.
     pub fn ensureCold(self: *Frame, account: *memory.MemoryAccount) !*FrameCold {
         if (self.cold) |c| return c;
         const c = try account.create(FrameCold);
@@ -313,8 +261,7 @@ pub const Frame = struct {
 
     /// Release every owned value/allocation held in `cold` (the derived-ctor
     /// `this`, the `arguments` object, and the original-args snapshot VALUES)
-    /// then free the box. Idempotent. `eval_var_refs` is owned by the frame's
-    /// `EvalVarRefSnapshot`, never here. `original_args` VALUES must be released
+    /// then free the box. Idempotent. `original_args` VALUES must be released
     /// BEFORE the storage backing them is reclaimed — call this before freeing
     /// `storage_values`.
     pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
@@ -328,8 +275,8 @@ pub const Frame = struct {
 
     /// Release ONLY the storage-coupled cold state — the original-args snapshot
     /// VALUES — resetting that field to its default while KEEPING the box and the
-    /// eval / ctor / arguments state. This matches the old `releaseOwnedStorage`
-    /// semantics, which reset original_args but left eval_*/ctor_this/
+    /// ctor / arguments state. This matches the old `releaseOwnedStorage`
+    /// semantics, which reset original_args but left ctor_this/
     /// arguments_object intact so a suspended generator retains them across resume.
     pub fn releaseColdStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         _ = account;
@@ -339,24 +286,6 @@ pub const Frame = struct {
     }
 
     // ---- Cold-field read accessors (return the default when `cold == null`) ----
-    pub inline fn evalLocalNames(self: *const Frame) []const Atom {
-        return if (self.cold) |c| c.eval_local_names else &.{};
-    }
-    pub inline fn evalLocalSlots(self: *const Frame) []JSValue {
-        return if (self.cold) |c| c.eval_local_slots else &.{};
-    }
-    pub inline fn evalVarRefNames(self: *const Frame) []const Atom {
-        return if (self.cold) |c| c.eval_var_ref_names else &.{};
-    }
-    pub inline fn evalVarRefs(self: *const Frame) []JSValue {
-        return if (self.cold) |c| c.eval_var_refs else &.{};
-    }
-    pub inline fn evalVarRefsRepublished(self: *const Frame) bool {
-        return if (self.cold) |c| c.eval_var_refs_republished else false;
-    }
-    pub inline fn evalCallerFrame(self: *const Frame) ?*Frame {
-        return if (self.cold) |c| c.eval_caller_frame else null;
-    }
     pub inline fn constructorThisValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();
     }
@@ -374,11 +303,9 @@ pub const Frame = struct {
         return .{ .function = function };
     }
 
-    pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
+    pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !void {
         try self.initCallBindingValues(&rt.memory, inputs, .{});
         errdefer self.releaseCallBindings(rt);
-
-        return try self.initCallEvalBindings(rt, inputs);
     }
 
     pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
@@ -395,30 +322,6 @@ pub const Frame = struct {
             c.constructor_this_value = ctor_value;
             c.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
         }
-    }
-
-    pub fn initCallEvalBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
-        const eval_local_names = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_names else inputs.eval_local_names;
-        const eval_local_slots = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_slots else inputs.eval_local_slots;
-        const frame_eval_var_ref_names = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_ref_names else inputs.input_eval_var_ref_names;
-        const frame_eval_var_refs = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_refs else inputs.input_eval_var_refs;
-
-        const has_eval = eval_local_names.len != 0 or eval_local_slots.len != 0 or
-            frame_eval_var_ref_names.len != 0 or frame_eval_var_refs.len != 0;
-        if (!has_eval) return .{};
-
-        const c = try self.ensureCold(&rt.memory);
-        c.eval_local_names = eval_local_names;
-        c.eval_local_slots = eval_local_slots;
-        if (frame_eval_var_ref_names.len == 0 and frame_eval_var_refs.len == 0) {
-            c.eval_var_ref_names = &.{};
-            c.eval_var_refs = &.{};
-            return .{};
-        }
-
-        var snapshot = try EvalVarRefSnapshot.init(rt, frame_eval_var_ref_names, frame_eval_var_refs);
-        snapshot.install(c);
-        return snapshot;
     }
 
     pub fn initArguments(
@@ -589,7 +492,7 @@ pub const Frame = struct {
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
         self.this_value_owned = true;
-        // Frees ctor_this (if owned) + the box; eval_local_* are borrowed.
+        // Frees constructor/arguments cold state and the box.
         self.freeCold(&rt.memory, rt);
         if (this_value_owned) this_value.free(rt);
         current_function.free(rt);
@@ -657,8 +560,8 @@ pub const Frame = struct {
         releaseValueSlice(rt, args);
         releaseCellSliceNoReset(rt, var_refs);
         // Frees original_args VALUES (which alias `storage_values`/the arena slab)
-        // + the sync allocs, BEFORE the storage backing is reclaimed below. KEEPS
-        // the box + eval/ctor/arguments so a generator retains them across resume.
+        // before the storage backing is reclaimed below. Keeps the cold box so a
+        // generator retains constructor/arguments state across resume.
         if (self.cold != null) self.releaseColdStorage(account, rt);
 
         if (storage_on_heap and storage_values.len != 0) account.free(JSValue, storage_values);
@@ -804,26 +707,6 @@ fn modeOwnsValue(mode: CallBindingValueMode) bool {
     return mode != .borrow;
 }
 
-fn dupAtomSlice(rt: *JSRuntime, atoms: []const Atom) ![]Atom {
-    if (atoms.len == 0) return &.{};
-    const duped = try rt.memory.alloc(Atom, atoms.len);
-    errdefer rt.memory.free(Atom, duped);
-    var initialized: usize = 0;
-    errdefer {
-        for (duped[0..initialized]) |atom_id| rt.atoms.free(atom_id);
-    }
-    for (atoms, 0..) |atom_id, idx| {
-        duped[idx] = rt.atoms.dup(atom_id);
-        initialized += 1;
-    }
-    return duped;
-}
-
-fn freeAtomSlice(rt: *JSRuntime, atoms: []Atom) void {
-    for (atoms) |atom_id| rt.atoms.free(atom_id);
-    if (atoms.len != 0) rt.memory.free(Atom, atoms);
-}
-
 test "Frame setLocal preserves inline locals while growing" {
     var rt = try JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -879,8 +762,8 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // Backfill slots are fresh closed cells holding undefined, never raw
     // slots: the slot contract is "every slot is a live JSVarRef*" (qjs
     // js_closure2 fills every slot with a real cell, quickjs.c:17297-17331).
-    // This growth path is the zjs-only dynamic-eval remainder; qjs sizes
-    // var_refs once at 17277.
+    // Legacy/synthetic bytecode may still request a sparse index; normal parser
+    // output sizes var_refs once during frame construction like qjs.
     const old_len = frame.var_refs.len;
     var filled: usize = old_len;
     errdefer for (next[old_len..filled]) |cell| cell.freeCell(ctx.runtime);

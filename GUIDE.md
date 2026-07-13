@@ -405,6 +405,7 @@ correctness first, then performance.
 
 ```bash
 zig fmt .
+zig build quick-check --summary all
 zig build test --summary all
 # 阶段收口档位 / phase-close tier:
 # zig build test-oom --summary all (OOM 注入门禁：corpus×注入+恢复金丝雀 / OOM injection gate: corpus x injection + recovery canaries)
@@ -522,11 +523,60 @@ owning change, not in broad status ledgers.
 9. Mark work `validated` only after regression evidence and command evidence
    are both recorded.
 
-### B.6 Durable Lessons
+### B.6 Validation Tiers
+
+Use the cheapest tier that proves the changed surface, then escalate before
+handoff or release. Do not weaken skips, excludes, or assertions to make any
+tier pass.
+
+**Inner loop.** Use this while optimizing or fixing a focused issue:
+
+```bash
+zig build quick-check --summary all
+git diff --check
+```
+
+Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
+slice that directly reproduces the changed behavior. Use the matching explicit
+`test-core`, `test-parser`, `test-bytecode`, `test-exec`, `test-builtins`,
+`test-runtime`, or `test-runner` target when it is narrower than the unified
+suite. These targets apply compile-time namespace filters and fail if the
+selection becomes empty. For repeated edits, `mise run quick-watch` keeps quick-check incremental;
+stop the watcher before escalating to a broader gate. `quick-check`
+intentionally does not compile the separate test262 runner.
+
+**Checkpoint.** Use this before handing off a non-trivial code-bearing change:
+
+```bash
+zig build checkpoint-check --summary all
+```
+
+This includes the unified Debug suite, Debug CLI smoke, architecture checks,
+and `test262-smoke`. Add the relevant focused test262 directory or file set;
+do not run `quick-check` first because checkpoint already supersedes it.
+
+**Phase close / release.** Use this only for final confirmation, release
+evidence, or CI gates:
+
+```bash
+zig build engine-production-gate --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+```
+
+Run `zig build test-altrepr --summary all` when value representation semantics
+changed, `zig build test-oom --summary all` when allocator/OOM behavior changed,
+and the performance gate when runtime-sensitive performance changed.
+
+### B.7 Durable Lessons
 
 These rules remain active even though the historical detailed records have
 been retired:
 
+- Standard ECMAScript globals are engine bootstrap, not a separate builtins or
+  intrinsics layer. Match QuickJS with hand-written standard-global installation,
+  QJS-style function-list tables, and native function payloads carrying cproto /
+  magic / function-pointer dispatch. Do not introduce a generic descriptor
+  registry or facade to hide engine operations.
 - Start from a reproducing validation command, then repair from its output.
 - Interrupted or partial sweeps are not final validation evidence.
 - Broad green gates do not prove semantic completeness when parser, emitter,
@@ -544,7 +594,7 @@ been retired:
 - Builtins that return existing objects must return retained values because
   VM call cleanup cannot distinguish borrowed and owned returns.
 
-### B.7 Process Anti-Patterns
+### B.8 Process Anti-Patterns
 
 - Reporting interrupted command output as final validation.
 - Marking work `validated` without a regression test.
@@ -555,7 +605,7 @@ been retired:
 - Skipping or rewriting failing tests instead of fixing the cause.
 - Treating "compiles + smoke green" as semantic completeness.
 
-### B.8 Cross-References
+### B.9 Cross-References
 
 - Operational rules: `AGENTS.md`.
 - Compatibility boundary: `COMPATIBILITY.md`.

@@ -38,9 +38,9 @@ pub const VarRef = struct {
             .header = .{},
             .value = initial_value,
         };
-        self.header.meta().* = .{ .kind = .var_ref };
+        std.debug.assert(self.header.meta().kind == .var_ref);
         self.pvalue = &self.value;
-        try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
 
@@ -53,8 +53,8 @@ pub const VarRef = struct {
             .pvalue = slot,
             .is_open = true,
         };
-        self.header.meta().* = .{ .kind = .var_ref };
-        try rt.gc.addWithSize(&self.header, @sizeOf(VarRef));
+        std.debug.assert(self.header.meta().kind == .var_ref);
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
 
@@ -74,6 +74,25 @@ pub const VarRef = struct {
     pub fn freeCycleDeferredStruct(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
         rt.destroyRuntime(VarRef, self);
+    }
+
+    /// Runtime teardown keeps VarRef structs alive until objects and bytecode
+    /// have released their cell pointers. Drop the cell-owned value first,
+    /// while every referenced GC object is still structurally valid.
+    pub fn prepareForRuntimeDeinit(rt: anytype, header: *gc.Header) void {
+        const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
+        if (!self.is_open) {
+            const old_value = self.value;
+            self.value = JSValue.undefinedValue();
+            self.pvalue = &self.value;
+            old_value.free(rt);
+        } else {
+            // A surviving open cell may point into a frame that has already
+            // unwound. It never owns that slot's value.
+            self.value = JSValue.undefinedValue();
+            self.pvalue = &self.value;
+            self.is_open = false;
+        }
     }
 
     pub fn valueRef(self: *VarRef) JSValue {
@@ -115,9 +134,8 @@ pub const VarRef = struct {
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) !void {
         // Terminal-state invariant (VARREFS-SLOT-TYPING-BLUEPRINT risk 3): a
         // cell's VALUE is NEVER itself a cell — every write path unwraps an
-        // incoming cell value first (setSlotValueRefCounted / execPutVarRef /
-        // publishDirectEvalVarRefs), and the former nesting producer (the
-        // direct-eval const view) now pvalue-ALIASES its target cell instead
+        // incoming cell value first (setSlotValueRefCounted / execPutVarRef),
+        // and the direct-eval const view pvalue-ALIASES its target cell instead
         // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
         // `*var_ref->pvalue` (quickjs.c:18627) with no chase. Debug-resident
         // so a regression that would silently corrupt the read fast path traps.
