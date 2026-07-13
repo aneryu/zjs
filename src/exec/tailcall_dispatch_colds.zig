@@ -866,7 +866,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.put_field] = td.op_put_field; // inline-cache put; IC miss → cold h_field
     t[op.get_array_el] = td.op_get_array_el; // dense fast path; miss → cold h_array_element
     t[op.put_array_el] = td.op_put_array_el; // dense write fast path; miss → cold h_array_element
-    t[op.get_length] = td.op_get_length; // inline string-length read; non-string → cold getLength
+    t[op.get_length] = td.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
     // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without
     // these overrides they routed through the 224-byte coldStd publish shell EVERY

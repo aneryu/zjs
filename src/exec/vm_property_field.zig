@@ -70,6 +70,8 @@ const globalOwnDataPropertyValue = property_ic.globalOwnDataPropertyValue;
 const ordinaryDataPropertyValueOrUndefinedForFastPath = property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath;
 const ownDataPropertyValueMaterializedForFastPath = property_ic.ownDataPropertyValueMaterializedForFastPath;
 const op = bytecode.opcode.op;
+const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
+const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 
 const RegExpMatchGet = union(enum) {
     binding: BindingGet,
@@ -447,6 +449,161 @@ pub const PropertyFastValue = union(enum) {
     proxy: *core.Object,
 };
 
+inline fn unsignedSizeValue(value: usize) core.JSValue {
+    if (value <= @as(usize, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(value));
+    return core.JSValue.float64(@floatFromInt(value));
+}
+
+inline fn typedArrayAccessorMethodId(atom_id: core.Atom) ?u32 {
+    const TypedArrayAccessorMethod = method_ids.buffer.TypedArrayAccessorMethod;
+    if (atom_id == core.atom.ids.length) return @intFromEnum(TypedArrayAccessorMethod.length);
+    if (atom_id == atom_byte_length) return @intFromEnum(TypedArrayAccessorMethod.byte_length);
+    if (atom_id == atom_byte_offset) return @intFromEnum(TypedArrayAccessorMethod.byte_offset);
+    return null;
+}
+
+pub inline fn isTypedArrayPayloadAtomForFastPath(atom_id: core.Atom) bool {
+    return atom_id == core.atom.ids.length or atom_id == atom_byte_length or atom_id == atom_byte_offset;
+}
+
+inline fn typedArrayNativeAccessorIdMatches(encoded_id: i32, expected_id: u32) bool {
+    const native_ref = core.function.decodeNativeBuiltinId(encoded_id) orelse return false;
+    return native_ref.domain == .buffer and native_ref.id == expected_id;
+}
+
+inline fn typedArrayIntrinsicNamedValue(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (atom_id == core.atom.ids.length) {
+        const length = core.object.typedArrayLength(rt, receiver) catch return null;
+        return .{ .owned = unsignedSizeValue(@intCast(length)) };
+    }
+    if (atom_id == atom_byte_length) {
+        const length = core.object.typedArrayByteLength(rt, receiver) catch return null;
+        return .{ .owned = unsignedSizeValue(length) };
+    }
+    if (atom_id == atom_byte_offset) {
+        const offset = core.object.typedArrayEffectiveByteOffset(receiver) catch return null;
+        return .{ .owned = unsignedSizeValue(offset) };
+    }
+    return null;
+}
+
+inline fn typedArrayShapePropertyForFastPath(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    holder: *core.Object,
+    index: usize,
+    atom_id: core.Atom,
+    expected_id: u32,
+) ?PropertyFastValue {
+    return switch (holder.propKindAt(index)) {
+        .data => .{ .borrowed = holder.prop_values[index].slot.data },
+        .accessor => accessor: {
+            const getter = holder.prop_values[index].slot.accessor.getterValue();
+            if (objectFromValue(getter)) |getter_object| {
+                if (typedArrayNativeAccessorIdMatches(getter_object.nativeFunctionId(), expected_id)) {
+                    break :accessor typedArrayIntrinsicNamedValue(rt, receiver, atom_id);
+                }
+            }
+            break :accessor .{ .getter = getter };
+        },
+        .auto_init => auto_init: {
+            const info = core.property.autoInitAt(rt, holder.prop_values[index].slot.auto_init).*;
+            if (info.kind == .native_accessor and typedArrayNativeAccessorIdMatches(info.native_builtin_id, expected_id)) {
+                break :auto_init typedArrayIntrinsicNamedValue(rt, receiver, atom_id);
+            }
+            break :auto_init null;
+        },
+        .var_ref => null,
+    };
+}
+
+noinline fn typedArrayPrototypeNamedPropertyForFastPath(
+    rt: *core.JSRuntime,
+    receiver: *core.Object,
+    atom_id: core.Atom,
+    expected_id: u32,
+) ?PropertyFastValue {
+    var holder = receiver.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
+    while (true) {
+        if (holder.findProperty(atom_id)) |index| {
+            return typedArrayShapePropertyForFastPath(rt, receiver, holder, index, atom_id, expected_id);
+        }
+        if (holder.proxyTarget() != null) return .{ .proxy = holder };
+        if (holder.needsSlowPropertyAccess() or holder.hasExoticMethods()) return null;
+        holder = holder.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
+    }
+}
+
+noinline fn typedArrayNamedPropertyForFastPath(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    const expected_id = typedArrayAccessorMethodId(atom_id) orelse return null;
+    if (object.findProperty(atom_id)) |index| {
+        return typedArrayShapePropertyForFastPath(rt, object, object, index, atom_id, expected_id);
+    }
+    return typedArrayPrototypeNamedPropertyForFastPath(rt, object, atom_id, expected_id);
+}
+
+/// Cheap routing guard used only after the ordinary static-field data lookup
+/// misses. TypedArray instance class ids are a contiguous range; checking that
+/// range avoids probing the out-of-line payload on every ordinary accessor
+/// miss. Keeping the test in the opcode handler prevents the larger typed-array
+/// action classifier from changing the shared ordinary accessor/Proxy tail.
+pub inline fn typedArrayReceiverForFastPath(receiver: core.JSValue) ?*core.Object {
+    const object = objectFromValue(receiver) orelse return null;
+    if (object.class_id < core.class.ids.uint8c_array or object.class_id > core.class.ids.float64_array) return null;
+    return object;
+}
+
+/// Static named-property action classifier for TypedArray instances. This is
+/// deliberately outlined from atomPropertyValueForFastPath: ordinary static
+/// accessor/Proxy reads should retain the same resident handler shape whether
+/// or not TypedArray payload accessors are accelerated.
+pub inline fn typedArrayPropertyValueForFastPath(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    atom_id: core.Atom,
+) ?PropertyFastValue {
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    return typedArrayNamedPropertyForFastPath(rt, object, atom_id);
+}
+
+/// Action half of qjs GET_FIELD_INLINE for the constant `length` atom. The
+/// data-only helper above already settles the hot case; after that misses, qjs
+/// still inspects an own accessor before consulting `p->is_exotic`. That order
+/// matters for user-defined `length` accessors on typed arrays and mapped
+/// Arguments. Proxies become resident actions; unsupported exotic misses retain
+/// the existing slow machinery.
+pub inline fn qjsGetLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSValue) ?PropertyFastValue {
+    var object = objectFromValue(receiver) orelse return null;
+    while (true) {
+        if (object.findProperty(core.atom.ids.length)) |index| {
+            return switch (object.propKindAt(index)) {
+                .data => .{ .borrowed = object.prop_values[index].slot.data },
+                .accessor => .{ .getter = object.prop_values[index].slot.accessor.getterValue() },
+                .var_ref, .auto_init => null,
+            };
+        }
+        // qjs continues from the typed-array exotic object into its current
+        // prototype chain for this non-numeric name. The helper recognizes the
+        // unmodified intrinsic accessor without calling it, but custom/null/
+        // Proxy prototype chains keep their observable lookup semantics.
+        if (core.object.isTypedArrayObject(object)) {
+            const expected_id = typedArrayAccessorMethodId(core.atom.ids.length).?;
+            return typedArrayPrototypeNamedPropertyForFastPath(rt, object, core.atom.ids.length, expected_id);
+        }
+        if (object.proxyTarget() != null) return .{ .proxy = object };
+        if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;
+        object = object.getPrototype() orelse return null;
+    }
+}
+
 inline fn primitivePrototypePropertyForFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
@@ -471,7 +628,7 @@ inline fn primitivePrototypePropertyForFastPath(
 
 /// Atom-keyed counterpart shared by static and computed property handlers.
 /// Ordinary receivers return a semantically complete data/getter/Proxy/missing
-/// result; class-specific exotics and primitive index/length cases remain on
+/// result. Class-specific exotics and primitive index/length cases remain on
 /// the general resolver. Returned data/getter values are borrowed from their
 /// holder and must be duplicated before the caller releases the receiver.
 pub inline fn atomPropertyValueForFastPath(

@@ -5750,7 +5750,7 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
-test "get_length preserves qjs own-data-before-exotic ordering and slow fallbacks" {
+test "get_length preserves qjs own-property-before-exotic ordering and actions" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -5786,26 +5786,111 @@ test "get_length preserves qjs own-data-before-exotic ordering and slow fallback
         \\}
         \\mappedComputedDescriptor(1);
         \\const typed = new Uint8Array(2);
+        \\assert.sameValue(typed.length, 2);
+        \\assert.sameValue(typed.byteLength, 2);
+        \\assert.sameValue(typed.byteOffset, 0);
+        \\const customPrototypeTyped = new Uint8Array(2);
+        \\Object.setPrototypeOf(customPrototypeTyped, { length: 15, byteLength: 16, byteOffset: 17 });
+        \\assert.sameValue(customPrototypeTyped.length, 15);
+        \\assert.sameValue(customPrototypeTyped.byteLength, 16);
+        \\assert.sameValue(customPrototypeTyped.byteOffset, 17);
+        \\assert.sameValue(Reflect.get(customPrototypeTyped, "length"), 15);
+        \\const nullPrototypeTyped = new Uint8Array(2);
+        \\Object.setPrototypeOf(nullPrototypeTyped, null);
+        \\assert.sameValue(nullPrototypeTyped.length, undefined);
+        \\assert.sameValue(nullPrototypeTyped.byteLength, undefined);
+        \\assert.sameValue(nullPrototypeTyped.byteOffset, undefined);
+        \\assert.sameValue(Reflect.get(nullPrototypeTyped, "length"), undefined);
         \\Object.defineProperty(typed, "length", { value: 9, configurable: true });
         \\assert.sameValue(typed.length, 9);
+        \\let typedGetterCount = 0;
+        \\Object.defineProperty(typed, "length", {
+        \\    configurable: true,
+        \\    get() {
+        \\        typedGetterCount++;
+        \\        return 12;
+        \\    },
+        \\});
+        \\assert.sameValue(typed.length, 12);
+        \\const lengthKey = "length";
+        \\assert.sameValue(typed[lengthKey], 12);
+        \\assert.sameValue(Reflect.get(typed, lengthKey), 12);
+        \\assert.sameValue(typedGetterCount, 3);
+        \\Object.defineProperty(typed, "byteLength", {
+        \\    configurable: true,
+        \\    get() { return 13; },
+        \\});
+        \\assert.sameValue(typed.byteLength, 13);
+        \\assert.sameValue(Reflect.get(typed, "byteLength"), 13);
+        \\Object.defineProperty(typed, "byteOffset", { configurable: true, value: 14 });
+        \\assert.sameValue(typed.byteOffset, 14);
+        \\assert.sameValue(Reflect.get(typed, "byteOffset"), 14);
         \\let getterCount = 0;
-        \\const accessor = {
+        \\let getterReceiver;
+        \\const accessorPrototype = {
         \\    get length() {
         \\        getterCount++;
+        \\        getterReceiver = this;
         \\        return 5;
         \\    },
         \\};
+        \\const accessor = Object.create(accessorPrototype);
         \\assert.sameValue(accessor.length, 5);
         \\assert.sameValue(getterCount, 1);
+        \\assert.sameValue(getterReceiver, accessor);
+        \\const accessorAlias = { get length() { return this; } };
+        \\assert.sameValue(accessorAlias.length, accessorAlias);
+        \\const undefinedAccessor = {};
+        \\Object.defineProperty(undefinedAccessor, "length", { get: undefined });
+        \\assert.sameValue(undefinedAccessor.length, undefined);
+        \\const thrownMarker = {};
+        \\const throwingAccessor = { get length() { throw thrownMarker; } };
+        \\try {
+        \\    void throwingAccessor.length;
+        \\    throw new Error("unreachable");
+        \\} catch (thrown) {
+        \\    assert.sameValue(thrown, thrownMarker);
+        \\}
         \\let trapCount = 0;
+        \\let trapReceiver;
         \\const proxy = new Proxy({}, {
         \\    get(target, key, receiver) {
         \\        trapCount++;
+        \\        trapReceiver = receiver;
         \\        return key === "length" ? 6 : Reflect.get(target, key, receiver);
         \\    },
         \\});
         \\assert.sameValue(proxy.length, 6);
         \\assert.sameValue(trapCount, 1);
+        \\assert.sameValue(trapReceiver, proxy);
+        \\let targetGetterReceiver;
+        \\const proxyTarget = {};
+        \\Object.defineProperty(proxyTarget, "length", {
+        \\    configurable: true,
+        \\    get() {
+        \\        targetGetterReceiver = this;
+        \\        return 7;
+        \\    },
+        \\});
+        \\const noTrapProxy = new Proxy(proxyTarget, {});
+        \\assert.sameValue(noTrapProxy.length, 7);
+        \\assert.sameValue(targetGetterReceiver, noTrapProxy);
+        \\const frozenTarget = {};
+        \\Object.defineProperty(frozenTarget, "length", { value: 1, writable: false, configurable: false });
+        \\try {
+        \\    void new Proxy(frozenTarget, { get() { return 2; } }).length;
+        \\    throw new Error("unreachable");
+        \\} catch (error) {
+        \\    assert.sameValue(error instanceof TypeError, true);
+        \\}
+        \\const revocable = Proxy.revocable({}, {});
+        \\revocable.revoke();
+        \\try {
+        \\    void revocable.proxy.length;
+        \\    throw new Error("unreachable");
+        \\} catch (error) {
+        \\    assert.sameValue(error instanceof TypeError, true);
+        \\}
         \\function mappedAccessor(value) {
         \\    const args = arguments;
         \\    Object.defineProperty(args, "length", {

@@ -1445,6 +1445,33 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const receiver = (sp - 1)[0];
+    const atom_id = readInt(u32, pc + 1);
+    if (vm_property_field.typedArrayPropertyValueForFastPath(vm.ctx.runtime, vm.property_holder, atom_id)) |result| {
+        const stack_value = switch (result) {
+            .borrowed => |value| if (value.requiresRefCount()) value.dup() else value,
+            .owned => |value| value,
+            .getter => |getter| blk: {
+                if (!getter.isUndefined()) {
+                    sp[0] = getter.dup();
+                    return @call(.always_tail, vm.property_tail_tbl[5], .{ pc, sp + 1, var_buf, vm });
+                }
+                break :blk JSValue.undefinedValue();
+            },
+            .proxy => |proxy| {
+                vm.property_holder = proxy;
+                vm.property_atom = atom_id;
+                return @call(.always_tail, vm.property_tail_tbl[7], .{ pc, sp, var_buf, vm });
+            },
+        };
+        receiver.free(vm.ctx.runtime);
+        (sp - 1)[0] = stack_value;
+        return cont(pc + 5, sp, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -1458,6 +1485,12 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         (sp - 1)[0] = stack_value;
         receiver.free(vm.ctx.runtime);
         return cont(pc + 5, sp, var_buf, vm);
+    }
+    if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
+        if (vm_property_field.typedArrayReceiverForFastPath(receiver)) |object| {
+            vm.property_holder = object;
+            return @call(.always_tail, vm.property_tail_tbl[10], .{ pc, sp, var_buf, vm });
+        }
     }
     return @call(.always_tail, vm.property_tail_tbl[6], .{ pc, sp, var_buf, vm });
 }
@@ -1619,8 +1652,9 @@ fn op_get_field_cached_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return op_get_property_cached_getter(5, pc, sp, var_buf, vm);
 }
 
-fn op_get_field_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    vm.syncPc(pc, 5);
+fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const pc_advance: usize = if (pc[0] == op.get_length) 1 else 5;
+    vm.syncPc(pc, pc_advance);
     const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue);
     vm.stack.values = vm.stack_base[0..operand_len];
     const receiver = vm.stack.values[operand_len - 1];
@@ -1762,8 +1796,9 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 // `len()` reads the rope's logical length without flattening) pushes its character
 // count directly, replacing the popped string. Arrays keep their synthetic length
 // arm; every other object gets the same ordinary shape walk as qjs
-// `GET_FIELD_INLINE(..., JS_ATOM_length)` before typed arrays, accessors, proxies,
-// and other slow cases fall to getLength's full getValueProperty path.
+// `GET_FIELD_INLINE(..., JS_ATOM_length)`. Data stays in this hot handler;
+// accessors, Proxies, and typed-array payloads tail to resident action handlers,
+// while unsupported class exotics retain getLength's full resolver.
 // 1-byte op (operand on the stack).
 pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
@@ -1779,7 +1814,8 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     }
     // Plain fast array `.length` — the `for (i=0;i<arr.length;i++)` hot read,
     // read inline instead of via the cold getLength's getValueProperty.
-    // Exotic/subclassed arrays, typed arrays, and length-getter objects fall cold.
+    // Exotic/subclassed arrays and all non-Array objects continue to the qjs
+    // shape/action walk below.
     if (vm_property_field.fastArrayLengthValue(value)) |len_val| {
         value.free(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
@@ -1792,6 +1828,37 @@ pub fn op_get_length(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // non-string/non-Array object through the published cold resolver.
     if (vm_property_field.qjsGetLengthFieldFast(vm.ctx.runtime, value)) |borrowed| {
         const len_val = if (borrowed.requiresRefCount()) borrowed.dup() else borrowed;
+        value.free(vm.ctx.runtime);
+        (sp - 1)[0] = len_val;
+        return cont(pc + 1, sp, var_buf, vm);
+    }
+    return @call(.always_tail, vm.property_tail_tbl[9], .{ pc, sp, var_buf, vm });
+}
+
+fn op_get_length_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const value = (sp - 1)[0];
+    // A data miss can still be an ordinary accessor or meet a Proxy in the
+    // prototype walk. Reuse the same resident action classifier and same-Machine
+    // continuations as static get_field; only the opcode width differs.
+    const action = vm_property_field.qjsGetLengthActionForFastPath(vm.ctx.runtime, value) orelse
+        vm_property_field.atomPropertyValueForFastPath(vm.ctx.runtime, vm.global, value, core.atom.ids.length);
+    if (action) |result| {
+        const len_val = switch (result) {
+            .borrowed => |borrowed| if (borrowed.requiresRefCount()) borrowed.dup() else borrowed,
+            .owned => |owned| owned,
+            .getter => |getter| blk: {
+                if (!getter.isUndefined()) {
+                    sp[0] = getter.dup();
+                    return @call(.always_tail, vm.property_tail_tbl[3], .{ pc, sp + 1, var_buf, vm });
+                }
+                break :blk JSValue.undefinedValue();
+            },
+            .proxy => |proxy| {
+                vm.property_holder = proxy;
+                vm.property_atom = core.atom.ids.length;
+                return @call(.always_tail, vm.property_tail_tbl[8], .{ pc, sp, var_buf, vm });
+            },
+        };
         value.free(vm.ctx.runtime);
         (sp - 1)[0] = len_val;
         return cont(pc + 1, sp, var_buf, vm);
@@ -2241,7 +2308,7 @@ const specials: colds.SpecialHandlers = .{
 /// so the cold publish+helper is NOT inlined into the lean fast handler.
 const cold_table: [256]Handler = colds.buildTable(specials, false);
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
-const property_tail_table = [8]Handler{ op_get_field_primitive, op_get_field2_primitive, op_get_array_el_cached_string, op_get_array_el_cached_getter, op_get_array_el_cached_proxy, op_get_field_cached_getter, op_get_field_property_tail, op_get_field_cached_proxy };
+const property_tail_table = [11]Handler{ op_get_field_primitive, op_get_field2_primitive, op_get_array_el_cached_string, op_get_array_el_cached_getter, op_get_array_el_cached_proxy, op_get_field_cached_getter, op_get_field_property_tail, op_get_static_cached_proxy, op_get_static_cached_proxy, op_get_length_property_tail, op_get_field_typed_property_tail };
 
 // ===========================================================================
 // Driver — the Outcome loop. Replaces dispatchLoop's switch; reuses the Machine +

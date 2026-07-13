@@ -2656,10 +2656,13 @@ pub fn getValueProperty(
         }
         if (mappedArgumentsValue(ctx.runtime, object, atom_id)) |mapped_value| return mapped_value;
         if (core.object.isTypedArrayObject(object)) {
-            if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
-            if (atom_id == core.atom.ids.length) return core.JSValue.int32(@intCast(try core.object.typedArrayLength(rt, object)));
-            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.object.typedArrayByteLength(rt, object)));
-            if (atom_id == atom_byte_offset) return core.JSValue.int32(@intCast(try core.object.typedArrayEffectiveByteOffset(object)));
+            // qjs JS_GetPropertyInternal probes the shape before its typed-array
+            // exotic arm. Canonical numeric elements never occupy a shape slot;
+            // named length/byteLength/byteOffset continue through the actual
+            // prototype chain below instead of being synthesized as own values.
+            if (object.findProperty(atom_id) == null) {
+                if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
+            }
         }
         if (!object.hasExoticMethods()) {
             if (object.flags.is_array) {
