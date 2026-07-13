@@ -3,6 +3,13 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Zig defaults the build/test seed to a new random value for every
+    // invocation. That changes test-runner arguments and destabilizes this
+    // repository's large compile graph cache even when no source changed.
+    // Keep normal validation reproducible; randomized runs remain available
+    // through the explicit project option.
+    const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
+    b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
     // Default: the 8-byte NaN-boxed JSValue layout. It has compute parity with
     // the portable 16-byte representation and materially lower RSS on
@@ -55,6 +62,9 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .root_module = runtime_plugin_fixture_mod,
     });
+    const install_runtime_plugin_fixture = b.addInstallArtifact(runtime_plugin_fixture, .{
+        .dest_dir = .{ .override = .lib },
+    });
     const runtime_empty_plugin_fixture_mod = b.createModule(.{
         .root_source_file = b.path("tests/fixtures/runtime_empty_plugin_fixture.zig"),
         .target = target,
@@ -68,6 +78,9 @@ pub fn build(b: *std.Build) void {
         .name = "zjs-runtime-empty-plugin-fixture",
         .linkage = .dynamic,
         .root_module = runtime_empty_plugin_fixture_mod,
+    });
+    const install_runtime_empty_plugin_fixture = b.addInstallArtifact(runtime_empty_plugin_fixture, .{
+        .dest_dir = .{ .override = .lib },
     });
 
     const internal_fast_mod = b.createModule(.{
@@ -96,6 +109,32 @@ pub fn build(b: *std.Build) void {
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
 
+    // Debug-only CLI used by the inner-loop gate. Keep the production `zjs`
+    // artifact ReleaseFast while avoiding optimized whole-engine compilation
+    // on every focused edit.
+    const internal_dev_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    internal_dev_mod.addOptions("build_options", engine_options);
+    const zjs_dev_exe = b.addExecutable(.{
+        .name = "zjs-dev",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/zjs.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zjs", .module = internal_dev_mod },
+            },
+        }),
+    });
+    const install_zjs_dev = b.addInstallArtifact(zjs_dev_exe, .{});
+    const zjs_dev_step = b.step("zjs-dev", "Build and install the Debug zjs used by inner-loop checks");
+    zjs_dev_step.dependOn(&install_zjs_dev.step);
+
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
         .root_module = b.createModule(.{
@@ -111,6 +150,22 @@ pub fn build(b: *std.Build) void {
     const install_run_test262 = b.addInstallArtifact(run_test262_exe, .{});
     const run_test262_step = b.step("run-test262", "Build and install run-test262");
     run_test262_step.dependOn(&install_run_test262.step);
+
+    const run_test262_dev_exe = b.addExecutable(.{
+        .name = "run-test262-dev",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/run_test262.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zjs", .module = internal_dev_mod },
+            },
+        }),
+    });
+    const install_run_test262_dev = b.addInstallArtifact(run_test262_dev_exe, .{});
+    const run_test262_dev_step = b.step("run-test262-dev", "Build and install the Debug test262 runner used by checkpoint checks");
+    run_test262_dev_step.dependOn(&install_run_test262_dev.step);
 
     // Add actual test262 execution step.
     const run_test262_exec = b.addRunArtifact(run_test262_exe);
@@ -140,8 +195,8 @@ pub fn build(b: *std.Build) void {
         "test262/test/built-ins/Promise/prototype/then/S25.4.5.3_A1.1_T1.js",
         "test262/test/built-ins/JSON/stringify/value-primitive-top-level.js",
     };
-    const run_test262_smoke = b.addRunArtifact(run_test262_exe);
-    run_test262_smoke.step.dependOn(&install_run_test262.step);
+    const run_test262_smoke = b.addRunArtifact(run_test262_dev_exe);
+    run_test262_smoke.step.dependOn(&install_run_test262_dev.step);
     run_test262_smoke.addArg("-t");
     run_test262_smoke.addArg("8");
     run_test262_smoke.addArg("-T");
@@ -154,7 +209,7 @@ pub fn build(b: *std.Build) void {
     }
     run_test262_smoke.addArg("-R");
     run_test262_smoke.addArg(".zig-cache/test262-smoke");
-    const test262_smoke_step = b.step("test262-smoke", "Run a small representative test262 file set for inner-loop checks");
+    const test262_smoke_step = b.step("test262-smoke", "Run a small representative test262 file set with the Debug runner");
     test262_smoke_step.dependOn(&run_test262_smoke.step);
 
     const run_perf_benchmark = b.addRunArtifact(zjs_exe);
@@ -478,19 +533,21 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOption(bool, "zjs_force_gc", zjs_force_gc);
-    test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
-    test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
-    test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
+    test_options.addOption([]const u8, "runtime_plugin_fixture_path", b.getInstallPath(.lib, runtime_plugin_fixture.out_filename));
+    test_options.addOption([]const u8, "runtime_empty_plugin_fixture_path", b.getInstallPath(.lib, runtime_empty_plugin_fixture.out_filename));
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
-    run_unified_tests.step.dependOn(&install_zjs.step);
+    run_unified_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+    run_unified_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
     if (b.args) |args| run_unified_tests.addArgs(args);
 
-    // Smoke tests (runs only the CLI integration tests in src/tests/smoke_test.zig)
+    // Production smoke tests retain the ReleaseFast CLI contract.
+    const smoke_options = b.addOptions();
+    smoke_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
     const smoke_tests = b.addTest(.{
-        .name = "smoke-tests",
+        .name = "smoke-tests-releasefast",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/smoke_test.zig"),
             .target = target,
@@ -502,15 +559,96 @@ pub fn build(b: *std.Build) void {
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
     };
-    smoke_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
-    smoke_tests.root_module.addImport("zjs", unified_tests.root_module);
-    smoke_tests.root_module.addOptions("build_options", test_options);
+    smoke_tests.root_module.addOptions("build_options", smoke_options);
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
     run_smoke_tests.step.dependOn(&install_zjs.step);
     if (b.args) |args| run_smoke_tests.addArgs(args);
 
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     smoke_step.dependOn(&run_smoke_tests.step);
+
+    // Debug smoke tests are the single engine-bearing artifact in the inner
+    // loop. They deliberately do not depend on unified-test modules or plugin
+    // fixtures.
+    const smoke_dev_options = b.addOptions();
+    smoke_dev_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs-dev"));
+    const smoke_dev_tests = b.addTest(.{
+        .name = "smoke-tests-debug",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/smoke_test.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+        }),
+    });
+    smoke_dev_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    smoke_dev_tests.root_module.addOptions("build_options", smoke_dev_options);
+    const run_smoke_dev_tests = b.addRunArtifact(smoke_dev_tests);
+    run_smoke_dev_tests.step.dependOn(&install_zjs_dev.step);
+    if (b.args) |args| run_smoke_dev_tests.addArgs(args);
+
+    const smoke_dev_step = b.step("smoke-dev", "Run JavaScript smoke fixtures against the Debug zjs");
+    smoke_dev_step.dependOn(&run_smoke_dev_tests.step);
+
+    // Explicit changed-area targets avoid compiling and running the entire
+    // unified suite during focused work. Selection stays developer-driven;
+    // checkpoint and production gates continue to use the unified root.
+    const scoped_test_engine_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    scoped_test_engine_mod.addOptions("build_options", test_options);
+    const ScopedTestConfig = struct {
+        name: []const u8,
+        description: []const u8,
+        root_source_file: []const u8,
+        filter: []const u8,
+        needs_plugin_fixtures: bool = false,
+    };
+    const scoped_test_configs = [_]ScopedTestConfig{
+        .{ .name = "test-core", .description = "Run focused core value, object, GC, and ownership tests", .root_source_file = "src/tests/core.zig", .filter = "core.test" },
+        .{ .name = "test-parser", .description = "Run focused lexer and parser tests", .root_source_file = "src/tests/parser.zig", .filter = "parser.test" },
+        .{ .name = "test-bytecode", .description = "Run focused bytecode and pipeline tests", .root_source_file = "src/tests/bytecode.zig", .filter = "bytecode.test" },
+        .{ .name = "test-exec", .description = "Run focused execution and VM tests", .root_source_file = "src/exec_tests.zig", .filter = "tests.exec" },
+        .{ .name = "test-builtins", .description = "Run focused ECMAScript built-in tests", .root_source_file = "src/builtins_tests.zig", .filter = "tests.builtins" },
+        .{ .name = "test-runtime", .description = "Run focused host runtime and plugin tests", .root_source_file = "src/runtime_tests.zig", .filter = "runtime.", .needs_plugin_fixtures = true },
+        .{ .name = "test-runner", .description = "Run focused test262 runner tests", .root_source_file = "src/cli/run_test262.zig", .filter = "run_test262.test" },
+    };
+    inline for (scoped_test_configs) |config| {
+        const scoped_root = b.createModule(.{
+            .root_source_file = b.path(config.root_source_file),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zjs", .module = scoped_test_engine_mod },
+            },
+        });
+        scoped_root.addOptions("build_options", test_options);
+        const scoped_tests = b.addTest(.{
+            .name = config.name,
+            .root_module = scoped_root,
+            .filters = &.{config.filter},
+        });
+        scoped_tests.test_runner = .{
+            .path = b.path("tools/timing_test_runner.zig"),
+            .mode = .simple,
+        };
+        const run_scoped_tests = b.addRunArtifact(scoped_tests);
+        run_scoped_tests.addArg("--require-tests");
+        if (config.needs_plugin_fixtures) {
+            run_scoped_tests.step.dependOn(&install_runtime_plugin_fixture.step);
+            run_scoped_tests.step.dependOn(&install_runtime_empty_plugin_fixture.step);
+        }
+        if (b.args) |args| run_scoped_tests.addArgs(args);
+        const scoped_step = b.step(config.name, config.description);
+        scoped_step.dependOn(&run_scoped_tests.step);
+    }
 
     // OOM injection suite (`zig build test-oom`): exhaustive allocation
     // failure injection (std.testing.checkAllAllocationFailures) over an
@@ -547,28 +685,6 @@ pub fn build(b: *std.Build) void {
     const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (phase-gate tier)");
     test_oom_step.dependOn(&run_oom_tests.step);
 
-    // Focused 8MB-cap OOM behaviour fixture. The same tests run inside the
-    // unified suite (all_tests.zig references src/tests/oom_cap.zig); this
-    // binary makes the production gate's dependency on the cap behaviour
-    // explicit.
-    const oom_cap_tests = b.addTest(.{
-        .name = "oom-cap-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/oom_cap.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zjs", .module = oom_engine_mod },
-            },
-        }),
-    });
-    oom_cap_tests.test_runner = .{
-        .path = b.path("tools/timing_test_runner.zig"),
-        .mode = .simple,
-    };
-    const run_oom_cap_tests = b.addRunArtifact(oom_cap_tests);
-
     // Alternate JSValue representation guard: runs the unified suite in the
     // non-default 16-byte representation (a full second build
     // graph, so the plugin fixtures recompile with a matching ABI
@@ -586,21 +702,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unified_tests.step);
 
     const quick_check_step = b.step("quick-check", "Run the fast inner-loop validation gate");
-    quick_check_step.dependOn(zjs_step);
-    quick_check_step.dependOn(smoke_step);
-    quick_check_step.dependOn(test262_smoke_step);
+    quick_check_step.dependOn(smoke_dev_step);
 
     const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, or alternate-representation gates");
     checkpoint_check_step.dependOn(test_step);
-    checkpoint_check_step.dependOn(smoke_step);
+    checkpoint_check_step.dependOn(smoke_dev_step);
     checkpoint_check_step.dependOn(architecture_check_step);
     checkpoint_check_step.dependOn(test262_smoke_step);
-    checkpoint_check_step.dependOn(&run_oom_cap_tests.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(architecture_check_step);
     engine_production_gate_step.dependOn(test262_gate_step);
-    engine_production_gate_step.dependOn(&run_oom_cap_tests.step);
 }

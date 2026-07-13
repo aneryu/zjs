@@ -532,14 +532,18 @@ tier pass.
 **Inner loop.** Use this while optimizing or fixing a focused issue:
 
 ```bash
-zig build zjs --summary all
 zig build quick-check --summary all
-zig build test262-smoke --summary all
 git diff --check
 ```
 
 Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
-slice that directly reproduces the changed behavior.
+slice that directly reproduces the changed behavior. Use the matching explicit
+`test-core`, `test-parser`, `test-bytecode`, `test-exec`, `test-builtins`,
+`test-runtime`, or `test-runner` target when it is narrower than the unified
+suite. These targets apply compile-time namespace filters and fail if the
+selection becomes empty. For repeated edits, `mise run quick-watch` keeps quick-check incremental;
+stop the watcher before escalating to a broader gate. `quick-check`
+intentionally does not compile the separate test262 runner.
 
 **Checkpoint.** Use this before handing off a non-trivial code-bearing change:
 
@@ -547,9 +551,9 @@ slice that directly reproduces the changed behavior.
 zig build checkpoint-check --summary all
 ```
 
-Add the relevant focused test262 directory or file set. Run the full Debug suite
-separately when shared runtime/core semantics changed and the focused evidence
-does not cover the blast radius.
+This includes the unified Debug suite, Debug CLI smoke, architecture checks,
+and `test262-smoke`. Add the relevant focused test262 directory or file set;
+do not run `quick-check` first because checkpoint already supersedes it.
 
 **Phase close / release.** Use this only for final confirmation, release
 evidence, or CI gates:

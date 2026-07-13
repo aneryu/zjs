@@ -119,7 +119,7 @@ test "latin1 string literal append range fast path preserves fallbacks" {
 }
 
 test "latin1 string literal append range fast path collapses loop opcodes" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -141,7 +141,7 @@ test "latin1 string literal append range fast path collapses loop opcodes" {
 }
 
 test "latin1 string literal append range fast path accepts i8 loop limits" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -163,7 +163,7 @@ test "latin1 string literal append range fast path accepts i8 loop limits" {
 }
 
 test "host output Number static literal fast path materializes lazy constructor" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -184,7 +184,7 @@ test "host output Number static literal fast path materializes lazy constructor"
 }
 
 test "empty script eval skips VM frame startup" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -523,7 +523,7 @@ test "sparse array literal fast paths preserve holes and length semantics" {
 }
 
 test "sparse array literal length add range fast path collapses loop opcodes" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -754,7 +754,7 @@ fn escapedEvalImportResolve(
     specifier: []const u8,
     referrer: ?[]const u8,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.ResolvedModule {
+) anyerror!helpers.TestEngine.HostHooks.ResolvedModule {
     const host: *EscapedEvalImportHost = @ptrCast(@alignCast(ptr));
     const dep_path = "/fixture/scripts/dep.js";
     if (std.mem.eql(u8, specifier, "./dep.js")) {
@@ -774,9 +774,9 @@ fn escapedEvalImportResolve(
 
 fn escapedEvalImportLoad(
     _: *anyopaque,
-    resolved: engine.harness.Engine.HostHooks.ResolvedModule,
+    resolved: helpers.TestEngine.HostHooks.ResolvedModule,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.LoadedModule {
+) anyerror!helpers.TestEngine.HostHooks.LoadedModule {
     const dep_path = "/fixture/scripts/dep.js";
     if (!std.mem.eql(u8, resolved.path, dep_path)) return error.ModuleNotFound;
     return .{
@@ -788,12 +788,12 @@ fn escapedEvalImportLoad(
 }
 
 test "escaped direct eval function keeps script referrer for dynamic import" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const root_path = "/fixture/scripts/main.mjs";
     var host = EscapedEvalImportHost{ .expected_referrer = root_path };
-    const hooks = engine.harness.Engine.HostHooks{
+    const hooks = helpers.TestEngine.HostHooks{
         .ptr = &host,
         .resolveModule = escapedEvalImportResolve,
         .loadModule = escapedEvalImportLoad,
@@ -2393,7 +2393,7 @@ test "Engine function global data IC preserves binding guards" {
 }
 
 test "Engine top-level var probes preserve QuickJS global object semantics" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [1024]u8 = undefined;
@@ -3580,7 +3580,7 @@ test "Object.defineProperty returns retained target object" {
 }
 
 test "Object constructor record preserves call and construct semantics" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(

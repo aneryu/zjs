@@ -115,7 +115,7 @@ pub const helpers = struct {
     //
     // Each `test "X" {}` block traditionally does:
     //
-    //     var js = try engine.harness.Engine.init(std.testing.allocator);
+    //     var js = try helpers.TestEngine.init(std.testing.allocator);
     //     defer js.deinit();
     //     ...
     //
@@ -139,7 +139,7 @@ pub const helpers = struct {
     // `installHostGlobals`. Tests that mutate built-in objects (e.g.
     // `Promise.resolve = ...`) or rely on freshly built closures
     // referencing the previous test's eval scope still need a fresh
-    // `engine.harness.Engine.init` per call; the shared-engine pattern is
+    // `helpers.TestEngine.init` per call; the shared-engine pattern is
     // safe for tests that only declare new locals / vars / functions
     // and read the standard globals.
     //
@@ -1071,7 +1071,7 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
 
 test "global closure get before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var let_output_buffer: [64]u8 = undefined;
@@ -1099,7 +1099,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
 
 test "global closure set before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1116,7 +1116,7 @@ test "global closure set before top-level lexical initialization honors TDZ" {
 
 test "global closure update before top-level lexical initialization honors TDZ" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1133,7 +1133,7 @@ test "global closure update before top-level lexical initialization honors TDZ" 
 
 test "Annex B block function updates existing global function binding" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1155,7 +1155,7 @@ test "Annex B block function updates existing global function binding" {
 
 test "Annex B eval block function updates global function binding mirrors" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var direct_output_buffer: [64]u8 = undefined;
@@ -1183,7 +1183,7 @@ test "Annex B eval block function updates global function binding mirrors" {
 
 test "Annex B direct eval global function does not block later script lexical declaration" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const eval_result = try js.eval(
@@ -1210,7 +1210,7 @@ test "Annex B direct eval global function does not block later script lexical de
 
 test "sloppy global assignment creates deletable object property" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var this_output_buffer: [64]u8 = undefined;
@@ -1502,7 +1502,7 @@ test "bytecode call view memo occupies the callable-class call cache" {
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1523,7 +1523,7 @@ test "Math cproto dispatch preserves observable ToNumber semantics" {
 
 test "cell-backed add_loc retains string snapshots while using a rope tail" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1567,7 +1567,7 @@ test "cell-backed add_loc retains string snapshots while using a rope tail" {
 
 test "checked lexical string accumulation keeps rope depth bounded" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1656,7 +1656,7 @@ test "computed reads with cached string atoms preserve exotic and prototype sema
 }
 
 test "native dispatch metadata is internal and ignores user properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1684,7 +1684,7 @@ test "native dispatch metadata is internal and ignores user properties" {
 
 test "scope resolver skips popped lexical shadow for destructured parameter" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1702,7 +1702,7 @@ test "scope resolver skips popped lexical shadow for destructured parameter" {
 }
 
 test "__zjs-prefixed user properties are ordinary own properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1725,7 +1725,7 @@ test "__zjs-prefixed user properties are ordinary own properties" {
 }
 
 test "array species fast path markers are internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1752,7 +1752,7 @@ test "array species fast path markers are internal" {
 }
 
 test "auto-init builtin markers are internal and ignore user properties" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1867,7 +1867,7 @@ test "auto-init builtin markers are internal and ignore user properties" {
 }
 
 test "immutable prototype marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1888,7 +1888,7 @@ test "immutable prototype marker is internal" {
 }
 
 test "builtin dispatch function markers are internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1930,7 +1930,7 @@ test "builtin dispatch function markers are internal" {
 }
 
 test "proxy revocation target is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1972,7 +1972,7 @@ test "proxy revocation target is internal" {
 }
 
 test "regexp accessor realm TypeError constructor is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -2007,7 +2007,7 @@ test "regexp accessor realm TypeError constructor is internal" {
 }
 
 test "throw type error intrinsic marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -2063,7 +2063,7 @@ test "throw type error intrinsic marker is internal" {
 }
 
 test "async generator prototype method marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -2086,7 +2086,7 @@ test "async generator prototype method marker is internal" {
 }
 
 test "iterator helper method marker is internal" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [1024]u8 = undefined;
@@ -2135,7 +2135,7 @@ test "iterator helper method marker is internal" {
 }
 
 test "Iterator.from follows QuickJS wrapper selection" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -4377,7 +4377,7 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
 }
 
 test "Engine eval exit releases frame var-ref cycles before cycle collection" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -4448,12 +4448,12 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
 
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
-        var js = try engine.harness.Engine.init(std.testing.allocator);
+        var js = try helpers.TestEngine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("const obj = {}; obj.missing(\"a\", \"a\");"));
     }
     {
-        var js = try engine.harness.Engine.init(std.testing.allocator);
+        var js = try helpers.TestEngine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("RegExp.test(\"a\", \"a\");"));
     }
@@ -5185,7 +5185,7 @@ test "Engine eval preserves regexp UTF-16 test host output semantics" {
 }
 
 test "Engine eval prepared RegExp call observes same-site property changes" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -5640,7 +5640,7 @@ test "strict plain calls preserve this arguments eval captures and backtraces" {
 }
 
 test "strict arguments preserve qjs intrinsic metadata and dense element semantics" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -6113,7 +6113,7 @@ test "method calls preserve receiver arguments eval captures and abrupt ownershi
 
 test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -6224,7 +6224,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
 
 test "computed named reads preserve prototype accessors proxies and operand ownership" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -6293,7 +6293,7 @@ test "computed named reads preserve prototype accessors proxies and operand owne
 
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -6397,7 +6397,7 @@ test "static named getter and proxy fast paths preserve receivers throws and inv
 
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
     engine.builtins.registry.registerStandardGlobalsDefault();
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -6795,7 +6795,7 @@ test "Engine eval Function.prototype.toString returns method and class source" {
 }
 
 test "Engine eval releases arrow destructuring iterator closures cleanly" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -7079,7 +7079,7 @@ test "Engine eval preserves simple for-in mutation semantics" {
 }
 
 test "Engine runJobs preserves pending JS exceptions for callers" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     js.context.preserve_uncaught_exception = true;
 
@@ -7101,7 +7101,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
 }
 
 test "host module graph syntax diagnostics do not write to program output" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -7131,7 +7131,7 @@ test "host module graph syntax diagnostics do not write to program output" {
 }
 
 test "host commonjs wrapper passes directory dirname" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -7168,7 +7168,7 @@ test "host commonjs wrapper passes directory dirname" {
 }
 
 test "module graph evaluates block var declarations as module bindings" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -7197,7 +7197,7 @@ test "module graph evaluates block var declarations as module bindings" {
 }
 
 test "module evaluation does not skip a body-leading function expression" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -7221,7 +7221,7 @@ test "module evaluation does not skip a body-leading function expression" {
 }
 
 test "module top-level await resumes in Promise reaction FIFO order" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -7262,7 +7262,7 @@ test "module top-level await resumes in Promise reaction FIFO order" {
 }
 
 test "module await reaction keeps its position on the awaited Promise" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -7296,7 +7296,7 @@ test "module await reaction keeps its position on the awaited Promise" {
 }
 
 test "async module dependency does not preempt an independent sibling" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const registry = engine.builtins.registry;
     registry.registerStandardGlobalsDefault();
@@ -7349,7 +7349,7 @@ test "async module dependency does not preempt an independent sibling" {
 }
 
 test "import bytes module creates immutable ArrayBuffer backing store" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-import-bytes-immutable-test";
@@ -7385,7 +7385,7 @@ const HostFixtureModule = struct {
     specifier: []const u8,
     path: []const u8,
     source: []const u8,
-    kind: engine.harness.Engine.HostHooks.ModuleKind,
+    kind: helpers.TestEngine.HostHooks.ModuleKind,
 };
 
 const HostFixture = struct {
@@ -7406,7 +7406,7 @@ const HostFixture = struct {
     }
 };
 
-fn hostHooks(host: *const HostFixture) engine.harness.Engine.HostHooks {
+fn hostHooks(host: *const HostFixture) helpers.TestEngine.HostHooks {
     return .{
         .ptr = @constCast(host),
         .resolveModule = resolveFixtureModule,
@@ -7419,7 +7419,7 @@ fn resolveFixtureModule(
     specifier: []const u8,
     referrer: ?[]const u8,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.ResolvedModule {
+) anyerror!helpers.TestEngine.HostHooks.ResolvedModule {
     _ = referrer;
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findBySpecifierOrPath(specifier) orelse return error.ModuleNotFound;
@@ -7432,9 +7432,9 @@ fn resolveFixtureModule(
 
 fn loadFixtureModule(
     ptr: *anyopaque,
-    resolved: engine.harness.Engine.HostHooks.ResolvedModule,
+    resolved: helpers.TestEngine.HostHooks.ResolvedModule,
     allocator: std.mem.Allocator,
-) anyerror!engine.harness.Engine.HostHooks.LoadedModule {
+) anyerror!helpers.TestEngine.HostHooks.LoadedModule {
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findByPath(resolved.path) orelse return error.ModuleNotFound;
     return .{

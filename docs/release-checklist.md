@@ -7,8 +7,8 @@ architecture gate. It is required release evidence, but it does not replace the
 ReleaseSafe, hygiene, and performance checks below.
 
 `zig build quick-check --summary all` and `zig build checkpoint-check --summary
-all` are iteration and handoff shortcuts. They are useful before starting the
-release sweep, but they are not release evidence replacements.
+all` are iteration and handoff shortcuts. Do not rerun them as prerequisites
+for the aggregate release gate.
 
 ## API
 
@@ -33,14 +33,11 @@ release sweep, but they are not release evidence replacements.
 
 ## Compatibility
 
-- `zig build checkpoint-check --summary all` passes before the final release
-  sweep starts.
-- `zig build test --summary all` passes.
-- `zig build test -Doptimize=ReleaseSafe --summary all` passes.
-- `zig build smoke --summary all` passes.
-- `zig build test262-gate --summary all` passes with the checked-in config.
 - `zig build engine-production-gate --summary all` passes from a clean
-  checkout.
+  checkout; it includes the unified Debug suite, ReleaseFast CLI smoke,
+  architecture checks, OOM-cap coverage, and the full test262 gate.
+- `zig build test -Doptimize=ReleaseSafe --summary all` passes once as the
+  optimized-loop safety gate.
 - Focused test262 slices were run for every changed semantic area.
 
 ## Boundary

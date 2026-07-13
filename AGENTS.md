@@ -91,17 +91,23 @@ This is a single-context repository. See `docs/agents/domain.md`.
 ### Build
 
 - `zig build zjs --summary all`
+- `zig build zjs-dev --summary all` (Debug CLI used by the inner-loop smoke gate)
 - `zig build run-test262 --summary all`
+- `zig build run-test262-dev --summary all` (Debug runner used by `test262-smoke`)
 
 ### Regression
 
-- `zig build quick-check --summary all` (fast inner-loop gate: build `zjs`,
-  smoke tests, and the representative `test262-smoke` set; use while iterating,
-  then add the changed-area slice)
+- `zig build quick-check --summary all` (fast inner-loop gate: build the Debug
+  `zjs-dev` and run CLI smoke fixtures; use while iterating, then add the
+  changed-area Zig test or test262 slice)
 - `zig build checkpoint-check --summary all` (medium checkpoint gate: unified
-  Debug tests plus smoke, architecture, `test262-smoke`, and OOM-cap coverage;
-  use before handing off non-trivial code-bearing changes when full test262 is
-  not yet justified)
+  Debug tests, Debug CLI smoke, architecture, Debug `test262-smoke`, and
+  OOM-cap coverage inside the unified suite; use before handing off non-trivial
+  code-bearing changes when full test262 is not yet justified)
+- `zig build test-{core,parser,bytecode,exec,builtins,runtime,runner} --summary all`
+  (explicit changed-area targets; choose the narrowest matching subsystem)
+- `mise run quick-watch` (persistent incremental quick-check loop; stop it
+  before running a checkpoint or production gate)
 - `zig build test --summary all` (Debug full unit/integration suite; during the
   current large refactor, do NOT run this after every small edit. Prefer
   targeted compile checks, focused unit tests, or changed-area slices while

@@ -1,2 +1,6 @@
 [tools]
-zig = "latest"
+zig = "0.16.0"
+
+[tasks.quick-watch]
+description = "Keep the Debug quick-check compiler alive for faster incremental edit feedback"
+run = "zig build quick-check --watch -fincremental --summary new"

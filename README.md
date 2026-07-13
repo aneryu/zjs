@@ -29,9 +29,10 @@ For day-to-day optimization and repair work, prefer the fast tier:
 zig build quick-check --summary all
 ```
 
-`quick-check` builds `zjs`, runs smoke tests, and runs a small representative
-`test262-smoke` file set. It is an iteration aid, not a release replacement for
-the full gates.
+`quick-check` builds the Debug `zjs-dev` and runs the CLI smoke fixtures. Add a
+focused Zig test or test262 slice for the changed semantic area. The checkpoint
+gate adds the unified Debug suite, architecture checks, and `test262-smoke`;
+neither iteration tier replaces the full release gates.
 
 `zig build engine-production-gate --summary all` is the engine semantic and
 architecture gate. A Production v1 release requires this gate to pass from a
@@ -48,11 +49,15 @@ diff hygiene, and performance evidence when runtime-sensitive code changed.
 
 ```sh
 zig build zjs --summary all
+zig build zjs-dev --summary all
 zig build run-test262 --summary all
+zig build run-test262-dev --summary all
 ```
 
-The main CLI is installed as `zig-out/bin/zjs`; the test262 runner is installed
-as `zig-out/bin/run-test262`.
+The ReleaseFast CLI is installed as `zig-out/bin/zjs`, its Debug inner-loop
+counterpart as `zig-out/bin/zjs-dev`, and the test262 runners as
+`zig-out/bin/run-test262` (ReleaseFast) and `zig-out/bin/run-test262-dev`
+(Debug smoke/checkpoint runner).
 
 Useful build steps:
 
@@ -61,6 +66,7 @@ zig build quick-check --summary all
 zig build checkpoint-check --summary all
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
+zig build smoke-dev --summary all
 zig build smoke --summary all
 zig build test262-smoke --summary all
 zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
@@ -68,6 +74,15 @@ zig build test -Dzjs_force_gc=true --summary all
 zig build perf-self-check --summary all
 zig build engine-production-gate --summary all
 ```
+
+Focused subsystem steps are available as `test-core`, `test-parser`,
+`test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`, and
+`test-runner`. For an edit/rebuild loop, `mise run quick-watch` keeps the Debug
+quick-check compiler alive with Zig incremental compilation enabled.
+
+Zig test runners use seed `0` by default so unchanged builds remain
+reproducible and cacheable. Pass `-Dzjs_test_seed=<u32>` for an explicit
+randomized validation run.
 
 `-Dzjs_enable_ic=false` disables shape-keyed inline caches for diagnosis.
 

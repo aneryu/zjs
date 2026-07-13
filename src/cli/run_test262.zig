@@ -1729,6 +1729,12 @@ fn runEmbeddedEngine(
 ) !bool {
     const rt = try zjs.JSRuntime.createWithOptions(allocator, .{});
     errdefer rt.destroy();
+    // Debug builds have materially larger native frames in the parser and VM.
+    // Keep the same logical recursion budget as optimized test262 runs rather
+    // than rejecting the harness prelude itself as StackOverflow.
+    if (@import("builtin").mode == .Debug) {
+        rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
+    }
     const ctx = try zjs.JSContext.create(rt);
     errdefer ctx.destroy();
     var output_buffer: [64 * 1024]u8 = undefined;
@@ -3997,6 +4003,38 @@ test "embedded runner passes async test that completes via $DONE" {
         &stderr,
     );
 
+    try std.testing.expect(passed);
+}
+
+test "embedded Debug runner executes a representative test262 harness within its native stack budget" {
+    const allocator = std.testing.allocator;
+    const test_path = "test262/test/language/types/null/S8.2_A1_T1.js";
+    const test_source = try readTestSource(allocator, std.testing.io, test_path);
+    defer allocator.free(test_source);
+    var metadata = try parseMetadataText(allocator, test_source);
+    defer metadata.deinit(allocator);
+    const harness_prelude = try makeHarnessPrelude(allocator, std.testing.io, "test262/harness");
+    defer allocator.free(harness_prelude);
+    var harness_cache = HarnessCache.init(allocator, std.testing.io, "test262/harness");
+    defer harness_cache.deinit();
+    const source = try makeTestSourceFromBytes(allocator, &harness_cache, harness_prelude, test_source, metadata);
+    defer allocator.free(source);
+
+    var stderr_storage: [stderr_storage_len]u8 = undefined;
+    var stderr: []const u8 = "";
+    const passed = try runEmbeddedEngine(
+        allocator,
+        std.testing.io,
+        source,
+        test_path,
+        false,
+        true,
+        false,
+        &stderr_storage,
+        &stderr,
+    );
+
+    try std.testing.expectEqualStrings("", stderr);
     try std.testing.expect(passed);
 }
 
