@@ -7330,7 +7330,6 @@ pub const pipeline_finalize = struct {
     }
 
     fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError![]fb_mod.FunctionBytecode {
-        reconcileCapturedBindings(fd);
         var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, fd.func_name);
         defer lowered.deinit(rt);
         lowered.line_num = fd.line_num;
@@ -7615,6 +7614,13 @@ pub const pipeline_finalize = struct {
         fd: ?*const function_def_mod.FunctionDef,
         fd_mut: ?*function_def_mod.FunctionDef,
     ) !void {
+        // The mutable top-level/eval Bytecode executes directly instead of
+        // being copied through createFunctionBytecodeAfterChildren. Fold the
+        // child capture tables back into its VarDefs here as well so frame
+        // sizing and the local-slot proof consume the same binding facts in
+        // both storage representations.
+        if (fd_mut) |def| reconcileCapturedBindings(def);
+
         // Phase 2: resolve_variables (with optional FunctionDef).
         var resolve_ctx = if (fd_mut) |def|
             resolve_variables.JSContext.initWithFunctionDef(function, def)
@@ -7663,6 +7669,12 @@ pub const pipeline_finalize = struct {
             try syncBytecodeGlobalVarNames(function, def);
             try syncBytecodePrivateBoundNames(function, def);
             try removeUncapturedCloseLoc(function, def);
+            // createFunctionBytecode copies this count into the packed FB;
+            // direct top-level/eval Bytecode must retain it itself. Without
+            // this assignment closure creation falls back to a closed cell,
+            // while the D1 loc handlers still assume an open alias and can
+            // overwrite the cell during a later destructuring initialization.
+            function.open_var_ref_count = capturedBindingCount(def);
         }
 
         // Phase 3b: pc2line from remapped Bytecode source slots.

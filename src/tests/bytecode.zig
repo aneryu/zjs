@@ -3310,6 +3310,40 @@ test "surviving local references reserve compact open VarRef storage" {
     try std.testing.expect(!view.localMayBeBoxed(0));
 }
 
+test "direct Bytecode retains compact open VarRef frame sizing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("direct-open-ref-frame-sizing");
+    const local_name = try rt.internAtom("value");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(local_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
+    defer function.deinit(rt);
+    var code = [_]u8{0} ** 14;
+    code[0] = bytecode.opcode.op.scope_make_ref;
+    std.mem.writeInt(u32, code[1..5], local_name, .little);
+    std.mem.writeInt(u32, code[5..9], 0, .little);
+    std.mem.writeInt(u16, code[9..11], 0, .little);
+    code[11] = bytecode.opcode.op.get_ref_value;
+    code[12] = bytecode.opcode.op.drop;
+    code[13] = bytecode.opcode.op.return_undef;
+    try function.setCode(&code);
+    try function.retainAtomOperand(local_name);
+
+    try pipeline.finalize.runWithFunctionDefRuntime(&function, &fd, rt);
+
+    try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
+    try std.testing.expect(fd.vars[0].is_captured);
+    try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, function.code[0]);
+}
+
 test "createFunctionBytecode: copies global var records from FunctionDef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -539,11 +539,13 @@ pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame
 }
 
 fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {
-    // Generator/async frames now retain one resident backing allocation across
-    // suspension. Their local/argument addresses are as stable as ordinary
-    // inline frames; vm_gen_async parks and restores the open-ref window with
-    // those same slices, so they no longer need the legacy closed-cell fallback.
-    return slotInSlice(slot, frame.locals) or slotInSlice(slot, frame.args);
+    if (slotInSlice(slot, frame.locals)) return true;
+    if (!slotInSlice(slot, frame.args)) return false;
+    // Generator/async parameter prologues run before their resident frame is
+    // parked. A mapped Arguments object created there can outlive the live
+    // Frame argument view, so parameter aliases remain closed cells. Resident
+    // locals use the stable combined backing and keep the open-alias fast path.
+    return !frame.function.flags.is_generator and !frame.function.flags.is_async;
 }
 
 fn slotInSlice(slot: *const core.JSValue, values: []const core.JSValue) bool {

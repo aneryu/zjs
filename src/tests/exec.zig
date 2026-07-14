@@ -6483,6 +6483,31 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
+test "resident generators preserve mapped arguments parameter aliases" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* mappedGenerator(first, second, third, missing) {
+        \\    arguments[0] = 32;
+        \\    arguments[1] = 54;
+        \\    arguments[2] = 333;
+        \\    yield first;
+        \\    yield second;
+        \\    yield third;
+        \\    yield missing;
+        \\}
+        \\const iterator = mappedGenerator(23, 45, 33);
+        \\assert.sameValue(iterator.next().value, 32);
+        \\assert.sameValue(iterator.next().value, 54);
+        \\assert.sameValue(iterator.next().value, 333);
+        \\assert.sameValue(iterator.next().value, undefined);
+        \\assert.sameValue(iterator.next().done, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "get_length preserves qjs own-property-before-exotic ordering and actions" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
