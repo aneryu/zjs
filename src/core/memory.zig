@@ -96,6 +96,7 @@ pub const SmallObjectSlab = struct {
 
     arenas: [block_sizes.len]?*Arena = @splat(null),
     free_arenas: [block_sizes.len]?*Arena = @splat(null),
+    empty_reserves: [block_sizes.len]?*Arena = @splat(null),
 
     pub inline fn canUse(byte_count: usize, alignment: std.mem.Alignment) bool {
         return classIndex(byte_count, alignment) != null;
@@ -112,6 +113,9 @@ pub const SmallObjectSlab = struct {
         const block_idx = arena.first_free_block;
         std.debug.assert(block_idx != free_nil);
         const header = blockHeaderAt(arena, block_idx, block_size);
+        if (arena.used_blocks == 0 and self.empty_reserves[index] == arena) {
+            self.empty_reserves[index] = null;
+        }
         arena.first_free_block = header.index_or_next;
         header.index_or_next = block_idx;
         arena.used_blocks += 1;
@@ -145,9 +149,20 @@ pub const SmallObjectSlab = struct {
         }
         arena.used_blocks -= 1;
         if (arena.used_blocks == 0) {
-            self.removeArena(index, arena);
-            self.removeFreeArena(index, arena);
-            backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+            // Keep one empty arena per size class as a bounded hot reserve. A
+            // class with no unrelated resident allocation must not alternate
+            // rawAlloc/rawFree for every short-lived object; that made object
+            // literal throughput depend on incidental startup allocation sizes.
+            // Excess empty arenas are still returned immediately, and deinit
+            // releases the final reserve. The upper bound is 31 * 4 KiB.
+            if (self.empty_reserves[index] == null) {
+                self.empty_reserves[index] = arena;
+            } else {
+                std.debug.assert(self.empty_reserves[index] != arena);
+                self.removeArena(index, arena);
+                self.removeFreeArena(index, arena);
+                backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+            }
         }
     }
 
@@ -774,7 +789,7 @@ pub const MemoryAccount = struct {
     }
 };
 
-test "small object slab releases empty arenas" {
+test "small object slab retains one empty arena as a reusable reserve" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
@@ -783,29 +798,34 @@ test "small object slab releases empty arenas" {
     try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
 
     slab.free(std.testing.allocator, alloc[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
-}
-
-test "small object slab keeps non-empty arenas reusable" {
-    var slab: SmallObjectSlab = .{};
-    defer slab.deinit(std.testing.allocator);
-
-    const first = try slab.alloc(std.testing.allocator, 64, .@"8");
-    const second = try slab.alloc(std.testing.allocator, 64, .@"8");
-    const index = SmallObjectSlab.classIndex(64, .@"8").?;
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
-
-    slab.free(std.testing.allocator, first[0..64], .@"8");
     try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
 
     const reused = try slab.alloc(std.testing.allocator, 64, .@"8");
-    try std.testing.expectEqual(@intFromPtr(first), @intFromPtr(reused));
-
-    slab.free(std.testing.allocator, second[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
-
+    try std.testing.expectEqual(@intFromPtr(alloc), @intFromPtr(reused));
     slab.free(std.testing.allocator, reused[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+}
+
+test "small object slab releases excess empty arenas" {
+    var slab: SmallObjectSlab = .{};
+    defer slab.deinit(std.testing.allocator);
+
+    const index = SmallObjectSlab.classIndex(64, .@"8").?;
+    var allocations: [SmallObjectSlab.arena_size / 16][*]u8 = undefined;
+    allocations[0] = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const first_arena_capacity: usize = slab.arenas[index].?.block_count;
+    for (allocations[1 .. first_arena_capacity + 1]) |*slot| {
+        slot.* = try slab.alloc(std.testing.allocator, 64, .@"8");
+    }
+    try std.testing.expectEqual(@as(usize, 2), slab.debugArenaCount(index));
+
+    for (allocations[0..first_arena_capacity]) |allocation| {
+        slab.free(std.testing.allocator, allocation[0..64], .@"8");
+    }
+    try std.testing.expectEqual(@as(usize, 2), slab.debugArenaCount(index));
+
+    slab.free(std.testing.allocator, allocations[first_arena_capacity][0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
 }
 
 test "small slab GC allocation reuses allocator header for metadata" {

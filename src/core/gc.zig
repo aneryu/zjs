@@ -215,8 +215,9 @@ pub const SpaceAccount = struct {
     // page geometry that used to be maintained on every alloc/free is now derived
     // from live_bytes on demand in refreshPageState (statsSnapshot / Debug verify
     // only). This also tracks the slab's real behaviour more faithfully: the
-    // SmallObjectSlab eagerly rawFrees an arena the moment it empties (memory.zig),
-    // so there is no retained-empty-page hysteresis to carry on the hot path.
+    // SmallObjectSlab keeps at most one unaccounted 4 KiB reserve per size class
+    // (memory.zig), so there is no GC-visible empty-page hysteresis to carry on
+    // the hot path.
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
         if (bytes == 0) return;
         self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);

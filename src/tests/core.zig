@@ -3494,17 +3494,16 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
-    // Page geometry is derived from live_bytes on demand, and the SmallObjectSlab
-    // returns an arena to the backing allocator the moment it empties, so a
-    // fully-freed heap reports zero committed/empty/fragmentation immediately —
-    // there is no retained-empty-page hysteresis (mirrors qjs delegating reclaim
-    // to system malloc).
+    // Page geometry is derived from live_bytes on demand. The SmallObjectSlab's
+    // bounded per-class reserve is allocator-private and released at runtime
+    // teardown, so a fully-freed GC heap reports zero logical committed/empty/
+    // fragmentation immediately.
     try std.testing.expectEqual(@as(usize, 0), released.heap_committed_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.empty_page_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_fragmentation_ratio);
 
-    // decommitEmptyPagesNow is now a diagnostics refresh: the slab already
-    // returned the memory, so nothing is left to hand back.
+    // decommitEmptyPagesNow is a diagnostics refresh; allocator-private reserves
+    // are outside the logical GC page account.
     rt.gc.decommitEmptyPagesNow();
     const decommitted = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), decommitted.heap_committed_bytes);
