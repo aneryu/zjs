@@ -125,6 +125,11 @@ pub fn runModuleWithOutputAndVarRefsStateAtPc(
     initial_pc: usize,
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
+    // Module continuations use caller-owned standalone stack storage. Finalize
+    // their execution record after the Frame unwinds; FAM-backed states must
+    // instead wait for the wrapper that owns the borrowed Stack window.
+    const finalize_completion = !module_state.generatorStackUsesCombinedStorage();
+    defer if (finalize_completion) module_state.finalizeGeneratorExecutionCompletion(ctx.runtime);
     return runWithCallEnv(.{
         .ctx = ctx,
         .stack = stack,
@@ -215,6 +220,11 @@ const argumentsNeedsOriginalSnapshot = frame_mod.argumentsNeedsOriginalSnapshot;
 
 /// Per-invocation interpreter entry state. Replaces the former 30-parameter
 /// `runWithArgsState` surface; eval/generator/module-await flags live here.
+pub const PreparedEntryFrame = struct {
+    slab: frame_mod.FrameSlab,
+    need_original_args: bool,
+};
+
 pub const CallEnv = struct {
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -237,6 +247,7 @@ pub const CallEnv = struct {
     is_eval_code: bool = false,
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
+    prepared_entry_frame: ?*const PreparedEntryFrame = null,
 };
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
@@ -262,6 +273,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.is_eval_code,
         env.suspend_on_module_await,
         env.initial_pc,
+        env.prepared_entry_frame,
     );
 }
 
@@ -287,6 +299,7 @@ fn runWithArgsState(
     entry_is_eval_code: bool,
     entry_suspend_on_module_await: bool,
     entry_initial_pc: usize,
+    entry_prepared_frame: ?*const PreparedEntryFrame,
 ) HostError!core.JSValue {
     const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
     defer call_depth_guard.deinit();
@@ -298,105 +311,90 @@ fn runWithArgsState(
     const frame_arena_mark = ctx.runtime.vm_stack.mark();
     defer ctx.runtime.vm_stack.restore(frame_arena_mark);
 
-    var frame_storage = frame_mod.Frame.init(entry_function);
+    const resident_binding_shell = entry_generator_state != null and constructor_this_value.isUndefined();
+    var frame_storage = if (resident_binding_shell)
+        frame_mod.Frame.initResidentExecution(
+            entry_function,
+            initial_this_value,
+            current_function_value,
+            new_target_value,
+            entry_generator_state.?.generatorActualArgCount(),
+        )
+    else
+        frame_mod.Frame.init(entry_function);
     defer {
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
     }
-    defer frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
-    // Single backtrace node for this whole VM invocation (qjs's
-    // `current_stack_frame` granularity). It covers the L0 frame during the
-    // pre-dispatch setup below (machine == null, depth 0) and walks the inline
-    // Machine's Entry chain once `machine` is attached after init — replacing
-    // the former per-inline-call backtrace push/pop.
-    var machine_backtrace = inline_calls.MachineBacktrace{ .l0_frame = &frame_storage };
+    defer {
+        if (entry_generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
+            frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
+        }
+    }
+    var catch_target_storage: ?usize = null;
+    const l0_state = inline_calls.L0State{
+        .level = .{
+            .frame = &frame_storage,
+            .stack = entry_stack,
+            .catch_target = &catch_target_storage,
+        },
+        .eval_global_var_bindings = entry_eval_global_var_bindings,
+        .is_eval_code = entry_is_eval_code,
+        .strict_unresolved_get_var = entry_strict_unresolved_get_var,
+        .generator_state = entry_generator_state,
+        .stop_on_yield = entry_stop_on_yield,
+        .stop_before_pc = entry_stop_before_pc,
+        .suspend_on_module_await = entry_suspend_on_module_await,
+    };
+    // Construct Machine at its final address before publishing the invocation
+    // Adapter that points to it. Machine is the resolver's only execution-state
+    // source; the separate link preserves Machine's existing hot layout. It must
+    // not move until the link is popped.
+    var machine = inline_calls.Machine.init(ctx, output, global, &l0_state);
     var active_backtrace_frame = core.ActiveBacktraceFrame{
-        .data = &machine_backtrace,
+        .data = &machine,
         .resolver = inline_calls.resolveMachineBacktrace,
     };
     ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
     defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
-    try frame_storage.initCallBindings(ctx.runtime, .{
+    // Register after the pop defer so inline frames are drained while this
+    // invocation is still observable; the L0 Frame is destroyed afterwards.
+    defer machine.deinit();
+
+    const call_bindings = frame_mod.CallBindingInputs{
         .initial_this_value = initial_this_value,
         .current_function_value = current_function_value,
         .new_target_value = new_target_value,
         .constructor_this_value = constructor_this_value,
-    });
-    const use_inline_frame_storage = entry_generator_state == null and !entry_function.flags.is_generator and !entry_function.flags.is_async;
-    const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;
-    const need_original_args = argumentsNeedsOriginalSnapshot(entry_function);
-    const frame_arg_count = frame_mod.frameArgCount(entry_function, args.len);
-    const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(entry_function, frame_arg_count);
-    // A STARTED generator/async resume (pc != 0) immediately frees any frame slab built
-    // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig:157-173), so
+    };
+    if (entry_generator_state != null and !resident_binding_shell) {
+        // The resident execution state owns these two values for the entire
+        // VM run. Borrow them exactly like qjs's JSAsyncFunctionState frame;
+        // completion is finalized only after this live Frame has unwound.
+        try frame_storage.initCallBindingValues(&ctx.runtime.memory, call_bindings, .{
+            .this_value = .borrow,
+            .current_function = .borrow,
+        });
+    } else if (entry_generator_state == null) {
+        try frame_storage.initCallBindings(ctx.runtime, call_bindings);
+    }
+    // A generator/async resume with a resident frame immediately frees any slab built
+    // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig), so
     // allocating + initializing a throwaway slab + re-duping args + rebuilding var_refs is
     // pure waste — qjs allocates the generator frame ONCE at creation and resumes on it
-    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c:17790). First creation (pc == 0) still
-    // builds the slab (it becomes the generator's working frame), so gate on pc != 0.
+    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c:17790). `has_frame`, not pc, is the
+    // discriminator: internal marker-less generators have a valid resident frame at pc 0.
     //
-    // EXCEPT a generator that needs the UNMAPPED `arguments` snapshot (strict / non-simple
-    // params): `initArguments` rebuilds `original_args` from generatorArgs on EVERY resume
-    // (it is NOT preserved in the generator frame buffers — resumeExecutionStateRaw clears
-    // it at line 164), so those keep the full path. For every other started resume the
-    // preserved buffers cover locals/args/var_refs; the only remaining initArguments output
+    // The unmapped `arguments` snapshot is also creation-only. If the bytecode can observe
+    // `arguments`, its prologue materializes that object before the first suspension and
+    // parks it in the hidden arguments local, which is part of the preserved locals window.
+    // Rebuilding `original_args` on every started resume therefore created a second snapshot
+    // only for resumeExecutionStateRaw to release it immediately. The preserved buffers cover
+    // locals/args/var_refs for every started resume; the only remaining initArguments output
     // is the mapped-arguments count (frame.args is already the preserved buffer), which we
     // set directly — identical to what initArguments would store (`actual_arg_count = args.len`).
-    const is_started_resume = if (entry_generator_state) |gen| gen.generatorPc() != 0 else false;
-    const skip_resume_slab = is_started_resume and !need_original_args;
+    const skip_resume_slab = if (entry_generator_state) |gen| gen.generatorExecutionState().has_frame else false;
     if (!skip_resume_slab) {
-        const slab = if (frame_arena) |arena| blk: {
-            if (frame_mod.FrameSlab.carve(
-                &ctx.runtime.memory,
-                arena,
-                frame_arg_count,
-                frame_mod.originalArgCount(args.len, need_original_args),
-                entry_function.var_count,
-                @as(usize, entry_function.stack_size) + 1,
-                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-                open_var_ref_count,
-            )) |windows| break :blk windows;
-            const heap_windows = try frame_mod.FrameSlab.allocHeap(
-                &ctx.runtime.memory,
-                frame_arg_count,
-                frame_mod.originalArgCount(args.len, need_original_args),
-                entry_function.var_count,
-                0,
-                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-                open_var_ref_count,
-            );
-            frame_storage.installOwnedStorage(heap_windows.storage);
-            break :blk heap_windows;
-        } else blk: {
-            const heap_windows = try frame_mod.FrameSlab.allocHeap(
-                &ctx.runtime.memory,
-                frame_arg_count,
-                frame_mod.originalArgCount(args.len, need_original_args),
-                entry_function.var_count,
-                0,
-                frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-                open_var_ref_count,
-            );
-            frame_storage.installOwnedStorage(heap_windows.storage);
-            break :blk heap_windows;
-        };
-        const frame_windows = frame_mod.FrameStorageWindows{
-            .args = if (slab.args.len != 0) slab.args else null,
-            .original_args = if (slab.original_args.len != 0) slab.original_args else null,
-            .locals = if (slab.locals.len != 0) slab.locals else null,
-            .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
-            .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
-        };
-        if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-            entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
-        }
-        try call_vm.initFrameLocals(ctx, entry_function, &frame_storage, use_inline_frame_storage, frame_windows);
-        try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
-        if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
-        try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage, frame_windows);
-    } else {
-        // Skipped the slab; resumeExecutionStateRaw installs the preserved frame.args. The
-        // mapped `arguments` object still reads frame.actual_arg_count, so set it the same way
-        // initArguments would have (args == generatorArgs() here, so this is byte-identical).
-        frame_storage.actual_arg_count = args.len;
+        try initFreshEntryFrame(ctx, entry_stack, entry_function, &frame_storage, global, args, var_refs, entry_generator_state, entry_prepared_frame);
     }
     if (entry_generator_state == null) {
         try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_global_var_bindings);
@@ -404,35 +402,28 @@ fn runWithArgsState(
 
     frame_storage.pc = entry_initial_pc;
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
-    try reserveEntryFrameCapacity(entry_stack, entry_function);
+    // If execution completes or fails, clear the payload's non-owning aliases
+    // before the live Frame/Stack defers release their buffers. A yield/await
+    // republished ownership already, so this is a no-op on suspension.
+    defer gen_async_vm.finishExecutionStateRun(ctx.runtime, entry_stack, &frame_storage, entry_generator_state);
+    // A parked frame already passed this full-capacity guard on its creation
+    // run, and GeneratorExecutionState retains (or grows) that same backing.
+    // QuickJS likewise resumes its preallocated stack directly.
+    if (!skip_resume_slab) try reserveEntryFrameCapacity(entry_stack, entry_function);
     errdefer {
         closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
     }
-    var catch_target_storage: ?usize = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
+    catch_target_storage = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
+    // Marker-less internal generator bytecode has no parameter/body boundary to
+    // execute toward. Park its fully initialized frame before dispatch at pc 0.
+    if (entry_stop_before_pc) |stop_pc| {
+        if (frame_storage.pc == stop_pc) {
+            if (try gen_async_vm.stopBeforePc(ctx, entry_stack, &frame_storage, entry_generator_state, catch_target_storage, stop_pc)) |stopped| return stopped;
+        }
+    }
 
-    var machine = inline_calls.Machine.init(ctx, output, global, &frame_storage, entry_stack, &catch_target_storage);
-    defer machine.deinit();
-    machine_backtrace.machine = &machine;
-
-    var loop_state = LoopState{
-        .ctx = ctx,
-        .output = output,
-        .global = global,
-        .machine = &machine,
-        .entry_function = entry_function,
-        .entry_stack = entry_stack,
-        .frame_storage = &frame_storage,
-        .catch_target_storage = &catch_target_storage,
-        .entry_eval_global_var_bindings = entry_eval_global_var_bindings,
-        .entry_is_eval_code = entry_is_eval_code,
-        .entry_strict_unresolved_get_var = entry_strict_unresolved_get_var,
-        .entry_generator_state = entry_generator_state,
-        .entry_stop_on_yield = entry_stop_on_yield,
-        .entry_stop_before_pc = entry_stop_before_pc,
-        .entry_suspend_on_module_await = entry_suspend_on_module_await,
-    };
     while (true) {
-        return runTC(&loop_state) catch |err| {
+        return runTC(&machine) catch |err| {
             // The error escaped the current frame without an in-frame
             // handler. Unwind suspended inline frames (mirroring how the
             // error would propagate through the recursive call chain) and
@@ -443,43 +434,127 @@ fn runWithArgsState(
     }
 }
 
-/// Tail-call dispatcher entry: build the `Vm` bundle from the loop state's CURRENT
-/// top frame (L0 frame_storage at depth 0, else machine.topEntry()) and run the
-/// handler chain. Replaces the old monolithic switch dispatcher.
-fn runTC(loop_state: *LoopState) HostError!core.JSValue {
-    const m = loop_state.machine;
-    const use_inline = m.depth != 0;
-    const func = if (use_inline) m.topEntry().function else loop_state.entry_function;
-    const fr = if (use_inline) &m.topEntry().frame else loop_state.frame_storage;
-    const st = if (use_inline) &m.topEntry().stack else loop_state.entry_stack;
-    const ct = if (use_inline) &m.topEntry().catch_target else loop_state.catch_target_storage;
+/// First-entry-only frame/slab construction. A resumed generator already owns
+/// all of these windows in its execution state, so keeping this allocation and
+/// partitioning state in `runWithArgsState` needlessly enlarged every resume's
+/// native stack frame. Keep the cold setup out of line while both paths still
+/// join the single interpreter entry below.
+noinline fn initFreshEntryFrame(
+    ctx: *core.JSContext,
+    entry_stack: *stack_mod.Stack,
+    entry_function: *const bytecode.Bytecode,
+    frame_storage: *frame_mod.Frame,
+    global: *core.Object,
+    args: []const core.JSValue,
+    var_refs: []const *core.VarRef,
+    entry_generator_state: ?*core.Object,
+    entry_prepared_frame: ?*const PreparedEntryFrame,
+) HostError!void {
+    const use_inline_frame_storage = entry_generator_state == null and !entry_function.flags.is_generator and !entry_function.flags.is_async;
+    const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;
+    const need_original_args = if (entry_prepared_frame) |prepared|
+        prepared.need_original_args
+    else
+        argumentsNeedsOriginalSnapshot(entry_function);
+    const frame_arg_count = if (entry_prepared_frame) |prepared|
+        prepared.slab.args.len
+    else
+        frame_mod.frameArgCount(entry_function, args.len);
+    const open_var_ref_count = if (entry_prepared_frame) |prepared|
+        prepared.slab.open_var_refs.len
+    else
+        frame_mod.frameOpenVarRefStorageCount(entry_function, frame_arg_count);
+    const resident_frame_storage: []core.JSValue = if (entry_prepared_frame) |prepared|
+        prepared.slab.storage
+    else if (entry_generator_state) |generator|
+        generator.generatorCombinedFrameStorage()
+    else
+        &.{};
+    const slab = if (entry_prepared_frame) |prepared| blk: {
+        frame_storage.installResidentStorage(prepared.slab.storage);
+        break :blk prepared.slab;
+    } else if (resident_frame_storage.len != 0) blk: {
+        const windows = frame_mod.FrameSlab.partitionStorage(
+            resident_frame_storage,
+            frame_arg_count,
+            frame_mod.originalArgCount(args.len, need_original_args),
+            entry_function.var_count,
+            0,
+            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+            open_var_ref_count,
+        );
+        frame_storage.installResidentStorage(resident_frame_storage);
+        break :blk windows;
+    } else if (frame_arena) |arena| blk: {
+        if (frame_mod.FrameSlab.carve(
+            &ctx.runtime.memory,
+            arena,
+            frame_arg_count,
+            frame_mod.originalArgCount(args.len, need_original_args),
+            entry_function.var_count,
+            @as(usize, entry_function.stack_size) + 1,
+            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+            open_var_ref_count,
+        )) |windows| break :blk windows;
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(
+            &ctx.runtime.memory,
+            frame_arg_count,
+            frame_mod.originalArgCount(args.len, need_original_args),
+            entry_function.var_count,
+            0,
+            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+            open_var_ref_count,
+        );
+        frame_storage.installOwnedStorage(heap_windows.storage);
+        break :blk heap_windows;
+    } else blk: {
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(
+            &ctx.runtime.memory,
+            frame_arg_count,
+            frame_mod.originalArgCount(args.len, need_original_args),
+            entry_function.var_count,
+            0,
+            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+            open_var_ref_count,
+        );
+        frame_storage.installOwnedStorage(heap_windows.storage);
+        break :blk heap_windows;
+    };
+    const frame_windows = frame_mod.FrameStorageWindows{
+        .args = if (slab.args.len != 0) slab.args else null,
+        .original_args = if (slab.original_args.len != 0) slab.original_args else null,
+        .locals = if (slab.locals.len != 0) slab.locals else null,
+        .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
+        .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
+    };
+    if (entry_stack.capacity == 0 and slab.stack.len != 0) {
+        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+    }
+    try call_vm.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
+    try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
+    if (frame_windows.open_var_refs) |open_refs| frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena, use_inline_frame_storage);
+    try call_vm.initFrameVarRefs(ctx, global, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
+}
+
+/// Tail-call dispatcher entry: build the hot `Vm` caches from the Machine's
+/// single current-level seam and run the handler chain.
+fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
+    const level = m.currentLevel();
+    const func = level.function();
     var vm = tailcall_dispatch.Vm{
-        .ctx = loop_state.ctx,
+        .ctx = m.ctx,
         .function = func,
-        .global = loop_state.global,
-        .frame = fr,
-        .stack = st,
+        .global = m.global,
+        .frame = level.frame,
+        .stack = level.stack,
         .machine = m,
-        .output = loop_state.output,
+        .output = m.output,
         .code_base = func.code.ptr,
         .code_end = func.code.ptr + func.code.len,
-        .stack_base = st.values.ptr,
-        .arg_buf = fr.args.ptr,
-        .catch_target = ct,
-        .l0_function = loop_state.entry_function,
-        .l0_frame = loop_state.frame_storage,
-        .l0_stack = loop_state.entry_stack,
-        .l0_catch_target = loop_state.catch_target_storage,
-        .poller = .init(loop_state.ctx.runtime),
-        .l0 = .{
-            .is_eval_code = loop_state.entry_is_eval_code,
-            .eval_global_var_bindings = loop_state.entry_eval_global_var_bindings,
-            .strict_unresolved_get_var = loop_state.entry_strict_unresolved_get_var,
-            .generator_state = loop_state.entry_generator_state,
-            .stop_on_yield = loop_state.entry_stop_on_yield,
-            .stop_before_pc = loop_state.entry_stop_before_pc,
-            .suspend_on_module_await = loop_state.entry_suspend_on_module_await,
-        },
+        .stack_base = level.stack.values.ptr,
+        .arg_buf = level.frame.args.ptr,
+        .catch_target = level.catch_target,
+        .poller = .init(m.ctx.runtime),
     };
     return tailcall_dispatch.run(&vm);
 }
@@ -497,27 +572,6 @@ fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *con
         entry_function.stack_size;
     try entry_stack.reserveFrameCapacity(frame_stack_size);
 }
-
-/// Per-invocation state shared between `runWithArgsState` and `runTC`. Holds
-/// the level-0 execution context; `runTC` derives the current top frame from it
-/// and the inline machine.
-const LoopState = struct {
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    machine: *inline_calls.Machine,
-    entry_function: *const bytecode.Bytecode,
-    entry_stack: *stack_mod.Stack,
-    frame_storage: *frame_mod.Frame,
-    catch_target_storage: *?usize,
-    entry_eval_global_var_bindings: bool,
-    entry_is_eval_code: bool,
-    entry_strict_unresolved_get_var: bool,
-    entry_generator_state: ?*core.Object,
-    entry_stop_on_yield: bool,
-    entry_stop_before_pc: ?usize,
-    entry_suspend_on_module_await: bool,
-};
 
 // ---- Helpers ----
 // ---- Shared helper aliases ----

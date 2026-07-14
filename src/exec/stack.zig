@@ -12,6 +12,9 @@ pub const Stack = struct {
     /// Windows are never freed or reallocated in place; growth beyond the
     /// window migrates to an owned heap buffer and clears this flag.
     arena_window: bool = false,
+    /// Borrowed view into a GeneratorExecutionState trailing allocation. Unlike
+    /// an arena window it may suspend; the execution record releases the bytes.
+    resident_window: bool = false,
 
     pub fn init(account: *memory.MemoryAccount, limit: usize) Stack {
         return .{ .memory = account, .limit = limit };
@@ -31,15 +34,17 @@ pub const Stack = struct {
         const values = self.values;
         const capacity = self.capacity;
         const arena_window = self.arena_window;
+        const resident_window = self.resident_window;
         self.values = &.{};
         self.capacity = 0;
         self.arena_window = false;
+        self.resident_window = false;
         for (values) |*slot| {
             const value = slot.*;
             slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
-        if (capacity != 0 and !arena_window) self.memory.free(JSValue, values.ptr[0..capacity]);
+        if (capacity != 0 and !arena_window and !resident_window) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
@@ -120,11 +125,13 @@ pub const Stack = struct {
         const old_values = self.values;
         const old_capacity = self.capacity;
         const old_arena_window = self.arena_window;
+        const old_resident_window = self.resident_window;
         @memcpy(next[0..old_values.len], old_values);
         self.values = next[0..old_values.len];
         self.capacity = next_capacity;
         self.arena_window = false;
-        if (old_capacity != 0 and !old_arena_window) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
+        self.resident_window = false;
+        if (old_capacity != 0 and !old_arena_window and !old_resident_window) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
     }
 };
 

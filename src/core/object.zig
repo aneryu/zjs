@@ -112,6 +112,18 @@ fn destroyOptionalValue(rt: *JSRuntime, slot: *?JSValue) void {
     if (old_value) |stored| stored.free(rt);
 }
 
+fn destroyOwnedValue(rt: *JSRuntime, slot: *JSValue) void {
+    const old_value = slot.*;
+    slot.* = JSValue.undefinedValue();
+    old_value.free(rt);
+}
+
+fn replaceOwnedValue(rt: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
+    const old_value = slot.*;
+    slot.* = next_value;
+    old_value.free(rt);
+}
+
 fn destroyOptionalObjectRef(rt: *JSRuntime, slot: *?*Object) void {
     const old_object = slot.*;
     slot.* = null;
@@ -150,6 +162,17 @@ fn destroyVarRefCellSliceValuesOnly(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef
     const cells = slot.*;
     slot.* = &.{};
     for (cells) |cell| cell.freeCell(rt);
+}
+
+/// Close and release the frame-owned references in an open-var-ref window.
+/// The window itself belongs to the surrounding frame slab.
+fn closeOpenVarRefCellSlots(rt: *JSRuntime, slots: []?*var_ref_mod.VarRef) void {
+    for (slots) |*slot| {
+        const cell = slot.* orelse continue;
+        slot.* = null;
+        cell.close(rt);
+        cell.freeCell(rt);
+    }
 }
 
 fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity: *usize) void {
@@ -647,6 +670,7 @@ pub const RealmValueSlot = enum(u8) {
     promise_constructor,
     callsite_prototype,
     regexp_match_result_template,
+    iterator_result_template,
     unmapped_arguments_template,
     mapped_arguments_template,
     count,
@@ -737,33 +761,449 @@ pub const GeneratorSuspendKind = enum(u8) {
     await_op = 3,
 };
 
-pub const GeneratorPayload = struct {
-    bytecode: ?JSValue = null,
-    // Slot-typed closure captures (`JSVarRef **`, qjs JSObject.u.func.var_refs
-    // quickjs.c:17277; VARREFS-SLOT-TYPING-BLUEPRINT phase D).
-    captures: []*var_ref_mod.VarRef = &.{},
-    home_object: ?*Object = null,
-    realm_global_ptr: ?*Object = null,
-    this_value: ?JSValue = null,
+/// Owned operand-stack buffer parked while a generator/async frame is
+/// suspended. `values` is the live prefix; `capacity` describes the backing
+/// allocation when non-zero.
+pub const SuspendedStackStorage = struct {
+    values: []JSValue = &.{},
+    capacity: usize = 0,
+
+    /// Grow the parked stack without changing ownership on failure. Values are
+    /// moved as raw slots (no dup/free); only the backing allocation changes.
+    pub fn ensureAdditional(self: *SuspendedStackStorage, rt: *JSRuntime, limit: usize, additional: usize) !void {
+        return self.ensureAdditionalWithResidentBacking(rt, limit, additional, false);
+    }
+
+    /// `resident_backing` means the current buffer is trailing storage in its
+    /// GeneratorExecutionState allocation. Growth migrates the live prefix to
+    /// a normal owned buffer but leaves that region for the record destructor.
+    pub fn ensureAdditionalWithResidentBacking(self: *SuspendedStackStorage, rt: *JSRuntime, limit: usize, additional: usize, resident_backing: bool) !void {
+        if (self.values.len > limit) return error.StackOverflow;
+        if (additional > limit - self.values.len) return error.StackOverflow;
+        const needed = self.values.len + additional;
+        if (needed <= self.capacity) return;
+
+        var next_capacity = if (self.capacity == 0) @min(@as(usize, 8), limit) else self.capacity;
+        while (next_capacity < needed) {
+            if (next_capacity > limit / 2) {
+                next_capacity = limit;
+                break;
+            }
+            next_capacity *= 2;
+        }
+        const next = try rt.memory.alloc(JSValue, next_capacity);
+        errdefer rt.memory.free(JSValue, next);
+        @memcpy(next[0..self.values.len], self.values);
+        const old_values = self.values;
+        const old_capacity = self.capacity;
+        self.values = next[0..old_values.len];
+        self.capacity = next_capacity;
+        if (old_capacity != 0 and !resident_backing) {
+            rt.memory.free(JSValue, old_values.ptr[0..old_capacity]);
+        } else if (old_capacity == 0 and old_values.len != 0) {
+            rt.memory.free(JSValue, old_values);
+        }
+    }
+
+    pub fn deinit(self: *SuspendedStackStorage, rt: *JSRuntime) void {
+        destroyValueSliceWithCapacity(rt, &self.values, &self.capacity);
+    }
+
+    pub fn isEmpty(self: *const SuspendedStackStorage) bool {
+        return self.values.len == 0 and self.capacity == 0;
+    }
+};
+
+/// Owned frame slab and its typed live windows while execution is suspended.
+/// When `storage` is non-empty the other slices borrow windows inside it; a
+/// storage-less state may own separate locals/args slices, while var-ref and
+/// open-var-ref slots release cells only because their slot memory is never
+/// standalone. Open cells continue pointing into `locals`/`args`; preserving
+/// the unchanged slab therefore preserves their qjs-style live aliases.
+pub const SuspendedFrameStorage = struct {
+    storage: []JSValue = &.{},
+    locals: []JSValue = &.{},
     args: []JSValue = &.{},
-    stack: []JSValue = &.{},
-    stack_capacity: usize = 0,
-    frame_storage: []JSValue = &.{},
-    frame_locals: []JSValue = &.{},
-    frame_args: []JSValue = &.{},
-    // The suspended frame's var_refs slice, migrated through save/resume
-    // (vm_gen_async.zig). Same slot typing as Frame.var_refs; the cell
-    // pointers keep their frame-held refcounts while parked here.
-    frame_var_refs: []*var_ref_mod.VarRef = &.{},
-    current_function: ?JSValue = null,
-    yield_star_iterator: ?JSValue = null,
+    var_refs: []*var_ref_mod.VarRef = &.{},
+    open_var_refs: []?*var_ref_mod.VarRef = &.{},
+
+    pub fn deinit(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
+        const owned = self.*;
+        self.* = .{};
+        var locals = owned.locals;
+        var args = owned.args;
+        var var_refs = owned.var_refs;
+        // Close while the aliased local/argument slots are still live, then
+        // release their values and finally the shared slab backing.
+        closeOpenVarRefCellSlots(rt, owned.open_var_refs);
+        if (owned.storage.len != 0) {
+            destroyValueSliceValuesOnly(rt, &locals);
+            destroyValueSliceValuesOnly(rt, &args);
+            destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+            rt.memory.free(JSValue, owned.storage);
+            return;
+        }
+        destroyValueSlice(rt, &locals);
+        destroyValueSlice(rt, &args);
+        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+    }
+
+    /// Release the live window contents while leaving the backing bytes to the
+    /// surrounding GeneratorExecutionState FAM allocation.
+    pub fn deinitResident(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
+        const owned = self.*;
+        self.* = .{};
+        var locals = owned.locals;
+        var args = owned.args;
+        var var_refs = owned.var_refs;
+        closeOpenVarRefCellSlots(rt, owned.open_var_refs);
+        destroyValueSliceValuesOnly(rt, &locals);
+        destroyValueSliceValuesOnly(rt, &args);
+        destroyVarRefCellSliceValuesOnly(rt, &var_refs);
+    }
+
+    pub fn isEmpty(self: *const SuspendedFrameStorage) bool {
+        return self.storage.len == 0 and self.locals.len == 0 and
+            self.args.len == 0 and self.var_refs.len == 0 and
+            self.open_var_refs.len == 0;
+    }
+};
+
+/// All buffer ownership parked while a generator is suspended. Program-counter
+/// state intentionally lives one level above this record: resume moves these
+/// buffers into live exec owners while finally/catch drivers continue reading
+/// the payload's pc, matching qjs retaining `cur_pc` while `cur_sp == NULL`.
+pub const SuspendedExecutionStorage = struct {
+    stack: SuspendedStackStorage = .{},
+    frame: SuspendedFrameStorage = .{},
+
+    /// Exchange ownership field-wise. `std.mem.swap` lowers this wide
+    /// record to a short-element loop in ReleaseFast, and save sites execute
+    /// that loop at every yield/await suspension.
+    fn swapOwned(self: *SuspendedExecutionStorage, other: *SuspendedExecutionStorage) void {
+        const stack_values = self.stack.values;
+        self.stack.values = other.stack.values;
+        other.stack.values = stack_values;
+
+        const stack_capacity = self.stack.capacity;
+        self.stack.capacity = other.stack.capacity;
+        other.stack.capacity = stack_capacity;
+
+        const frame_storage = self.frame.storage;
+        self.frame.storage = other.frame.storage;
+        other.frame.storage = frame_storage;
+
+        const frame_locals = self.frame.locals;
+        self.frame.locals = other.frame.locals;
+        other.frame.locals = frame_locals;
+
+        const frame_args = self.frame.args;
+        self.frame.args = other.frame.args;
+        other.frame.args = frame_args;
+
+        const frame_var_refs = self.frame.var_refs;
+        self.frame.var_refs = other.frame.var_refs;
+        other.frame.var_refs = frame_var_refs;
+
+        const frame_open_var_refs = self.frame.open_var_refs;
+        self.frame.open_var_refs = other.frame.open_var_refs;
+        other.frame.open_var_refs = frame_open_var_refs;
+    }
+
+    pub fn deinit(self: *SuspendedExecutionStorage, rt: *JSRuntime) void {
+        // Resume normally takes every parked buffer before the next save. In
+        // that overwhelmingly common case there is no previous owner to tear
+        // down; avoid copying/resetting the full record just to discover that
+        // all seven ownership fields are empty.
+        if (self.isEmpty()) return;
+        const owned = self.*;
+        self.* = .{};
+        var stack = owned.stack;
+        var frame = owned.frame;
+        stack.deinit(rt);
+        frame.deinit(rt);
+    }
+
+    /// Move this storage into an empty destination.
+    pub fn moveInto(self: *SuspendedExecutionStorage, destination: *SuspendedExecutionStorage) void {
+        std.debug.assert(self != destination);
+        std.debug.assert(destination.isEmpty());
+        self.swapOwned(destination);
+    }
+
+    pub fn isEmpty(self: *const SuspendedExecutionStorage) bool {
+        return self.stack.isEmpty() and self.frame.isEmpty();
+    }
+};
+
+/// The single execution record parked in a generator payload. This is a
+/// core-neutral precursor to qjs's resident `JSAsyncFunctionState.frame`.
+pub const SuspendedExecutionState = struct {
+    pc: usize = 0,
+    storage: SuspendedExecutionStorage = .{},
+    /// Active catch target parked with the frame. `maxInt(u32)` is the null
+    /// sentinel; bytecode offsets are u32-addressable. Keeping this scalar in
+    /// the struct's former tail padding avoids rescanning bytecode from pc 0 on
+    /// every resume and does not grow GeneratorExecutionState.
+    catch_target_pc: u32 = no_suspended_catch_target,
+    /// A resident frame exists even when every window is zero length and pc is
+    /// zero. This is the zjs counterpart of qjs `func_state != NULL`; neither
+    /// the program counter nor storage emptiness can represent that state.
+    has_frame: bool = false,
+    /// While true, the parked storage is installed in a live exec Frame/Stack.
+    /// Legacy/standalone states temporarily hand ownership to those views;
+    /// FAM-backed generator states keep ownership resident and lend borrowed
+    /// views, matching qjs `JSAsyncFunctionState.frame` with `cur_sp == NULL`.
+    running_aliases: bool = false,
+    /// The parked record remains the backing owner while `running_aliases` is
+    /// true. This is enabled after the first suspension proves that the normal
+    /// generator's stack and frame still occupy their combined FAM windows.
+    resident_storage_owner: bool = false,
+
+    pub fn deinit(self: *SuspendedExecutionState, rt: *JSRuntime) void {
+        if (self.running_aliases) {
+            std.debug.assert(!self.resident_storage_owner);
+            // The active Frame/Stack owns these aliases and tears them down.
+            // A running generator is normally rooted, but keeping deinit
+            // ownership-safe prevents a double free if teardown is forced.
+            self.storage = .{};
+            self.running_aliases = false;
+        } else {
+            self.storage.deinit(rt);
+        }
+        self.pc = 0;
+        self.catch_target_pc = no_suspended_catch_target;
+        self.has_frame = false;
+        self.resident_storage_owner = false;
+    }
+
+    /// Mark the parked storage as aliases of the newly-installed live owners.
+    /// No GC point may occur between installing the views and this call.
+    pub fn beginRunningAliases(self: *SuspendedExecutionState) void {
+        std.debug.assert(!self.running_aliases);
+        self.running_aliases = true;
+    }
+
+    /// A run completed or failed without suspending. Drop the stale aliases;
+    /// the live Frame/Stack remains responsible for releasing the buffers.
+    pub fn finishRunningAliases(self: *SuspendedExecutionState) void {
+        if (!self.running_aliases) return;
+        self.running_aliases = false;
+        self.has_frame = false;
+        self.catch_target_pc = no_suspended_catch_target;
+        if (self.resident_storage_owner) return;
+        self.storage = .{};
+    }
+
+    pub fn catchTarget(self: *const SuspendedExecutionState) ?usize {
+        if (self.catch_target_pc == no_suspended_catch_target) return null;
+        return self.catch_target_pc;
+    }
+
+    /// Publish replacement storage and pc before destroying the old buffers;
+    /// cleanup-time GC therefore observes the new authoritative state.
+    pub fn replaceStorageOwned(self: *SuspendedExecutionState, pc: usize, catch_target_pc: u32, replacement: *SuspendedExecutionStorage, rt: *JSRuntime) void {
+        std.debug.assert(&self.storage != replacement);
+        if (self.running_aliases) {
+            // The old fields are aliases of the same live owners (and may be
+            // stale if the operand stack grew). Publish the current views with
+            // direct ownership transfer; never inspect or destroy the aliases.
+            self.storage = replacement.*;
+            replacement.* = .{};
+            self.pc = pc;
+            self.catch_target_pc = catch_target_pc;
+            self.has_frame = true;
+            self.running_aliases = false;
+            self.resident_storage_owner = false;
+            return;
+        }
+        self.storage.swapOwned(replacement);
+        self.pc = pc;
+        self.catch_target_pc = catch_target_pc;
+        self.has_frame = true;
+        self.resident_storage_owner = false;
+        // The normal resume path emptied the previous parked owner. Test at
+        // the publication seam so that case does not enter the heavyweight
+        // generic destructor prologue at all.
+        if (!replacement.isEmpty()) replacement.deinit(rt);
+    }
+};
+
+const no_suspended_catch_target = std.math.maxInt(u32);
+
+const empty_suspended_execution_state: SuspendedExecutionState = .{};
+
+/// The separately-owned qjs `JSAsyncFunctionState` analogue.  A live
+/// generator points at one of these; completion destroys it and leaves only
+/// the compact `GeneratorPayload` state discriminator on the iterator object,
+/// matching `JSGeneratorData { state, func_state }`.
+pub const GeneratorExecutionState = struct {
+    suspended: SuspendedExecutionState = .{},
+    // qjs stores these as raw JSValue slots with JS_UNDEFINED as the empty
+    // sentinel. Avoiding Zig optionals keeps the resident state in the same
+    // 160-byte slab class as its qjs-style field set.
+    this_value: JSValue = JSValue.undefinedValue(),
+    current_function: JSValue = JSValue.undefinedValue(),
+    yield_star_iterator: JSValue = JSValue.undefinedValue(),
+    /// qjs JSAsyncFunctionState.argc. Once parameter initialization parks the
+    /// resident frame, the separate input slice is gone; this scalar preserves
+    /// mapped/unmapped `arguments` actual-count semantics on resume.
+    actual_arg_count: u16 = 0,
+    /// Operand-stack slots trailing this record in the same allocation. Zero
+    /// denotes the standalone record used by internal hand-built continuations.
+    combined_stack_slots: u16 = 0,
+    /// Frame args/locals/var-ref slots immediately following the stack region.
+    /// The high bit is the completion-pending flag, keeping the record's tail
+    /// at four bytes while allowing strict generators with >32K actual args to
+    /// retain both args and their required original-args snapshot. A u16 count
+    /// incorrectly rejected those ordinary calls even though qjs accepts up to
+    /// JS_MAX_LOCAL_VARS (65534) actual arguments.
+    combined_frame_metadata: u32 = 0,
+
+    const completion_pending_bit: u32 = 1 << 31;
+    const frame_slot_count_mask: u32 = completion_pending_bit - 1;
+
+    fn combinedFrameSlotCount(self: *const GeneratorExecutionState) usize {
+        return self.combined_frame_metadata & frame_slot_count_mask;
+    }
+
+    fn completionPending(self: *const GeneratorExecutionState) bool {
+        return self.combined_frame_metadata & completion_pending_bit != 0;
+    }
+
+    fn setCompletionPending(self: *GeneratorExecutionState, pending: bool) void {
+        if (pending) {
+            self.combined_frame_metadata |= completion_pending_bit;
+        } else {
+            self.combined_frame_metadata &= frame_slot_count_mask;
+        }
+    }
+
+    fn combinedStackStorage(self: *GeneratorExecutionState) []JSValue {
+        if (self.combined_stack_slots == 0) return &.{};
+        const base: [*]u8 = @ptrCast(self);
+        const slots: [*]JSValue = @ptrCast(@alignCast(base + generator_execution_storage_offset));
+        return slots[0..self.combined_stack_slots];
+    }
+
+    fn combinedFrameStorage(self: *GeneratorExecutionState) []JSValue {
+        const frame_slot_count = self.combinedFrameSlotCount();
+        if (frame_slot_count == 0) return &.{};
+        const base: [*]u8 = @ptrCast(self);
+        const stack_bytes = @as(usize, self.combined_stack_slots) * @sizeOf(JSValue);
+        const slots: [*]JSValue = @ptrCast(@alignCast(base + generator_execution_storage_offset + stack_bytes));
+        return slots[0..frame_slot_count];
+    }
+
+    pub fn stackUsesCombinedStorage(self: *GeneratorExecutionState) bool {
+        const combined = self.combinedStackStorage();
+        if (combined.len == 0) return false;
+        const stack = self.suspended.storage.stack;
+        return stack.capacity != 0 and stack.values.ptr == combined.ptr;
+    }
+
+    pub fn frameUsesCombinedStorage(self: *GeneratorExecutionState) bool {
+        const combined = self.combinedFrameStorage();
+        if (combined.len == 0) return false;
+        const frame = self.suspended.storage.frame;
+        return frame.storage.len != 0 and frame.storage.ptr == combined.ptr;
+    }
+
+    pub fn canRetainResidentStorageOwnership(self: *GeneratorExecutionState) bool {
+        if (!self.stackUsesCombinedStorage()) return false;
+        return self.combinedFrameSlotCount() == 0 or self.frameUsesCombinedStorage();
+    }
+
+    pub fn destroy(self: *GeneratorExecutionState, rt: *JSRuntime) void {
+        // qjs async_func_free_frame releases the resident frame before cur_func
+        // and this_val. Keep the same ownership order; yield-star's separate
+        // zjs root belongs to this execution record as well.
+        if (!self.suspended.running_aliases and self.stackUsesCombinedStorage()) {
+            var live_values = self.suspended.storage.stack.values;
+            destroyValueSliceValuesOnly(rt, &live_values);
+            self.suspended.storage.stack = .{};
+        }
+        if (!self.suspended.running_aliases and self.frameUsesCombinedStorage()) {
+            self.suspended.storage.frame.deinitResident(rt);
+        }
+        self.suspended.deinit(rt);
+        destroyOwnedValue(rt, &self.current_function);
+        destroyOwnedValue(rt, &self.this_value);
+        destroyOwnedValue(rt, &self.yield_star_iterator);
+        self.* = .{};
+    }
+};
+
+const generator_execution_alignment = blk: {
+    const state_alignment = std.mem.Alignment.of(GeneratorExecutionState);
+    const value_alignment = std.mem.Alignment.of(JSValue);
+    break :blk if (state_alignment.compare(.gt, value_alignment)) state_alignment else value_alignment;
+};
+const generator_execution_storage_offset = std.mem.alignForward(usize, @sizeOf(GeneratorExecutionState), @alignOf(JSValue));
+
+fn createGeneratorExecutionStateWithStorage(rt: *JSRuntime, stack_slots: usize, frame_slots: usize) !*GeneratorExecutionState {
+    const stack_slot_count = std.math.cast(u16, stack_slots) orelse return error.StackOverflow;
+    if (frame_slots > GeneratorExecutionState.frame_slot_count_mask) return error.StackOverflow;
+    const frame_slot_count: u32 = @intCast(frame_slots);
+    const total_slots = try std.math.add(usize, stack_slots, frame_slots);
+    const slot_bytes = try std.math.mul(usize, total_slots, @sizeOf(JSValue));
+    const allocation_size = try std.math.add(usize, generator_execution_storage_offset, slot_bytes);
+    const bytes = try rt.allocRuntimeAlignedBytes(allocation_size, generator_execution_alignment);
+    const execution: *GeneratorExecutionState = @ptrCast(@alignCast(bytes.ptr));
+    execution.* = .{
+        .combined_stack_slots = stack_slot_count,
+        .combined_frame_metadata = frame_slot_count,
+    };
+    const combined_stack = execution.combinedStackStorage();
+    execution.suspended.storage.stack = .{
+        .values = combined_stack.ptr[0..0],
+        .capacity = combined_stack.len,
+    };
+    execution.suspended.storage.frame.storage = execution.combinedFrameStorage();
+    return execution;
+}
+
+fn freeGeneratorExecutionState(rt: *JSRuntime, execution: *GeneratorExecutionState) void {
+    const combined_stack_slots = execution.combined_stack_slots;
+    const combined_frame_slots = execution.combinedFrameSlotCount();
+    execution.destroy(rt);
+    if (combined_stack_slots == 0 and combined_frame_slots == 0) {
+        rt.memory.destroy(GeneratorExecutionState, execution);
+        return;
+    }
+    const total_slots = @as(usize, combined_stack_slots) + combined_frame_slots;
+    const slot_bytes = total_slots * @sizeOf(JSValue);
+    const allocation_size = generator_execution_storage_offset + slot_bytes;
+    const bytes: [*]u8 = @ptrCast(execution);
+    rt.memory.freeAlignedBytes(bytes[0..allocation_size], generator_execution_alignment);
+}
+
+fn destroyGeneratorExecutionState(rt: *JSRuntime, slot: *?*GeneratorExecutionState) void {
+    const execution = slot.* orelse return;
+    // Publish completion before releasing graph edges so re-entrant GC sees
+    // the compact completed state, never a half-destroyed execution record.
+    slot.* = null;
+    std.debug.assert(!execution.completionPending());
+    freeGeneratorExecutionState(rt, execution);
+}
+
+pub const GeneratorPayload = struct {
+    realm_global_ptr: ?*Object = null,
+    execution: ?*GeneratorExecutionState = null,
     async_promise: ?JSValue = null,
     /// Async-generator request queue (mirrors JSAsyncGeneratorData.queue,
     /// quickjs.c:21362): FIFO of pending next/return/throw requests.
     async_queue: []AsyncGeneratorRequest = &.{},
     async_queue_capacity: usize = 0,
-    pc: usize = 0,
     resume_completion_type: i32 = 0,
+    /// Dense index into the runtime's borrowed-reference-holder registry.
+    /// Generator instances carry a borrowed realm pointer just like function
+    /// objects; caching the index keeps short-lived generator teardown O(1).
+    /// These three bytes consume existing tail padding without growing the
+    /// payload (see the matching fields on FunctionPayload).
+    borrowed_holder_index_lo: u8 = 0,
+    borrowed_holder_index_mid: u8 = 0,
+    borrowed_holder_index_hi: u8 = 0,
     /// Async-generator state machine (mirrors JSAsyncGeneratorStateEnum,
     /// quickjs.c:21345). Only meaningful for JS_CLASS_ASYNC_GENERATOR objects.
     async_state: u8 = 0,
@@ -776,32 +1216,10 @@ pub const GeneratorPayload = struct {
     yield_star_suspended: bool = false,
 
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.bytecode);
-        destroyVarRefCellSlice(rt, &self.captures);
-        destroyOptionalObjectRef(rt, &self.home_object);
-        destroyOptionalValue(rt, &self.this_value);
-        destroyValueSlice(rt, &self.args);
-        destroyValueSliceWithCapacity(rt, &self.stack, &self.stack_capacity);
-        if (self.frame_storage.len != 0) {
-            destroyValueSliceValuesOnly(rt, &self.frame_locals);
-            destroyValueSliceValuesOnly(rt, &self.frame_args);
-            // frame_var_refs is a window inside frame_storage (qjs free_var_ref
-            // per cell, quickjs.c:16199; the window memory dies with storage).
-            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
-            rt.memory.free(JSValue, self.frame_storage);
-            self.frame_storage = &.{};
-        } else {
-            destroyValueSlice(rt, &self.frame_locals);
-            destroyValueSlice(rt, &self.frame_args);
-            // Owned frame var_refs are always windows inside frame_storage
-            // (slab carve / heap fallback / capacity growth all back them with
-            // []JSValue storage), so a storage-less payload can only hold an
-            // empty slice here — release cell refs only, never a typed free
-            // of window memory.
-            destroyVarRefCellSliceValuesOnly(rt, &self.frame_var_refs);
-        }
-        destroyOptionalValue(rt, &self.current_function);
-        destroyOptionalValue(rt, &self.yield_star_iterator);
+        // Normal generators borrow this pointer under current_function; clear
+        // it before releasing that dominating strong edge.
+        self.realm_global_ptr = null;
+        destroyGeneratorExecutionState(rt, &self.execution);
         destroyOptionalValue(rt, &self.async_promise);
         for (self.async_queue) |*req| {
             req.result.free(rt);
@@ -1291,6 +1709,95 @@ pub const Object = struct {
         return createInternal(rt, class_id, prototype, capacity, null);
     }
 
+    /// Allocate the private generator object/state used while parameter
+    /// initialization runs, but do not allocate a Shape or link the object into
+    /// the GC registry yet. qjs keeps JSGeneratorData/JSAsyncFunctionState
+    /// detached until `async_func_resume` reaches OP_initial_yield, then creates
+    /// the public object once with its final constructor-derived prototype.
+    ///
+    /// The shell is not a JSValue and must be paired with either
+    /// `finishGeneratorShell` or `destroyGeneratorShell`. Its owned JSValue
+    /// edges carry ordinary refcounts while detached, so allocation-triggered
+    /// cycle collection cannot reclaim them.
+    pub fn createGeneratorShell(rt: *JSRuntime, class_id: class.ClassId) !*Object {
+        std.debug.assert(class_id == class.ids.generator or class_id == class.ids.async_generator);
+        const class_record = rt.classes.recordPtr(class_id);
+        std.debug.assert(inlineClassPayloadLayout(class_record) == null);
+        const payload_kind = if (class_record) |record|
+            record.payload_kind
+        else
+            class.standardPayloadKind(class_id);
+        std.debug.assert(payload_kind == .generator);
+
+        const self = try rt.createRuntime(Object);
+        errdefer rt.memory.destroy(Object, self);
+        // The detached path knows the finalized operand-stack size and installs
+        // a variable-sized execution record immediately afterwards. Allocate
+        // only the compact JSGeneratorData analogue here; Object.create keeps
+        // using allocClassPayload for internal continuations with no bytecode
+        // sizing context.
+        const generator_payload = try rt.createRuntime(GeneratorPayload);
+        generator_payload.* = .{};
+        const class_payload: class.Payload = @ptrCast(generator_payload);
+        errdefer freeClassPayloadAllocation(rt, class_payload, .generator);
+
+        var reserved_class_payload_finalizer_slot = false;
+        errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
+        if (class_record) |record| {
+            if (record.payload_finalizer != null) {
+                try rt.reserveDeferredClassPayloadFinalizerSlot();
+                reserved_class_payload_finalizer_slot = true;
+            }
+        }
+        const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
+        self.* = .{
+            .header = .{},
+            .class_id = class_id,
+            .u = .{ .payload = class_payload },
+            // These fields become readable only after finishGeneratorShell.
+            .shape_ref = undefined,
+            .prop_values = undefined,
+            .class_payload_kind = .generator,
+            .flags = .{
+                .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
+                .has_exotic_methods = has_exotic_methods,
+                .needs_slow_property = classNeedsSlowPropertyAccess(class_id, has_exotic_methods),
+            },
+        };
+        return self;
+    }
+
+    /// Turn a detached generator shell into the registered public object using
+    /// its final prototype. No temporary null-prototype Shape is ever created.
+    pub fn finishGeneratorShell(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
+        std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
+        std.debug.assert(self.class_payload_kind == .generator);
+        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        const final_shape = try rt.shapes.createObjectRoot(prototype);
+        markObjectAsPrototype(rt, prototype);
+        self.shape_ref = final_shape;
+        rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
+            self.shape_ref = undefined;
+            rt.shapes.release(final_shape);
+            return err;
+        };
+    }
+
+    /// Error-path counterpart for a shell that has not been registered yet.
+    pub fn destroyGeneratorShell(self: *Object, rt: *JSRuntime) void {
+        std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
+        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
+        freeClassPayloadAllocation(rt, self.u.payload, self.class_payload_kind);
+        self.u.payload = null;
+        self.class_payload_kind = .none;
+        if (self.flags.reserved_class_payload_finalizer_slot) {
+            self.flags.reserved_class_payload_finalizer_slot = false;
+            rt.releaseDeferredClassPayloadFinalizerSlot();
+        }
+        rt.memory.destroy(Object, self);
+    }
+
     /// Create a fresh object with the same class, prototype, shared shape, and
     /// own-property slots as a realm-pinned template. This is the zjs analogue
     /// of qjs `JS_NewObjectFromShape`: the caller has already paid the property
@@ -1535,6 +2042,10 @@ pub const Object = struct {
             .generator => {
                 const payload = try rt.createRuntime(GeneratorPayload);
                 payload.* = .{};
+                errdefer rt.memory.destroy(GeneratorPayload, payload);
+                const execution = try rt.createRuntime(GeneratorExecutionState);
+                execution.* = .{};
+                payload.execution = execution;
                 return @ptrCast(payload);
             },
             .function => {
@@ -1584,7 +2095,11 @@ pub const Object = struct {
             .object_data => rt.memory.destroy(ObjectDataPayload, @ptrCast(@alignCast(ptr))),
             .var_ref => rt.memory.destroy(VarRefPayload, @ptrCast(@alignCast(ptr))),
             .promise => rt.memory.destroy(PromisePayload, @ptrCast(@alignCast(ptr))),
-            .generator => rt.memory.destroy(GeneratorPayload, @ptrCast(@alignCast(ptr))),
+            .generator => {
+                const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
+                typed.destroy(rt);
+                rt.memory.destroy(GeneratorPayload, typed);
+            },
             .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
             .module_namespace => rt.memory.destroy(ModuleNamespacePayload, @ptrCast(@alignCast(ptr))),
             .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
@@ -3974,113 +4489,166 @@ pub const Object = struct {
         return false;
     }
 
-    pub fn generatorThisSlot(self: *Object) *?JSValue {
-        if (self.generatorPayload()) |payload| return &payload.this_value;
+    /// Install the qjs-style variable-sized execution record for a detached
+    /// generator shell. The trailing operand stack and scalar execution state
+    /// are returned by one allocator operation.
+    pub fn initGeneratorExecutionWithStorage(self: *Object, rt: *JSRuntime, stack_slots: usize, frame_slots: usize) !void {
+        const payload = self.generatorPayload() orelse {
+            std.debug.assert(self.class_payload_kind == .generator);
+            unreachable;
+        };
+        std.debug.assert(payload.execution == null);
+        payload.execution = try createGeneratorExecutionStateWithStorage(rt, stack_slots, frame_slots);
+    }
+
+    fn generatorLiveExecution(self: *Object) *GeneratorExecutionState {
+        const payload = self.generatorPayload() orelse {
+            std.debug.assert(self.class_payload_kind == .generator);
+            unreachable;
+        };
+        return payload.execution orelse {
+            std.debug.assert(!payload.done);
+            unreachable;
+        };
+    }
+
+    /// Direct payload for a proven generator object. Resume entry checks the
+    /// class once, then reuses this stable qjs-style state record instead of
+    /// redispatching through the class-payload union for every field.
+    pub inline fn generatorPayloadPtr(self: *Object) *GeneratorPayload {
+        std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+        return @ptrCast(@alignCast(self.u.payload.?));
+    }
+
+    pub fn generatorThisSlot(self: *Object) *JSValue {
+        return &self.generatorLiveExecution().this_value;
+    }
+
+    pub fn setGeneratorThis(self: *Object, rt: *JSRuntime, next_value: JSValue) void {
+        replaceOwnedValue(rt, self.generatorThisSlot(), next_value);
     }
 
     pub fn generatorThis(self: *const Object) ?JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.this_value;
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return null;
+            return execution.this_value;
+        }
         return null;
-    }
-
-    pub fn generatorArgsSlot(self: *Object) *[]JSValue {
-        if (self.generatorPayload()) |payload| return &payload.args;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
     }
 
     pub fn generatorArgs(self: *const Object) []JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.args;
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return &.{};
+            return execution.suspended.storage.frame.args;
+        }
         return &.{};
     }
 
-    pub fn generatorStackSlot(self: *Object) *[]JSValue {
-        if (self.generatorPayload()) |payload| return &payload.stack;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
-    }
-
-    pub fn generatorStack(self: *const Object) []JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.stack;
+    pub fn generatorCaptures(self: *const Object) []*var_ref_mod.VarRef {
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return &.{};
+            return execution.suspended.storage.frame.var_refs;
+        }
         return &.{};
     }
 
-    pub fn generatorStackCapacitySlot(self: *Object) *usize {
-        if (self.generatorPayload()) |payload| return &payload.stack_capacity;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn generatorActualArgCountSlot(self: *Object) *u16 {
+        return &self.generatorLiveExecution().actual_arg_count;
     }
 
-    pub fn generatorStackCapacity(self: *const Object) usize {
-        if (self.generatorPayloadConst()) |payload| return payload.stack_capacity;
+    pub fn generatorActualArgCount(self: *const Object) usize {
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return 0;
+            return execution.actual_arg_count;
+        }
         return 0;
     }
 
-    pub fn generatorFrameLocalsSlot(self: *Object) *[]JSValue {
-        if (self.generatorPayload()) |payload| return &payload.frame_locals;
+    pub fn generatorExecutionStateSlot(self: *Object) *SuspendedExecutionState {
+        return &self.generatorLiveExecution().suspended;
+    }
+
+    pub fn generatorExecutionState(self: *const Object) *const SuspendedExecutionState {
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return &empty_suspended_execution_state;
+            return &execution.suspended;
+        }
         std.debug.assert(self.class_payload_kind == .generator);
         unreachable;
     }
 
-    pub fn generatorFrameLocals(self: *const Object) []JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.frame_locals;
-        return &.{};
+    pub fn generatorStackUsesCombinedStorage(self: *Object) bool {
+        const payload = self.generatorPayload() orelse return false;
+        const execution = payload.execution orelse return false;
+        return execution.stackUsesCombinedStorage();
     }
 
-    pub fn generatorFrameStorageSlot(self: *Object) *[]JSValue {
-        if (self.generatorPayload()) |payload| return &payload.frame_storage;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn generatorCombinedFrameStorage(self: *Object) []JSValue {
+        const payload = self.generatorPayload() orelse return &.{};
+        const execution = payload.execution orelse return &.{};
+        return execution.combinedFrameStorage();
     }
 
-    pub fn generatorFrameStorage(self: *const Object) []JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.frame_storage;
-        return &.{};
+    pub fn generatorFrameUsesCombinedStorage(self: *Object) bool {
+        const payload = self.generatorPayload() orelse return false;
+        const execution = payload.execution orelse return false;
+        return execution.frameUsesCombinedStorage();
     }
 
-    pub fn generatorFrameArgsSlot(self: *Object) *[]JSValue {
-        if (self.generatorPayload()) |payload| return &payload.frame_args;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn generatorCanRetainResidentStorageOwnership(self: *Object) bool {
+        const payload = self.generatorPayload() orelse return false;
+        const execution = payload.execution orelse return false;
+        return execution.canRetainResidentStorageOwnership();
     }
 
-    pub fn generatorFrameArgs(self: *const Object) []JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.frame_args;
-        return &.{};
+    /// Called by the outer call wrapper after its live Frame and Stack have
+    /// deinitialized. A running state cannot be freed inside the return opcode:
+    /// both live owners still borrow/alias fields until VM unwind completes.
+    pub fn finalizeGeneratorExecutionCompletion(self: *Object, rt: *JSRuntime) void {
+        const payload = self.generatorPayload() orelse return;
+        const execution = payload.execution orelse return;
+        if (!execution.completionPending()) return;
+        std.debug.assert(!execution.suspended.running_aliases);
+        execution.setCompletionPending(false);
+        destroyGeneratorExecutionState(rt, &payload.execution);
     }
 
-    pub fn generatorFrameVarRefsSlot(self: *Object) *[]*var_ref_mod.VarRef {
-        if (self.generatorPayload()) |payload| return &payload.frame_var_refs;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn generatorCurrentFunctionSlot(self: *Object) *JSValue {
+        return &self.generatorLiveExecution().current_function;
     }
 
-    pub fn generatorFrameVarRefs(self: *const Object) []*var_ref_mod.VarRef {
-        if (self.generatorPayloadConst()) |payload| return payload.frame_var_refs;
-        return &.{};
-    }
-
-    pub fn generatorCurrentFunctionSlot(self: *Object) *?JSValue {
-        if (self.generatorPayload()) |payload| return &payload.current_function;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn setGeneratorCurrentFunction(self: *Object, rt: *JSRuntime, next_value: JSValue) void {
+        replaceOwnedValue(rt, self.generatorCurrentFunctionSlot(), next_value);
     }
 
     pub fn generatorCurrentFunction(self: *const Object) ?JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.current_function;
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return null;
+            if (execution.current_function.isUndefined()) return null;
+            return execution.current_function;
+        }
         return null;
     }
 
-    pub fn generatorYieldStarIteratorSlot(self: *Object) *?JSValue {
-        if (self.generatorPayload()) |payload| return &payload.yield_star_iterator;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+    pub fn generatorYieldStarIteratorSlot(self: *Object) *JSValue {
+        return &self.generatorLiveExecution().yield_star_iterator;
+    }
+
+    pub fn setGeneratorYieldStarIterator(self: *Object, rt: *JSRuntime, next_value: JSValue) void {
+        replaceOwnedValue(rt, self.generatorYieldStarIteratorSlot(), next_value);
+    }
+
+    pub fn clearGeneratorYieldStarIterator(self: *Object, rt: *JSRuntime) void {
+        destroyOwnedValue(rt, self.generatorYieldStarIteratorSlot());
     }
 
     pub fn generatorYieldStarIterator(self: *const Object) ?JSValue {
-        if (self.generatorPayloadConst()) |payload| return payload.yield_star_iterator;
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return null;
+            if (execution.yield_star_iterator.isUndefined()) return null;
+            return execution.yield_star_iterator;
+        }
         return null;
     }
 
@@ -4096,13 +4664,14 @@ pub const Object = struct {
     }
 
     pub fn generatorPcSlot(self: *Object) *usize {
-        if (self.generatorPayload()) |payload| return &payload.pc;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
+        return &self.generatorLiveExecution().suspended.pc;
     }
 
     pub fn generatorPc(self: *const Object) usize {
-        if (self.generatorPayloadConst()) |payload| return payload.pc;
+        if (self.generatorPayloadConst()) |payload| {
+            const execution = payload.execution orelse return 0;
+            return execution.suspended.pc;
+        }
         return 0;
     }
 
@@ -4126,6 +4695,49 @@ pub const Object = struct {
     pub fn generatorDone(self: *const Object) bool {
         if (self.generatorPayloadConst()) |payload| return payload.done;
         return false;
+    }
+
+    /// End the resident generator/async-function execution record exactly once.
+    ///
+    /// QuickJS funnels normal return, injected return/throw, and exceptional
+    /// completion through `free_generator_stack()` /
+    /// `js_async_generator_complete()`: the parked `JSAsyncFunctionState` is
+    /// released immediately instead of being retained by the completed
+    /// iterator object. zjs keeps the same owners in one separately allocated
+    /// execution record, so completion can return the entire record to the
+    /// allocator while retaining only the compact state discriminator. This
+    /// helper is deliberately cold;
+    /// ordinary function returns still pay only the existing nullable-generator
+    /// branch in the VM return handler.
+    pub noinline fn completeGeneratorExecution(self: *Object, rt: *JSRuntime) void {
+        const payload = self.generatorPayload() orelse {
+            std.debug.assert(self.class_payload_kind == .generator);
+            unreachable;
+        };
+
+        payload.done = true;
+        payload.just_yielded = false;
+        payload.resume_completion_type = 0;
+        payload.yield_star_suspended = false;
+        // Clear the borrowed realm before the execution record releases its
+        // current-function owner. Raw continuations unregister below.
+        payload.realm_global_ptr = null;
+
+        if (payload.execution) |execution| {
+            if (execution.suspended.running_aliases) {
+                // The live Frame borrows call bindings and the live Stack may
+                // point into the execution allocation. Publish completion now;
+                // the outer call wrapper releases the record after both unwind.
+                execution.setCompletionPending(true);
+            } else {
+                destroyGeneratorExecutionState(rt, &payload.execution);
+            }
+        }
+
+        // Only marker-less internal continuations need this fallback while
+        // alive. A completed qjs generator no longer owns a func_state/realm
+        // edge, so unregister the corresponding borrowed holder as well.
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn generatorExecutingSlot(self: *Object) *bool {
@@ -4556,12 +5168,6 @@ pub const Object = struct {
         unreachable;
     }
 
-    pub fn generatorBytecodeSlot(self: *Object) *?JSValue {
-        if (self.generatorPayload()) |payload| return &payload.bytecode;
-        std.debug.assert(self.class_payload_kind == .generator);
-        unreachable;
-    }
-
     pub fn setFunctionBytecodeValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
         errdefer next_value.free(rt);
         if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
@@ -4585,8 +5191,19 @@ pub const Object = struct {
         if (self.functionPayloadConst()) |payload| {
             return if (payload.bytecode.isUndefined()) null else payload.bytecode;
         }
-        if (self.generatorPayloadConst()) |payload| return payload.bytecode;
         return null;
+    }
+
+    /// Bytecode backing a suspended generator frame. A generator instance is
+    /// not itself a bytecode function (and must not make the ordinary function
+    /// accessor pay for this uncommon derivation). qjs reaches the FB through
+    /// JSAsyncFunctionState.frame.cur_func in the same way.
+    pub fn generatorFunctionBytecode(self: *const Object) ?JSValue {
+        const current = self.generatorCurrentFunction() orelse return null;
+        if (current.isFunctionBytecode()) return current;
+        const current_object = Object.expect(current) catch return null;
+        if (current_object == self) return null;
+        return current_object.functionBytecode();
     }
 
     pub fn functionClassFieldsInitSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -4870,14 +5487,12 @@ pub const Object = struct {
 
     pub fn functionCapturesSlot(self: *Object) *[]*var_ref_mod.VarRef {
         if (self.functionPayload()) |payload| return &payload.captures;
-        if (self.generatorPayload()) |payload| return &payload.captures;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
+        std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (self.functionPayloadConst()) |payload| return payload.captures;
-        if (self.generatorPayloadConst()) |payload| return payload.captures;
         return &.{};
     }
 
@@ -4900,14 +5515,12 @@ pub const Object = struct {
 
     pub fn functionHomeObjectSlot(self: *Object) *?*Object {
         if (self.functionPayload()) |payload| return &payload.home_object;
-        if (self.generatorPayload()) |payload| return &payload.home_object;
-        std.debug.assert(self.class_payload_kind == .function or self.class_payload_kind == .generator);
+        std.debug.assert(self.class_payload_kind == .function);
         unreachable;
     }
 
     pub fn functionHomeObject(self: *const Object) ?*Object {
         if (self.functionPayloadConst()) |payload| return payload.home_object;
-        if (self.generatorPayloadConst()) |payload| return payload.home_object;
         return null;
     }
 
@@ -5314,31 +5927,33 @@ pub const Object = struct {
     }
 
     pub fn borrowedReferenceHolderIndex(self: *const Object) ?usize {
-        const payload = self.functionPayloadConst() orelse return null;
-        const encoded = @as(u32, payload.borrowed_holder_index_lo) |
-            (@as(u32, payload.borrowed_holder_index_mid) << 8) |
-            (@as(u32, payload.borrowed_holder_index_hi) << 16);
+        const encoded = if (self.functionPayloadConst()) |payload|
+            @as(u32, payload.borrowed_holder_index_lo) |
+                (@as(u32, payload.borrowed_holder_index_mid) << 8) |
+                (@as(u32, payload.borrowed_holder_index_hi) << 16)
+        else if (self.generatorPayloadConst()) |payload|
+            @as(u32, payload.borrowed_holder_index_lo) |
+                (@as(u32, payload.borrowed_holder_index_mid) << 8) |
+                (@as(u32, payload.borrowed_holder_index_hi) << 16)
+        else
+            return null;
         return if (encoded == 0) null else @as(usize, encoded - 1);
     }
 
     pub fn setBorrowedReferenceHolderIndex(self: *Object, index: ?usize) void {
-        const payload = self.functionPayload() orelse return;
-        const holder_index = index orelse {
-            payload.borrowed_holder_index_lo = 0;
-            payload.borrowed_holder_index_mid = 0;
-            payload.borrowed_holder_index_hi = 0;
-            return;
-        };
-        if (holder_index >= std.math.maxInt(u24)) {
-            payload.borrowed_holder_index_lo = 0;
-            payload.borrowed_holder_index_mid = 0;
-            payload.borrowed_holder_index_hi = 0;
-            return;
+        const encoded: u32 = if (index) |holder_index|
+            if (holder_index < std.math.maxInt(u24)) @intCast(holder_index + 1) else 0
+        else
+            0;
+        if (self.functionPayload()) |payload| {
+            payload.borrowed_holder_index_lo = @truncate(encoded);
+            payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
+            payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
+        } else if (self.generatorPayload()) |payload| {
+            payload.borrowed_holder_index_lo = @truncate(encoded);
+            payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
+            payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
         }
-        const encoded: u32 = @intCast(holder_index + 1);
-        payload.borrowed_holder_index_lo = @truncate(encoded);
-        payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
-        payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
     }
 
     /// Realm-global pointer for a PROVEN bytecode-function object (the caller
@@ -6739,27 +7354,27 @@ pub const Object = struct {
             try Helper.traceOptValue(visitor, &payload.zip_keys);
         }
         if (self.generatorPayload()) |payload| {
-            try Helper.traceOptValue(visitor, &payload.bytecode);
-            // Cell-typed captures / suspended-frame var_refs: header edge per
-            // cell (qjs mark_func on var_refs[i]->header, quickjs.c:16211 and
-            // the suspended async_func_state mark walking the frame's
-            // var_refs). A missed edge here would let the cycle collector
-            // free a live cell under a suspended generator (blueprint risk 1).
-            for (payload.captures) |cell| {
-                var cell_value = cell.valueRef();
-                try Helper.callVisitValue(visitor, &cell_value);
+            if (payload.execution) |execution| {
+                try Helper.callVisitValue(visitor, &execution.this_value);
+                if (!execution.suspended.running_aliases) {
+                    for (execution.suspended.storage.stack.values) |*stored| try Helper.callVisitValue(visitor, stored);
+                    for (execution.suspended.storage.frame.locals) |*stored| try Helper.callVisitValue(visitor, stored);
+                    for (execution.suspended.storage.frame.args) |*stored| try Helper.callVisitValue(visitor, stored);
+                    // qjs marks the resident JSAsyncFunctionState frame's var_refs;
+                    // there is no second generator-payload capture array.
+                    for (execution.suspended.storage.frame.var_refs) |cell| {
+                        var cell_value = cell.valueRef();
+                        try Helper.callVisitValue(visitor, &cell_value);
+                    }
+                    for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
+                        const cell = maybe_cell orelse continue;
+                        var cell_value = cell.valueRef();
+                        try Helper.callVisitValue(visitor, &cell_value);
+                    }
+                }
+                try Helper.callVisitValue(visitor, &execution.current_function);
+                try Helper.callVisitValue(visitor, &execution.yield_star_iterator);
             }
-            try Helper.traceOptValue(visitor, &payload.this_value);
-            for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.stack) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.frame_locals) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.frame_args) |*stored| try Helper.callVisitValue(visitor, stored);
-            for (payload.frame_var_refs) |cell| {
-                var cell_value = cell.valueRef();
-                try Helper.callVisitValue(visitor, &cell_value);
-            }
-            try Helper.traceOptValue(visitor, &payload.current_function);
-            try Helper.traceOptValue(visitor, &payload.yield_star_iterator);
             try Helper.traceOptValue(visitor, &payload.async_promise);
             // Async-generator request queue values (mirrors
             // js_async_generator_mark, quickjs.c:21400-21418).
@@ -6769,7 +7384,6 @@ pub const Object = struct {
                 try Helper.callVisitValue(visitor, &req.resolve);
                 try Helper.callVisitValue(visitor, &req.reject);
             }
-            try Helper.callVisitObject(visitor, &payload.home_object);
         }
         if (self.varRefPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.value);
@@ -7215,7 +7829,11 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.iteratorZipNexts(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.iteratorZipPads(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.iteratorZipKeys(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionBytecode(), function_bytecode);
+        // Count owned edges, not the generator functionBytecode() derived view:
+        // a generator owns current_function, and that function owns its FB.
+        if (self.functionPayloadConst()) |payload| {
+            count += countFunctionBytecodeValueRef(payload.bytecode, function_bytecode);
+        }
         count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
         for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
@@ -7252,11 +7870,19 @@ pub const Object = struct {
         count += countOptionalFunctionBytecodeRef(self.functionAsyncContinuation(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionRealmTypeErrorConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorThis(), function_bytecode);
-        for (self.generatorArgs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorStack()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorFrameLocals()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorFrameArgs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        for (self.generatorFrameVarRefs()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+        if (self.generatorPayloadConst()) |payload| {
+            if (payload.execution) |execution| {
+                if (!execution.suspended.running_aliases) {
+                    for (execution.suspended.storage.stack.values) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+                    for (execution.suspended.storage.frame.locals) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+                    for (execution.suspended.storage.frame.args) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+                    for (execution.suspended.storage.frame.var_refs) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+                    for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
+                        if (maybe_cell) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+                    }
+                }
+            }
+        }
         count += countOptionalFunctionBytecodeRef(self.generatorCurrentFunction(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorYieldStarIterator(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorAsyncPromise(), function_bytecode);
@@ -7330,6 +7956,26 @@ pub const Object = struct {
         try rt.shapes.prepareUpdate(&self.shape_ref);
         const old_prototype = rt.shapes.replacePrototypeAssumePrepared(self.shape_ref, prototype);
         if (old_prototype) |old| old.value().free(rt);
+    }
+
+    /// Rebind an unexposed, property-empty object to the shared root shape for
+    /// its final prototype. Construction paths sometimes must resolve a
+    /// user-visible `constructor.prototype` only after preparing class state;
+    /// using ordinary `setPrototype` there clones the initial shared root and
+    /// leaves every instance with a private empty shape. This is the delayed
+    /// equivalent of qjs `JS_NewObjectFromShape` with the final prototype.
+    pub fn setFreshObjectPrototype(self: *Object, rt: *JSRuntime, prototype: ?*Object) Error!void {
+        std.debug.assert(self.shape_ref.prop_count == 0);
+        std.debug.assert(!self.flags.has_property_storage);
+        std.debug.assert(self.flags.extensible);
+        std.debug.assert(prototype != self);
+        if (self.getPrototype() == prototype) return;
+
+        const replacement = try rt.shapes.createObjectRoot(prototype);
+        markObjectAsPrototype(rt, prototype);
+        const previous = self.shape_ref;
+        self.shape_ref = replacement;
+        rt.shapes.release(previous);
     }
 
     pub fn preventExtensions(self: *Object) void {

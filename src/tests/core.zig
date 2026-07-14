@@ -64,6 +64,32 @@ test "runtime and context init-deinit are leak free" {
     }
 }
 
+test "runtime-resident indexes outlive a temporary allocator" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.heap.page_allocator, .{});
+    defer rt.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const stable_allocator = rt.memory.allocator;
+    rt.memory.allocator = arena.allocator();
+    errdefer {
+        rt.memory.allocator = stable_allocator;
+        arena.deinit();
+    }
+
+    rt.beginBorrowedWeakCleanup();
+    try rt.enqueueBorrowedWeakCleanupIdentity(2);
+    rt.endBorrowedWeakCleanup();
+
+    rt.memory.allocator = stable_allocator;
+    arena.deinit();
+
+    // Clearing after the temporary arena is gone exercises the retained hash
+    // allocation. It must have come from the runtime's persistent allocator.
+    rt.beginBorrowedWeakCleanup();
+    rt.endBorrowedWeakCleanup();
+}
+
 test "atom replace handles self-assignment without releasing dynamic atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2311,8 +2337,14 @@ test "generator state uses payload storage" {
     generator.generatorThisSlot().* = core.JSValue.int32(404);
     const args = try rt.memory.alloc(core.JSValue, 1);
     args[0] = core.JSValue.int32(505);
-    generator.generatorArgsSlot().* = args;
-    generator.generatorPcSlot().* = 12;
+    const stack_values = try rt.memory.alloc(core.JSValue, 1);
+    stack_values[0] = core.JSValue.int32(606);
+    var replacement = core.object.SuspendedExecutionStorage{
+        .stack = .{ .values = stack_values },
+        .frame = .{ .args = args },
+    };
+    generator.generatorExecutionStateSlot().replaceStorageOwned(12, std.math.maxInt(u32), &replacement, rt);
+    try std.testing.expect(replacement.isEmpty());
     generator.generatorDoneSlot().* = true;
     generator.generatorExecutingSlot().* = true;
     generator.generatorStartedSlot().* = true;
@@ -2322,10 +2354,150 @@ test "generator state uses payload storage" {
     try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
     try std.testing.expectEqual(@as(?i32, 505), generator.generatorArgs()[0].asInt32());
     try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
+    try generator.generatorExecutionStateSlot().storage.stack.ensureAdditional(rt, 8, 1);
+    try std.testing.expectEqual(@as(?i32, 606), generator.generatorExecutionState().storage.stack.values[0].asInt32());
+    var moved: core.object.SuspendedExecutionStorage = .{};
+    generator.generatorExecutionStateSlot().storage.moveInto(&moved);
+    defer moved.deinit(rt);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+    try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
+    try std.testing.expectEqual(@as(?i32, 606), moved.stack.values[0].asInt32());
     try std.testing.expect(generator.generatorDone());
     try std.testing.expect(generator.generatorExecuting());
     try std.testing.expect(generator.generatorStarted());
     try std.testing.expect(generator.generatorJustYielded());
+}
+
+test "generator completion eagerly releases the resident execution owners" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const realm = try core.Object.create(rt, core.class.ids.object, null);
+    defer realm.value().free(rt);
+    const current_function = try core.Object.create(rt, core.class.ids.object, null);
+    defer current_function.value().free(rt);
+    const this_object = try core.Object.create(rt, core.class.ids.object, null);
+    defer this_object.value().free(rt);
+    const delegate = try core.Object.create(rt, core.class.ids.object, null);
+    defer delegate.value().free(rt);
+    const generator = try core.Object.create(rt, core.class.ids.generator, null);
+    defer generator.value().free(rt);
+
+    generator.setGeneratorCurrentFunction(rt, current_function.value().dup());
+    generator.setGeneratorThis(rt, this_object.value().dup());
+    generator.setGeneratorYieldStarIterator(rt, delegate.value().dup());
+    try generator.setFunctionRealmGlobalPtr(rt, realm);
+    generator.generatorActualArgCountSlot().* = 1;
+    generator.generatorJustYieldedSlot().* = true;
+    generator.generatorYieldStarSuspendedSlot().* = true;
+    generator.generatorResumeCompletionTypeSlot().* = 1;
+
+    const args = try rt.memory.alloc(core.JSValue, 1);
+    args[0] = core.JSValue.int32(11);
+    const stack_values = try rt.memory.alloc(core.JSValue, 1);
+    stack_values[0] = core.JSValue.int32(22);
+    var replacement = core.object.SuspendedExecutionStorage{
+        .stack = .{ .values = stack_values },
+        .frame = .{ .args = args },
+    };
+    generator.generatorExecutionStateSlot().replaceStorageOwned(17, 23, &replacement, rt);
+
+    try std.testing.expect(rt.borrowedReferenceHolderRegistered(generator));
+    try std.testing.expect(generator.generatorExecutionState().has_frame);
+    generator.completeGeneratorExecution(rt);
+
+    try std.testing.expect(generator.generatorDone());
+    try std.testing.expect(!generator.generatorExecutionState().has_frame);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), generator.generatorPc());
+    try std.testing.expect(generator.generatorExecutionState().catchTarget() == null);
+    try std.testing.expectEqual(@as(usize, 0), generator.generatorActualArgCount());
+    try std.testing.expectEqual(@as(usize, 0), generator.generatorArgs().len);
+    try std.testing.expect(generator.generatorThis() == null);
+    try std.testing.expect(generator.generatorCurrentFunction() == null);
+    try std.testing.expect(generator.generatorYieldStarIterator() == null);
+    try std.testing.expect(!generator.generatorJustYielded());
+    try std.testing.expect(!generator.generatorYieldStarSuspended());
+    try std.testing.expectEqual(@as(i32, 0), generator.generatorResumeCompletionType());
+    try std.testing.expect(generator.functionRealmGlobalPtr() == null);
+    try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
+
+    // Async-generator completion can reach the same boundary after the VM
+    // return handler already did; the ownership endpoint must stay idempotent.
+    generator.completeGeneratorExecution(rt);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+}
+
+test "suspended execution preserves and closes open frame var refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const pointer_value_slots = try std.math.divCeil(usize, @sizeOf(?*core.VarRef), @sizeOf(core.JSValue));
+    const storage = try rt.memory.alloc(core.JSValue, 1 + pointer_value_slots);
+    var storage_is_standalone = true;
+    defer if (storage_is_standalone) rt.memory.free(core.JSValue, storage);
+    storage[0] = core.JSValue.int32(707);
+    const open_bytes = std.mem.sliceAsBytes(storage[1..]);
+    const open_var_refs: []?*core.VarRef = @alignCast(std.mem.bytesAsSlice(
+        ?*core.VarRef,
+        open_bytes[0..@sizeOf(?*core.VarRef)],
+    ));
+
+    const cell = try core.VarRef.createOpen(rt, &storage[0]);
+    const retained_cell = cell.dupCell();
+    defer retained_cell.freeCell(rt);
+    open_var_refs[0] = cell;
+
+    var suspended = core.object.SuspendedExecutionStorage{
+        .frame = .{
+            .storage = storage,
+            .locals = storage[0..1],
+            .open_var_refs = open_var_refs,
+        },
+    };
+    storage_is_standalone = false;
+    defer suspended.deinit(rt);
+
+    try std.testing.expect(cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().asInt32());
+    suspended.deinit(rt);
+    try std.testing.expect(suspended.isEmpty());
+    try std.testing.expect(!cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 707), cell.varRefValue().asInt32());
+}
+
+test "suspended execution republishes running aliases without a second owner" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const values = try rt.memory.alloc(core.JSValue, 2);
+    values[0] = core.JSValue.int32(11);
+    values[1] = core.JSValue.int32(22);
+    var state: core.object.SuspendedExecutionState = .{};
+    defer state.deinit(rt);
+    var initial = core.object.SuspendedExecutionStorage{
+        .stack = .{ .values = values[0..1], .capacity = values.len },
+    };
+    state.replaceStorageOwned(7, 3, &initial, rt);
+    state.beginRunningAliases();
+
+    var resuspended = core.object.SuspendedExecutionStorage{
+        .stack = .{ .values = values, .capacity = values.len },
+    };
+    state.replaceStorageOwned(9, 5, &resuspended, rt);
+    try std.testing.expect(!state.running_aliases);
+    try std.testing.expect(resuspended.isEmpty());
+    try std.testing.expectEqual(@as(usize, 9), state.pc);
+    try std.testing.expectEqual(@as(?usize, 5), state.catchTarget());
+    try std.testing.expectEqual(@intFromPtr(values.ptr), @intFromPtr(state.storage.stack.values.ptr));
+    try std.testing.expectEqual(@as(usize, 2), state.storage.stack.values.len);
+
+    state.beginRunningAliases();
+    var live_owner = state.storage;
+    state.finishRunningAliases();
+    try std.testing.expect(state.storage.isEmpty());
+    try std.testing.expect(state.catchTarget() == null);
+    live_owner.deinit(rt);
 }
 
 test "native function state uses payload storage" {
@@ -4616,6 +4788,63 @@ test "function borrowed holder cache follows swap removal" {
     try second.setFunctionRealmGlobalPtr(rt, null);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
     second.value().free(rt);
+}
+
+test "generator borrowed holder cache follows swap removal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    global.flags.is_global = true;
+
+    const first = try core.Object.create(rt, core.class.ids.generator, null);
+    const second = try core.Object.create(rt, core.class.ids.async_generator, null);
+    const third = try core.Object.create(rt, core.class.ids.generator, null);
+
+    try first.setFunctionRealmGlobalPtr(rt, global);
+    try second.setFunctionRealmGlobalPtr(rt, global);
+    try third.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
+
+    // Generator instances carry the same borrowed realm edge as functions.
+    // Removing an early entry must repair the swapped tail's index so bulk
+    // generator teardown remains linear rather than rescanning the registry.
+    first.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
+    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
+
+    try third.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
+    third.value().free(rt);
+
+    try second.setFunctionRealmGlobalPtr(rt, null);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    second.value().free(rt);
+}
+
+test "fresh object prototype rebinding reuses the shared empty root shape" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const first = try core.Object.create(rt, core.class.ids.generator, null);
+    defer first.value().free(rt);
+    const second = try core.Object.create(rt, core.class.ids.async_generator, null);
+    defer second.value().free(rt);
+
+    try first.setFreshObjectPrototype(rt, prototype);
+    try second.setFreshObjectPrototype(rt, prototype);
+
+    try std.testing.expectEqual(prototype, first.getPrototype().?);
+    try std.testing.expectEqual(prototype, second.getPrototype().?);
+    try std.testing.expectEqual(first.shape_ref, second.shape_ref);
+    try std.testing.expectEqual(@as(u32, 0), first.shape_ref.prop_count);
 }
 
 test "replaced realm auto-init unregisters empty borrowed holder" {

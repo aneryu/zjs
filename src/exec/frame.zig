@@ -24,6 +24,74 @@ pub const FrameSlab = struct {
     var_refs: []*core.VarRef = &.{},
     open_var_refs: []?*core.VarRef = &.{},
 
+    pub fn requiredStorageSlots(
+        arg_count: usize,
+        original_arg_count: usize,
+        local_count: usize,
+        stack_count: usize,
+        var_ref_count: usize,
+        open_var_ref_count: usize,
+    ) !usize {
+        const count_1 = try std.math.add(usize, arg_count, original_arg_count);
+        const count_2 = try std.math.add(usize, count_1, local_count);
+        const value_count = try std.math.add(usize, count_2, stack_count);
+        const var_ref_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), var_ref_count);
+        const open_bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count);
+        const ptr_bytes = try std.math.add(usize, var_ref_bytes, open_bytes);
+        const ptr_value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue));
+        return try std.math.add(usize, value_count, ptr_value_slots);
+    }
+
+    /// Partition caller-owned backing into the same typed windows as
+    /// `allocHeap`. The caller retains the allocation itself; Frame teardown
+    /// releases only the values/cells stored in the windows.
+    pub fn partitionStorage(
+        storage: []JSValue,
+        arg_count: usize,
+        original_arg_count: usize,
+        local_count: usize,
+        stack_count: usize,
+        var_ref_count: usize,
+        open_var_ref_count: usize,
+    ) FrameSlab {
+        const value_count = arg_count + original_arg_count + local_count + stack_count;
+        const var_ref_bytes = @sizeOf(*core.VarRef) * var_ref_count;
+        const open_bytes = @sizeOf(?*core.VarRef) * open_var_ref_count;
+        const ptr_value_slots = std.math.divCeil(usize, var_ref_bytes + open_bytes, @sizeOf(JSValue)) catch unreachable;
+        std.debug.assert(storage.len == value_count + ptr_value_slots);
+
+        var cursor: usize = 0;
+        const args = storage[cursor .. cursor + arg_count];
+        cursor += arg_count;
+        const original_args = storage[cursor .. cursor + original_arg_count];
+        cursor += original_arg_count;
+        const locals = storage[cursor .. cursor + local_count];
+        cursor += local_count;
+        const stack = storage[cursor .. cursor + stack_count];
+        cursor += stack_count;
+
+        const ptr_region = std.mem.sliceAsBytes(storage[cursor .. cursor + ptr_value_slots]);
+        const var_refs: []*core.VarRef = if (var_ref_count == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(*core.VarRef, ptr_region[0..var_ref_bytes]);
+        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
+            &.{}
+        else
+            @alignCast(std.mem.bytesAsSlice(?*core.VarRef, ptr_region[var_ref_bytes..][0..open_bytes]));
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+
+        return .{
+            .storage = storage,
+            .args = args,
+            .original_args = original_args,
+            .locals = locals,
+            .stack = stack,
+            .var_refs = var_refs,
+            .open_var_refs = open_var_refs,
+        };
+    }
+
     pub fn carve(
         account: *memory.MemoryAccount,
         arena: *runtime.VmStackArena,
@@ -87,51 +155,11 @@ pub const FrameSlab = struct {
         var_ref_count: usize,
         open_var_ref_count: usize,
     ) !FrameSlab {
-        const count_1 = try std.math.add(usize, arg_count, original_arg_count);
-        const count_2 = try std.math.add(usize, count_1, local_count);
-        const value_count = try std.math.add(usize, count_2, stack_count);
-        const var_ref_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), var_ref_count);
-        const open_bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count);
-        const ptr_bytes = try std.math.add(usize, var_ref_bytes, open_bytes);
-        const ptr_value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue));
-        const total_value_slots = value_count + ptr_value_slots;
+        const total_value_slots = try requiredStorageSlots(arg_count, original_arg_count, local_count, stack_count, var_ref_count, open_var_ref_count);
         if (total_value_slots == 0) return .{};
         const storage = try account.alloc(JSValue, total_value_slots);
         errdefer account.free(JSValue, storage);
-
-        var cursor: usize = 0;
-        const args = storage[cursor .. cursor + arg_count];
-        cursor += arg_count;
-        const original_args = storage[cursor .. cursor + original_arg_count];
-        cursor += original_arg_count;
-        const locals = storage[cursor .. cursor + local_count];
-        cursor += local_count;
-        const stack = storage[cursor .. cursor + stack_count];
-        cursor += stack_count;
-
-        const ptr_region = std.mem.sliceAsBytes(storage[cursor .. cursor + ptr_value_slots]);
-        const var_refs: []*core.VarRef = if (var_ref_count == 0)
-            &.{}
-        else
-            std.mem.bytesAsSlice(*core.VarRef, ptr_region[0..var_ref_bytes]);
-        // The open window starts at var_ref_bytes (a multiple of 8) inside the
-        // 16-aligned region; the runtime offset erases the comptime alignment,
-        // so re-assert the pointer alignment explicitly.
-        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
-            &.{}
-        else
-            @alignCast(std.mem.bytesAsSlice(?*core.VarRef, ptr_region[var_ref_bytes..][0..open_bytes]));
-        if (open_var_refs.len != 0) @memset(open_var_refs, null);
-
-        return .{
-            .storage = storage,
-            .args = args,
-            .original_args = original_args,
-            .locals = locals,
-            .stack = stack,
-            .var_refs = var_refs,
-            .open_var_refs = open_var_refs,
-        };
+        return partitionStorage(storage, arg_count, original_arg_count, local_count, stack_count, var_ref_count, open_var_ref_count);
     }
 };
 
@@ -150,6 +178,35 @@ pub const CallBindingValueMode = enum {
     /// Keep a borrowed value rooted by the frame but do not release it.
     borrow,
 };
+
+/// Whether a live frame must release a reference when the binding/storage is
+/// torn down. Keeping this as a type instead of a collection of unrelated
+/// booleans makes every transfer site state its ownership decision explicitly.
+pub const Ownership = enum(u1) {
+    borrowed,
+    owned,
+};
+
+/// The ordinary frame's three independent ownership decisions. This is the
+/// execution-time counterpart of qjs's implicit call-frame contract:
+///
+/// - `this_value` may borrow a realm/lexical value or own a moved receiver;
+/// - `var_refs` may borrow the closure capture array or own retained cells;
+/// - `storage` borrows an arena window or owns a heap allocation.
+///
+/// One packed disposition replaces three booleans that previously had to stay
+/// synchronized with Entry's fast-teardown discriminator.
+pub const OwnershipDisposition = packed struct(u8) {
+    this_value: Ownership = .owned,
+    current_function: Ownership = .owned,
+    var_refs: Ownership = .owned,
+    storage: Ownership = .borrowed,
+    _reserved: u4 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(OwnershipDisposition) == 1);
+}
 
 pub const CallBindingModes = struct {
     this_value: CallBindingValueMode = .dup,
@@ -217,28 +274,22 @@ pub const Frame = struct {
     /// "is this slot a cell" discrimination is gone with the type
     /// (VARREFS-SLOT-TYPING-BLUEPRINT phase D).
     var_refs: []*core.VarRef = &.{},
-    /// True when `var_refs` aliases the callee's closure captures array
-    /// (`functionCapturesSlot`) instead of an owned per-frame copy — qjs's
-    /// `var_refs = p->u.func.var_refs` borrow (quickjs.c:17844). Set only for a
-    /// no-global-var inline call, so every var_ref write goes through
-    /// a cell (never the array element) and the shared array is never
-    /// mutated/realloced. Teardown then skips the per-element release (the
-    /// closure still owns the cells).
-    var_refs_borrowed: bool = false,
     open_var_refs: []?*core.VarRef = &.{},
     storage_values: []JSValue = &.{},
-    storage_on_heap: bool = false,
+    /// Records whether `this_value`, `var_refs`, and `storage_values` are
+    /// borrowed or owned. A borrowed var-ref slice aliases the callee captures;
+    /// borrowed storage is an arena window. Teardown consults only this value.
+    ownership: OwnershipDisposition = .{},
     /// Lazily-allocated side-struct holding the cold per-frame state a plain
     /// inline call (fib, ordinary closures) never touches: the
     /// derived-constructor `this`, the `arguments` object, and the original-args
     /// snapshot. `null` on the common path, so `Frame.init` writes one null
     /// pointer and keeps this state off the hot frame.
     cold: ?*FrameCold = null,
-    this_value_owned: bool = true,
 
     pub const FrameCold = struct {
         constructor_this_value: JSValue = JSValue.undefinedValue(),
-        constructor_this_value_owned: bool = false,
+        constructor_this_value_ownership: Ownership = .borrowed,
         arguments_object: ?JSValue = null,
         original_args: []JSValue = &.{},
     };
@@ -266,7 +317,7 @@ pub const Frame = struct {
     /// `storage_values`.
     pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const c = self.cold orelse return;
-        if (c.constructor_this_value_owned) c.constructor_this_value.free(rt);
+        if (c.constructor_this_value_ownership == .owned) c.constructor_this_value.free(rt);
         if (c.arguments_object) |value| value.free(rt);
         releaseValueSliceNoReset(rt, c.original_args);
         account.destroy(FrameCold, c);
@@ -289,9 +340,6 @@ pub const Frame = struct {
     pub inline fn constructorThisValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();
     }
-    pub inline fn constructorThisValueOwned(self: *const Frame) bool {
-        return if (self.cold) |c| c.constructor_this_value_owned else false;
-    }
     pub inline fn argumentsObject(self: *const Frame) ?JSValue {
         return if (self.cold) |c| c.arguments_object else null;
     }
@@ -303,24 +351,69 @@ pub const Frame = struct {
         return .{ .function = function };
     }
 
+    /// Build the borrowed call-binding shell used to resume a resident
+    /// generator/async frame. The execution record owns `this` and `cur_func`;
+    /// unlike a fresh call there is no constructor binding to allocate and no
+    /// reference-count traffic to perform.
+    pub inline fn initResidentExecution(
+        function: *const bytecode.Bytecode,
+        this_value: JSValue,
+        current_function: JSValue,
+        new_target: JSValue,
+        actual_arg_count: usize,
+    ) Frame {
+        return .{
+            .function = function,
+            .this_value = this_value,
+            .current_function = current_function,
+            .new_target = new_target,
+            .actual_arg_count = actual_arg_count,
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+            },
+        };
+    }
+
+    /// A suspension (and the resident completion handoff) moves every storage
+    /// window back to GeneratorExecutionState before this temporary Frame
+    /// unwinds. The two call bindings are borrowed from that same record, so an
+    /// empty shell has no teardown work at all.
+    pub inline fn isEmptyResidentExecutionShell(self: *const Frame) bool {
+        return self.ownership.this_value == .borrowed and
+            self.ownership.current_function == .borrowed and
+            self.ownership.storage == .borrowed and
+            self.storage_values.len == 0 and
+            self.locals.len == 0 and
+            self.args.len == 0 and
+            self.var_refs.len == 0 and
+            self.open_var_refs.len == 0 and
+            self.cold == null;
+    }
+
     pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !void {
-        try self.initCallBindingValues(&rt.memory, inputs, .{});
         errdefer self.releaseCallBindings(rt);
+        try self.initCallBindingValues(&rt.memory, inputs, .{});
     }
 
     pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
+        // Allocate the only fallible part before retaining or taking any call
+        // binding. On OOM the caller must still own every input unchanged.
+        const ctor_cold = if (inputs.constructor_this_value.isUndefined())
+            null
+        else
+            try self.ensureCold(account);
         self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
         self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
         self.new_target = inputs.new_target_value;
-        self.this_value_owned = modeOwnsValue(modes.this_value);
+        self.ownership.this_value = modeOwnership(modes.this_value);
+        self.ownership.current_function = modeOwnership(modes.current_function);
         // ctor_this is undefined for every non-derived-constructor frame (owned
         // undefined is a no-op to free), so only materialize `cold` when it is a
         // real value. The inline path never reaches here (no derived ctors inline).
-        const ctor_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
-        if (!ctor_value.isUndefined()) {
-            const c = try self.ensureCold(account);
-            c.constructor_this_value = ctor_value;
-            c.constructor_this_value_owned = modeOwnsValue(modes.constructor_this_value);
+        if (ctor_cold) |c| {
+            c.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
+            c.constructor_this_value_ownership = modeOwnership(modes.constructor_this_value);
         }
     }
 
@@ -453,6 +546,10 @@ pub const Frame = struct {
         window: ?[]JSValue,
     ) !void {
         if (args.len == 0 or !need_original_snapshot) return;
+        // Publish the destructor owner before copying any references into the
+        // snapshot window. If allocating the cold box fails, every source and
+        // pre-carved destination slot must remain untouched.
+        const cold = try self.ensureCold(account);
         const original_args = if (window) |values| blk: {
             std.debug.assert(values.len == args.len);
             break :blk values;
@@ -461,18 +558,23 @@ pub const Frame = struct {
             break :blk try self.allocOwnedStorage(account, args.len);
         };
         for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
-        (try self.ensureCold(account)).original_args = original_args;
+        cold.original_args = original_args;
     }
 
     pub fn installOwnedStorage(self: *Frame, storage: []JSValue) void {
-        std.debug.assert(!self.storage_on_heap);
+        std.debug.assert(self.ownership.storage == .borrowed);
         self.storage_values = storage;
-        self.storage_on_heap = storage.len != 0;
+        self.ownership.storage = if (storage.len != 0) .owned else .borrowed;
+    }
+
+    pub fn installResidentStorage(self: *Frame, storage: []JSValue) void {
+        std.debug.assert(self.ownership.storage == .borrowed);
+        self.storage_values = storage;
     }
 
     pub fn allocOwnedStorage(self: *Frame, account: *memory.MemoryAccount, count: usize) ![]JSValue {
         const values = try account.alloc(JSValue, count);
-        if (self.storage_on_heap and self.storage_values.len != 0) {
+        if (self.ownership.storage == .owned and self.storage_values.len != 0) {
             // Dynamic growth paths that do not receive pre-carved windows are
             // intentionally rare. Keep ownership explicit instead of silently
             // leaking a second backing allocation.
@@ -487,15 +589,17 @@ pub const Frame = struct {
         const this_value = self.this_value;
         const current_function = self.current_function;
         const new_target = self.new_target;
-        const this_value_owned = self.this_value_owned;
+        const this_value_ownership = self.ownership.this_value;
+        const current_function_ownership = self.ownership.current_function;
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
-        self.this_value_owned = true;
+        self.ownership.this_value = .owned;
+        self.ownership.current_function = .owned;
         // Frees constructor/arguments cold state and the box.
         self.freeCold(&rt.memory, rt);
-        if (this_value_owned) this_value.free(rt);
-        current_function.free(rt);
+        if (this_value_ownership == .owned) this_value.free(rt);
+        if (current_function_ownership == .owned) current_function.free(rt);
         _ = new_target;
     }
 
@@ -503,14 +607,16 @@ pub const Frame = struct {
         const this_value = self.this_value;
         const current_function = self.current_function;
         const new_target = self.new_target;
-        const this_value_owned = self.this_value_owned;
+        const this_value_ownership = self.ownership.this_value;
+        const current_function_ownership = self.ownership.current_function;
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
         self.new_target = JSValue.undefinedValue();
-        self.this_value_owned = true;
+        self.ownership.this_value = .owned;
+        self.ownership.current_function = .owned;
 
-        if (this_value_owned) this_value.free(rt);
-        current_function.free(rt);
+        if (this_value_ownership == .owned) this_value.free(rt);
+        if (current_function_ownership == .owned) current_function.free(rt);
         _ = new_target;
 
         // releaseOwnedStorage frees the storage slices + clears the storage-coupled
@@ -521,8 +627,8 @@ pub const Frame = struct {
     }
 
     pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
-        if (self.this_value_owned) self.this_value.free(rt);
-        self.current_function.free(rt);
+        if (self.ownership.this_value == .owned) self.this_value.free(rt);
+        if (self.ownership.current_function == .owned) self.current_function.free(rt);
 
         if (self.open_var_refs.len != 0) self.closeOpenVarRefs(rt);
 
@@ -534,9 +640,9 @@ pub const Frame = struct {
         // Borrowed var_refs alias the closure's captures (owned by the still-live
         // function object); freeing them here would double-free on the next call.
         // Owned slots release per cell (qjs free_var_ref, quickjs.c:16199).
-        if (!self.var_refs_borrowed) releaseCellSliceNoReset(rt, self.var_refs);
+        if (self.ownership.var_refs == .owned) releaseCellSliceNoReset(rt, self.var_refs);
 
-        if (self.storage_on_heap and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
+        if (self.ownership.storage == .owned and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
     }
 
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
@@ -544,17 +650,17 @@ pub const Frame = struct {
         const locals = self.locals;
         const args = self.args;
         // A borrowed var_refs aliases the closure captures (not owned here).
-        const var_refs: []*core.VarRef = if (self.var_refs_borrowed) &.{} else self.var_refs;
+        const var_refs: []*core.VarRef = if (self.ownership.var_refs == .borrowed) &.{} else self.var_refs;
         const storage_values = self.storage_values;
-        const storage_on_heap = self.storage_on_heap;
+        const storage_ownership = self.ownership.storage;
 
         self.locals = &.{};
         self.args = &.{};
         self.var_refs = &.{};
-        self.var_refs_borrowed = false;
+        self.ownership.var_refs = .owned;
         self.open_var_refs = &.{};
         self.storage_values = &.{};
-        self.storage_on_heap = false;
+        self.ownership.storage = .borrowed;
 
         releaseValueSlice(rt, locals);
         releaseValueSlice(rt, args);
@@ -564,7 +670,7 @@ pub const Frame = struct {
         // generator retains constructor/arguments state across resume.
         if (self.cold != null) self.releaseColdStorage(account, rt);
 
-        if (storage_on_heap and storage_values.len != 0) account.free(JSValue, storage_values);
+        if (storage_ownership == .owned and storage_values.len != 0) account.free(JSValue, storage_values);
     }
 
     pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
@@ -632,32 +738,11 @@ pub const Frame = struct {
     }
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
-        if (index >= self.locals.len) {
-            const next_len = index + 1;
-            const old_len = self.locals.len;
-            const next = try account.alloc(JSValue, next_len);
-            errdefer account.free(JSValue, next);
-            const old_locals = self.locals;
-            if (old_len != 0 and old_locals.ptr == next.ptr) {
-                @memset(next[old_len..], JSValue.undefinedValue());
-            } else {
-                @memset(next, JSValue.undefinedValue());
-                if (old_len != 0) @memcpy(next[0..old_len], old_locals);
-            }
-            const old_storage = self.storage_values;
-            const old_storage_on_heap = self.storage_on_heap;
-            self.locals = next;
-            self.storage_values = next;
-            self.storage_on_heap = true;
-            if (old_storage_on_heap and old_storage.len != 0) account.free(JSValue, old_storage);
-        } else {
-            const next_value = value.dup();
-            const old_value = self.locals[index];
-            self.locals[index] = next_value;
-            old_value.free(rt);
-            return;
-        }
-        self.locals[index] = value.dup();
+        try growLocalsCapacity(account, self, index);
+        const next_value = value.dup();
+        const old_value = self.locals[index];
+        self.locals[index] = next_value;
+        old_value.free(rt);
     }
 
     fn releaseValueSlice(rt: anytype, values: []JSValue) void {
@@ -703,8 +788,8 @@ fn bindCallValue(value: JSValue, mode: CallBindingValueMode) JSValue {
     };
 }
 
-fn modeOwnsValue(mode: CallBindingValueMode) bool {
-    return mode != .borrow;
+fn modeOwnership(mode: CallBindingValueMode) Ownership {
+    return if (mode == .borrow) .borrowed else .owned;
 }
 
 test "Frame setLocal preserves inline locals while growing" {
@@ -724,32 +809,28 @@ test "Frame setLocal preserves inline locals while growing" {
 
     try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].asInt32());
     try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].asInt32());
-    try std.testing.expect(exec_frame.storage_on_heap);
+    try std.testing.expectEqual(Ownership.owned, exec_frame.ownership.storage);
 }
 
 // Frame capacity helpers (moved from the dissolved exec/vm_utils.zig).
 
 pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
-    if (idx < frame.locals.len) return;
-    const next_len = idx + 1;
-
-    const next_locals = try ctx.runtime.memory.alloc(core.JSValue, next_len);
-    errdefer ctx.runtime.memory.free(core.JSValue, next_locals);
-
-    for (frame.locals, 0..) |value, i| next_locals[i] = value;
-    if (next_len > frame.locals.len) @memset(next_locals[frame.locals.len..next_len], core.JSValue.undefinedValue());
-
-    const old_storage = frame.storage_values;
-    const old_storage_on_heap = frame.storage_on_heap;
-    frame.locals = next_locals;
-    frame.storage_values = next_locals;
-    frame.storage_on_heap = true;
-    if (old_storage.len != 0 and old_storage_on_heap) ctx.runtime.memory.free(core.JSValue, old_storage);
+    try growLocalsCapacity(&ctx.runtime.memory, frame, idx);
 }
 
 pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !void {
     if (idx < frame.var_refs.len) return;
-    const next_len = idx + 1;
+    const next_len = try std.math.add(usize, idx, 1);
+    const old_storage = frame.storage_values;
+    const old_storage_ownership = frame.ownership.storage;
+    // A heap FrameSlab is one allocation shared by locals/args/stack and the
+    // typed pointer tails. Replacing only var_refs cannot free that slab while
+    // the other live windows still point into it. Normal compiled bytecode is
+    // sized exactly, so reject this malformed/synthetic growth case instead of
+    // manufacturing dangling frame slices.
+    if (old_storage_ownership == .owned and old_storage.len != 0 and !ownedStorageContainsOnlyVarRefs(frame)) {
+        return error.InvalidBytecode;
+    }
     // The typed window keeps the "var_refs lives inside a []JSValue storage
     // allocation" invariant (like the slab carve), so the uniform
     // storage_values free path still owns the memory: allocate value slots
@@ -765,16 +846,89 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // Legacy/synthetic bytecode may still request a sparse index; normal parser
     // output sizes var_refs once during frame construction like qjs.
     const old_len = frame.var_refs.len;
+    const borrowed_cells = frame.ownership.var_refs == .borrowed;
+    for (frame.var_refs, 0..) |cell, i| {
+        next[i] = if (borrowed_cells) cell.dupCell() else cell;
+    }
     var filled: usize = old_len;
-    errdefer for (next[old_len..filled]) |cell| cell.freeCell(ctx.runtime);
+    errdefer {
+        if (borrowed_cells) {
+            for (next[0..old_len]) |cell| cell.freeCell(ctx.runtime);
+        }
+        for (next[old_len..filled]) |cell| cell.freeCell(ctx.runtime);
+    }
     while (filled < next_len) : (filled += 1) {
         next[filled] = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
     }
-    for (frame.var_refs, 0..) |cell, i| next[i] = cell;
-    const old_storage = frame.storage_values;
-    const old_storage_on_heap = frame.storage_on_heap;
     frame.var_refs = next;
+    frame.ownership.var_refs = .owned;
     frame.storage_values = next_storage;
-    frame.storage_on_heap = true;
-    if (old_storage.len != 0 and old_storage_on_heap) ctx.runtime.memory.free(core.JSValue, old_storage);
+    frame.ownership.storage = .owned;
+    if (old_storage.len != 0 and old_storage_ownership == .owned) ctx.runtime.memory.free(core.JSValue, old_storage);
+}
+
+fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize) !void {
+    if (idx < frame.locals.len) return;
+    const next_len = try std.math.add(usize, idx, 1);
+    const old_storage = frame.storage_values;
+    const old_storage_ownership = frame.ownership.storage;
+    if (old_storage_ownership == .owned and old_storage.len != 0 and !ownedStorageContainsOnlyLocals(frame)) {
+        return error.InvalidBytecode;
+    }
+
+    const old_locals = frame.locals;
+    const next = try account.alloc(JSValue, next_len);
+    errdefer account.free(JSValue, next);
+    if (old_locals.len != 0) @memcpy(next[0..old_locals.len], old_locals);
+    @memset(next[old_locals.len..], JSValue.undefinedValue());
+
+    // Open cells alias local slots directly. Moving the local window must
+    // rebase those aliases before the old backing can disappear.
+    const open_local_count = @min(old_locals.len, frame.open_var_refs.len);
+    for (frame.open_var_refs[0..open_local_count], 0..) |maybe_ref, local_idx| {
+        const ref = maybe_ref orelse continue;
+        std.debug.assert(ref.is_open);
+        std.debug.assert(ref.pvalue == &old_locals[local_idx]);
+        ref.pvalue = &next[local_idx];
+    }
+
+    frame.locals = next;
+    frame.storage_values = next;
+    frame.ownership.storage = .owned;
+    if (old_storage.len != 0 and old_storage_ownership == .owned) account.free(JSValue, old_storage);
+}
+
+fn ownedStorageContainsOnlyLocals(frame: *const Frame) bool {
+    const storage = frame.storage_values;
+    if (storage.len == 0 or frame.locals.len == 0) return false;
+    if (@intFromPtr(storage.ptr) != @intFromPtr(frame.locals.ptr)) return false;
+    if (storage.len != frame.locals.len) return false;
+    return !sliceOverlapsStorage(JSValue, frame.args, storage) and
+        !sliceOverlapsStorage(JSValue, frame.originalArgs(), storage) and
+        !sliceOverlapsStorage(*core.VarRef, frame.var_refs, storage) and
+        !sliceOverlapsStorage(?*core.VarRef, frame.open_var_refs, storage);
+}
+
+fn ownedStorageContainsOnlyVarRefs(frame: *const Frame) bool {
+    const storage = frame.storage_values;
+    if (storage.len == 0 or frame.var_refs.len == 0) return false;
+    if (@intFromPtr(storage.ptr) != @intFromPtr(frame.var_refs.ptr)) return false;
+    const ptr_bytes = std.math.mul(usize, @sizeOf(*core.VarRef), frame.var_refs.len) catch return false;
+    const value_slots = std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue)) catch return false;
+    if (storage.len != value_slots) return false;
+    return !sliceOverlapsStorage(JSValue, frame.locals, storage) and
+        !sliceOverlapsStorage(JSValue, frame.args, storage) and
+        !sliceOverlapsStorage(JSValue, frame.originalArgs(), storage) and
+        !sliceOverlapsStorage(?*core.VarRef, frame.open_var_refs, storage);
+}
+
+fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JSValue) bool {
+    if (values.len == 0 or storage.len == 0) return false;
+    const value_bytes = std.math.mul(usize, @sizeOf(T), values.len) catch return true;
+    const storage_bytes = std.math.mul(usize, @sizeOf(JSValue), storage.len) catch return true;
+    const value_start = @intFromPtr(values.ptr);
+    const storage_start = @intFromPtr(storage.ptr);
+    const value_end = std.math.add(usize, value_start, value_bytes) catch return true;
+    const storage_end = std.math.add(usize, storage_start, storage_bytes) catch return true;
+    return value_start < storage_end and storage_start < value_end;
 }

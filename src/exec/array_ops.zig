@@ -82,7 +82,6 @@ const qjsArraySearchCall = string_ops.qjsArraySearchCall;
 const qjsArrayToLocaleStringCall = string_ops.qjsArrayToLocaleStringCall;
 const qjsArrayToStringCall = string_ops.qjsArrayToStringCall;
 const qjsCollectIteratorValues = call_runtime.qjsCollectIteratorValues;
-const qjsGeneratorNext = call_runtime.qjsGeneratorNext;
 const qjsIteratorCallForNativeRecord = call_runtime.qjsIteratorCallForNativeRecord;
 const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
@@ -6112,39 +6111,6 @@ pub fn argsFromArrayLike(
         rooted_args = args[0..initialized];
     }
     return args;
-}
-
-pub fn qjsGeneratorSlice(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (!receiver.isObject()) return null;
-    const object = property_ops.expectObject(receiver) catch return null;
-    if (object.class_id != core.class.ids.generator) return null;
-
-    const start = if (args.len > 0) args[0].asInt32() orelse 0 else 0;
-    const out = try core.Object.createArray(ctx.runtime, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    var skipped: i32 = 0;
-    while (true) {
-        const next_result = (try qjsGeneratorNext(ctx, output, global, receiver, &.{})) orelse break;
-        defer next_result.free(ctx.runtime);
-        const next_object = try property_ops.expectObject(next_result);
-        const done = next_object.getProperty(core.atom.predefinedId("done", .string).?);
-        defer done.free(ctx.runtime);
-        if (done.asBool() == true) break;
-        const value = next_object.getProperty(core.atom.predefinedId("value", .string).?);
-        defer value.free(ctx.runtime);
-        if (skipped < start) {
-            skipped += 1;
-            continue;
-        }
-        try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
-    }
-    return out.value();
 }
 
 pub fn qjsArrayIteratorMethod(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {

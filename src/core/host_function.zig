@@ -672,6 +672,18 @@ pub const builtin_method_ids = struct {
             flat_map = 211,
             dispose = 212,
         };
+
+        /// Intrinsic iterator prototype methods that are not properties of
+        /// `Iterator.prototype` itself. QuickJS installs these as direct
+        /// `JSCFunction` entries (`JS_ITERATOR_NEXT_DEF`) carrying a function
+        /// pointer plus magic; keep them in the iterator native-record domain
+        /// so calls do not fall back to dispatch-name matching.
+        pub const IntrinsicMethod = enum(u32) {
+            array_iterator_next = 213,
+            generator_next = 214,
+            generator_return = 215,
+            generator_throw = 216,
+        };
     };
 
     pub const number = struct {

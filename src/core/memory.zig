@@ -311,7 +311,13 @@ pub const SmallObjectSlab = struct {
 };
 
 pub const MemoryAccount = struct {
+    /// Current operation allocator. Parser compilation temporarily redirects
+    /// this to its result-owned arena; allocations kept beyond that operation
+    /// must not use it.
     allocator: std.mem.Allocator,
+    /// Stable allocator that owns runtime-resident state for the lifetime of
+    /// this account. Long-lived unmanaged containers must allocate and deinit
+    /// with this allocator.
     persistent_allocator: std.mem.Allocator,
     small_slab: SmallObjectSlab = .{},
     small_slab_enabled: bool = false,

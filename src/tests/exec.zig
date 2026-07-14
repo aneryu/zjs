@@ -10,11 +10,186 @@ const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
+const frame_mod = zjs.exec.frame;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
+
+test "var-ref growth promotes borrowed captures to owned cells" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("frame-borrowed-var-ref-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const captured = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
+    defer captured.freeCell(rt);
+    var captures = [_]*core.VarRef{captured};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.var_refs = &captures;
+    exec_frame.ownership.var_refs = .borrowed;
+
+    try frame_mod.ensureVarRefsCapacity(ctx, &exec_frame, 1);
+    try std.testing.expectEqual(@as(usize, 2), exec_frame.var_refs.len);
+    try std.testing.expectEqual(captured, exec_frame.var_refs[0]);
+    try std.testing.expectEqual(frame_mod.Ownership.owned, exec_frame.ownership.var_refs);
+}
+
+test "var-ref growth rejects an owned composite frame slab" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("frame-composite-var-ref-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 0, 1, 1, 0);
+    slab.stack[0] = core.JSValue.undefinedValue();
+    slab.var_refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.installOwnedStorage(slab.storage);
+    exec_frame.var_refs = slab.var_refs;
+
+    const storage_ptr = exec_frame.storage_values.ptr;
+    const var_refs_ptr = exec_frame.var_refs.ptr;
+    try std.testing.expectError(error.InvalidBytecode, frame_mod.ensureVarRefsCapacity(ctx, &exec_frame, 1));
+    try std.testing.expectEqual(storage_ptr, exec_frame.storage_values.ptr);
+    try std.testing.expectEqual(var_refs_ptr, exec_frame.var_refs.ptr);
+}
+
+test "local growth rejects an owned composite frame slab" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-composite-local-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 1, 1, 0, 0);
+    slab.locals[0] = core.JSValue.int32(3);
+    slab.stack[0] = core.JSValue.undefinedValue();
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.installOwnedStorage(slab.storage);
+    exec_frame.locals = slab.locals;
+
+    const storage_ptr = exec_frame.storage_values.ptr;
+    const locals_ptr = exec_frame.locals.ptr;
+    try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(4)));
+    try std.testing.expectEqual(storage_ptr, exec_frame.storage_values.ptr);
+    try std.testing.expectEqual(locals_ptr, exec_frame.locals.ptr);
+}
+
+test "local growth rebases open var-ref cells" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-open-local-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    var locals = [_]core.JSValue{core.JSValue.int32(7)};
+    const open_ref = try core.VarRef.createOpen(rt, &locals[0]);
+    var open_refs = [_]?*core.VarRef{open_ref};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.locals = &locals;
+    exec_frame.open_var_refs = &open_refs;
+    exec_frame.ownership.storage = .borrowed;
+
+    try exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8));
+    try exec_frame.setLocal(&rt.memory, rt, 0, core.JSValue.int32(9));
+    try std.testing.expectEqual(@as(?i32, 9), open_ref.varRefValue().asInt32());
+}
+
+test "call-binding OOM leaves input references with the caller" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-call-binding-oom-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const held = try core.Object.create(rt, core.class.ids.object, null);
+    defer held.value().free(rt);
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    const initial_refs = held.header.meta().rc;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const result = exec_frame.initCallBindings(rt, .{
+        .initial_this_value = held.value(),
+        .current_function_value = held.value(),
+        .new_target_value = core.JSValue.undefinedValue(),
+        .constructor_this_value = held.value(),
+    });
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+}
+
+test "original-args cold-state OOM does not retain copied references" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-original-args-oom-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const held = try core.Object.create(rt, core.class.ids.object, null);
+    defer held.value().free(rt);
+    var source_args = [_]core.JSValue{held.value().dup()};
+    defer source_args[0].free(rt);
+    var original_args = [_]core.JSValue{core.JSValue.undefinedValue()};
+    defer original_args[0].free(rt);
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    const initial_refs = held.header.meta().rc;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const result = exec_frame.initArgumentsBorrowedSlots(
+        &rt.memory,
+        &source_args,
+        false,
+        true,
+        .{ .original_args = &original_args },
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+}
+
+test "strict generator resident frame supports qjs argument counts beyond u16 storage" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* manyArgs() {
+        \\    "use strict";
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(manyArgs.apply(null, Array(40000)).next().value, 40000);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
 
 pub const helpers = struct {
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
@@ -2085,6 +2260,289 @@ test "async generator prototype method marker is internal" {
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\nfalse\n", stream.buffered());
 }
 
+test "generator instances inherit shared prototype methods" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function* syncGenerator() { yield 1; }
+        \\var syncA = syncGenerator();
+        \\var syncB = syncGenerator();
+        \\var GeneratorPrototype = Object.getPrototypeOf(syncGenerator.prototype);
+        \\var arrayIteratorForNativeRecord = [][Symbol.iterator]();
+        \\print(Object.getOwnPropertyNames(syncA).length);
+        \\print(syncA.next === GeneratorPrototype.next);
+        \\print(syncA.return === GeneratorPrototype.return);
+        \\print(syncA.throw === GeneratorPrototype.throw);
+        \\print(syncA.next === syncB.next);
+        \\print(syncA.next.length);
+        \\print(typeof syncA.slice);
+        \\var calls = 0;
+        \\var overridden = syncGenerator();
+        \\var builtinNext = overridden.next;
+        \\overridden.next = function() {
+        \\  calls++;
+        \\  return builtinNext.call(this);
+        \\};
+        \\var values = [];
+        \\for (var value of overridden) values.push(value);
+        \\print(calls + ":" + values.join(","));
+        \\var customGeneratorPrototype = Object.create(GeneratorPrototype);
+        \\syncGenerator.prototype = customGeneratorPrototype;
+        \\var customSync = syncGenerator();
+        \\print(Object.getPrototypeOf(customSync) === customGeneratorPrototype);
+        \\print(customSync.next === GeneratorPrototype.next);
+        \\syncGenerator.prototype = 1;
+        \\print(Object.getPrototypeOf(syncGenerator()) === GeneratorPrototype);
+        \\async function* asyncGenerator() { yield 1; }
+        \\var asyncA = asyncGenerator();
+        \\var asyncB = asyncGenerator();
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(asyncGenerator.prototype);
+        \\print(Object.getOwnPropertyNames(asyncA).length);
+        \\print(asyncA.next === AsyncGeneratorPrototype.next);
+        \\print(asyncA.return === AsyncGeneratorPrototype.return);
+        \\print(asyncA.throw === AsyncGeneratorPrototype.throw);
+        \\print(asyncA.next === asyncB.next);
+        \\print(asyncA.next.length);
+        \\print(typeof asyncA.slice);
+        \\var customAsyncGeneratorPrototype = Object.create(AsyncGeneratorPrototype);
+        \\asyncGenerator.prototype = customAsyncGeneratorPrototype;
+        \\print(Object.getPrototypeOf(asyncGenerator()) === customAsyncGeneratorPrototype);
+        \\asyncGenerator.prototype = null;
+        \\print(Object.getPrototypeOf(asyncGenerator()) === AsyncGeneratorPrototype);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\n2:1\ntrue\ntrue\ntrue\n0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\ntrue\ntrue\n",
+        stream.buffered(),
+    );
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const sync_key = try js.runtime.internAtom("syncA");
+    defer js.runtime.atoms.free(sync_key);
+    const sync_value = global.getProperty(sync_key);
+    defer sync_value.free(js.runtime);
+    const sync_object = try property_ops.expectObject(sync_value);
+    try std.testing.expect(!js.runtime.borrowedReferenceHolderRegistered(sync_object));
+    try std.testing.expectEqual(global, engine.exec.object_ops.objectRealmGlobal(sync_object).?);
+
+    const generator_prototype_key = try js.runtime.internAtom("GeneratorPrototype");
+    defer js.runtime.atoms.free(generator_prototype_key);
+    const generator_prototype_value = global.getProperty(generator_prototype_key);
+    defer generator_prototype_value.free(js.runtime);
+    const generator_prototype = try property_ops.expectObject(generator_prototype_value);
+    const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
+    const generator_methods = [_]struct { name: []const u8, id: u32 }{
+        .{ .name = "next", .id = @intFromEnum(IntrinsicMethod.generator_next) },
+        .{ .name = "return", .id = @intFromEnum(IntrinsicMethod.generator_return) },
+        .{ .name = "throw", .id = @intFromEnum(IntrinsicMethod.generator_throw) },
+    };
+    for (generator_methods) |method| {
+        const key = try js.runtime.internAtom(method.name);
+        defer js.runtime.atoms.free(key);
+        const value = generator_prototype.getProperty(key);
+        defer value.free(js.runtime);
+        const function_object = try property_ops.expectObject(value);
+        const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
+        try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, native_ref.domain);
+        try std.testing.expectEqual(method.id, native_ref.id);
+        try std.testing.expect(function_object.nativeRecord() != null);
+    }
+
+    const array_iterator_key = try js.runtime.internAtom("arrayIteratorForNativeRecord");
+    defer js.runtime.atoms.free(array_iterator_key);
+    const array_iterator_value = global.getProperty(array_iterator_key);
+    defer array_iterator_value.free(js.runtime);
+    const array_iterator = try property_ops.expectObject(array_iterator_value);
+    const next_key = try js.runtime.internAtom("next");
+    defer js.runtime.atoms.free(next_key);
+    const next_value = array_iterator.getProperty(next_key);
+    defer next_value.free(js.runtime);
+    const next_function = try property_ops.expectObject(next_value);
+    const next_ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
+    try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, next_ref.domain);
+    try std.testing.expectEqual(@intFromEnum(IntrinsicMethod.array_iterator_next), next_ref.id);
+    try std.testing.expect(next_function.nativeRecord() != null);
+}
+
+test "generator object uses the prototype selected after parameter initialization" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var GeneratorPrototype = Object.getPrototypeOf(function* () {}.prototype);
+        \\var syncPrototype = Object.create(GeneratorPrototype);
+        \\function* syncGenerator(value = (syncGenerator.prototype = syncPrototype)) {}
+        \\if (Object.getPrototypeOf(syncGenerator()) !== syncPrototype) throw new Error("sync prototype order");
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(async function* () {}.prototype);
+        \\var asyncPrototype = Object.create(AsyncGeneratorPrototype);
+        \\async function* asyncGenerator(value = (asyncGenerator.prototype = asyncPrototype)) {}
+        \\if (Object.getPrototypeOf(asyncGenerator()) !== asyncPrototype) throw new Error("async prototype order");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator completion resumes keep the original function home object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\class Base {
+        \\  get marker() { return 41; }
+        \\}
+        \\class Derived extends Base {
+        \\  *viaReturn() {
+        \\    try { yield 0; }
+        \\    finally { yield super.marker; }
+        \\  }
+        \\  *viaThrow() {
+        \\    try { yield 0; }
+        \\    catch (value) { yield super.marker + value; }
+        \\  }
+        \\  *viaYieldStar() {
+        \\    yield* [0];
+        \\    return super.marker;
+        \\  }
+        \\}
+        \\const instance = new Derived();
+        \\const returned = instance.viaReturn();
+        \\assert.sameValue(returned.next().value, 0);
+        \\let step = returned.return(99);
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, false);
+        \\step = returned.next();
+        \\assert.sameValue(step.value, 99);
+        \\assert.sameValue(step.done, true);
+        \\const thrown = instance.viaThrow();
+        \\assert.sameValue(thrown.next().value, 0);
+        \\step = thrown.throw(1);
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(thrown.next().done, true);
+        \\const delegated = instance.viaYieldStar();
+        \\assert.sameValue(delegated.next().value, 0);
+        \\step = delegated.next();
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "suspended generators retain one resident execution owner across resumes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* residentGenerator(argument) {
+        \\  let local = { local: true };
+        \\  try {
+        \\    yield local;
+        \\    yield argument;
+        \\  } catch (error) {
+        \\    yield error;
+        \\  }
+        \\}
+        \\globalThis.__residentGenerator = residentGenerator({ argument: true });
+        \\let first = __residentGenerator.next();
+        \\assert.sameValue(first.value.local, true);
+        \\assert.sameValue(first.done, false);
+        \\let second = __residentGenerator.next();
+        \\assert.sameValue(second.value.argument, true);
+        \\assert.sameValue(second.done, false);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__residentGenerator");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const state = generator.generatorExecutionState();
+    try std.testing.expect(!generator.generatorDone());
+    try std.testing.expect(state.has_frame);
+    try std.testing.expect(!state.running_aliases);
+    try std.testing.expect(state.resident_storage_owner);
+    try std.testing.expect(state.catchTarget() != null);
+    try std.testing.expect(generator.generatorStackUsesCombinedStorage());
+    try std.testing.expect(generator.generatorFrameUsesCombinedStorage());
+    try std.testing.expect(state.storage.frame.args.len != 0);
+    try std.testing.expect(state.storage.frame.locals.len != 0);
+    const completion = try js.eval(
+        \\let finalStep = __residentGenerator.next();
+        \\assert.sameValue(finalStep.value, undefined);
+        \\assert.sameValue(finalStep.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+    try std.testing.expect(generator.generatorDone());
+    try std.testing.expect(!generator.generatorExecutionState().has_frame);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+}
+
+test "completed generators eagerly release their resident execution state" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function make(captured) {
+        \\  return function* generator(argument) { yield captured; return argument; };
+        \\}
+        \\const generator = make({ captured: true });
+        \\globalThis.__returnedGenerator = generator.call({ receiver: true }, { argument: true });
+        \\let step = __returnedGenerator.return(7);
+        \\assert.sameValue(step.value, 7);
+        \\assert.sameValue(step.done, true);
+        \\step = __returnedGenerator.next();
+        \\assert.sameValue(step.value, undefined);
+        \\assert.sameValue(step.done, true);
+        \\step = __returnedGenerator.return(8);
+        \\assert.sameValue(step.value, 8);
+        \\assert.sameValue(step.done, true);
+        \\let thrown;
+        \\try { __returnedGenerator.throw(9); } catch (value) { thrown = value; }
+        \\assert.sameValue(thrown, 9);
+        \\globalThis.__normallyCompletedGenerator = generator({ argument: true });
+        \\__normallyCompletedGenerator.next();
+        \\step = __normallyCompletedGenerator.next();
+        \\assert.sameValue(step.done, true);
+        \\globalThis.__thrownGenerator = generator({ argument: true });
+        \\try { __thrownGenerator.throw(10); } catch (value) { thrown = value; }
+        \\assert.sameValue(thrown, 10);
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const names = [_][]const u8{
+        "__returnedGenerator",
+        "__normallyCompletedGenerator",
+        "__thrownGenerator",
+    };
+    for (names) |name| {
+        const key = try js.runtime.internAtom(name);
+        defer js.runtime.atoms.free(key);
+        const value = global.getProperty(key);
+        defer value.free(js.runtime);
+        const generator_object = try property_ops.expectObject(value);
+        try std.testing.expect(generator_object.generatorDone());
+        try std.testing.expect(!generator_object.generatorExecutionState().has_frame);
+        try std.testing.expect(generator_object.generatorExecutionState().storage.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorPc());
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorArgs().len);
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorCaptures().len);
+        try std.testing.expect(generator_object.generatorThis() == null);
+        try std.testing.expect(generator_object.generatorCurrentFunction() == null);
+    }
+}
+
 test "iterator helper method marker is internal" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -4039,6 +4497,24 @@ test "native builtin errors capture a native callsite" {
         \\var dateConstructStack;
         \\try { new Date(Symbol()); } catch (error) { dateConstructStack = error.stack; }
         \\assert.sameValue(dateConstructStack.indexOf("    at Date (native)"), 0);
+        \\Error.prepareStackTrace = function(_, sites) {
+        \\    return sites.map(function(site) {
+        \\        return [site.getFunctionName(), site.isNative()];
+        \\    });
+        \\};
+        \\function outerMapBacktrace() {
+        \\    return [1].map(function callback() {
+        \\        return new Error("cross-machine").stack;
+        \\    })[0];
+        \\}
+        \\var crossMachineSites = outerMapBacktrace();
+        \\assert.sameValue(crossMachineSites[0][0], "callback");
+        \\assert.sameValue(crossMachineSites[0][1], false);
+        \\assert.sameValue(crossMachineSites[1][0], "map");
+        \\assert.sameValue(crossMachineSites[1][1], true);
+        \\assert.sameValue(crossMachineSites[2][0], "outerMapBacktrace");
+        \\assert.sameValue(crossMachineSites[2][1], false);
+        \\Error.prepareStackTrace = undefined;
         \\Error.prepareStackTrace = function(error, sites) {
         \\    assert.sameValue(sites[0].getFunctionName(), "map");
         \\    assert.sameValue(sites[0].getFileName(), null);
@@ -7127,6 +7603,245 @@ test "Engine generator return keeps finally rethrow control marker" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+}
+
+test "generator parameter eval cells close before body resume" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var x = 'outside';
+        \\var first, second, body;
+        \\function* g(
+        \\  _ = (eval('var x = "inside";'), first = function() { return x; }),
+        \\  __ = second = function() { return x; }
+        \\) { body = function() { return x; }; }
+        \\g().next();
+        \\var y = 'outside';
+        \\var restParam, restBody;
+        \\function* h(...[_ = (eval('var y = "inside";'), restParam = function() { return y; })]) {
+        \\  restBody = function() { return y; };
+        \\}
+        \\h().next();
+        \\print(first(), second(), body(), restParam(), restBody());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
+}
+
+test "started generator resumes preserve unmapped arguments from parked locals" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* strictGenerator(value) {
+        \\  "use strict";
+        \\  const first = arguments;
+        \\  value = 17;
+        \\  yield;
+        \\  const shorthand = { arguments };
+        \\  assert.sameValue(shorthand.arguments, first);
+        \\  assert.sameValue(shorthand.arguments[0], 1);
+        \\  yield;
+        \\  assert.sameValue(arguments, first);
+        \\  assert.sameValue(arguments[0], 1);
+        \\}
+        \\const strictIterator = strictGenerator(1);
+        \\strictIterator.next();
+        \\strictIterator.next();
+        \\strictIterator.next();
+        \\function* defaultGenerator(value = 3) {
+        \\  const first = eval("arguments");
+        \\  value = 19;
+        \\  yield;
+        \\  assert.sameValue(eval("arguments"), first);
+        \\  assert.sameValue(eval("arguments")[0], 2);
+        \\}
+        \\const defaultIterator = defaultGenerator(2);
+        \\defaultIterator.next();
+        \\defaultIterator.next();
+        \\function* restGenerator(...values) {
+        \\  const first = arguments;
+        \\  values[0] = 23;
+        \\  yield;
+        \\  assert.sameValue(arguments, first);
+        \\  assert.sameValue(arguments[0], 4);
+        \\}
+        \\const restIterator = restGenerator(4);
+        \\restIterator.next();
+        \\restIterator.next();
+        \\function* lateArguments(first) {
+        \\  yield;
+        \\  assert.sameValue(arguments.length, 3);
+        \\  assert.sameValue(arguments[0], 5);
+        \\  assert.sameValue(arguments[2], 7);
+        \\}
+        \\const lateIterator = lateArguments(5, 6, 7);
+        \\lateIterator.next();
+        \\lateIterator.next();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "iterator results reuse the realm shape without intermediate property growth" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const warm = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(1), false);
+    warm.free(js.runtime);
+    const alloc_calls = js.runtime.memory.alloc_calls;
+    const create_calls = js.runtime.memory.create_calls;
+    const result = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(2), true);
+    defer result.free(js.runtime);
+
+    // One GC object plus its final two-entry property array. In particular,
+    // there is no intermediate one-entry property allocation.
+    try std.testing.expectEqual(alloc_calls + 1, js.runtime.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls + 1, js.runtime.memory.create_calls);
+    const object = try core.Object.expect(result);
+    try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.asInt32());
+    try std.testing.expect(object.asDataAt(1).?.asBool().?);
+}
+
+test "generator creation avoids a second payload copy of rooted input slices" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const argument = (try core.Object.create(js.runtime, core.class.ids.object, null)).value();
+    defer argument.free(js.runtime);
+    const argument_setup = try js.eval("globalThis.__argumentGenerator = function* () {};");
+    argument_setup.free(js.runtime);
+    const argument_key = try js.runtime.internAtom("__argumentGenerator");
+    defer js.runtime.atoms.free(argument_key);
+    const argument_generator = global.getProperty(argument_key);
+    defer argument_generator.free(js.runtime);
+    const argument_values = [_]core.JSValue{argument};
+
+    const warm_argument = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &argument_values,
+        null,
+        null,
+    );
+    warm_argument.free(js.runtime);
+    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    // Keep one final-prototype root Shape live. A qjs-style detached generator
+    // construction then needs two fixed creates (public Object + compact
+    // payload) and one variable allocation containing execution state + stack;
+    // it must not allocate a temporary null-prototype Shape or stack buffer.
+    defer warm_no_argument.free(js.runtime);
+
+    var alloc_calls = js.runtime.memory.alloc_calls;
+    var create_calls = js.runtime.memory.create_calls;
+    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    no_argument_result.free(js.runtime);
+    const no_argument_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const no_argument_create_count = js.runtime.memory.create_calls - create_calls;
+    try std.testing.expectEqual(@as(usize, 2), no_argument_create_count);
+    try std.testing.expectEqual(@as(usize, 1), no_argument_alloc_count);
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &argument_values,
+        null,
+        null,
+    );
+    argument_result.free(js.runtime);
+    const argument_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const argument_create_count = js.runtime.memory.create_calls - create_calls;
+    // Args/locals/var-ref windows enlarge the same variable-sized execution
+    // allocation; the construction root borrows the caller slice until those
+    // resident windows have been initialized and parked.
+    try std.testing.expectEqual(no_argument_alloc_count, argument_alloc_count);
+    try std.testing.expectEqual(no_argument_create_count, argument_create_count);
+
+    const capture_setup = try js.eval("globalThis.__captureGenerator = (function () { var captured = {}; return function* () { yield captured; }; })();");
+    capture_setup.free(js.runtime);
+    const capture_key = try js.runtime.internAtom("__captureGenerator");
+    defer js.runtime.atoms.free(capture_key);
+    const capture_generator = global.getProperty(capture_key);
+    defer capture_generator.free(js.runtime);
+    const warm_capture = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        capture_generator,
+        &.{},
+        null,
+        null,
+    );
+    defer warm_capture.free(js.runtime);
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    no_capture_result.free(js.runtime);
+    const no_capture_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const no_capture_create_count = js.runtime.memory.create_calls - create_calls;
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        capture_generator,
+        &.{},
+        null,
+        null,
+    );
+    capture_result.free(js.runtime);
+    const capture_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const capture_create_count = js.runtime.memory.create_calls - create_calls;
+    try std.testing.expectEqual(no_capture_alloc_count, capture_alloc_count);
+    try std.testing.expectEqual(no_capture_create_count, capture_create_count);
 }
 
 test "Engine generator return propagates an explicit finally throw" {

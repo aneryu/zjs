@@ -121,9 +121,9 @@ pub const Vm = struct {
     /// dispatchLoop's `local_fast_blocked_by_generator`).
     local_fast_blocked: bool = false,
 
-    /// Pointer to the CURRENT frame's catch-target slot (L0: loop_state.catch_target_storage;
-    /// inline: &entry.catch_target). reloadTop re-points it on every frame switch, so a
-    /// catch handler set in one frame doesn't leak into another.
+    /// Pointer to the CURRENT frame's catch-target slot. `reloadTop` re-points
+    /// it through `Machine.loadCurrentLevel` on every frame switch, so a catch
+    /// handler set in one frame doesn't leak into another.
     catch_target: *?usize,
 
     /// Interrupt poll state — qjs polls on every OP_goto (quickjs.c:18822,
@@ -131,14 +131,6 @@ pub const Vm = struct {
     /// installed handler (`poller.active`) like the old dispatchLoop leg: with
     /// none installed the jump handlers stay poll-free.
     poller: control_vm.InterruptPoller,
-
-    /// The L0 (depth-0) frame, captured at entry. When a return pops the last inline
-    /// frame (depth back to 0), reloadTop restores THESE (topEntry() is invalid at
-    /// depth 0 — the L0 frame is loop_state.frame_storage, not a Machine Entry).
-    l0_function: *const bytecode.Bytecode,
-    l0_frame: *frame_mod.Frame,
-    l0_stack: *stack_mod.Stack,
-    l0_catch_target: *?usize,
 
     /// Outcome payloads (ride here, not in the u32 return).
     return_value: JSValue = JSValue.undefinedValue(),
@@ -148,22 +140,6 @@ pub const Vm = struct {
     /// On `.tail`: true => `tailCallReuse` (op.tail_call*/eval-tail), false => `pushCall`
     /// (op.call*/call_method). The driver branches on it.
     tail_is_reuse: bool = false,
-
-    /// L0-only (depth==0) eval/generator entry state. Inline frames inherit theirs
-    /// from `frame`; these mirror the dispatchLoop's `entry_*` depth-conditional
-    /// locals so a cold handler reads them from one place. Populated by the driver at
-    /// the L0 boundary; the depth==0 check is `machine.depth == 0`.
-    l0: L0Entry,
-
-    pub const L0Entry = struct {
-        is_eval_code: bool = false,
-        eval_global_var_bindings: bool = false,
-        strict_unresolved_get_var: bool = false,
-        generator_state: ?*core.Object = null,
-        stop_on_yield: bool = false,
-        stop_before_pc: ?usize = null,
-        suspend_on_module_await: bool = false,
-    };
 
     /// syncDown analog: publish the register-resident pc/sp back to frame.pc /
     /// stack.values so a cold helper sees live state. `pc` points at the opcode byte;
@@ -255,8 +231,8 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(
 /// runs `[0, generator_body_pc)` then stops. Mirrors zjs_vm.zig:921's stopBeforePc.
 inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
     if (vm.machine.depth == 0) {
-        const stop_before_pc = vm.l0.stop_before_pc orelse return false;
-        const r = gen_async_vm.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.l0.generator_state, stop_before_pc) catch |e| {
+        const stop_before_pc = vm.machine.l0.stop_before_pc orelse return false;
+        const r = gen_async_vm.stopBeforePc(vm.ctx, vm.stack, vm.frame, vm.machine.l0.generator_state, vm.catch_target.*, stop_before_pc) catch |e| {
             out.* = vm.fail(e);
             return true;
         };
@@ -327,13 +303,13 @@ pub fn coldGen(comptime body: fn (vm: *Vm, pc: [*]const u8) HostError!?JSValue) 
 
 // ---- d==0 entry-guard accessors (mirror the dispatchLoop `(if depth==0 ...)`) ----
 pub inline fn isEvalCode(vm: *Vm) bool {
-    return if (vm.machine.depth == 0) vm.l0.is_eval_code else false;
+    return if (vm.machine.depth == 0) vm.machine.l0.is_eval_code else false;
 }
 pub inline fn evalGlobalVarBindings(vm: *Vm) bool {
-    return if (vm.machine.depth == 0) vm.l0.eval_global_var_bindings else false;
+    return if (vm.machine.depth == 0) vm.machine.l0.eval_global_var_bindings else false;
 }
 pub inline fn strictUnresolvedGetVar(vm: *Vm) bool {
-    return if (vm.machine.depth == 0) vm.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict);
+    return if (vm.machine.depth == 0) vm.machine.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict);
 }
 
 inline fn evIsEval(vm: *Vm) bool {
@@ -419,7 +395,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     // pointer pass-through (pushFrame just stored the same pointer into
     // `machine.top`, quickjs.c:17870). The manual expansion below is
     // reloadTop's depth>0 arm verbatim.
-    vm.function = entry.function;
+    vm.function = entry.frame.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
@@ -454,7 +430,7 @@ inline fn pushMovedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    vm.function = entry.function;
+    vm.function = entry.frame.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
@@ -541,7 +517,7 @@ inline fn pushForwardedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    vm.function = entry.function;
+    vm.function = entry.frame.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
@@ -623,43 +599,22 @@ fn op_proxy_get_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     return coldNext(var_buf, vm);
 }
 
-/// Fused popReturn + reload for an in-handler return to an inline caller —
+/// Fused popFrame + reload for an in-handler return to an inline caller —
 /// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
 /// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
 /// quickjs.c:20709), deliver the result into the caller's operand stack,
-/// resume the caller — all in the handler. Expanded inline into the
-/// Handler-signature caller so the tail call is legal.
+/// resume the caller — all in the handler. Frame ownership and the
+/// simple/general teardown choice stay behind Machine.popFrame.
 inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     const machine = vm.machine;
-    const dying = machine.topEntry();
-    const continuation = inline_calls.ReturnContinuation{
-        .action = dying.return_action,
-        .atom_id = dying.continuation_atom,
-    };
-    dying.continuation_atom = core.atom.null_atom;
-    // Straight-line teardown (qjs done: epilogue) unless execution escaped
-    // the simple shape: grew the operand stack to the heap, materialized the
-    // cold box (arguments object), or moved frame storage to the heap.
-    if (dying.fast_teardown != .none and dying.frame.cold == null and
-        !dying.frame.storage_on_heap and dying.stack.arena_window)
-    {
-        inline_calls.Machine.teardownSimpleEntry(vm.ctx, dying);
-    } else {
-        inline_calls.Machine.teardownInlineEntry(vm.ctx, dying);
-    }
-    vm.ctx.call_depth -= 1;
-    machine.depth -= 1;
-    // qjs done: `rt->current_stack_frame = sf->prev_frame;` (quickjs.c:20709)
-    // — the caller's Entry address comes from the chain, not from re-deriving
-    // entryAt(depth-1) chunk arithmetic; reloadTop below reads it back.
-    machine.top = dying.prev;
+    var continuation = machine.popFrame();
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
     reloadTop(vm, &pc2, &sp2, &vb2);
     if (continuation.action == .proxy_get) {
         vm.return_value = value;
-        vm.return_atom = continuation.atom_id;
+        vm.return_atom = continuation.takeAtom();
         return @call(.always_tail, op_proxy_get_continuation, .{ pc2, sp2, vb2, vm });
     }
     std.debug.assert(continuation.atom_id == core.atom.null_atom);
@@ -708,7 +663,7 @@ fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
-    const value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    const value = control_vm.returnTop(vm.ctx, vm.stack, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
     if (depth0) {
         vm.return_value = value;
         return .returned; // L0 exit stays on the driver
@@ -728,7 +683,7 @@ fn op_return_undef_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm
     _ = vb;
     vm.publish(pc, sp);
     const depth0 = vm.machine.depth == 0;
-    const value = control_vm.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.l0.generator_state else null) catch |e| return vm.fail(e);
+    const value = control_vm.returnUndefined(vm.ctx, vm.frame, if (depth0) vm.machine.l0.generator_state else null) catch |e| return vm.fail(e);
     if (depth0) {
         vm.return_value = value;
         return .returned;
@@ -772,7 +727,10 @@ fn op_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
         },
     }
 }
-fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+// This is a high-frequency tail-dispatch target. Keep its entry on an I-cache
+// boundary so unrelated source/layout changes cannot move the prologue across
+// a cache line and swing the method-call loop cost.
+fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     vm.publish(pc, sp); // frame.pc now at the 2-byte argc operand
     const argc = readInt(u16, pc + 1);
     // Inline the bytecode-method resolution (recv.method() where method is a plain
@@ -923,7 +881,7 @@ fn op_throw_error(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
 const h_initial_yield = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.initialYield(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null, if (vm.machine.depth == 0) vm.l0.stop_on_yield else false)) {
+        switch (try gen_async_vm.initialYield(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -932,7 +890,7 @@ const h_initial_yield = coldGen(struct {
 const h_yield = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.yieldValue(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null, if (vm.machine.depth == 0) vm.l0.stop_on_yield else false)) {
+        switch (try gen_async_vm.yieldValue(vm.ctx, vm.stack, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, vm.catch_target.*, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -941,7 +899,7 @@ const h_yield = coldGen(struct {
 const h_yield_star = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.yieldStar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null, if (vm.machine.depth == 0) vm.l0.stop_on_yield else false, vm.catch_target)) {
+        switch (try gen_async_vm.yieldStar(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -950,7 +908,7 @@ const h_yield_star = coldGen(struct {
 const h_await = coldGen(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!?JSValue {
         _ = pc;
-        switch (try gen_async_vm.awaitValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.l0.generator_state else null, if (vm.machine.depth == 0) vm.l0.suspend_on_module_await else false, if (vm.machine.depth == 0) vm.l0.stop_on_yield else false, vm.catch_target)) {
+        switch (try gen_async_vm.awaitValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, if (vm.machine.depth == 0) vm.machine.l0.generator_state else null, if (vm.machine.depth == 0) vm.machine.l0.suspend_on_module_await else false, if (vm.machine.depth == 0) vm.machine.l0.stop_on_yield else false, vm.catch_target)) {
             .none, .continue_loop => return null,
             .return_value => |v| return v,
         }
@@ -2367,24 +2325,13 @@ const property_tail_table = [10]Handler{
 // ===========================================================================
 
 fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) void {
-    if (vm.machine.depth == 0) {
-        // Returned to L0 — topEntry() is invalid; restore the captured L0 frame.
-        vm.function = vm.l0_function;
-        vm.frame = vm.l0_frame;
-        vm.stack = vm.l0_stack;
-        vm.catch_target = vm.l0_catch_target;
-    } else {
-        const entry = vm.machine.topEntry();
-        vm.function = entry.function;
-        vm.frame = &entry.frame;
-        vm.stack = &entry.stack;
-        vm.catch_target = &entry.catch_target;
-    }
+    vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
+    vm.function = vm.frame.function;
     vm.code_base = vm.function.code.ptr;
     vm.code_end = vm.function.code.ptr + vm.function.code.len;
     vm.stack_base = vm.stack.values.ptr;
     vm.arg_buf = vm.frame.args.ptr;
-    vm.local_fast_blocked = vm.machine.depth == 0 and vm.l0.stop_before_pc != null;
+    vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
     pc.* = vm.code_base + vm.frame.pc;
@@ -2396,7 +2343,7 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
 pub fn run(vm: *Vm) HostError!JSValue {
     vm.tbl = &dispatch_table; // resident table base (avoids per-dispatch adrp+add)
     vm.property_tail_tbl = &property_tail_table;
-    vm.local_fast_blocked = vm.machine.depth == 0 and vm.l0.stop_before_pc != null;
+    vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     var pc = vm.code_base + vm.frame.pc;
     var sp = vm.reloadSp();
     var var_buf = vm.frame.locals.ptr;
@@ -2404,12 +2351,12 @@ pub fn run(vm: *Vm) HostError!JSValue {
         switch (next(pc, sp, var_buf, vm)) {
             .returned => {
                 if (vm.machine.depth == 0) return vm.return_value;
-                const continuation = vm.machine.popReturn(vm.return_value);
+                var continuation = vm.machine.popReturn(vm.return_value);
                 reloadTop(vm, &pc, &sp, &var_buf);
                 if (continuation.action == .proxy_get) {
                     const result = vm.return_value;
                     vm.return_value = JSValue.undefinedValue();
-                    try completeProxyGetContinuation(vm, result, continuation.atom_id);
+                    try completeProxyGetContinuation(vm, result, continuation.takeAtom());
                     reloadTop(vm, &pc, &sp, &var_buf);
                 } else {
                     std.debug.assert(continuation.atom_id == core.atom.null_atom);

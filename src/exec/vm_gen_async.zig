@@ -32,74 +32,161 @@ const AwaitSuspendMode = enum {
 };
 
 pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
-    _ = rt;
-    const values = generator.generatorStack();
-    const capacity = generator.generatorStackCapacity();
-    if (values.len > stack.limit) return error.StackOverflow;
-    if (additional > stack.limit - values.len) return error.StackOverflow;
-    const needed = values.len + additional;
-    if (needed <= capacity) return;
+    const execution = generator.generatorPayloadPtr().execution orelse return error.TypeError;
+    return reserveGeneratorExecutionStackAdditional(rt, stack, execution, additional);
+}
 
-    var next_capacity = if (capacity == 0) @as(usize, 8) else capacity;
-    while (next_capacity < needed) {
-        next_capacity *= 2;
-        if (next_capacity > stack.limit) {
-            next_capacity = stack.limit;
-            break;
+inline fn reserveGeneratorExecutionStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, execution: *core.object.GeneratorExecutionState, additional: usize) !void {
+    const parked = &execution.suspended.storage.stack;
+    if (parked.values.len <= stack.limit and
+        additional <= stack.limit - parked.values.len and
+        parked.values.len <= parked.capacity and
+        additional <= parked.capacity - parked.values.len)
+    {
+        return;
+    }
+    const resident_backing = execution.stackUsesCombinedStorage();
+    try parked.ensureAdditionalWithResidentBacking(rt, stack.limit, additional, resident_backing);
+}
+
+fn sameSlice(comptime T: type, left: []T, right: []T) bool {
+    return left.len == right.len and (left.len == 0 or left.ptr == right.ptr);
+}
+
+fn residentFrameViewsMatch(state: *const core.object.SuspendedExecutionState, frame: *const frame_mod.Frame) bool {
+    const parked = state.storage.frame;
+    return sameSlice(core.JSValue, parked.storage, frame.storage_values) and
+        sameSlice(core.JSValue, parked.locals, frame.locals) and
+        sameSlice(core.JSValue, parked.args, frame.args) and
+        sameSlice(*core.VarRef, parked.var_refs, frame.var_refs) and
+        sameSlice(?*core.VarRef, parked.open_var_refs, frame.open_var_refs);
+}
+
+fn clearLiveExecutionViews(stack: *stack_mod.Stack, frame: *frame_mod.Frame) void {
+    stack.values = &.{};
+    stack.capacity = 0;
+    stack.arena_window = false;
+    stack.resident_window = false;
+    frame.storage_values = &.{};
+    frame.ownership.storage = .borrowed;
+    frame.locals = &.{};
+    frame.args = &.{};
+    frame.var_refs = &.{};
+    frame.ownership.var_refs = .owned;
+    frame.open_var_refs = &.{};
+}
+
+/// Park live execution views without moving the resident frame on the common
+/// path. QuickJS keeps one JSAsyncFunctionState backing allocation and changes
+/// only cur_sp/cur_pc at a suspension; this is the corresponding zjs seam.
+///
+/// A defensive frame-growth path can replace one of the combined windows. In
+/// that case publish the live descriptors once and return to the legacy
+/// transfer model. Normal compiled generator frames are sized exactly and stay
+/// on the descriptor-free resident path after their first suspension.
+fn parkGeneratorExecutionState(
+    rt: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    execution: *core.object.GeneratorExecutionState,
+    pc: usize,
+    catch_target_pc: u32,
+    has_frame: bool,
+) void {
+    const state = &execution.suspended;
+    const was_resident_owner = state.running_aliases and state.resident_storage_owner;
+    const frame_views_match = was_resident_owner and residentFrameViewsMatch(state, frame);
+
+    if (frame_views_match) {
+        const old_stack = state.storage.stack;
+        const old_stack_uses_combined_storage = execution.stackUsesCombinedStorage();
+        state.storage.stack = .{
+            .values = stack.values,
+            .capacity = stack.capacity,
+        };
+        state.pc = pc;
+        state.catch_target_pc = catch_target_pc;
+        state.has_frame = has_frame;
+        state.running_aliases = false;
+        clearLiveExecutionViews(stack, frame);
+
+        // Stack growth copies raw owned slots to its new buffer. Once the new
+        // view is authoritative, release only the old backing bytes; its stale
+        // slot copies must never decrement references.
+        if (old_stack.capacity != 0 and
+            old_stack.values.ptr != state.storage.stack.values.ptr and
+            !old_stack_uses_combined_storage)
+        {
+            rt.memory.free(core.JSValue, old_stack.values.ptr[0..old_stack.capacity]);
         }
+        return;
     }
 
-    const next = try stack.memory.alloc(core.JSValue, next_capacity);
-    errdefer stack.memory.free(core.JSValue, next);
-    @memcpy(next[0..values.len], values);
-    generator.generatorStackSlot().* = next[0..values.len];
-    generator.generatorStackCapacitySlot().* = next_capacity;
-    if (capacity != 0) {
-        stack.memory.free(core.JSValue, values.ptr[0..capacity]);
-    } else if (values.len != 0) {
-        stack.memory.free(core.JSValue, values);
+    if (was_resident_owner) {
+        // Resident frame growth is expected only on defensive malformed or
+        // synthetic bytecode paths. The first such change still starts from
+        // the combined FAM backing, which remains owned by the execution-state
+        // allocation after the live replacement is published.
+        std.debug.assert(execution.frameUsesCombinedStorage() or state.storage.frame.storage.len == 0);
+    }
+
+    const old_stack = state.storage.stack;
+    const old_stack_uses_combined_storage = execution.stackUsesCombinedStorage();
+    var replacement = core.object.SuspendedExecutionStorage{
+        .stack = .{
+            .values = stack.values,
+            .capacity = stack.capacity,
+        },
+        .frame = .{
+            .storage = frame.storage_values,
+            .locals = frame.locals,
+            .args = frame.args,
+            .var_refs = frame.var_refs,
+            .open_var_refs = frame.open_var_refs,
+        },
+    };
+    clearLiveExecutionViews(stack, frame);
+    state.replaceStorageOwned(pc, catch_target_pc, &replacement, rt);
+    state.has_frame = has_frame;
+
+    if (was_resident_owner and old_stack.capacity != 0 and
+        old_stack.values.ptr != state.storage.stack.values.ptr and
+        !old_stack_uses_combined_storage)
+    {
+        rt.memory.free(core.JSValue, old_stack.values.ptr[0..old_stack.capacity]);
+    }
+
+    if (has_frame and !was_resident_owner and execution.canRetainResidentStorageOwnership()) {
+        state.resident_storage_owner = true;
     }
 }
 
-pub fn saveGeneratorExecutionState(
+/// Keep the ownership handoff as one cold-ish seam. Every yield/await opcode
+/// reaches this helper, and duplicating its reset/swap/deinit sequence into
+/// each handler measurably bloats the ReleaseFast instruction working set.
+pub noinline fn saveGeneratorExecutionState(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: *core.Object,
     pc: usize,
+    catch_target: ?usize,
 ) !void {
+    const execution = generator.generatorPayloadPtr().execution orelse return error.TypeError;
     // Generator frames must run on heap-backed stacks: suspension transfers
     // buffer ownership into the generator object, which is incompatible with
     // borrowed VM stack-arena windows.
     std.debug.assert(!stack.arena_window);
-    generator.generatorPcSlot().* = pc;
-    const old_stack = generator.generatorStack();
-    const old_stack_capacity = generator.generatorStackCapacity();
-    const old_frame_storage = generator.generatorFrameStorage();
-    const old_frame_locals = generator.generatorFrameLocals();
-    const old_frame_args = generator.generatorFrameArgs();
-    const old_frame_var_refs = generator.generatorFrameVarRefs();
-    generator.generatorStackSlot().* = stack.values;
-    generator.generatorStackCapacitySlot().* = stack.capacity;
-    generator.generatorFrameStorageSlot().* = frame.storage_values;
-    generator.generatorFrameLocalsSlot().* = frame.locals;
-    generator.generatorFrameArgsSlot().* = frame.args;
-    generator.generatorFrameVarRefsSlot().* = frame.var_refs;
-    stack.values = &.{};
-    stack.capacity = 0;
-    frame.storage_values = &.{};
-    frame.storage_on_heap = false;
-    frame.locals = &.{};
-    frame.args = &.{};
-    frame.var_refs = &.{};
-
-    for (old_stack) |stored| stored.free(ctx.runtime);
-    if (old_stack_capacity != 0) {
-        ctx.runtime.memory.free(core.JSValue, old_stack.ptr[0..old_stack_capacity]);
-    } else if (old_stack.len != 0) {
-        ctx.runtime.memory.free(core.JSValue, old_stack);
-    }
-    freeGeneratorFrameStorage(ctx.runtime, old_frame_storage, old_frame_locals, old_frame_args, old_frame_var_refs);
+    std.debug.assert(frame.ownership.storage == .owned or frame.storage_values.len == 0 or execution.frameUsesCombinedStorage());
+    std.debug.assert(frame.ownership.var_refs == .owned or frame.var_refs.len == 0);
+    std.debug.assert(frame.open_var_refs.len == 0 or frame.storage_values.len != 0);
+    // Encode every fallible scalar before changing any ownership. An invalid
+    // oversized target must leave the live VM state intact for normal unwind.
+    const catch_target_pc = if (catch_target) |target|
+        std.math.cast(u32, target) orelse return error.InvalidBytecode
+    else
+        std.math.maxInt(u32);
+    parkGeneratorExecutionState(ctx.runtime, stack, frame, execution, pc, catch_target_pc, true);
 }
 
 pub fn resumeExecutionState(
@@ -114,26 +201,84 @@ pub fn resumeExecutionState(
     return resumeExecutionStateRaw(ctx, stack, function, frame, generator_object, resume_value);
 }
 
-fn resumeExecutionStateRaw(
+/// Install parked buffers after every fallible resume preparation has
+/// completed. The typed state keeps these addresses as non-owning aliases while
+/// running, mirroring qjs's resident async frame with `cur_sp == NULL`. GC and
+/// teardown consult `running_aliases`, so only the live Frame/Stack owns them.
+inline fn installSuspendedExecutionStorage(
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    state: *core.object.SuspendedExecutionState,
+    resident_stack: bool,
+    resident_frame: bool,
+) void {
+    const suspended = &state.storage;
+    const resident_owner = state.resident_storage_owner;
+    frame.storage_values = suspended.frame.storage;
+    frame.ownership.storage = if (frame.storage_values.len != 0 and !resident_frame and !resident_owner) .owned else .borrowed;
+    frame.locals = suspended.frame.locals;
+    frame.args = suspended.frame.args;
+    frame.var_refs = suspended.frame.var_refs;
+    frame.ownership.var_refs = .owned;
+    frame.open_var_refs = suspended.frame.open_var_refs;
+    stack.values = suspended.stack.values;
+    stack.capacity = suspended.stack.capacity;
+    stack.arena_window = false;
+    stack.resident_window = resident_stack or resident_owner;
+    state.beginRunningAliases();
+}
+
+/// Clear aliases after completion/error. A suspension already republished the
+/// live owners and cleared `running_aliases`, making this a cheap no-op there.
+pub fn finishExecutionStateRun(rt: *core.JSRuntime, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) void {
+    const object = generator orelse return;
+    // The payload outlives its nullable execution record. Internal module
+    // continuations can complete and release that record before this defer.
+    const execution = object.generatorPayloadPtr().execution orelse return;
+    const state = &execution.suspended;
+    if (!state.running_aliases) return;
+    if (state.resident_storage_owner) {
+        parkGeneratorExecutionState(rt, stack, frame, execution, frame.pc, std.math.maxInt(u32), false);
+        return;
+    }
+    state.finishRunningAliases();
+}
+
+/// Keep generator-only ownership installation out of the universal
+/// runWithArgsState frame. The nullable wrapper still folds to a cheap null
+/// return for ordinary calls, while an actual resume crosses this boundary
+/// once, like qjs's async_func_resume re-entry seam.
+noinline fn resumeExecutionStateRaw(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     generator: *core.Object,
     resume_value: ?core.JSValue,
-) !ResumeState {
-    if (generator.generatorPc() == 0) {
-        generator.generatorJustYieldedSlot().* = false;
+) align(64) !ResumeState {
+    const payload = generator.generatorPayloadPtr();
+    const execution = payload.execution orelse return error.TypeError;
+    const state = &execution.suspended;
+    if (!state.has_frame) {
+        if (execution.stackUsesCombinedStorage()) {
+            std.debug.assert(stack.capacity == 0 and stack.values.len == 0);
+            stack.values = state.storage.stack.values;
+            stack.capacity = state.storage.stack.capacity;
+            stack.arena_window = false;
+            stack.resident_window = true;
+            state.beginRunningAliases();
+        }
+        payload.just_yielded = false;
         return .{};
     }
     // Resume installs generator-owned heap buffers into the stack; the stack
     // must not be an arena window (its deinit would skip freeing them).
     std.debug.assert(!stack.arena_window);
 
-    const resume_pc = generator.generatorPc();
-    const generator_started = generator.generatorStarted();
-    const was_yield_star_suspended = generator_started and call_runtime.generatorYieldStarSuspended(ctx.runtime, generator);
-    const completion_type = if (generator_started) call_runtime.generatorResumeCompletionType(ctx.runtime, generator) else 0;
+    const resume_pc = state.pc;
+    const generator_started = payload.started;
+    const was_yield_star_suspended = generator_started and payload.yield_star_suspended;
+    const completion_type = if (generator_started) payload.resume_completion_type else 0;
     const resume_needs_branch_false = generator_started and
         resume_pc > 0 and
         resume_pc <= function.code.len and
@@ -150,45 +295,38 @@ fn resumeExecutionStateRaw(
     else
         1;
     if (resume_needs_branch_false) resume_push_count += 1;
-    try reserveGeneratorStackAdditional(ctx.runtime, stack, generator, resume_push_count);
+    try reserveGeneratorExecutionStackAdditional(ctx.runtime, stack, execution, resume_push_count);
 
-    generator.generatorJustYieldedSlot().* = false;
+    payload.just_yielded = false;
+    // Started resumes no longer build a throwaway frame slab in zjs_vm. The
+    // fresh Frame contains only borrowed call bindings until the resident
+    // windows below are installed, so there is no pre-existing storage to
+    // close or release here.
+    std.debug.assert(frame.storage_values.len == 0);
+    std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
+    std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
     frame.pc = resume_pc;
-    frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
-    frame.storage_values = generator.generatorFrameStorage();
-    frame.storage_on_heap = frame.storage_values.len != 0;
-    frame.locals = generator.generatorFrameLocals();
-    frame.args = generator.generatorFrameArgs();
-    frame.var_refs = generator.generatorFrameVarRefs();
-    if (frame.cold) |c| {
-        c.original_args = &.{};
-    }
-    generator.generatorFrameStorageSlot().* = &.{};
-    generator.generatorFrameLocalsSlot().* = &.{};
-    generator.generatorFrameArgsSlot().* = &.{};
-    generator.generatorFrameVarRefsSlot().* = &.{};
-    stack.values = generator.generatorStack();
-    stack.capacity = generator.generatorStackCapacity();
-    generator.generatorStackSlot().* = &.{};
-    generator.generatorStackCapacitySlot().* = 0;
-    const catch_target = activeCatchTargetForPc(function, frame.pc);
+    const resident_stack = execution.stackUsesCombinedStorage();
+    const resident_frame = execution.frameUsesCombinedStorage();
+    installSuspendedExecutionStorage(stack, frame, state, resident_stack, resident_frame);
+    const catch_target = state.catchTarget();
 
     if (!generator_started) return .{ .catch_target = catch_target };
     if (was_yield_star_suspended) {
-        try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator, false);
-        try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+        payload.yield_star_suspended = false;
+        payload.resume_completion_type = 0;
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
         stack.pushOwnedAssumeCapacity(core.JSValue.int32(completion_type));
     } else {
         if (completion_type == 2) {
-            try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+            payload.resume_completion_type = 0;
             if (resume_needs_branch_false) {
                 stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
             }
             return .{ .throw_on_entry = true, .catch_target = catch_target };
         }
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
-        if (completion_type != 0) try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+        if (completion_type != 0) payload.resume_completion_type = 0;
     }
     if (resume_needs_branch_false) {
         stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
@@ -236,12 +374,20 @@ pub fn stopBeforePc(
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
+    catch_target: ?usize,
     stop_before_pc: ?usize,
 ) !?core.JSValue {
     const stop_pc = stop_before_pc orelse return null;
     if (frame.pc != stop_pc) return null;
     if (generator) |generator_object| {
-        try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc);
+        // runGeneratorParameterInit stops at the parameter-environment/body
+        // boundary before the generator is started. The old temporary Frame
+        // teardown closed these cells here; preserve that semantic transition
+        // explicitly now that suspended storage survives as one typed owner.
+        // Later finally-return stops belong to an already-started generator
+        // and must keep their open aliases parked across the suspension.
+        if (!generator_object.generatorStarted()) frame.closeOpenVarRefs(ctx.runtime);
+        try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc, catch_target);
         generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
     }
     return core.JSValue.undefinedValue();
@@ -252,11 +398,12 @@ pub fn initialYield(
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
+    catch_target: ?usize,
     stop_on_yield: bool,
 ) !Result {
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
             generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
@@ -272,6 +419,7 @@ pub noinline fn yieldValue(
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
+    catch_target: ?usize,
     stop_on_yield: bool,
 ) !Result {
     const value = try stack.pop();
@@ -279,10 +427,11 @@ pub noinline fn yieldValue(
     errdefer if (value_owned) value.free(ctx.runtime);
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
-            generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield);
-            generator_object.generatorStartedSlot().* = true;
-            generator_object.generatorJustYieldedSlot().* = true;
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
+            const payload = generator_object.generatorPayloadPtr();
+            payload.suspend_kind = @intFromEnum(core.object.GeneratorSuspendKind.yield);
+            payload.started = true;
+            payload.just_yielded = true;
         }
         value_owned = false;
         return .{ .return_value = value };
@@ -305,7 +454,7 @@ pub noinline fn yieldStar(
     stop_on_yield: bool,
     catch_target: *?usize,
 ) !Result {
-    return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield) catch |err| {
+    return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield, catch_target.*) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
@@ -322,6 +471,7 @@ fn yieldStarRaw(
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
+    catch_target: ?usize,
 ) !Result {
     const opcode_pc = frame.pc - 1;
     const expanded_lowering = frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.dup;
@@ -331,7 +481,7 @@ fn yieldStarRaw(
         errdefer if (result_object_owned) result_object.free(ctx.runtime);
         if (stop_on_yield) {
             if (generator) |generator_object| {
-                try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+                try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
                 generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
                 try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
                 generator_object.generatorStartedSlot().* = true;
@@ -385,15 +535,15 @@ fn yieldStarRaw(
     if (step.done) {
         try stack.reserveAdditional(1);
         if (generator) |generator_object| {
-            generator_object.clearOptionalValueSlot(ctx.runtime, generator_object.generatorYieldStarIteratorSlot());
+            generator_object.clearGeneratorYieldStarIterator(ctx.runtime);
         }
         stack.pushAssumeCapacity(step.value);
         return .continue_loop;
     }
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            if (!using_stored_iterator) try generator_object.setOptionalValueSlot(ctx.runtime, generator_object.generatorYieldStarIteratorSlot(), iterator_value.dup());
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc);
+            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(ctx.runtime, iterator_value.dup());
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc, catch_target);
             generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
@@ -417,7 +567,7 @@ pub noinline fn awaitValue(
     stop_on_yield: bool,
     catch_target: *?usize,
 ) !Result {
-    return awaitValueRaw(ctx, output, global, stack, function, frame, generator, suspend_on_module_await, stop_on_yield) catch |err| {
+    return awaitValueRaw(ctx, output, global, stack, function, frame, generator, suspend_on_module_await, stop_on_yield, catch_target.*) catch |err| {
         if (try handleAwaitError(ctx, output, global, stack, function, frame, catch_target, err)) {
             return .continue_loop;
         }
@@ -435,34 +585,35 @@ fn awaitValueRaw(
     generator: ?*core.Object,
     suspend_on_module_await: bool,
     stop_on_yield: bool,
+    catch_target: ?usize,
 ) !Result {
     const suspend_mode = awaitSuspendMode(function, suspend_on_module_await, stop_on_yield);
     const awaited = try stack.pop();
     defer awaited.free(ctx.runtime);
     if (suspend_mode == .raw) {
-        if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited, catch_target)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     }
     const promise = objectFromValue(awaited) orelse {
         if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
+            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
             try stack.push(value);
             return .none;
         }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, catch_target)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     };
     if (promise.class_id != core.class.ids.promise) {
         if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
+            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, catch_target)) |result| return result;
             try stack.push(value);
             return .none;
         }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, catch_target)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     }
@@ -475,7 +626,7 @@ fn awaitValueRaw(
         _ = ctx.throwValue(result.dup());
         return error.JSException;
     }
-    if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result)) |suspended| return suspended;
+    if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result, catch_target)) |suspended| return suspended;
     try stack.push(result);
     return .none;
 }
@@ -487,10 +638,11 @@ fn suspendAwaitValue(
     generator: ?*core.Object,
     suspend_on_await: bool,
     value: core.JSValue,
+    catch_target: ?usize,
 ) !?Result {
     if (!suspend_on_await) return null;
     const generator_object = generator orelse return null;
-    try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+    try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
     generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.await_op);
     generator_object.generatorStartedSlot().* = true;
     generator_object.generatorJustYieldedSlot().* = true;
@@ -506,25 +658,6 @@ fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await:
     // quickjs.c:21446/21670).
     if (stop_on_yield and function.flags.is_async) return .raw;
     return .none;
-}
-
-fn activeCatchTargetForPc(function: *const bytecode.Bytecode, start_pc: usize) ?usize {
-    var pc: usize = 0;
-    var found: ?usize = null;
-    while (pc < start_pc and pc < function.code.len) {
-        const op_id = function.code[pc];
-        if (op_id == bytecode.opcode.op.@"catch") {
-            if (pc + 5 > function.code.len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, function.code[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= function.code.len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
 }
 
 fn closeIteratorForPendingError(
@@ -551,42 +684,6 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
-}
-
-fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
-}
-
-fn freeValueSliceValuesOnly(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-}
-
-pub fn freeGeneratorFrameStorage(
-    rt: *core.JSRuntime,
-    storage: []core.JSValue,
-    locals: []core.JSValue,
-    args: []core.JSValue,
-    var_refs: []*core.VarRef,
-) void {
-    if (storage.len == 0) {
-        freeValueSlice(rt, locals);
-        freeValueSlice(rt, args);
-        // Owned var_refs are always windows inside `storage` (slab carve /
-        // allocHeap / capacity growth all back them with []JSValue storage),
-        // so a storage-less frame cannot own a var_refs allocation — release
-        // the cell refs only (qjs free_var_ref, quickjs.c:16199).
-        freeCellSliceCellsOnly(rt, var_refs);
-        return;
-    }
-    freeValueSliceValuesOnly(rt, locals);
-    freeValueSliceValuesOnly(rt, args);
-    freeCellSliceCellsOnly(rt, var_refs);
-    rt.memory.free(core.JSValue, storage);
-}
-
-fn freeCellSliceCellsOnly(rt: *core.JSRuntime, cells: []*core.VarRef) void {
-    for (cells) |cell| cell.freeCell(rt);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

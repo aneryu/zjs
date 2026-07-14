@@ -206,6 +206,11 @@ pub const GCPollMode = enum {
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
+    /// Borrowed values whose backing storage is stable for the root frame's
+    /// lifetime. The visitor traces copies and never mutates caller-owned
+    /// slots; useful when a resident frame will take its own copy before the
+    /// call returns.
+    borrowed: []const JSValue,
     /// A register-resident operand window. `values` supplies the stack buffer
     /// pointer (so reallocations made by delegated handlers are visible), while
     /// `live_len` points at the dispatcher's register-resident operand depth.
@@ -218,6 +223,9 @@ pub const ValueRootSlice = union(enum) {
     /// cell's JSValue view — bit-identical to the pre-typed rooting of the
     /// same cells stored as JSValues.
     cells: *const []*var_ref_mod.VarRef,
+    /// Borrowed counterpart of `cells`; keeps the referenced cell/value graph
+    /// live without taking temporary per-cell references.
+    borrowed_cells: []const *var_ref_mod.VarRef,
 };
 
 pub const ValueRootBuffer = struct {
@@ -1033,10 +1041,13 @@ pub const JSRuntime = struct {
         self.gc.deinit(self);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
-        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
-        self.weak_object_ids.deinit(self.memory.allocator);
-        self.weak_id_objects.deinit(self.memory.allocator);
-        self.auto_init_table.deinit(self.memory.allocator);
+        // These containers live for the whole runtime. `memory.allocator` may
+        // temporarily point at a parser arena, so both allocation and teardown
+        // must use the stable backing allocator that owns runtime state.
+        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
+        self.weak_object_ids.deinit(self.memory.persistent_allocator);
+        self.weak_id_objects.deinit(self.memory.persistent_allocator);
+        self.auto_init_table.deinit(self.memory.persistent_allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
@@ -1341,12 +1352,16 @@ pub const JSRuntime = struct {
             for (current.slices) |root| {
                 switch (root) {
                     .mutable => |values| try visitor.values(values.*),
+                    .borrowed => |values| try visitor.constValues(values),
                     .windowed => |w| try visitor.values(w.values.*.ptr[0..w.live_len.*]),
                     .cells => |cells| {
                         for (cells.*) |cell| {
                             var cell_value = cell.valueRef();
                             try visitor.value(&cell_value);
                         }
+                    },
+                    .borrowed_cells => |cells| {
+                        for (cells) |cell| try visitor.constValue(cell.valueRef());
                     },
                 }
             }
@@ -1598,8 +1613,8 @@ pub const JSRuntime = struct {
             return weak_id << 1;
         }
         const weak_id = self.next_weak_id;
-        try self.weak_object_ids.put(self.memory.allocator, address, weak_id);
-        self.weak_id_objects.put(self.memory.allocator, weak_id, object) catch |err| {
+        try self.weak_object_ids.put(self.memory.persistent_allocator, address, weak_id);
+        self.weak_id_objects.put(self.memory.persistent_allocator, weak_id, object) catch |err| {
             _ = self.weak_object_ids.remove(address);
             return err;
         };
@@ -2766,7 +2781,7 @@ pub const JSRuntime = struct {
         const index = self.borrowed_weak_cleanup_identities.len;
         try self.ensureBorrowedWeakCleanupIdentityCapacity(index + 1);
         if ((identity & 1) == 0) {
-            try self.borrowed_weak_cleanup_identity_set.put(self.memory.allocator, identity, {});
+            try self.borrowed_weak_cleanup_identity_set.put(self.memory.persistent_allocator, identity, {});
         }
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;

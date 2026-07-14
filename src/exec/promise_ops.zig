@@ -2886,11 +2886,12 @@ pub fn qjsAsyncFunctionRunState(
     resume_rejected: bool,
 ) HostError!core.JSValue {
     if (continuation.generatorExecuting()) return error.TypeError;
-    const function_value = continuation.functionBytecode() orelse return error.TypeError;
+    const function_value = continuation.generatorFunctionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
     var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     const nested = &nested_view;
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    defer continuation.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
 
     try setGeneratorResumeCompletionType(ctx.runtime, continuation, if (resume_rejected) 2 else 0);
@@ -2906,7 +2907,7 @@ pub fn qjsAsyncFunctionRunState(
         .function = nested,
         .initial_this_value = continuation.generatorThis() orelse core.JSValue.undefinedValue(),
         .args = continuation.generatorArgs(),
-        .var_refs = continuation.functionCapturesSlot().*,
+        .var_refs = continuation.generatorCaptures(),
         .output = output,
         .global = async_global,
         .strict_unresolved_get_var = fb_runtime_strict,
@@ -2927,7 +2928,7 @@ pub fn qjsAsyncFunctionRunAndSettle(
 ) HostError!void {
     const async_global = objectRealmGlobal(continuation) orelse global;
     const result = qjsAsyncFunctionRunState(ctx, output, async_global, continuation, resume_value, resume_rejected) catch |err| {
-        continuation.generatorDoneSlot().* = true;
+        continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try qjsPromiseErrorValue(ctx, async_global, err);
         defer reason.free(ctx.runtime);
         try qjsAsyncFunctionSettle(ctx, output, async_global, continuation, reason, true, null, null);
@@ -2942,7 +2943,7 @@ pub fn qjsAsyncFunctionRunAndSettle(
         return;
     }
 
-    continuation.generatorDoneSlot().* = true;
+    continuation.completeGeneratorExecution(ctx.runtime);
     try qjsAsyncFunctionSettle(ctx, output, async_global, continuation, result, false, null, null);
     qjsAsyncFunctionClearPromise(ctx.runtime, continuation);
 }
@@ -2957,7 +2958,7 @@ pub fn qjsAsyncFunctionAwaitOrReject(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     qjsAsyncFunctionAwait(ctx, output, global, continuation, awaited_value, caller_function, caller_frame) catch |err| {
-        continuation.generatorDoneSlot().* = true;
+        continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
         try qjsAsyncFunctionSettle(ctx, output, global, continuation, reason, true, caller_function, caller_frame);
@@ -3857,6 +3858,8 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
 
     const result = promise.promiseResult() orelse return error.TypeError;
     const generator = objectFromValue(result) orelse return error.TypeError;
+    try std.testing.expect(generator.generatorExecutionState().has_frame);
+    try std.testing.expectEqual(@as(usize, 0), generator.generatorPc());
     try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
     try std.testing.expectEqual(arg_symbol, generator.generatorArgs()[0].asSymbolAtom().?);
 

@@ -27,6 +27,7 @@ const zjs = @import("zjs");
 
 const core = zjs.core;
 const BindingContext = zjs.binding_root.JSContext;
+const call_runtime = zjs.exec.call_runtime;
 const module_graph = zjs.exec.module_graph;
 const parser = zjs.parser;
 
@@ -491,6 +492,72 @@ const OneShotFailingAllocator = struct {
         try std.testing.expectEqual(self.alloc_calls, self.free_calls);
     }
 };
+
+/// Pin the transactional boundary used when `.return(v)` has to park its
+/// completion on a suspended generator stack. The first growth allocation is
+/// forced to fail; the exact same generator must retain its original parked
+/// buffers and pc, then accept and expose the completion once memory works
+/// again. This targets the ownership seam directly instead of relying on a
+/// parser/eval allocation index to happen to land inside the stack growth.
+fn runGeneratorPendingReturnRecovery(injector: *OneShotFailingAllocator) !void {
+    const rt = try core.JSRuntime.create(injector.allocator());
+    defer rt.destroy();
+    const generator = try core.Object.create(rt, core.class.ids.generator, null);
+    defer generator.value().free(rt);
+    const pending_object = try core.Object.create(rt, core.class.ids.object, null);
+    defer pending_object.value().free(rt);
+
+    const initial_stack = try rt.memory.alloc(core.JSValue, 1);
+    initial_stack[0] = core.JSValue.int32(41);
+    var replacement = core.object.SuspendedExecutionStorage{
+        .stack = .{
+            .values = initial_stack,
+            .capacity = initial_stack.len,
+        },
+    };
+    generator.generatorExecutionStateSlot().replaceStorageOwned(17, std.math.maxInt(u32), &replacement, rt);
+    try std.testing.expect(replacement.isEmpty());
+
+    const original = generator.generatorExecutionState().storage.stack;
+    injector.attempts = 0;
+    injector.fail_index = 0;
+    injector.induced = false;
+    injector.disarmed = false;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        call_runtime.stashGeneratorPendingReturn(rt, generator, pending_object.value(), 29),
+    );
+    try std.testing.expect(injector.induced);
+
+    const after_oom = generator.generatorExecutionState().storage.stack;
+    try std.testing.expectEqual(@intFromPtr(original.values.ptr), @intFromPtr(after_oom.values.ptr));
+    try std.testing.expectEqual(original.values.len, after_oom.values.len);
+    try std.testing.expectEqual(original.capacity, after_oom.capacity);
+    try std.testing.expectEqual(@as(?i32, 41), after_oom.values[0].asInt32());
+    try std.testing.expectEqual(@as(usize, 17), generator.generatorPc());
+    try std.testing.expectEqual(@as(i32, 0), generator.generatorResumeCompletionType());
+
+    injector.disarmed = true;
+    try call_runtime.stashGeneratorPendingReturn(rt, generator, pending_object.value(), 29);
+    const pending = call_runtime.takeGeneratorPendingReturn(generator) orelse
+        return error.TestUnexpectedResult;
+    defer pending.value.free(rt);
+    try std.testing.expect(pending.value.sameValue(pending_object.value()));
+    try std.testing.expectEqual(@as(usize, 29), pending.stop_pc);
+    try std.testing.expectEqual(@as(usize, 17), generator.generatorPc());
+    try std.testing.expectEqual(@as(i32, 0), generator.generatorResumeCompletionType());
+    try std.testing.expectEqual(@as(?i32, 41), generator.generatorExecutionState().storage.stack.values[0].asInt32());
+}
+
+test "oom recovery: pending return leaves the same generator resumable" {
+    var injector = OneShotFailingAllocator{
+        .backing = std.testing.allocator,
+        .fail_index = 0,
+        .disarmed = true,
+    };
+    try runGeneratorPendingReturnRecovery(&injector);
+    try injector.expectBalanced();
+}
 
 const canary_source = "(1 + 2) * 14 === 42 ? \"canary-ok\" : \"canary-bad\"";
 

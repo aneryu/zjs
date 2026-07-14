@@ -1016,7 +1016,13 @@ pub fn arrayIteratorPrototypeFromContext(
 
     const object = try qjsIteratorPrototype(ctx.runtime, global, "Array Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try builtin_glue.defineNativeDataMethod(ctx.runtime, object, "next", 0);
+    try builtin_glue.defineNativeDataMethodWithNativeId(
+        ctx.runtime,
+        object,
+        "next",
+        0,
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(method_ids.iterator.IntrinsicMethod.array_iterator_next)),
+    );
     const next_atom = core.atom.predefinedId("next", .string) orelse return error.TypeError;
     const next_value = object.getProperty(next_atom);
     defer next_value.free(ctx.runtime);

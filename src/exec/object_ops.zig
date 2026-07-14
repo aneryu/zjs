@@ -240,7 +240,7 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
     const current = frame.this_value;
     if (current.isObject()) return current;
     if (current.isUndefined() or current.isNull()) {
-        if (frame.this_value_owned) {
+        if (frame.ownership.this_value == .owned) {
             current.free(ctx.runtime);
             frame.this_value = global.value().dup();
         } else {
@@ -250,9 +250,9 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
     }
 
     const boxed = try primitiveObjectForAccess(ctx.runtime, global, current);
-    if (frame.this_value_owned) current.free(ctx.runtime);
+    if (frame.ownership.this_value == .owned) current.free(ctx.runtime);
     frame.this_value = boxed;
-    frame.this_value_owned = true;
+    frame.ownership.this_value = .owned;
     return boxed;
 }
 
@@ -270,11 +270,17 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
 }
 
 pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Object) !void {
-    try defineNativeDataMethod(rt, object, "next", 1);
-    try defineNativeDataMethod(rt, object, "return", 1);
-    try defineNativeDataMethod(rt, object, "throw", 1);
-    // NOTE: the for-of fast-path marker lives on each generator instance's OWN `next`
-    // (createGeneratorObject), which shadows this prototype `next`, so no flag is set here.
+    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    const next_atom = try rt.internAtom("next");
+    defer rt.atoms.free(next_atom);
+    const next = try core.function.nativeFunction(rt, "next", 1);
+    defer next.free(rt);
+    const next_object = property_ops.expectObject(next) catch return error.TypeError;
+    next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
+    if (!next_object.addGeneratorNextFunction(rt)) return error.TypeError;
+    try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
@@ -1739,6 +1745,15 @@ pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
         const target_object = objectFromValue(target_value) orelse return null;
         return objectRealmGlobal(target_object);
     }
+    if (object.class_id == core.class.ids.generator or object.class_id == core.class.ids.async_generator) {
+        if (object.generatorCurrentFunction()) |current_function| {
+            if (objectFromValue(current_function)) |current_object| {
+                if (current_object != object) {
+                    if (objectRealmGlobal(current_object)) |realm_global| return realm_global;
+                }
+            }
+        }
+    }
     if (object.functionRealmGlobalPtr()) |realm_global| return realm_global;
     const realm_value = object.functionRealmGlobal() orelse return null;
     return property_ops.expectObject(realm_value) catch null;
@@ -2151,15 +2166,13 @@ pub fn createGeneratorObject(
         .{ .value = &rooted_this },
         .{ .value = &rooted_boxed_this },
     };
-    var args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
-    defer args_buffer.deinit(ctx.runtime);
-    const args = args_buffer.values;
-    var var_refs_buffer = try core.runtime.CellRootBuffer.initCopy(ctx.runtime, input_var_refs);
-    defer var_refs_buffer.deinit(ctx.runtime);
-    const var_refs = var_refs_buffer.cells;
+    if (input_args.len > array_ops.max_apply_arguments) {
+        return throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+    }
+    const fb = functionBytecodeFromValue(rooted_func) orelse return error.TypeError;
     var root_slices = [_]core.runtime.ValueRootSlice{
-        args_buffer.slice(),
-        var_refs_buffer.slice(),
+        .{ .borrowed = input_args },
+        .{ .borrowed_cells = input_var_refs },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
@@ -2169,17 +2182,80 @@ pub fn createGeneratorObject(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const fb = functionBytecodeFromValue(rooted_func) orelse return error.TypeError;
+    // Build the borrowed bytecode view once: its finalized frame dimensions
+    // size the qjs-style execution FAM and the same view runs the parameter
+    // prologue below.
+    var nested_base: bytecode.Bytecode = undefined;
+    const nested: *const bytecode.Bytecode = bytecode.cachedBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms) orelse blk: {
+        nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
+        break :blk &nested_base;
+    };
+
     const class_id = if (is_async) core.class.ids.async_generator else core.class.ids.generator;
-    const object = try core.Object.create(ctx.runtime, class_id, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.setOptionalValueSlot(ctx.runtime, object.generatorBytecodeSlot(), rooted_func.dup());
-    if (property_ops.expectObject(rooted_current)) |function_object| {
-        try object.setOptionalValueSlot(ctx.runtime, object.generatorCurrentFunctionSlot(), rooted_current.dup());
-        try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
-        try object.setFunctionRealmGlobalPtr(ctx.runtime, objectRealmGlobal(function_object) orelse global);
-    } else |_| {}
-    try object.setFunctionRealmGlobalPtrIfNull(ctx.runtime, global);
+    // Normal JS generator calls keep their execution state detached while the
+    // parameter prologue runs, then create the public object directly with its
+    // final prototype. This mirrors qjs js_generator_function_call and avoids
+    // a temporary null-prototype Shape on every short-lived generator. The raw
+    // internal-bytecode path still needs a registered holder while installing
+    // its borrowed realm fallback.
+    const detached_shell = rooted_current.isObject();
+    const object = if (detached_shell)
+        try core.Object.createGeneratorShell(ctx.runtime, class_id)
+    else
+        try core.Object.create(ctx.runtime, class_id, null);
+    var object_registered = !detached_shell;
+    errdefer if (object_registered)
+        core.Object.destroyFromHeader(ctx.runtime, &object.header)
+    else
+        object.destroyGeneratorShell(ctx.runtime);
+    var prepared_frame: zjs_vm.PreparedEntryFrame = undefined;
+    var prepared_frame_ptr: ?*const zjs_vm.PreparedEntryFrame = null;
+    if (detached_shell) {
+        const stack_slots = try std.math.add(usize, @as(usize, fb.stack_size), 1);
+        const frame_arg_count = frame_mod.frameArgCount(nested, input_args.len);
+        const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(nested);
+        const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
+        const var_ref_count = frame_mod.frameVarRefStorageCount(nested, input_var_refs);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested, frame_arg_count);
+        const frame_slots = try frame_mod.FrameSlab.requiredStorageSlots(
+            frame_arg_count,
+            original_arg_count,
+            nested.var_count,
+            0,
+            var_ref_count,
+            open_var_ref_count,
+        );
+        try object.initGeneratorExecutionWithStorage(ctx.runtime, stack_slots, frame_slots);
+        prepared_frame = .{
+            .slab = frame_mod.FrameSlab.partitionStorage(
+                object.generatorCombinedFrameStorage(),
+                frame_arg_count,
+                original_arg_count,
+                nested.var_count,
+                0,
+                var_ref_count,
+                open_var_ref_count,
+            ),
+            .need_original_args = need_original_args,
+        };
+        prepared_frame_ptr = &prepared_frame;
+    }
+    object.generatorActualArgCountSlot().* = @intCast(input_args.len);
+    if (rooted_current.isObject()) {
+        object.setGeneratorCurrentFunction(ctx.runtime, rooted_current.dup());
+        // The owned current-function edge dominates this borrowed realm pointer
+        // for the execution record's lifetime, so normal generators need no
+        // separate borrowed-holder registry entry.
+        object.generatorPayloadPtr().realm_global_ptr = global;
+    } else {
+        // Internal raw-FunctionBytecode calls have no function object, but use
+        // the same qjs-like current-function owner slot. Normal JS calls store
+        // the closure object here; both paths derive bytecode from this edge.
+        const raw_current = if (rooted_current.isFunctionBytecode()) rooted_current else rooted_func;
+        object.setGeneratorCurrentFunction(ctx.runtime, raw_current.dup());
+        // Raw internal bytecode has no function object to dominate the realm.
+        try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
+    }
     const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
     const effective_this = if (!fb_runtime_strict) blk: {
         if (rooted_this.isUndefined() or rooted_this.isNull()) break :blk global.value();
@@ -2189,70 +2265,27 @@ pub fn createGeneratorObject(
         }
         break :blk rooted_this;
     } else rooted_this;
-    try object.setOptionalValueSlot(ctx.runtime, object.generatorThisSlot(), effective_this.dup());
-    if (var_refs.len > 0) {
-        // Cell-typed captures: pointer copy + rc++ per slot (qjs generator
-        // creation shares the caller's JSVarRef* array). The CellRootBuffer
-        // above keeps the source cells rooted; the fresh slice's refs are its
-        // own, and dupCell cannot fail, so no mid-build rooting is needed.
-        const captures = try ctx.runtime.memory.alloc(*core.VarRef, var_refs.len);
-        for (var_refs, 0..) |cell, idx| captures[idx] = cell.dupCell();
-        object.setFunctionCaptures(ctx.runtime, captures);
+    object.setGeneratorThis(ctx.runtime, effective_this.dup());
+    // Every generator gets one resident frame at creation, including internal
+    // hand-built bytecode with no body marker (which parks at pc 0). qjs's
+    // async_func_init likewise has no separate deferred args/captures owner.
+    const init_result = try runGeneratorParameterInit(ctx, fb, nested, prepared_frame_ptr, object, rooted_current, effective_this, input_args, input_var_refs, output, global);
+    init_result.free(ctx.runtime);
+
+    const prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch null;
+    if (detached_shell) {
+        try object.finishGeneratorShell(ctx.runtime, prototype);
+        object_registered = true;
+    } else {
+        try object.setFreshObjectPrototype(ctx.runtime, prototype);
     }
-
-    if (args.len > 0) {
-        const generator_args = try ctx.runtime.memory.alloc(core.JSValue, args.len);
-        var rooted_generator_args: []core.JSValue = generator_args[0..0];
-        var generator_args_root = ValueSliceRoot{};
-        generator_args_root.init(ctx.runtime, &rooted_generator_args);
-        defer generator_args_root.deinit();
-        var initialized: usize = 0;
-        var generator_args_owned = true;
-        errdefer if (generator_args_owned) {
-            for (generator_args[0..initialized]) |*stored| {
-                stored.free(ctx.runtime);
-                stored.* = core.JSValue.undefinedValue();
-            }
-            rooted_generator_args = &.{};
-            ctx.runtime.memory.free(core.JSValue, generator_args);
-        };
-        for (args, 0..) |value, idx| {
-            generator_args[idx] = value.dup();
-            initialized += 1;
-            rooted_generator_args = generator_args[0..initialized];
-        }
-        generator_args_owned = false;
-        try object.setValueSlice(ctx.runtime, object.generatorArgsSlot(), generator_args);
-    }
-
-    if (fb.generatorBodyPc() != 0) {
-        const init_result = try runGeneratorParameterInit(ctx, fb, object, current_function_value, effective_this, args, object.functionCapturesSlot().*, output, global);
-        init_result.free(ctx.runtime);
-    }
-
-    const prototype = generatorObjectPrototype(ctx.runtime, global, current_function_value, is_async) catch null;
-    try object.setPrototype(ctx.runtime, prototype);
-
-    const next = try core.function.nativeFunction(ctx.runtime, "next", 0);
-    defer next.free(ctx.runtime);
-    // Flag this generator's own `next` so for-of can take the result-object-free fast
-    // step (fastGeneratorForOfNext). zjs gives each generator instance its OWN `next`
-    // (not %GeneratorPrototype%.next), so the marker must live here; a user `gen.next = …`
-    // override replaces this property with an unflagged function, so the fast path bails.
-    if (objectFromValue(next)) |next_object| _ = next_object.addGeneratorNextFunction(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "next", next);
-    const return_fn = try core.function.nativeFunction(ctx.runtime, "return", 1);
-    defer return_fn.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "return", return_fn);
-    const slice = try core.function.nativeFunction(ctx.runtime, "slice", 1);
-    defer slice.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "slice", slice);
     return object.value();
 }
 
 pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !?*core.Object {
     const fallback = if (is_async) try asyncGeneratorPrototypeFromGlobal(rt, global) else try generatorPrototypeFromGlobal(rt, global);
     const function_object = property_ops.expectObject(function_value) catch return fallback;
+    if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     const prototype_value = function_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     return property_ops.expectObject(prototype_value) catch fallback;

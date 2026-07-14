@@ -259,7 +259,9 @@ pub fn execPutVarRef(
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
     }
-    try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
+    if (value.isObject()) {
+        try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
+    }
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
         assigned = slotValueDup(value);
@@ -283,7 +285,7 @@ pub fn constVarRefWriteAllowed(cell: *core.VarRef, opc: u8) bool {
     return isVarRefInitOpcode(opc);
 }
 
-pub fn publishTopLevelFunctionVarRef(
+pub noinline fn publishTopLevelFunctionVarRef(
     rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     global: *core.Object,

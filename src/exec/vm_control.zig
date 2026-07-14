@@ -39,13 +39,13 @@ pub const InterruptPoller = struct {
 };
 
 pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
-    if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
+    if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
     // qjs OP_return is an ownership MOVE off the operand stack, never a dup:
     // `ret_val = *--sp;` (quickjs.c:18266-18268). The done: epilogue then frees
     // only local_buf..sp (quickjs.c:20705-20707), which no longer includes the
     // popped ret_val — zero refcount traffic on the returned value. Mirror
     // that: take the top slot by value and shrink, so frame teardown
-    // (teardownSimpleEntry / stack.deinit) never touches it.
+    // (Entry.deinitSimple / stack.deinit) never touches it.
     const values = stack.values;
     const value = if (values.len != 0) blk: {
         stack.values = values.ptr[0 .. values.len - 1];
@@ -55,7 +55,7 @@ pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *f
 }
 
 pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
-    if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
+    if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
     return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }
 

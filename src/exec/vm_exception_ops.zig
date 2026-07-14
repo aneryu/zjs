@@ -420,9 +420,9 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
     return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
 }
 
-/// Snapshot one live VM frame for the backtrace walk. Shared by the
-/// per-invocation `resolveMachineBacktrace` (inline_calls.zig), which walks the
-/// Machine's Entry chain + L0 frame directly — faithful to qjs's single
+/// Snapshot one live VM frame for the backtrace walk. The Machine-owned
+/// per-invocation resolver (inline_calls.zig) walks the Entry chain + L0 frame
+/// directly — faithful to qjs's single
 /// `current_stack_frame -> prev_frame` walk (quickjs.c:7571), with no per-call
 /// parallel backtrace node.
 pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktraceSnapshot {

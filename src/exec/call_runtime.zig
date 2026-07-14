@@ -898,9 +898,6 @@ fn callValueOrBytecodeClassModeDispatch(
         if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "slice")) {
-            if (try array_ops.qjsGeneratorSlice(ctx, output, global, this_value, args)) |value| return value;
-        }
         if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
             if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
@@ -4695,9 +4692,9 @@ pub fn callFunctionBytecodeModeState(
     // their operand stack from the contiguous per-runtime VM stack arena
     // instead of heap-allocating per call. Generator/async resumption swaps
     // heap buffers in and out of the stack, so those keep heap mode.
-    const arena_mark = ctx.runtime.vm_stack.mark();
-    defer ctx.runtime.vm_stack.restore(arena_mark);
     const arena_eligible = fb.flags.func_kind == .normal and generator_state == null;
+    const arena_mark = if (arena_eligible) ctx.runtime.vm_stack.mark() else null;
+    defer if (arena_mark) |mark| ctx.runtime.vm_stack.restore(mark);
     const operand_window: ?[]core.JSValue = if (arena_eligible)
         ctx.runtime.vm_stack.carve(&ctx.runtime.memory, @as(usize, fb.stack_size) + 1)
     else
@@ -4706,6 +4703,7 @@ pub fn callFunctionBytecodeModeState(
         stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, window)
     else
         stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
     // the queue machine (exec/async_generator.zig execBody) — no promise
@@ -4734,6 +4732,8 @@ pub fn callFunctionBytecodeModeState(
 pub fn runGeneratorParameterInit(
     ctx: *core.JSContext,
     fb: *const bytecode.FunctionBytecode,
+    nested: *const bytecode.Bytecode,
+    prepared_entry_frame: ?*const zjs_vm.PreparedEntryFrame,
     object: *core.Object,
     current_function_value: core.JSValue,
     this_value: core.JSValue,
@@ -4742,63 +4742,13 @@ pub fn runGeneratorParameterInit(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !core.JSValue {
-    var nested = bytecode.Bytecode.init(&ctx.runtime.memory, &ctx.runtime.atoms, fb.func_name);
-    defer nested.deinit(ctx.runtime);
-    nested.atoms.replace(&nested.filename, fb.filename);
-    nested.line_num = fb.lineNum();
-    nested.col_num = fb.colNum();
-    nested.arg_count = fb.arg_count;
-    nested.var_count = fb.var_count;
-    nested.stack_size = fb.stack_size;
-    nested.flags.is_strict = fb.flags.is_strict_mode;
-    nested.flags.runtime_strict = fb.flags.runtime_strict_mode;
-    nested.flags.has_simple_parameter_list = fb.flags.has_simple_parameter_list;
-    try nested.setCode(fb.byteCode());
-    // Rebuild the nested view's atom-operand retention array by walking the
-    // FB's inline atoms (the FB no longer keeps a standalone array).
-    var atom_it = fb.atomOperandIterator();
-    while (atom_it.next()) |atom_id| {
-        try nested.retainAtomOperand(atom_id);
-    }
-    if (fb.argNames().len > 0) {
-        nested.arg_names = try ctx.runtime.memory.alloc(core.Atom, fb.argNames().len);
-        for (fb.argNames(), 0..) |atom_id, idx| {
-            nested.arg_names[idx] = ctx.runtime.atoms.dup(atom_id);
-        }
-    }
-    if (fb.varDefs().len > 0) {
-        nested.vardefs = try ctx.runtime.memory.alloc(bytecode.function_def.VarDef, fb.varDefs().len);
-        for (fb.varDefs(), 0..) |v, idx| {
-            nested.vardefs[idx] = v;
-            nested.vardefs[idx].var_name = ctx.runtime.atoms.dup(v.var_name);
-        }
-    }
-    if (fb.closureVar().len > 0) {
-        // The FB no longer keeps a standalone var-ref name array; the var-ref
-        // names are `closure_var[i].var_name`. Mirror them here so the nested
-        // compile-time Bytecode's var_ref_names matches the view accessors.
-        nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.closureVar().len);
-        for (fb.closureVar(), 0..) |cv, idx| {
-            nested.var_ref_names[idx] = ctx.runtime.atoms.dup(cv.var_name);
-        }
-    }
-    if (fb.closureVar().len > 0) {
-        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closureVar().len);
-        for (fb.closureVar(), 0..) |cv, idx| {
-            nested.closure_var[idx] = cv;
-            nested.closure_var[idx].var_name = ctx.runtime.atoms.dup(cv.var_name);
-        }
-    }
-    for (fb.cpoolSlice()) |value| {
-        _ = try nested.addConstant(value);
-    }
-
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    defer object.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     return runWithCallEnv(.{
         .ctx = ctx,
         .stack = &nested_stack,
-        .function = &nested,
+        .function = nested,
         .initial_this_value = this_value,
         .args = args,
         .var_refs = var_refs,
@@ -4808,6 +4758,7 @@ pub fn runGeneratorParameterInit(
         .generator_state = object,
         .stop_before_pc = fb.generatorBodyPc(),
         .current_function_value = current_function_value,
+        .prepared_entry_frame = prepared_entry_frame,
     });
 }
 
@@ -4827,9 +4778,10 @@ pub fn qjsGeneratorNext(
         // arriving while EXECUTING only appends — never a TypeError.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 0);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
-    if (object.generatorDone()) {
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    if (payload.done) {
         const done_result = try createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
         return done_result.dup();
@@ -4845,20 +4797,19 @@ pub fn qjsGeneratorNext(
         defer step.value.free(ctx.runtime);
         return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
     }
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
-    const resume_value = if (object.generatorPc() != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
+    const execution = payload.execution orelse return error.TypeError;
+    const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
+    payload.executing = true;
+    defer payload.executing = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
         current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        execution.this_value,
+        execution.suspended.storage.frame.args,
+        execution.suspended.storage.frame.var_refs,
         output,
         generator_global,
         false,
@@ -4868,16 +4819,14 @@ pub fn qjsGeneratorNext(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
-    if (object.generatorJustYielded() and
-        (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
-    {
+    if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
         return result.dup();
     }
-    return try createIteratorResult(ctx.runtime, generator_global, result, !object.generatorJustYielded());
+    return try createIteratorResult(ctx.runtime, generator_global, result, !payload.just_yielded);
 }
 
 /// A raw generator step result: the yielded/returned value + done flag, with no
@@ -4886,6 +4835,20 @@ pub const GeneratorValueDone = struct {
     value: core.JSValue,
     done: bool,
 };
+
+inline fn generatorFunctionBytecodeFromExecution(object: *core.Object, execution: *const core.object.GeneratorExecutionState) ?core.JSValue {
+    const current = execution.current_function;
+    if (current.isFunctionBytecode()) return current;
+    const current_object = object_ops.objectFromValue(current) orelse return null;
+    if (current_object == object) return null;
+    return current_object.functionBytecode();
+}
+
+inline fn generatorHasYieldStarResult(payload: *const core.object.GeneratorPayload) bool {
+    if (payload.yield_star_suspended) return true;
+    const execution = payload.execution orelse return false;
+    return !execution.yield_star_iterator.isUndefined();
+}
 
 /// Resume a SYNC generator one step and return (value, done) WITHOUT allocating the
 /// iterator-result object, so a for-of consumer can skip it (qjs JS_IteratorNext2
@@ -4906,27 +4869,27 @@ pub fn qjsSyncGeneratorStep(
     if (!receiver.isObject()) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator) return null; // sync generators only
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
-    if (object.generatorDone()) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    if (payload.done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     // Pending return completion stashed by .return(v) suspended in a finally block:
     // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
     // and threads the completion through the finally.
-    if (object.generatorResumeCompletionType() == 1) return null;
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
-    const resume_value = if (object.generatorPc() != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
+    if (payload.resume_completion_type == 1) return null;
+    const execution = payload.execution orelse return error.TypeError;
+    const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
+    payload.executing = true;
+    defer payload.executing = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
         current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        execution.this_value,
+        execution.suspended.storage.frame.args,
+        execution.suspended.storage.frame.var_refs,
         output,
         generator_global,
         false,
@@ -4936,12 +4899,10 @@ pub fn qjsSyncGeneratorStep(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
-    if (object.generatorJustYielded() and
-        (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
-    {
+    if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
         // yield* passthrough: `result` is already an iterator-result object — unwrap it
         // exactly as the generic for-of step would (read .done, then .value only if !done).
         defer result.free(ctx.runtime);
@@ -4954,7 +4915,7 @@ pub fn qjsSyncGeneratorStep(
         const value = try object_ops.getValueProperty(ctx, output, global, result, value_key, null, null);
         return .{ .value = value, .done = false };
     }
-    return .{ .value = result, .done = !object.generatorJustYielded() };
+    return .{ .value = result, .done = !payload.just_yielded };
 }
 
 pub fn generatorYieldStarSuspended(rt: *core.JSRuntime, object: *core.Object) bool {
@@ -4986,17 +4947,18 @@ pub fn resumeGeneratorYieldStarCompletion(
     resume_value: core.JSValue,
     completion_type: i32,
 ) !core.JSValue {
-    const function_value = object.functionBytecode() orelse return error.TypeError;
+    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     try setGeneratorResumeCompletionType(ctx.runtime, object, completion_type);
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
-        receiver,
+        current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         global,
         false,
@@ -5006,12 +4968,12 @@ pub fn resumeGeneratorYieldStarCompletion(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
-    if (done) object.generatorDoneSlot().* = true;
+    if (done) object.completeGeneratorExecution(ctx.runtime);
     if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result.dup();
     return try createIteratorResult(ctx.runtime, global, result, done);
 }
@@ -5032,25 +4994,12 @@ pub fn stashGeneratorPendingReturn(
     pending_value: core.JSValue,
     stop_pc: usize,
 ) !void {
-    const values = generator.generatorStack();
-    const capacity = generator.generatorStackCapacity();
-    if (values.len + 2 > capacity) {
-        var next_capacity: usize = if (capacity == 0) 8 else capacity;
-        while (next_capacity < values.len + 2) next_capacity *= 2;
-        const next = try rt.memory.alloc(core.JSValue, next_capacity);
-        @memcpy(next[0..values.len], values);
-        generator.generatorStackSlot().* = next[0..values.len];
-        generator.generatorStackCapacitySlot().* = next_capacity;
-        if (capacity != 0) {
-            rt.memory.free(core.JSValue, values.ptr[0..capacity]);
-        } else if (values.len != 0) {
-            rt.memory.free(core.JSValue, values);
-        }
-    }
-    const stack = generator.generatorStack();
-    stack.ptr[stack.len] = pending_value.dup();
-    stack.ptr[stack.len + 1] = core.JSValue.int32(@intCast(stop_pc));
-    generator.generatorStackSlot().* = stack.ptr[0 .. stack.len + 2];
+    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
+    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stack_size, 2, generator.generatorStackUsesCombinedStorage());
+    const values = saved_stack.values;
+    values.ptr[values.len] = pending_value.dup();
+    values.ptr[values.len + 1] = core.JSValue.int32(@intCast(stop_pc));
+    saved_stack.values = values.ptr[0 .. values.len + 2];
     generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
 }
 
@@ -5067,11 +5016,12 @@ pub const GeneratorPendingReturn = struct {
 pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
     if (generator.generatorResumeCompletionType() != 1) return null;
     generator.generatorResumeCompletionTypeSlot().* = 0;
-    const values = generator.generatorStack();
+    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
+    const values = saved_stack.values;
     std.debug.assert(values.len >= 2);
     const marker = values[values.len - 1];
     const value = values[values.len - 2];
-    generator.generatorStackSlot().* = values.ptr[0 .. values.len - 2];
+    saved_stack.values = values.ptr[0 .. values.len - 2];
     return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
 }
 
@@ -5091,10 +5041,8 @@ fn resumeGeneratorPendingReturnStep(
 ) !GeneratorValueDone {
     const pending_value = pending.value;
     defer pending_value.free(ctx.runtime);
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
+    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
@@ -5104,7 +5052,7 @@ fn resumeGeneratorPendingReturnStep(
         current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         generator_global,
         false,
@@ -5114,7 +5062,7 @@ fn resumeGeneratorPendingReturnStep(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
@@ -5125,7 +5073,7 @@ fn resumeGeneratorPendingReturnStep(
         try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
         return .{ .value = result.dup(), .done = false };
     }
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     const value = if (result.isUndefined()) pending_value.dup() else result.dup();
     return .{ .value = value, .done = true };
 }
@@ -5146,8 +5094,9 @@ pub fn qjsGeneratorReturn(
         // the queue machine before the finally range runs / the request settles.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     // A fresh .return(v) replaces any pending return completion stashed by an earlier
     // return that suspended inside a finally block (qjs: the new completion resumes at
     // the yield and the old stack slots unwind with the frame).
@@ -5174,18 +5123,19 @@ pub fn qjsGeneratorReturn(
         }
     }
     if (object.generatorPc() != 0) {
-        const function_value = object.functionBytecode() orelse return error.TypeError;
+        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findGeneratorReturnFinallyTarget(fb, @intCast(object.generatorPc()))) |finally_range| {
+            const current_function_value = object.generatorCurrentFunction() orelse receiver;
             object.generatorPcSlot().* = finally_range.start;
             object.generatorJustYieldedSlot().* = false;
             const result = callFunctionBytecodeModeState(
                 ctx,
                 function_value,
-                receiver,
+                current_function_value,
                 object.generatorThis() orelse core.JSValue.undefinedValue(),
                 object.generatorArgs(),
-                object.functionCapturesSlot().*,
+                object.generatorCaptures(),
                 output,
                 generator_global,
                 false,
@@ -5195,12 +5145,12 @@ pub fn qjsGeneratorReturn(
                 core.JSValue.undefinedValue(),
                 core.JSValue.undefinedValue(),
             ) catch |err| {
-                object.generatorDoneSlot().* = true;
+                object.completeGeneratorExecution(ctx.runtime);
                 return err;
             };
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
-            if (done) object.generatorDoneSlot().* = true;
+            if (done) object.completeGeneratorExecution(ctx.runtime);
             if (!done) {
                 // The finally block itself yielded: preserve the pending return
                 // completion across the suspension (qjs js_generator_next
@@ -5215,7 +5165,7 @@ pub fn qjsGeneratorReturn(
             return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
         }
     }
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
 }
 
@@ -5229,20 +5179,21 @@ pub fn resumeGeneratorCatchForRuntimeError(
 ) !?core.JSValue {
     if (object.class_id == core.class.ids.async_generator) return null;
     if (object.generatorPc() == 0 or !object.generatorStarted()) return null;
-    const function_value = object.functionBytecode() orelse return null;
+    const function_value = object.generatorFunctionBytecode() orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
     const catch_target = findEnclosingCatchTarget(fb, @intCast(object.generatorPc())) orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
     defer thrown.free(ctx.runtime);
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     object.generatorPcSlot().* = catch_target;
     object.generatorJustYieldedSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
-        receiver,
+        current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         global,
         false,
@@ -5252,12 +5203,12 @@ pub fn resumeGeneratorCatchForRuntimeError(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |resume_err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return resume_err;
     };
     defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
-    if (done) object.generatorDoneSlot().* = true;
+    if (done) object.completeGeneratorExecution(ctx.runtime);
     const result_value = generatorCatchResumeResultValue(result);
     return try createIteratorResult(ctx.runtime, global, result_value, done);
 }
@@ -5287,7 +5238,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     defer return_method.free(ctx.runtime);
 
     if (return_method.isUndefined() or return_method.isNull()) {
-        generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+        generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return .{ .complete = return_arg.dup() };
     }
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -5310,7 +5261,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
-    generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+    generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
 
@@ -5330,7 +5281,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
 
     if (throw_method.isUndefined() or throw_method.isNull()) {
         try qjsGeneratorYieldStarCloseForMissingThrow(ctx, output, global, iterator_value);
-        generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+        generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return error.TypeError;
     }
     if (!isCallableValue(throw_method)) return error.TypeError;
@@ -5353,7 +5304,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
-    generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+    generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
 
@@ -5387,7 +5338,7 @@ pub fn qjsGeneratorYieldStarReturn(
         .yield_result => |result| return result,
         .complete => |value| {
             defer value.free(ctx.runtime);
-            generator.generatorDoneSlot().* = true;
+            generator.completeGeneratorExecution(ctx.runtime);
             return try createIteratorResult(ctx.runtime, global, value, true);
         },
     }
@@ -5406,8 +5357,9 @@ pub fn qjsGeneratorThrow(
         // Mirrors js_async_generator_next GEN_MAGIC_THROW (quickjs.c:21706).
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 2);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     // A throw injected at a yield inside a finally block discards any pending return
     // completion stashed there (qjs: the exception unwinds the frame and the stacked
@@ -5421,24 +5373,25 @@ pub fn qjsGeneratorThrow(
     if (object.generatorYieldStarIterator() != null) {
         const step = qjsGeneratorYieldStarThrowStep(ctx, output, generator_global, object, thrown) catch |err| {
             if (try resumeGeneratorCatchForRuntimeError(ctx, output, generator_global, receiver, object, err)) |handled| return handled;
-            object.generatorDoneSlot().* = true;
+            object.completeGeneratorExecution(ctx.runtime);
             return err;
         };
         switch (step) {
             .yield_result => |result| return result,
             .complete => |value| {
                 defer value.free(ctx.runtime);
-                const function_value = object.functionBytecode() orelse return error.TypeError;
+                const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
                 const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+                const current_function_value = object.generatorCurrentFunction() orelse receiver;
                 object.generatorPcSlot().* = generatorPcAfterYieldStar(fb, object.generatorPc()) orelse return error.InvalidBytecode;
                 object.generatorJustYieldedSlot().* = false;
                 const result = callFunctionBytecodeModeState(
                     ctx,
                     function_value,
-                    receiver,
+                    current_function_value,
                     object.generatorThis() orelse core.JSValue.undefinedValue(),
                     object.generatorArgs(),
-                    object.functionCapturesSlot().*,
+                    object.generatorCaptures(),
                     output,
                     generator_global,
                     false,
@@ -5448,30 +5401,31 @@ pub fn qjsGeneratorThrow(
                     core.JSValue.undefinedValue(),
                     core.JSValue.undefinedValue(),
                 ) catch |err| {
-                    object.generatorDoneSlot().* = true;
+                    object.completeGeneratorExecution(ctx.runtime);
                     return err;
                 };
                 defer result.free(ctx.runtime);
                 const done = !object.generatorJustYielded();
-                if (done) object.generatorDoneSlot().* = true;
+                if (done) object.completeGeneratorExecution(ctx.runtime);
                 return try createIteratorResult(ctx.runtime, generator_global, result, done);
             },
         }
     }
 
     if (object.generatorPc() != 0 and object.generatorStarted()) {
-        const function_value = object.functionBytecode() orelse return error.TypeError;
+        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findEnclosingCatchTarget(fb, @intCast(object.generatorPc()))) |catch_target| {
+            const current_function_value = object.generatorCurrentFunction() orelse receiver;
             object.generatorPcSlot().* = catch_target;
             object.generatorJustYieldedSlot().* = false;
             const result = callFunctionBytecodeModeState(
                 ctx,
                 function_value,
-                receiver,
+                current_function_value,
                 object.generatorThis() orelse core.JSValue.undefinedValue(),
                 object.generatorArgs(),
-                object.functionCapturesSlot().*,
+                object.generatorCaptures(),
                 output,
                 generator_global,
                 false,
@@ -5481,18 +5435,18 @@ pub fn qjsGeneratorThrow(
                 core.JSValue.undefinedValue(),
                 core.JSValue.undefinedValue(),
             ) catch |err| {
-                object.generatorDoneSlot().* = true;
+                object.completeGeneratorExecution(ctx.runtime);
                 return err;
             };
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
-            if (done) object.generatorDoneSlot().* = true;
+            if (done) object.completeGeneratorExecution(ctx.runtime);
             const result_value = generatorCatchResumeResultValue(result);
             return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
         }
     }
 
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     _ = ctx.throwValue(thrown.dup());
     return error.JSException;
 }
@@ -5652,9 +5606,10 @@ pub fn closeGeneratorDestructuringIterators(
     global: *core.Object,
     generator: *core.Object,
 ) !void {
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorStack());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameLocals());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameArgs());
+    const suspended = generator.generatorExecutionState();
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.stack.values);
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.locals);
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.args);
     // frame_var_refs: every element is a VarRef cell (typed slots), never a
     // destructuring-iterator-state Object — the pre-typed scan over the slots
     // was a provable no-op (expectObject rejects the var_ref GC kind), so the
@@ -5728,6 +5683,14 @@ pub fn qjsIteratorCallForNativeRecord(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    switch (id) {
+        @intFromEnum(IntrinsicMethod.array_iterator_next) => return try iter_vm.arrayIteratorNext(ctx, output, global, receiver),
+        @intFromEnum(IntrinsicMethod.generator_next) => return (try qjsGeneratorNext(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_return) => return (try qjsGeneratorReturn(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_throw) => return (try qjsGeneratorThrow(ctx, output, global, receiver, args)) orelse error.TypeError,
+        else => {},
+    }
     switch (id) {
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_getter),
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter),
@@ -6241,7 +6204,36 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
     try promise_ops.enqueuePendingPromiseJob(ctx, callback);
 }
 
-pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
+noinline fn initIteratorResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+    const cached = try global.cachedRealmValueSlot(rt, .iterator_result_template);
+    if (cached.*) |stored| return core.Object.expect(stored);
+
+    // qjs's realm keeps the final `{ value, done }` shape and
+    // js_create_iterator_result allocates its two-slot property array in one
+    // shot. Pin an equivalent template so every generator/iterator step skips
+    // the empty -> value -> done storage-growth sequence.
+    const template = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        object_ops.objectPrototypeFromGlobal(rt, global),
+        2,
+    );
+    defer template.value().free(rt);
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.value,
+        core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true),
+    );
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.done,
+        core.Descriptor.data(core.JSValue.boolean(false), true, true, true),
+    );
+    try global.setOptionalValueSlot(rt, cached, template.value().dup());
+    return core.Object.expect(cached.*.?);
+}
+
+pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -6253,14 +6245,14 @@ pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: co
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
+    const template = if (global.cachedRealmValue(.iterator_result_template)) |stored|
+        try core.Object.expect(stored)
+    else
+        try initIteratorResultPropertyTemplate(rt, global);
+    const object = try core.Object.createFromPropertyTemplate(rt, template);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    // qjs js_create_iterator_result (quickjs.c:16768) keys on the predefined
-    // JS_ATOM_value / JS_ATOM_done constants; use the interned atom ids directly
-    // instead of re-interning the "value"/"done" byte strings per result (this
-    // runs once per generator/iterator step, a hot path).
-    try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(rooted_value, true, true, true));
-    try object.defineOwnProperty(rt, core.atom.ids.done, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
+    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, rooted_value.dup());
+    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 1, core.JSValue.boolean(done));
     return object.value();
 }
 

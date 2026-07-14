@@ -16,6 +16,7 @@ pub const Result = struct {
 pub const AccessorMethod = core.host_function.builtin_method_ids.iterator.AccessorMethod;
 pub const StaticMethod = core.host_function.builtin_method_ids.iterator.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.iterator.PrototypeMethod;
+pub const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
@@ -81,6 +82,10 @@ pub const internal_entries = iteratorEntries: {
         iteratorEntry("drop", 1, @intFromEnum(PrototypeMethod.drop)),
         iteratorEntry("flatMap", 1, @intFromEnum(PrototypeMethod.flat_map)),
         iteratorEntry("[Symbol.dispose]", 0, @intFromEnum(PrototypeMethod.dispose)),
+        iteratorEntry("Array Iterator.next", 0, @intFromEnum(IntrinsicMethod.array_iterator_next)),
+        iteratorEntry("Generator.next", 1, @intFromEnum(IntrinsicMethod.generator_next)),
+        iteratorEntry("Generator.return", 1, @intFromEnum(IntrinsicMethod.generator_return)),
+        iteratorEntry("Generator.throw", 1, @intFromEnum(IntrinsicMethod.generator_throw)),
     };
 };
 
@@ -102,4 +107,22 @@ fn iteratorCall(host_call: InternalCall) HostError!core.JSValue {
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, host_call.output, active_global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
+}
+
+test "intrinsic iterator next methods have dedicated native records" {
+    const testing = std.testing;
+    const expected_ids = [_]u32{
+        @intFromEnum(IntrinsicMethod.array_iterator_next),
+        @intFromEnum(IntrinsicMethod.generator_next),
+        @intFromEnum(IntrinsicMethod.generator_return),
+        @intFromEnum(IntrinsicMethod.generator_throw),
+    };
+    for (expected_ids) |expected_id| {
+        var handler: ?core.host_function.InternalCallFn = null;
+        for (internal_entries) |entry| {
+            if (entry.id == expected_id) handler = entry.call;
+        }
+        try testing.expect(handler != null);
+        try testing.expect(handler.? == &iteratorCall);
+    }
 }
