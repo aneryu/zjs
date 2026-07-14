@@ -51,7 +51,10 @@ pub const Plugin = struct {
         if (self.consumed) return error.PluginAlreadyConsumed;
         const loaded = self.loaded orelse return error.PluginAlreadyConsumed;
         self.consumed = true;
-        try installLoaded(ctx, target_value, self.path, loaded, options);
+        try installSource(ctx, target_value, self.path, .{
+            .descriptor = loaded.descriptor,
+            .lib = loaded.lib,
+        }, options);
         self.loaded = null;
     }
 };
@@ -289,13 +292,6 @@ fn tombstoneRecord() core.host_function.ExternalRecord {
     };
 }
 
-fn installLoaded(ctx: *core.JSContext, target_value: core.JSValue, path: []const u8, loaded: ffi.LoadedPlugin, options: InstallOptions) !void {
-    try installSource(ctx, target_value, path, .{
-        .descriptor = loaded.descriptor,
-        .lib = loaded.lib,
-    }, options);
-}
-
 fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const u8, source: LoadedSource, options: InstallOptions) !void {
     const rt = ctx.runtimePtr();
     const descriptor = source.descriptor;
@@ -527,11 +523,7 @@ fn hostClassForType(plugin: *InstalledPlugin, type_id: ffi.HostTypeId) ?HostClas
 }
 
 fn hostClassPrototype(host_class: HostClass) ?*core.Object {
-    const value = host_class.prototype;
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    if (header.meta().kind != .object) return null;
-    return @fieldParentPtr("header", header);
+    return objectFromValue(host_class.prototype);
 }
 
 fn unwrapOpaqueObjectValue(rt: *core.JSRuntime, value: core.JSValue, expected_type_id: ffi.HostTypeId) !ffi.OpaqueHostObject {
@@ -718,14 +710,8 @@ fn errorNameFromStatus(status: ffi.Status) []const u8 {
 
 fn fallbackMessageFromStatus(status: ffi.Status) []const u8 {
     return switch (status) {
-        .type_error => "TypeError",
-        .range_error => "RangeError",
-        .syntax_error => "SyntaxError",
-        .reference_error => "ReferenceError",
-        .eval_error => "EvalError",
-        .uri_error => "URIError",
         .unsupported => "Unsupported",
-        .generic_error => "GenericError",
+        .type_error, .range_error, .syntax_error, .reference_error, .eval_error, .uri_error => errorNameFromStatus(status),
         else => "GenericError",
     };
 }

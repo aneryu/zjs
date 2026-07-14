@@ -154,7 +154,7 @@
   work already matching qjs. Future effort must go to the big handlers
   (op_call 17-24% / op_return 20% — restructuring, not micro-tightening) or
   Step-4, NOT back to these three.** Codex mechanics for the record: `codex
-  exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
+exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
   headless under ChatGPT auth; `-o <file>` did NOT reliably capture the last
   message (read the stdout tail instead); the wrapper's independent
   build+smoke+diff-review is the source of truth (codex's self-report is
@@ -178,14 +178,14 @@
   frame ~80-150 B vs the old monolithic 3504 B. **Do not touch the dispatch mechanism.**
 - **The single-function / labeled-switch rewrite is UNNECESSARY — proven (route-2, §3).** At full
   224-arm scale a labeled-switch (116 insn/call) and tail-call (112 insn/call) fib are within 4% and
-  both ~0.30× qjs. The dispatch *mechanism* is not the lever. The old POC's 0.32× win is overwhelmingly
+  both ~0.30× qjs. The dispatch _mechanism_ is not the lever. The old POC's 0.32× win is overwhelmingly
   "the toy skips real per-call work" (refcount dup/free, frame setup, shape/GC), not architecture.
 - **The lever for the remaining fib gap (~2.66× qjs) is aggressive method-A:** collapse the call-path
   function decomposition and strip the per-call bookkeeping qjs doesn't have — **keeping tail-call
   dispatch**. Low risk, incremental, gate-able.
 - **Native recursion (the other half of "axis ②") is UNPROVEN and risky.** `Path B` (native recursion
-  + real per-call work) *regressed* to 6.04× on deep fib. Treat it as a separate, later, real-work-modeled
-  experiment — NOT bundled into a "collapse" rewrite.
+    - real per-call work) _regressed_ to 6.04× on deep fib. Treat it as a separate, later, real-work-modeled
+      experiment — NOT bundled into a "collapse" rewrite.
 
 ## 1. What has landed (current state)
 
@@ -204,7 +204,7 @@
 
 1. **Aggressive method-A — collapse the call path (low risk, keep tail-call).** Merge the ~9 incidental
    frame-setup functions (`pushCall→pushFrame→acquireSlot→{Frame.init, FrameSlab.carve, initArenaWindow,
-   initFrameLocals, initArgumentsBorrowedSlots}`) toward a straight-line sequence like qjs's
+initFrameLocals, initArgumentsBorrowedSlots}`) toward a straight-line sequence like qjs's
    `JS_CallInternal` prologue, and strip per-call bookkeeping qjs lacks (Entry pool, profile guard, eval
    checks, arena mark on the simple frame). Each step gate-able; expect single-digit-% wins (diminishing).
 2. **Native recursion** — open, unproven, correctness-bearing (see §6). Not recommended without a
@@ -214,18 +214,20 @@
 
 Question: does the 30-line POC's `0.28-0.32× qjs` (single-function labeled-switch + native recursion)
 survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Harness: `/tmp/gen_fib.py`
-+ `/tmp/run_sweep.sh` (parameterized fib interpreter, opaque-call padding arms, `taskset -c 8`, fib(30)×3
-= 8,077,611 calls). Reproduced the POC exactly (9 arms = 107.6 = the old 107.5).
 
-| dispatch | arms | insn/call | vs qjs (389) | table base (objdump) |
-|---|---|---|---|---|
-| labeled-switch | 9 (POC) | 107.6 | 0.28× | resident |
-| labeled-switch | 96 | 116.1 | 0.30× | resident (adrp=2) |
-| labeled-switch | **224** | 116.1 | **0.30×** | **resident — 2-insn dispatch** |
-| tail-call | 224 | 111.6 | 0.29× | resident |
-| current zjs (real work) | — | ~1036 | 2.66× | — |
+- `/tmp/run_sweep.sh` (parameterized fib interpreter, opaque-call padding arms, `taskset -c 8`, fib(30)×3
+  = 8,077,611 calls). Reproduced the POC exactly (9 arms = 107.6 = the old 107.5).
+
+| dispatch                | arms    | insn/call | vs qjs (389) | table base (objdump)           |
+| ----------------------- | ------- | --------- | ------------ | ------------------------------ |
+| labeled-switch          | 9 (POC) | 107.6     | 0.28×        | resident                       |
+| labeled-switch          | 96      | 116.1     | 0.30×        | resident (adrp=2)              |
+| labeled-switch          | **224** | 116.1     | **0.30×**    | **resident — 2-insn dispatch** |
+| tail-call               | 224     | 111.6     | 0.29×        | resident                       |
+| current zjs (real work) | —       | ~1036     | 2.66×        | —                              |
 
 **Conclusions:**
+
 - **Dispatch mechanism doesn't move the needle** (ls 116 ≈ tc 112 at 224 arms) → the single-function
   rewrite buys nothing the current tail-call doesn't already have. B is dominated.
 - **Corrects `DISPATCH-TAX-FINDINGS`:** that doc claimed "arm count is the determining variable" for
@@ -235,25 +237,25 @@ survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Ha
   alone does not evict** (consistent with the doc's own earlier two-condition root cause: arms-call AND
   carrier-saturation, both required).
 - **The POC's win is toy-leanness, not architecture.** The toy omits 16 B JSValue refcount dup/free, frame
-  locals/var_refs setup, stack-overflow check, shapes/GC — all of which qjs *also* does (hence qjs = 389,
-  not 115). So a real collapse can't reach 115; its honest target is *qjs's order*, by removing the
+  locals/var_refs setup, stack-overflow check, shapes/GC — all of which qjs _also_ does (hence qjs = 389,
+  not 115). So a real collapse can't reach 115; its honest target is _qjs's order_, by removing the
   function-decomposition tax + the bookkeeping qjs lacks.
 
 ## 4. Invariants that must NOT be broken (load-bearing — any call-path work preserves these)
 
 - **Ownership lockstep.** `current_function` is **KEPT OWNED** (the "borrow cur_func" facet is rejected —
-  `takeSourceSlot` is a *move*, not a dup, so refcount is already identical to qjs; nothing to remove).
+  `takeSourceSlot` is a _move_, not a dup, so refcount is already identical to qjs; nothing to remove).
   The `var_refs` borrow safety is **coupled to `current_function` being owned** — the still-live function
   object roots the borrowed cells. Flipping one ownership flag without the other → double-free or leak
   (force-GC + test262 are the oracle).
 - **Frame stays its current ~15-field shape; do NOT slim to 9.** Rejected for real reasons: the teardown
-  cost is the *necessary* value frees (not field proliferation), and most "cold" fields
+  cost is the _necessary_ value frees (not field proliferation), and most "cold" fields
   (`storage_*`, `original_args`, eval/sync state) **cross generator/async suspend**, so a `FrameCold`
   side-struct can't be freed at teardown for a suspended generator. `FrameCold` already exists and is
   correct as-is.
 - **Suspend / raw-sp bifurcation — preserve all gates.** Hot inline frames borrow a slab window; cold
   growable frames (top-level / native re-entry / generator / async) keep the full heap-backed `Stack`.
-  Generators transfer buffer ownership into the generator object and *physically cannot* use a borrowed
+  Generators transfer buffer ownership into the generator object and _physically cannot_ use a borrowed
   slab window — do not unify the two regimes.
 - **Refcount-only frame liveness.** The cycle collector never walks the frame/Entry chain
   (`traceRoots`); frame values stay alive by refcount only. Don't add the frame chain to GC roots.
@@ -269,13 +271,14 @@ survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Ha
 - **"Borrow cur_func"** — a non-diff (move, not dup; same refcount as qjs).
 - **Frame slim to 9 fields** — low benefit, high complexity, cold fields cross suspend.
 - **Un-caching cold context vars to free a register for the table base** — disproven by reading the actual
-  reg-alloc: the cold vars are already in stack slots, not callee-saved; only eliminating a *hot* carrier
+  reg-alloc: the cold vars are already in stack slots, not callee-saved; only eliminating a _hot_ carrier
   frees a callee-saved register (and that's the raw-sp rewrite, whose fib payoff is a known mirage).
 
 ## 6. If native recursion is ever pursued (crossing concerns)
 
-Only as a separate experiment, *after* a real-work-modeled de-risk (the toy can't settle it; `Path B`
+Only as a separate experiment, _after_ a real-work-modeled de-risk (the toy can't settle it; `Path B`
 regressed to 6.04× with real work + the old slow path). Ground-truth these first:
+
 - **Suspend.** Generator/async yield must unwind the native stack via a Zig error/sentinel (qjs's
   `FUNC_RET_YIELD` analog); simple-normal calls recurse, generator/async/class-ctor/eval stay on the
   current path (already excluded by `resolveInlineTarget`'s `func_kind != .normal`).
@@ -283,6 +286,106 @@ regressed to 6.04× with real work + the old slow path). Ground-truth these firs
   proper tail calls + a `js_check_stack_overflow` equivalent.
 - **Backtrace / exception.** Walk the live `Frame` chain (qjs `current_stack_frame->prev`); Zig `error`
   propagates naturally up the stack, replacing the explicit Entry-chain unwind.
+
+## 7. Zero-copy JS↔Zig argument ABI — current state & conclusion (2026-07-12)
+
+> Consolidates the four JS↔Zig argument-passing paths, the ownership contract that
+> makes zero-copy safe, and the concrete wiring plan for the one path that is _not_
+> yet at qjs-internal parity. Supersedes the loose "can we go zero-copy" thread.
+
+### 7.1 Path-by-path state
+
+| #   | Path                                                  | Today                                                                                                                                                                                                                  | qjs anchor                                                                               | At parity?                                               |
+| --- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| A   | **JS→JS inline** (hot)                                | `initArgumentsBorrowedSlots` — args alias caller's operand-stack slots, value ownership transfers, no payload copy                                                                                                     | qjs `arg_buf = argv` fast path (17828-17871)                                             | **Yes, zero-copy**                                       |
+| B   | **JS→Zig** (VM calls builtin)                         | `args: []const JSValue = stack.values[region_base+2..][0..argc]` — a borrow window into the caller's operand stack; region stays pushed for the whole call (roots obj/func/args), `popOwnedStackRegion` releases after | qjs `OP_call_method` `call_argv` borrow + tail `JS_FreeValue` loop (18232)               | **Yes, zero-copy**                                       |
+| C   | **Zig→JS** (builtin re-enters VM, `runWithArgsState`) | `initArguments` — per-arg `dup()` into the frame slab                                                                                                                                                                  | qjs public `JS_Call` (`JS_CALL_FLAG_COPY_ARGV`) — also copies argv into the callee frame | **At qjs _public_ parity, NOT at qjs _internal_ parity** |
+| D   | **Plugin FFI** (`binding/ffi.zig` `CallFrame`)        | heavyweight wrapper, by design                                                                                                                                                                                         | n/a (qjs has no equivalent plugin ABI)                                                   | Isolated, not on hot path                                |
+
+The gap is **only path C**, and only relative to qjs's _internal_ call path (the
+`flags=0` borrow that qjs gives its own operand-stack calls but not to embedders).
+zjs's public ABI matching qjs's public ABI is an interop asset, not a deficit.
+
+### 7.2 Why path C copies today (and why qjs's public API does too)
+
+Public-ABI arguments are `const` and caller-owned; the callee's bytecode may
+`put_arg` (overwrite an argument slot), which under a borrow would mutate the
+caller's memory. Copying decouples the two. This is the same reason qjs's
+`JS_Call` sets `JS_CALL_FLAG_COPY_ARGV`. The copy is _correct_, not lazy.
+
+### 7.3 The mechanism for zero-copy path C already exists
+
+`Frame` has three argument-init modes (`src/exec/frame.zig`):
+
+- `initArguments` (327) — dup, current path-C mode
+- `initArgumentsBorrowedSlots` (412) — borrow slots, value ownership transfers,
+  frame frees values but not storage (qjs `arg_buf = argv`)
+- `initArgumentsMoved` (384) — move already-owned slots in, zero refcount churn
+
+What's missing is a selector: `CallEnv`/`runWithArgsState` has no `args_mode`
+field, so internal re-entry always picks `initArguments`. **The work is wiring,
+not invention.**
+
+### 7.4 Ownership contract for zero-copy path C (all four must hold)
+
+1. **Storage outlives the frame.** Borrowed slice must live to frame teardown.
+   Host-stack arrays (native frame wraps the whole call) and caller operand-stack
+   regions (no realloc while another frame owns the growth point) both satisfy this.
+2. **Value ownership transfers.** Borrow/move mode means the frame frees these
+   values; `put_arg` overwrites free the old value and write the new one. Call
+   sites must accept "values passed in belong to the engine; dup first if you want
+   to keep them." For internal call sites that were going to release the temp
+   values anyway, this is free.
+3. **Suspendable callees excluded.** Generator/async frames must keep args alive
+   across suspend → must copy (qjs does the same: generator frames dup argv into
+   the heap frame). The existing `use_inline_frame_storage` gate already excludes
+   them — reuse it.
+4. **Arity-padding path stays on move, not borrow.** `argc < arg_count` needs
+   allocated padding slots (qjs `arg_allocated_size` branch); move the padded
+   array, don't dup into it.
+
+### 7.5 Wiring plan (ordered by ROI)
+
+1. **Zero-arg internal callbacks first.** `iterator.next()` / `return()` are
+   mostly zero-arg — no ownership problem at all, just skip the args-window slab
+   carve. for-of is the highest-frequency callback in real JS; cheapest win.
+2. **Single-arg internal callbacks via move.** Promise reactions (1 value, the
+   job already owns it), accessors (1 value) — move the job-owned value into the
+   frame, save one dup + one free pair.
+3. **`Function.prototype.apply`/`call` forwarding via move.** Spread already
+   materializes a temp array; move it into the callee frame instead of dup-ing
+   each element.
+4. **Public ABI stays dup.** This is the qjs `JS_Call` embedder-safety contract
+   (const args, caller retains ownership). Do NOT break it. For advanced
+   embedders who want zero-copy, add an explicit `callTakingArgs` variant
+   (documented ownership transfer), opt-in.
+5. **Plugin FFI `CallFrame` stays isolated.** Its wrapper cost stays out of VM
+   internal paths.
+
+### 7.6 Payoff
+
+Per internal callback: `argc` dups + `argc` frees (atomic refcount memory
+traffic) eliminated, plus one args-window slab carve skipped. Each item is small
+alone, but for-of / map / filter / then-chains run millions of callbacks, and
+this multiplies with the **boundary-shim** work (§6-adjacent): the shim drops
+re-entry fixed cost to an inline-push; `args_mode` drops the argc-scaled variable
+cost to zero. Together they bring Zig→JS callback cost down to qjs-internal-path
+magnitude.
+
+### 7.7 Invariants this adds (load-bearing for any path-C work)
+
+- **Public ABI dup is a contract, not a perf bug.** Don't "fix" it by flipping
+  `JS_Call` to borrow — that breaks embedder ownership semantics.
+- **Borrow/move only on internal call sites that already own the values** (job
+  queue, iterator protocol, accessor dispatch, internal apply/call). External
+  callers go through the dup path.
+- **Suspend gate is non-negotiable.** Generator/async/eval callees copy, always.
+  Reuse `use_inline_frame_storage == false` as the discriminator; do not invent a
+  new one.
+- **Storage-lifetime proof per call site.** Every site flipped to borrow/move
+  must have a one-line comment stating why the backing storage outlives the frame
+  (host stack array / caller region / job-owned temp). This is the kind of
+  invariant that costs 2 bugs if unwritten (see §4 "thread an opcode" discipline).
 
 ## Pointers
 
