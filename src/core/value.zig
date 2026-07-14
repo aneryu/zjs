@@ -71,10 +71,6 @@ const NanBox = struct {
     /// Inclusive prefix range of all reference-counted tags.
     const refcount_min: u64 = prefixOf(Tag.big_int);
     const refcount_max: u64 = prefixOf(Tag.function_bytecode);
-    /// String-header tags are adjacent inside the dense NaN-box prefix space.
-    const stringlike_min: u64 = prefixOf(Tag.symbol);
-    const stringlike_max: u64 = prefixOf(Tag.string_rope);
-    const flat_stringlike_max: u64 = prefixOf(Tag.string);
     /// Lowest prefix of the deinit-phase skip set {module, object, function_bytecode}.
     const deinit_skip_min: u64 = prefixOf(Tag.module);
 
@@ -580,7 +576,14 @@ pub const JSValue = extern struct {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
-                if (p >= NanBox.stringlike_min and p <= NanBox.stringlike_max) {
+                // Keep the adjacent tags in equality form. LLVM folds this into
+                // one biased range compare with a shifted operand on AArch64;
+                // spelling the source as >= / <= materializes an extra shift in
+                // every dup hot path.
+                if (p == NanBox.prefixOf(Tag.symbol) or
+                    p == NanBox.prefixOf(Tag.string) or
+                    p == NanBox.prefixOf(Tag.string_rope))
+                {
                     gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
                 } else {
                     gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
@@ -610,7 +613,7 @@ pub const JSValue = extern struct {
             }
             if (p == NanBox.prefixOf(Tag.string_rope)) {
                 releaseRopeValue(rt, self);
-            } else if (p >= NanBox.stringlike_min and p <= NanBox.flat_stringlike_max) {
+            } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
                 gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
             } else {
                 gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
