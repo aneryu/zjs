@@ -181,6 +181,16 @@ pub const JSValue = extern struct {
 
     inline fn make(comptime tag: i32, payload: u64) JSValue {
         if (comptime nan_boxing) {
+            if (comptime tag == Tag.float64) {
+                // Floats are the one semantic tag that is not boxed. Keep the
+                // unified constructor total over every Tag while preserving
+                // the canonical-NaN invariant that separates raw IEEE values
+                // from the boxed prefix range.
+                if ((payload & 0x7FFF_FFFF_FFFF_FFFF) > 0x7FF0_0000_0000_0000) {
+                    return .{ .repr = .{ .bits = NanBox.canonical_nan } };
+                }
+                return .{ .repr = .{ .bits = payload } };
+            }
             std.debug.assert(payload <= NanBox.payload_mask);
             const prefix_bits = comptime (NanBox.prefixOf(tag) << NanBox.payload_bits);
             return .{ .repr = .{ .bits = prefix_bits | payload } };
@@ -206,14 +216,6 @@ pub const JSValue = extern struct {
     }
 
     pub fn float64(v: f64) JSValue {
-        if (comptime nan_boxing) {
-            const bits: u64 = @bitCast(v);
-            // Canonicalize every NaN so no float collides with boxed encodings.
-            if ((bits & 0x7FFF_FFFF_FFFF_FFFF) > 0x7FF0_0000_0000_0000) {
-                return .{ .repr = .{ .bits = NanBox.canonical_nan } };
-            }
-            return .{ .repr = .{ .bits = bits } };
-        }
         return make(Tag.float64, @bitCast(v));
     }
 

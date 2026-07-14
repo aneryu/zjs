@@ -40,6 +40,19 @@ test "primitive value predicates match QuickJS helpers" {
     try std.testing.expectEqual(@as(?i32, null), core.JSValue.float64(7).asInt32());
 }
 
+test "float construction is valid across JSValue representations" {
+    const finite = core.JSValue.float64(1.5);
+    try std.testing.expectEqual(@as(?f64, 1.5), finite.asFloat64());
+
+    const negative_zero = core.JSValue.float64(-0.0);
+    const negative_zero_value = negative_zero.asFloat64().?;
+    try std.testing.expect(negative_zero_value == 0.0);
+    try std.testing.expectEqual(@as(u64, 0x8000_0000_0000_0000), @as(u64, @bitCast(negative_zero_value)));
+
+    const nan_value = core.JSValue.float64(@bitCast(@as(u64, 0x7FF8_0000_0000_0042)));
+    try std.testing.expect(std.math.isNan(nan_value.asFloat64().?));
+}
+
 test "heap BigInt value uses reserved QuickJS tag" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
