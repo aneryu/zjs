@@ -458,7 +458,14 @@ pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot
     // The frame owns the initial reference; callers receive an additional
     // reference and may drop it on error without leaving the open list dangling.
     const cell = try core.VarRef.createOpen(ctx.runtime, slot);
-    frame.addOpenVarRef(cell);
+    if (!frame.addOpenVarRef(cell)) {
+        // A malformed/synthetic Bytecode may understate its compile-time open
+        // reference count. Preserve correctness without leaking the temporary
+        // open cell; finalized parser output sizes this table exactly.
+        cell.close(ctx.runtime);
+        cell.freeCell(ctx.runtime);
+        return ensureVarRefCell(ctx, slot);
+    }
     return cell.valueRef().dup();
 }
 
@@ -532,7 +539,10 @@ pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame
 }
 
 fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {
-    if (frame.function.flags.is_generator or frame.function.flags.is_async) return false;
+    // Generator/async frames now retain one resident backing allocation across
+    // suspension. Their local/argument addresses are as stable as ordinary
+    // inline frames; vm_gen_async parks and restores the open-ref window with
+    // those same slices, so they no longer need the legacy closed-cell fallback.
     return slotInSlice(slot, frame.locals) or slotInSlice(slot, frame.args);
 }
 

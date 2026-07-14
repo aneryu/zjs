@@ -242,12 +242,12 @@ pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var
 }
 
 pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode, frame_arg_count: usize) usize {
-    const slot_count = @as(usize, function.var_count) + frame_arg_count;
-    if (slot_count == 0) return 0;
-    if (function.flags.is_generator or function.flags.is_async) return 0;
-    if (function.constants.values.len != 0) return slot_count;
-    if (function.flags.has_eval_call) return slot_count;
-    return 0;
+    const static_count: usize = function.open_var_ref_count;
+    if (!function.flags.has_mapped_arguments) return static_count;
+    // Mapped Arguments aliases are created for the supplied-argument window at
+    // runtime. Add that dynamic upper bound to the compact compile-time set;
+    // duplicate explicitly-captured args merely leave spare null entries.
+    return std.math.add(usize, static_count, frame_arg_count) catch std.math.maxInt(usize);
 }
 
 pub const FrameStorageWindows = struct {
@@ -674,25 +674,32 @@ pub const Frame = struct {
     }
 
     pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
-        const idx = self.openVarRefIndex(slot) orelse return null;
-        if (idx >= self.open_var_refs.len) return null;
-        return self.open_var_refs[idx];
+        for (self.open_var_refs) |maybe_ref| {
+            const ref = maybe_ref orelse continue;
+            if (ref.pvalue == slot) return ref;
+        }
+        return null;
     }
 
-    pub fn addOpenVarRef(self: *Frame, ref: *core.VarRef) void {
+    pub fn addOpenVarRef(self: *Frame, ref: *core.VarRef) bool {
         std.debug.assert(ref.is_open);
-        const idx = self.openVarRefIndex(ref.pvalue) orelse return;
-        std.debug.assert(idx < self.open_var_refs.len);
-        self.open_var_refs[idx] = ref;
+        for (self.open_var_refs) |*slot| {
+            if (slot.* != null) continue;
+            slot.* = ref;
+            return true;
+        }
+        return false;
     }
 
     pub fn closeOpenVarRefForSlot(self: *Frame, rt: anytype, slot: *JSValue) void {
-        const idx = self.openVarRefIndex(slot) orelse return;
-        if (idx >= self.open_var_refs.len) return;
-        const ref = self.open_var_refs[idx] orelse return;
-        self.open_var_refs[idx] = null;
-        ref.close(rt);
-        ref.valueRef().free(rt);
+        for (self.open_var_refs) |*entry| {
+            const ref = entry.* orelse continue;
+            if (ref.pvalue != slot) continue;
+            entry.* = null;
+            ref.close(rt);
+            ref.valueRef().free(rt);
+            return;
+        }
     }
 
     pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
@@ -715,7 +722,7 @@ pub const Frame = struct {
         arena: ?*runtime.VmStackArena,
         use_inline_storage: bool,
     ) !void {
-        const count = self.locals.len + self.args.len;
+        const count = self.function.open_var_ref_count;
         if (count == 0 or self.open_var_refs.len >= count) return;
         _ = use_inline_storage;
         const slots = blk: {
@@ -729,12 +736,6 @@ pub const Frame = struct {
         };
         @memset(slots, null);
         self.open_var_refs = slots;
-    }
-
-    fn openVarRefIndex(self: *const Frame, slot: *const JSValue) ?usize {
-        if (slotIndexInSlice(slot, self.locals)) |idx| return idx;
-        if (slotIndexInSlice(slot, self.args)) |idx| return self.locals.len + idx;
-        return null;
     }
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
@@ -884,9 +885,9 @@ fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize)
 
     // Open cells alias local slots directly. Moving the local window must
     // rebase those aliases before the old backing can disappear.
-    const open_local_count = @min(old_locals.len, frame.open_var_refs.len);
-    for (frame.open_var_refs[0..open_local_count], 0..) |maybe_ref, local_idx| {
+    for (frame.open_var_refs) |maybe_ref| {
         const ref = maybe_ref orelse continue;
+        const local_idx = Frame.slotIndexInSlice(ref.pvalue, old_locals) orelse continue;
         std.debug.assert(ref.is_open);
         std.debug.assert(ref.pvalue == &old_locals[local_idx]);
         ref.pvalue = &next[local_idx];

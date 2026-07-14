@@ -3272,6 +3272,44 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
     }
 }
 
+test "surviving local references reserve compact open VarRef storage" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("open-ref-frame-sizing");
+    const local_name = try rt.internAtom("value");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(local_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+
+    var code = [_]u8{0} ** 14;
+    code[0] = bytecode.opcode.op.scope_make_ref;
+    std.mem.writeInt(u32, code[1..5], local_name, .little);
+    std.mem.writeInt(u32, code[5..9], 0, .little);
+    std.mem.writeInt(u16, code[9..11], 0, .little);
+    code[11] = bytecode.opcode.op.get_ref_value;
+    code[12] = bytecode.opcode.op.drop;
+    code[13] = bytecode.opcode.op.return_undef;
+    try fd.appendByteCode(&code);
+    try fd.appendAtomOperand(local_name);
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
+    try std.testing.expect(fb.varDefs()[0].is_captured);
+    try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, fb.byteCode()[0]);
+    const view = bytecode.asBytecodeView(fb, rt);
+    try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
+    try std.testing.expect(view.locals_never_boxed);
+    try std.testing.expect(!view.localMayBeBoxed(0));
+}
+
 test "createFunctionBytecode: copies global var records from FunctionDef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

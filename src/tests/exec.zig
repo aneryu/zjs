@@ -17,6 +17,14 @@ const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
+fn localIndexNamed(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, name: []const u8) ?usize {
+    for (function.varDefs(), 0..) |vd, idx| {
+        const bytes = rt.atoms.name(vd.var_name) orelse continue;
+        if (std.mem.eql(u8, bytes, name)) return idx;
+    }
+    return null;
+}
+
 test "var-ref growth promotes borrowed captures to owned cells" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2456,7 +2464,6 @@ test "resident generator resumes preserve nested catch and finally targets" {
         \\let caught;
         \\try { iterator.next(); } catch (error) { caught = error; }
         \\assert.sameValue(caught, 6);
-
         \\function* beforeNested() {
         \\  try {
         \\    yield 1;
@@ -2468,7 +2475,6 @@ test "resident generator resumes preserve nested catch and finally targets" {
         \\assert.sameValue(iterator.throw(7).value, 3);
         \\try { iterator.next(); } catch (error) { caught = error; }
         \\assert.sameValue(caught, 7);
-
         \\function* plainFinally() {
         \\  try { yield 1; } finally { yield 2; }
         \\}
@@ -2477,7 +2483,6 @@ test "resident generator resumes preserve nested catch and finally targets" {
         \\assert.sameValue(iterator.throw(8).value, 2);
         \\try { iterator.next(); } catch (error) { caught = error; }
         \\assert.sameValue(caught, 8);
-
         \\function* inner() { return yield 1; }
         \\function* delegate(iterable) { return yield* iterable; }
         \\iterator = delegate(inner());
@@ -2488,6 +2493,89 @@ test "resident generator resumes preserve nested catch and finally targets" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+}
+
+test "surviving var references keep resident local slots bare" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* referenceStorage(scope) {
+        \\  var target;
+        \\  with (scope) { target = 41; }
+        \\  yield target;
+        \\  target += 1;
+        \\  return target;
+        \\}
+        \\globalThis.__referenceStorage = referenceStorage({});
+        \\__referenceStorage.next();
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__referenceStorage");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    const function = engine.exec.call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    const target_idx = localIndexNamed(js.runtime, function, "target") orelse return error.TypeError;
+    const state = generator.generatorExecutionState();
+
+    try std.testing.expect(function.open_var_ref_count > 0);
+    try std.testing.expect(function.varDefs()[target_idx].is_captured);
+    try std.testing.expect(!function.varDefs()[target_idx].is_lexical);
+    try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(state.storage.frame.locals[target_idx]) == null);
+    var found_open_alias = false;
+    for (state.storage.frame.open_var_refs) |maybe_ref| {
+        const ref = maybe_ref orelse continue;
+        if (ref.is_open and ref.pvalue == &state.storage.frame.locals[target_idx]) found_open_alias = true;
+    }
+    try std.testing.expect(found_open_alias);
+
+    const completion = try js.eval(
+        \\const step = __referenceStorage.next();
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+}
+
+test "direct eval captures only bindings visible at its call scope" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* scopedEvalStorage() {
+        \\  { let sibling = 10; globalThis.__siblingValue = sibling; }
+        \\  var visible = 1;
+        \\  { let active = 2; eval("visible = active"); yield visible; }
+        \\}
+        \\globalThis.__scopedEvalStorage = scopedEvalStorage();
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__scopedEvalStorage");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    const function = engine.exec.call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    const sibling_idx = localIndexNamed(js.runtime, function, "sibling") orelse return error.TypeError;
+    const visible_idx = localIndexNamed(js.runtime, function, "visible") orelse return error.TypeError;
+    const active_idx = localIndexNamed(js.runtime, function, "active") orelse return error.TypeError;
+
+    try std.testing.expect(!function.varDefs()[sibling_idx].is_captured);
+    try std.testing.expect(function.varDefs()[visible_idx].is_captured);
+    try std.testing.expect(function.varDefs()[active_idx].is_captured);
+    const view = bytecode.asBytecodeView(function, js.runtime);
+    try std.testing.expect(!view.localMayBeBoxed(visible_idx));
+    try std.testing.expect(view.localMayBeBoxed(active_idx));
 }
 
 test "suspended generators retain one resident execution owner across resumes" {

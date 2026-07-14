@@ -5600,11 +5600,15 @@ pub const parser_core = struct {
         }
 
         fn ensureClosureChain(self: *State, source_index: usize, source: function_def_mod.ClosureVar) Error!void {
-            if (source.closure_type == .local) {
-                const source_fd = self.funcAtVirtualIndex(source_index);
-                if (source.var_idx < source_fd.vars.len) {
+            const source_fd = self.funcAtVirtualIndex(source_index);
+            switch (source.closure_type) {
+                .local => if (source.var_idx < source_fd.vars.len) {
                     source_fd.vars[source.var_idx].is_captured = true;
-                }
+                },
+                .arg => if (source.var_idx < source_fd.args.len) {
+                    source_fd.args[source.var_idx].is_captured = true;
+                },
+                else => {},
             }
             var parent_ref_idx: ?u16 = null;
             var child_index = source_index + 1;
@@ -5805,6 +5809,11 @@ pub const parser_core = struct {
                 if (!functionDefUsesAtomTransitive(child, atom_id)) continue;
                 if (child.findVar(atom_id) >= 0 or child.findArg(atom_id) >= 0) continue;
                 if (!scopeChainContains(parent_fd, child.parent_scope_level, local.scope_level)) continue;
+                // Forward references are discovered after the child was parsed,
+                // so they bypass ensureClosureChain's normal capture marking.
+                // Keep the source slot metadata authoritative for frame layout
+                // and per-local boxed access decisions.
+                parent_fd.vars[local_idx].is_captured = true;
                 const child_ref_idx: u16 = if (findClosureVarIndex(child, atom_id)) |existing| blk: {
                     if (child.closure_var[existing].closure_type == .local and
                         child.closure_var[existing].var_idx < parent_fd.vars.len)
@@ -5848,6 +5857,7 @@ pub const parser_core = struct {
                 closure.is_const = parameter_local.is_const;
                 closure.var_kind = parameter_local.var_kind;
                 closure.var_idx = parameter_arguments_idx;
+                parent_fd.vars[parameter_arguments_idx].is_captured = true;
                 try self.propagateForwardCaptureToDescendants(
                     child,
                     atom_module.ids.arguments,
@@ -15625,6 +15635,7 @@ pub const parser_core = struct {
                 // Mirrors qjs per-class-scope resolution of
                 // JS_ATOM_class_fields_init (quickjs.c:25702 + 25185).
                 const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
+                parent_fd.vars[fields_init_var_idx].is_captured = true;
                 _ = try child_fd.addClosureVar(.{
                     .closure_type = .local,
                     .is_lexical = true,
@@ -19874,6 +19885,7 @@ pub const parser_core = struct {
         // class's own scope (define_var, quickjs.c:25702) and the constructor
         // resolves it lexically (emit_class_field_init, quickjs.c:25185).
         const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
+        parent_fd.vars[fields_init_var_idx].is_captured = true;
         _ = try child_fd.addClosureVar(.{
             .closure_type = .local,
             .is_lexical = true,
@@ -20566,8 +20578,14 @@ pub const parser_core = struct {
         source_owner: *function_def_mod.FunctionDef,
         source: function_def_mod.ClosureVar,
     ) Error!void {
-        if (source.closure_type == .local and source.var_idx < source_owner.vars.len) {
-            source_owner.vars[source.var_idx].is_captured = true;
+        switch (source.closure_type) {
+            .local => if (source.var_idx < source_owner.vars.len) {
+                source_owner.vars[source.var_idx].is_captured = true;
+            },
+            .arg => if (source.var_idx < source_owner.args.len) {
+                source_owner.args[source.var_idx].is_captured = true;
+            },
+            else => {},
         }
 
         var owner = source_owner;
@@ -20761,15 +20779,62 @@ pub const parser_core = struct {
         }
     }
 
+    fn markDirectEvalVisibleOwnBindings(fd: *function_def_mod.FunctionDef) void {
+        const eval_scope_mask: u16 = 0x3fff;
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        var found_eval = false;
+        var malformed = false;
+        while (pc < fd.byte_code.len) {
+            const op_id = fd.byte_code[pc];
+            const instr = parserPhaseInstruction(fd.byte_code, fd.atom_operands, pc, atom_index);
+            if (instr.size == 0 or pc + instr.size > fd.byte_code.len) {
+                malformed = true;
+                break;
+            }
+            const scope_level: ?i32 = switch (op_id) {
+                opcode.op.eval => if (instr.size >= 5)
+                    @intCast(std.mem.readInt(u16, fd.byte_code[pc + 3 ..][0..2], .little) & eval_scope_mask)
+                else
+                    null,
+                opcode.op.apply_eval => if (instr.size >= 3)
+                    @intCast(std.mem.readInt(u16, fd.byte_code[pc + 1 ..][0..2], .little) & eval_scope_mask)
+                else
+                    null,
+                else => null,
+            };
+            if (scope_level) |visible_scope| {
+                found_eval = true;
+                for (fd.vars) |*vd| {
+                    if (vd.var_kind == .eval_var_object) continue;
+                    if (vd.var_kind == .function_name or State.scopeChainContains(fd, visible_scope, vd.scope_level)) {
+                        vd.is_captured = true;
+                    }
+                }
+                // Formal parameters belong to the function environment and
+                // are visible from every direct-eval call in the body.
+                for (fd.args) |*arg| arg.is_captured = true;
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += instr.size;
+        }
+
+        // Parser-produced streams are expected to decode completely. Keep a
+        // conservative fallback for hand-built FunctionDefs so an understated
+        // open-ref table can never turn into a dangling/boxed-slot mismatch.
+        if (!found_eval or malformed) {
+            for (fd.vars) |*vd| if (vd.var_kind != .eval_var_object) {
+                vd.is_captured = true;
+            };
+            for (fd.args) |*arg| arg.is_captured = true;
+        }
+    }
+
     fn captureDirectEvalPreparedBindings(fd: *function_def_mod.FunctionDef) Error!void {
         if (fd.has_eval_call) {
-            // Direct eval may close over any binding visible at a call site.
-            // Marking the owning slots captured makes enter_scope detach their
-            // cells on every re-entry, preserving per-iteration and repeated
-            // catch/block environment identity for eval-created closures.
-            for (fd.vars) |*vd| {
-                if (vd.var_kind != .eval_var_object) vd.is_captured = true;
-            }
+            // Reserve open references only for the union of bindings visible
+            // at real eval call scopes. Sibling block lexicals remain bare.
+            markDirectEvalVisibleOwnBindings(fd);
             try captureAllVisibleDirectEvalBindings(fd);
         }
         for (fd.child_list) |child| {

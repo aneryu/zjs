@@ -1448,6 +1448,9 @@ pub const function_bytecode = struct {
         var_count: u16 = 0,
         defined_arg_count: u16 = 0,
         stack_size: u16 = 0,
+        /// Compile-time upper bound for simultaneously-open local/argument
+        /// VarRefs. Only bindings whose identity can escape are counted.
+        open_var_ref_count: u16 = 0,
         cpool_count: i32 = 0,
 
         // QuickJS dispatches the VM directly from the `JSFunctionBytecode *`; zjs
@@ -3578,7 +3581,10 @@ pub const pipeline_resolve_variables = struct {
         if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
         for (fd.child_list) |child| {
             for (child.closure_var) |cv| {
-                if ((cv.closure_type == .local or cv.closure_type == .ref) and cv.var_idx == loc_idx) return true;
+                // `.ref` indexes the parent's closure-var table, not its local
+                // slots. Only a direct `.local` source proves this local's
+                // identity escapes into the child.
+                if (cv.closure_type == .local and cv.var_idx == loc_idx) return true;
             }
         }
         return false;
@@ -4691,6 +4697,19 @@ pub const pipeline_resolve_variables = struct {
         };
     }
 
+    fn markReferenceTakenBinding(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i16) void {
+        const fd = ctx.function_def orelse return;
+        const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return;
+        switch (binding) {
+            .local => |idx| if (idx < fd.vars.len) {
+                fd.vars[idx].is_captured = true;
+            },
+            .arg => |idx| if (idx < fd.args.len) {
+                fd.args[idx].is_captured = true;
+            },
+        }
+    }
+
     fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level: i16) bool {
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return false;
         if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) return false;
@@ -5007,6 +5026,11 @@ pub const pipeline_resolve_variables = struct {
                         }
                     }
                 }
+                // The reference survived compile-time tail folding. Record its
+                // binding identity now so final frame sizing reserves one open
+                // VarRef slot instead of falling back to replacing the JSValue
+                // slot with a closed cell at runtime.
+                markReferenceTakenBinding(ctx, atom_id, scope_level);
                 if (eval_probe) |probe| {
                     output_size += probe.prefix_size;
                     output_atom_count += probe.count;
@@ -7268,6 +7292,30 @@ pub const pipeline_finalize = struct {
         // will include parent/child relationship tracking.
     };
 
+    fn capturedBindingCount(fd: *const function_def_mod.FunctionDef) u16 {
+        var count: usize = 0;
+        for (fd.vars) |vd| count += @intFromBool(vd.is_captured);
+        for (fd.args) |vd| count += @intFromBool(vd.is_captured);
+        return std.math.cast(u16, count) orelse std.math.maxInt(u16);
+    }
+
+    /// Child closure tables are the final authority after forward-capture and
+    /// class/private-name retrofits. Fold them back into the source VarDefs
+    /// once, before lowering and frame-layout sizing, so every later consumer
+    /// sees the same per-binding capture fact.
+    fn reconcileCapturedBindings(fd: *function_def_mod.FunctionDef) void {
+        for (fd.vars, 0..) |*vd, idx| {
+            if (resolve_variables.localIsCaptured(fd, @intCast(idx))) vd.is_captured = true;
+        }
+        for (fd.child_list) |child| {
+            for (child.closure_var) |cv| {
+                if (cv.closure_type == .arg and cv.var_idx < fd.args.len) {
+                    fd.args[cv.var_idx].is_captured = true;
+                }
+            }
+        }
+    }
+
     /// Create a FunctionBytecode from a FunctionDef.
     ///
     /// This mirrors `js_create_function` at `quickjs.c:35401`. It:
@@ -7282,6 +7330,7 @@ pub const pipeline_finalize = struct {
     }
 
     fn createFunctionBytecodeAfterChildren(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError![]fb_mod.FunctionBytecode {
+        reconcileCapturedBindings(fd);
         var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, fd.func_name);
         defer lowered.deinit(rt);
         lowered.line_num = fd.line_num;
@@ -7457,6 +7506,7 @@ pub const pipeline_finalize = struct {
         fb.var_count = @intCast(fd.var_count);
         fb.defined_arg_count = @intCast(fd.defined_arg_count);
         fb.stack_size = lowered.stack_size;
+        fb.open_var_ref_count = capturedBindingCount(fd);
 
         // Copy source location into the boxed cold cluster (`dbg`, allocated up
         // front above alongside the argument names).
@@ -8332,7 +8382,10 @@ const function_mod = struct {
         has_eval_call: bool = false,
         is_arrow_function: bool = false,
         backtrace_barrier: bool = false,
-        reserved: u2 = 0,
+        /// Runtime-created mapped Arguments objects open-alias every supplied
+        /// argument slot in addition to the statically captured bindings.
+        has_mapped_arguments: bool = false,
+        reserved: u1 = 0,
     };
 
     /// Compatibility aliases for finalized runtime function bytecode.
@@ -8378,23 +8431,16 @@ const function_mod = struct {
         /// before mutable parameter slots can change them. Selected only when
         /// finalized bytecode materializes an arguments object.
         strict_simple_snapshot_inline_eligible: bool = false,
-        /// Precomputed: NO `var_buf` local slot of this function can ever hold a
-        /// var-ref cell. In qjs a captured local (`capture_var`, quickjs.c:32907)
-        /// gets `is_captured = TRUE` for BOTH closure capture and OP_make_loc_ref
-        /// (quickjs.c:33029); zjs sets `is_captured` on closure capture but the
-        /// make_loc_ref lowering (bytecode.zig ~4723) does not, so this predicate
-        /// derives the complete "locals never boxed" set at finalize instead:
-        /// no vardef `is_captured`, no `make_loc_ref` in the code, not a derived
-        /// constructor (`this`-cell, vm_call.linkDerivedConstructorThisLocal),
-        /// and not eval/module code (direct-eval / module fill can box a caller
-        /// local). When true, the checked-loc fast handlers (opLocCheck) skip the
-        /// per-op `varRefCellFromValue` cell guard on both the slot and the
-        /// stored value — mirroring qjs, whose OP_get_loc_check/put_loc_check read
-        /// `var_buf[idx]` as a plain value with no cell test (quickjs.c:18704).
+        /// Precomputed proof that every local slot stays a plain JSValue. Normal
+        /// var/arg captures now use open VarRefs whose pvalue points at the slot,
+        /// matching qjs, so they do not invalidate this proof. Captured lexical
+        /// bindings and derived-constructor `this` still use the legacy closed
+        /// cell representation and keep the guarded handlers.
         locals_never_boxed: bool = false,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
+        open_var_ref_count: u16 = 0,
         /// `code` and `atom_operands` are mutated by the parser via geometric
         /// growth (see `appendCode` / `retainAtomOperand`). The visible slice
         /// length is the *used* count; the backing buffer is sized by
@@ -8654,6 +8700,14 @@ const function_mod = struct {
             if (capacity != 0) self.memory.free(DirectCallSite, items.ptr[0..capacity]);
         }
 
+        pub inline fn localMayBeBoxed(self: *const BytecodeImpl, idx: usize) bool {
+            if (self.locals_never_boxed) return false;
+            if (idx >= self.vardefs.len) return true;
+            const vd = self.vardefs[idx];
+            if (vd.is_captured and vd.is_lexical) return true;
+            return self.flags.is_derived_class_constructor and vd.var_name == atom.ids.this_;
+        }
+
         pub fn ensureModule(self: *BytecodeImpl) *module.Record {
             if (self.module_record == null) self.module_record = module.Record.init(self.memory, self.atoms);
             return &self.module_record.?;
@@ -8665,19 +8719,13 @@ const function_mod = struct {
         }
     };
 
-    /// Precompute `BytecodeImpl.locals_never_boxed`: true when no `var_buf`
-    /// local of `fb` can ever hold a var-ref cell (see the field doc). A local
-    /// becomes a cell only via (a) closure capture, which marks the vardef
-    /// `is_captured`; (b) OP_make_loc_ref reference-taking; (c) the derived
-    /// constructor `this` cell (linkDerivedConstructorThisLocal); or (d) a
-    /// direct-eval that boxes a caller local (the caller then has has_eval_call).
-    /// Any of these disqualifies the function; otherwise every checked-loc slot
-    /// is a plain value, exactly as qjs reads `var_buf[idx]` (quickjs.c:18704).
+    /// Precompute the plain-local proof used by hot handlers. Non-lexical
+    /// reference-taking is safe because the finalized frame reserves compact
+    /// open-VarRef storage and never replaces those slots with cell values.
     fn computeLocalsNeverBoxed(fb: *const FunctionBytecode) bool {
         if (fb.flags.is_derived_class_constructor) return false;
-        if (fb.flags.has_eval_call or fb.flags.is_indirect_eval) return false;
         for (fb.varDefs()) |vd| {
-            if (vd.is_captured) return false;
+            if (vd.is_captured and vd.is_lexical) return false;
         }
         const code = fb.byteCode();
         var pc: usize = 0;
@@ -8687,7 +8735,11 @@ const function_mod = struct {
             // A malformed/short opcode should never survive finalize; treat it
             // conservatively as boxable rather than reading past the buffer.
             if (size == 0 or pc + size > code.len) return false;
-            if (op_id == opcode.op.make_loc_ref) return false;
+            if (op_id == opcode.op.make_loc_ref) {
+                if (size < 7 or fb.open_var_ref_count == 0) return false;
+                const idx = std.mem.readInt(u16, code[pc + 5 ..][0..2], .little);
+                if (idx >= fb.vars_len or fb.varDefs()[idx].is_lexical) return false;
+            }
             pc += size;
         }
         return true;
@@ -8754,6 +8806,7 @@ const function_mod = struct {
                 .has_eval_call = fb.flags.has_eval_call,
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
+                .has_mapped_arguments = materializes_arguments_object and !strict_mode and fb.flags.has_simple_parameter_list,
             },
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
@@ -8762,6 +8815,7 @@ const function_mod = struct {
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,
             .stack_size = fb.stack_size,
+            .open_var_ref_count = fb.open_var_ref_count,
             .code = fb.byteCode(),
             // `atom_operands` intentionally left as the default empty slice: the
             // FB no longer keeps a standalone atom-operand array (retention moved

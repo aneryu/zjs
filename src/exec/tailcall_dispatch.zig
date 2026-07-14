@@ -1119,6 +1119,7 @@ inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) 
 /// for-18-variants op_loc whose runtime decode cost ~15 insn/op (measured).
 const LocKind = enum { get, put, set };
 const LocIdx = enum { c0, c1, c2, c3, byte, half };
+
 pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -1137,7 +1138,8 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
                 .half => 3,
             };
             const old_v = var_buf[idx];
-            if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const may_box = vm.function.localMayBeBoxed(idx);
+            if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             switch (kind) {
                 .get => {
                     sp[0] = old_v.dup();
@@ -1145,14 +1147,14 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
                 },
                 .put => {
                     const value = (sp - 1)[0];
-                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     var_buf[idx] = value;
                     old_v.free(vm.ctx.runtime);
                     return cont(pc + advance, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     const assigned = value.dup();
                     var_buf[idx] = assigned;
                     old_v.free(vm.ctx.runtime);
@@ -1191,10 +1193,10 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
             // `varRefCellFromValue` guards are dropped — qjs reads `var_buf[idx]`
             // as a plain value with no cell test at all (quickjs.c:18704). When
             // clear, the guards run exactly as before (captured binding → cold).
-            const may_box = !vm.function.locals_never_boxed;
             // Cell slot OR plain-uninitialized (TDZ) slot both fall to the cold
             // checkedLocVm: `varRefCellFromValue` catches the captured-binding case
             // and `isUninitialized` the plain-TDZ case (qjs 18709 tag test).
+            const may_box = vm.function.localMayBeBoxed(idx);
             if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             switch (kind) {
@@ -1230,7 +1232,7 @@ pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     const old_v = var_buf[idx];
-    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (vm.function.localMayBeBoxed(idx) and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // Store before freeing: a collection during old_v.free must not trace the dying
     // value through the local slot (the same order as checkedLocVm and qjs).
     var_buf[idx] = JSValue.uninitialized();
@@ -1247,9 +1249,10 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     if (vm.function.flags.is_derived_class_constructor) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     const old_v = var_buf[idx];
-    if (slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const may_box = vm.function.localMayBeBoxed(idx);
+    if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const value = (sp - 1)[0];
-    if (slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // Mirror setSlotValue's plain-slot arm and opLoc(.put): move the popped value,
     // then release the overwritten slot value. The inline free intentionally keeps
     // the rc==1/destroy case here rather than paying a cold-table round trip.
