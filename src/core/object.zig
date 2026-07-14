@@ -941,10 +941,12 @@ pub const SuspendedExecutionStorage = struct {
 pub const SuspendedExecutionState = struct {
     pc: usize = 0,
     storage: SuspendedExecutionStorage = .{},
-    /// Active catch target parked with the frame. `maxInt(u32)` is the null
-    /// sentinel; bytecode offsets are u32-addressable. Keeping this scalar in
-    /// the struct's former tail padding avoids rescanning bytecode from pc 0 on
-    /// every resume and does not grow GeneratorExecutionState.
+    /// Catch target observed when the frame was parked. `maxInt(u32)` is the
+    /// null sentinel; bytecode offsets are u32-addressable. This diagnostic
+    /// snapshot is not authoritative after a completion crosses a yielding
+    /// finally leg: resume reconstructs control state from `pc` and bytecode.
+    /// Keeping it in the struct's former tail padding does not grow
+    /// GeneratorExecutionState.
     catch_target_pc: u32 = no_suspended_catch_target,
     /// A resident frame exists even when every window is zero length and pc is
     /// zero. This is the zjs counterpart of qjs `func_state != NULL`; neither

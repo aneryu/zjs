@@ -2435,6 +2435,61 @@ test "generator completion resumes keep the original function home object" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "resident generator resumes preserve nested catch and finally targets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* afterNested() {
+        \\  try {
+        \\    yield 1;
+        \\    try { yield 2; throw 3; } catch (error) { yield error; }
+        \\    yield 4;
+        \\  } finally { yield 5; }
+        \\}
+        \\let iterator = afterNested();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.next().value, 2);
+        \\assert.sameValue(iterator.next().value, 3);
+        \\assert.sameValue(iterator.next().value, 4);
+        \\assert.sameValue(iterator.throw(6).value, 5);
+        \\let caught;
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 6);
+
+        \\function* beforeNested() {
+        \\  try {
+        \\    yield 1;
+        \\    try { yield 2; } catch (error) { yield error; }
+        \\  } finally { yield 3; }
+        \\}
+        \\iterator = beforeNested();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.throw(7).value, 3);
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 7);
+
+        \\function* plainFinally() {
+        \\  try { yield 1; } finally { yield 2; }
+        \\}
+        \\iterator = plainFinally();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.throw(8).value, 2);
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 8);
+
+        \\function* inner() { return yield 1; }
+        \\function* delegate(iterable) { return yield* iterable; }
+        \\iterator = delegate(inner());
+        \\assert.sameValue(iterator.next().value, 1);
+        \\try { iterator.throw(9); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 9);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "suspended generators retain one resident execution owner across resumes" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

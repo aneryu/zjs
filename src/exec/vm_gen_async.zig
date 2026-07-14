@@ -309,7 +309,14 @@ noinline fn resumeExecutionStateRaw(
     const resident_stack = execution.stackUsesCombinedStorage();
     const resident_frame = execution.frameUsesCombinedStorage();
     installSuspendedExecutionStorage(stack, frame, state, resident_stack, resident_frame);
-    const catch_target = state.catchTarget();
+    // The interpreter's catch target is a control-flow cursor, not frame
+    // ownership state.  A suspension can resume in a different leg of a
+    // nested try/finally after the saved scalar was produced (notably after a
+    // completion is injected and the finally body yields).  Reconstruct the
+    // active target from the bytecode at the resumed pc, as QuickJS does when
+    // restoring the execution cursor, instead of letting a stale cached
+    // target swallow the completion on the next resume.
+    const catch_target = activeCatchTargetForPc(function, resume_pc);
 
     if (!generator_started) return .{ .catch_target = catch_target };
     if (was_yield_star_suspended) {
@@ -658,6 +665,28 @@ fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await:
     // quickjs.c:21446/21670).
     if (stop_on_yield and function.flags.is_async) return .raw;
     return .none;
+}
+
+/// Recover the innermost catch/finally target whose protected range contains
+/// `start_pc`.  Catch opcodes are nested in emission order, so the last active
+/// target encountered before the resume pc is authoritative.
+fn activeCatchTargetForPc(function: *const bytecode.Bytecode, start_pc: usize) ?usize {
+    var pc: usize = 0;
+    var found: ?usize = null;
+    while (pc < start_pc and pc < function.code.len) {
+        const op_id = function.code[pc];
+        if (op_id == bytecode.opcode.op.@"catch") {
+            if (pc + 5 > function.code.len) return found;
+            const operand_pc = pc + 1;
+            const diff = readInt(i32, function.code[operand_pc..][0..4]);
+            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
+            if (target > start_pc and target <= function.code.len) found = @intCast(target);
+        }
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0) return found;
+        pc += size;
+    }
+    return found;
 }
 
 fn closeIteratorForPendingError(
