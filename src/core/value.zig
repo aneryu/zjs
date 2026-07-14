@@ -71,6 +71,10 @@ const NanBox = struct {
     /// Inclusive prefix range of all reference-counted tags.
     const refcount_min: u64 = prefixOf(Tag.big_int);
     const refcount_max: u64 = prefixOf(Tag.function_bytecode);
+    /// String-header tags are adjacent inside the dense NaN-box prefix space.
+    const stringlike_min: u64 = prefixOf(Tag.symbol);
+    const stringlike_max: u64 = prefixOf(Tag.string_rope);
+    const flat_stringlike_max: u64 = prefixOf(Tag.string);
     /// Lowest prefix of the deinit-phase skip set {module, object, function_bytecode}.
     const deinit_skip_min: u64 = prefixOf(Tag.module);
 
@@ -576,10 +580,7 @@ pub const JSValue = extern struct {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
-                if (p == NanBox.prefixOf(Tag.symbol) or
-                    p == NanBox.prefixOf(Tag.string) or
-                    p == NanBox.prefixOf(Tag.string_rope))
-                {
+                if (p >= NanBox.stringlike_min and p <= NanBox.stringlike_max) {
                     gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
                 } else {
                     gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
@@ -588,14 +589,12 @@ pub const JSValue = extern struct {
             return self;
         }
         if (!self.requiresRefCount()) return self;
-        switch (self.tagOf()) {
-            Tag.symbol, Tag.string, Tag.string_rope => {
-                if (self.stringHeader()) |header| gc.retain(header);
-                return self;
-            },
-            else => {},
+        const tag = self.tagOf();
+        if (tag >= Tag.symbol and tag <= Tag.string_rope) {
+            gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
+        } else {
+            gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
         }
-        if (self.refCountHeader()) |header| gc.retain(header);
         return self;
     }
 
@@ -611,7 +610,7 @@ pub const JSValue = extern struct {
             }
             if (p == NanBox.prefixOf(Tag.string_rope)) {
                 releaseRopeValue(rt, self);
-            } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
+            } else if (p >= NanBox.stringlike_min and p <= NanBox.flat_stringlike_max) {
                 gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
             } else {
                 gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
@@ -619,27 +618,18 @@ pub const JSValue = extern struct {
             return;
         }
         if (!self.requiresRefCount()) return;
-        if (rt.gc.phase == .deinit) {
-            switch (self.tagOf()) {
-                Tag.object, Tag.module, Tag.function_bytecode => return,
-                else => {},
-            }
-        }
+        const tag = self.tagOf();
+        if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return;
         if (comptime build_options.zjs_enable_opcode_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
-        switch (self.tagOf()) {
-            Tag.string_rope => {
-                releaseRopeValue(rt, self);
-                return;
-            },
-            Tag.symbol, Tag.string => {
-                if (self.stringHeader()) |header| gc.release(rt, header);
-                return;
-            },
-            else => {},
+        if (tag == Tag.string_rope) {
+            releaseRopeValue(rt, self);
+        } else if (tag >= Tag.symbol and tag <= Tag.string) {
+            gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
+        } else {
+            gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
         }
-        if (self.refCountHeader()) |header| gc.release(rt, header);
     }
 
     /// Refcount release for a `.string_rope` value: decrement the rope's
