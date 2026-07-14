@@ -3401,8 +3401,10 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     const after_free = rt.gcStats();
-    try std.testing.expectEqual(heap_bytes, after_free.total_allocated_bytes);
-    try std.testing.expectEqual(heap_bytes, after_free.large_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.peak_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.large_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.large_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), after_free.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.large_object_bytes);
     // Large-space committed follows live_bytes to zero the moment the payload is

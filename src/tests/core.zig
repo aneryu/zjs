@@ -3394,8 +3394,8 @@ test "function bytecode registration is old-space accounted" {
     const value = core.JSValue.functionBytecode(&fb.header);
     defer value.free(&rt);
 
-    // old_allocated_bytes / old_alloc_count are now derived lazily in the stats
-    // snapshot (total minus the large bucket), not stored per-alloc.
+    // old_allocated_bytes / old_alloc_count are derived lazily from live space
+    // bytes and the GC object list, not stored per allocation.
     const fb_stats = rt.gcStats();
     try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), fb_stats.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), fb_stats.old_alloc_count);
@@ -3487,8 +3487,10 @@ test "gc live heap stats drop when object is released" {
     object.value().free(rt);
 
     const released = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, expected_gc_bytes), released.total_allocated_bytes);
-    try std.testing.expectEqual(@as(usize, expected_gc_bytes), released.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.peak_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.old_alloc_count);
     try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
@@ -5618,7 +5620,7 @@ test "object allocation threshold triggers runtime cycle removal" {
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
-test "gc threshold API resets to surviving allocated bytes plus half" {
+test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -5629,8 +5631,13 @@ test "gc threshold API resets to surviving allocated bytes plus half" {
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
 
-    const expected = rt.memory.allocated_bytes + (rt.memory.allocated_bytes >> 1);
-    try std.testing.expectEqual(expected, rt.gcThreshold());
+    if (comptime core.memory.force_gc_on_allocation_enabled) {
+        // Synthetic pre-allocation collections must not rewrite user policy.
+        try std.testing.expectEqual(@as(usize, 0), rt.gcThreshold());
+    } else {
+        const expected = rt.memory.allocated_bytes + (rt.memory.allocated_bytes >> 1);
+        try std.testing.expectEqual(expected, rt.gcThreshold());
+    }
 }
 
 test "proxy target handler cycle is released by runtime cycle removal" {

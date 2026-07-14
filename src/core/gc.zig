@@ -505,21 +505,8 @@ pub const GeStats = struct {
     current_mark_stack_depth: usize = 0,
     mark_stack_peak: usize = 0,
 
-    // qjs-scalar hot-path counters: allocated_bytes mirrors rt->malloc_size,
-    // alloc_count mirrors rt->malloc_count. Everything below (peak, per-space
-    // live/allocated splits, page geometry) is a diagnostic derived lazily in
-    // statsSnapshot (JS_ComputeMemoryUsage-style recompute), NOT maintained per
-    // allocation. See recordHeapAlloc.
-    allocated_bytes: usize = 0,
-    alloc_count: usize = 0,
     collections: usize = 0,
     freed_objects: usize = 0,
-
-    // Large-space diagnostics stay inline: the large-object path is cold, so a
-    // couple of saturating adds there are free. old-space equivalents are
-    // derived as (total - large) at snapshot time.
-    large_allocated_bytes: usize = 0,
-    large_alloc_count: usize = 0,
 
     external_bytes: usize = 0,
     external_untracked_bytes: usize = 0,
@@ -1015,21 +1002,31 @@ pub const Registry = struct {
         self.stats.allocation_debt = 0;
     }
 
-    pub fn statsSnapshot(self: Registry) Stats {
+    pub fn statsSnapshot(self: Registry, rt: anytype) Stats {
         var snapshot = self;
         snapshot.refreshSpacePageState();
-        // Diagnostics that used to be maintained per-alloc are recomputed here
-        // (JS_ComputeMemoryUsage-style). The space accounts are the source of
-        // truth for live bytes; the cumulative scalars give the historical
-        // totals. peak == allocated because allocated_bytes is monotonic.
+        // Diagnostics that used to be maintained per allocation are recomputed
+        // here, like qjs JS_ComputeMemoryUsage. The space accounts are the byte
+        // source of truth. Counts are split by walking the already-maintained GC
+        // object list; this cold snapshot work removes four scalar updates from
+        // the large-object allocation path and two from every ordinary one.
         const old_live = snapshot.old_space.live_bytes;
         const large_live = snapshot.large_space.live_bytes;
         const derived_heap_live = old_live +| large_live;
-        const derived_old_allocated = snapshot.stats.allocated_bytes -| snapshot.stats.large_allocated_bytes;
-        const derived_old_count = snapshot.stats.alloc_count -| snapshot.stats.large_alloc_count;
+        var derived_old_count: usize = 0;
+        var derived_large_count: usize = 0;
+        var iterator = snapshot.objectIterator();
+        while (iterator.next()) |header| {
+            const bytes = heapByteSizeFromHeader(rt, header);
+            if (snapshot.isLargeAllocation(bytes)) {
+                derived_large_count +|= 1;
+            } else {
+                derived_old_count +|= 1;
+            }
+        }
         return .{
-            .total_allocated_bytes = snapshot.stats.allocated_bytes,
-            .peak_allocated_bytes = snapshot.stats.allocated_bytes,
+            .total_allocated_bytes = derived_heap_live,
+            .peak_allocated_bytes = derived_heap_live,
             .heap_live_bytes = derived_heap_live,
             .old_live_bytes = old_live,
             .large_object_bytes = large_live,
@@ -1053,10 +1050,10 @@ pub const Registry = struct {
             .large_empty_page_count = snapshot.large_space.empty_page_count,
             .large_decommitted_page_count = snapshot.large_space.decommitted_page_count,
             .large_needs_sweep_page_count = snapshot.large_space.needs_sweep_page_count,
-            .old_allocated_bytes = derived_old_allocated,
+            .old_allocated_bytes = old_live,
             .old_alloc_count = derived_old_count,
-            .large_allocated_bytes = snapshot.stats.large_allocated_bytes,
-            .large_alloc_count = snapshot.stats.large_alloc_count,
+            .large_allocated_bytes = large_live,
+            .large_alloc_count = derived_large_count,
             .external_bytes = snapshot.stats.external_bytes,
             .external_untracked_bytes = snapshot.stats.external_untracked_bytes,
             .peak_external_bytes = snapshot.stats.peak_external_bytes,
@@ -1124,7 +1121,10 @@ pub const Registry = struct {
         const tracked = isCycleCandidate(h);
         if (!h.meta().flags.metadata_in_slab) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().flags.heap_accounted = true;
-        self.recordHeapAlloc(is_large, bytes);
+        // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
+        // keeps the selected space's live-byte scalar; all other allocation
+        // diagnostics are derived by statsSnapshot.
+        self.recordSpaceAlloc(is_large, bytes);
 
         if (tracked) self.appendGcObject(h);
     }
@@ -1183,40 +1183,11 @@ pub const Registry = struct {
         return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape;
     }
 
-    fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
-        if (bytes == 0) return;
-        // Hot-path accounting mirrors qjs js_def_malloc, which only bumps
-        // rt->malloc_size / rt->malloc_count (quickjs.c:2160). GC pacing rides on
-        // memory.allocated_bytes vs malloc_gc_threshold (runtime.zig:2072), never
-        // on these gc.stats mirrors, so we keep two scalar counters here:
-        //   allocated_bytes (cumulative bytes) + alloc_count (cumulative count).
-        // peak_allocated_bytes == allocated_bytes invariantly (allocated_bytes is
-        // never decremented — frees don't touch it), and heap_live_bytes /
-        // old_live_bytes / large_object_bytes / old_allocated_bytes /
-        // old_alloc_count are all pure functions of the space accounts + the
-        // large_* bucket; every one is recomputed lazily in statsSnapshot
-        // (JS_ComputeMemoryUsage). recordSpaceAlloc now only bumps
-        // {old,large}_space.live_bytes; the committed/free page geometry is no
-        // longer maintained per-alloc. It is derived from live_bytes on demand in
-        // refreshPageState (statsSnapshot / incremental sweep / Debug verify),
-        // mirroring qjs which tracks a single rt->malloc_size scalar and delegates
-        // page management to the system allocator.
-        self.stats.allocated_bytes = std.math.add(usize, self.stats.allocated_bytes, bytes) catch std.math.maxInt(usize);
-        self.stats.alloc_count +|= 1;
-        self.recordSpaceAlloc(is_large, bytes);
-        if (is_large) {
-            // Cold path only: the large-object bucket is kept inline so that
-            // old-space diagnostics can be derived as (total - large).
-            self.stats.large_allocated_bytes = std.math.add(usize, self.stats.large_allocated_bytes, bytes) catch std.math.maxInt(usize);
-            self.stats.large_alloc_count +|= 1;
-        }
-    }
-
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (!header.meta().flags.heap_accounted or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
-        // recordHeapAlloc); the free path just decrements live_bytes. Page
+        // addInitializedWithSize); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
         self.recordSpaceFree(is_large, bytes);
         header.meta().flags.heap_accounted = false;

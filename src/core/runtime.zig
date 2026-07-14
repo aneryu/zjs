@@ -2045,7 +2045,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn gcStats(self: JSRuntime) gc.Stats {
-        var stats = self.gc.statsSnapshot();
+        var stats = self.gc.statsSnapshot(&self);
         stats.weak_ref_count = self.weakReferenceCount();
         stats.finalizer_queue_length = self.pending_finalization_jobs.len;
         stats.pending_finalization_job_count = self.pending_finalization_jobs.len;
@@ -2144,6 +2144,9 @@ pub const JSRuntime = struct {
         if (comptime memory.force_gc_on_allocation_enabled) {
             if (self.memory.trigger_gc_fn == null) return;
             if (self.gc_running) return;
+            // The force-GC build option is diagnostic instrumentation, not a
+            // scheduling-policy change. Preserve an explicitly configured
+            // threshold across the synthetic pre-allocation collection.
             const saved_threshold = self.malloc_gc_threshold;
             defer self.malloc_gc_threshold = saved_threshold;
             _ = self.forceGC(null) catch {};

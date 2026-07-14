@@ -2159,7 +2159,7 @@ pub const Object = struct {
         rt.memory.destroy(Object, self);
     }
 
-    pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
+    pub fn allocationSize(self: *const Object, rt: *const JSRuntime) usize {
         if (inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id))) |layout| return layout.object_size;
         return @sizeOf(Object);
     }
