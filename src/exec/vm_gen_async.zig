@@ -387,13 +387,13 @@ pub fn stopBeforePc(
     const stop_pc = stop_before_pc orelse return null;
     if (frame.pc != stop_pc) return null;
     if (generator) |generator_object| {
-        // runGeneratorParameterInit stops at the parameter-environment/body
-        // boundary before the generator is started. The old temporary Frame
-        // teardown closed these cells here; preserve that semantic transition
-        // explicitly now that suspended storage survives as one typed owner.
-        // Later finally-return stops belong to an already-started generator
-        // and must keep their open aliases parked across the suspension.
-        if (!generator_object.generatorStarted()) frame.closeOpenVarRefs(ctx.runtime);
+        // QuickJS closes parameter-environment refs at the body boundary while
+        // keeping arg_buf resident. zjs-side adaptation: args and locals share
+        // one open-ref table, so retain entries whose pvalue targets the stable
+        // resident arg backing and close only the parameter-environment refs.
+        // Later finally-return stops belong to an already-started generator and
+        // must keep every open alias parked across the suspension.
+        if (!generator_object.generatorStarted()) frame.closeParameterEnvironmentVarRefs(ctx.runtime);
         try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc, catch_target);
         generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
     }

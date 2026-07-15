@@ -2447,8 +2447,18 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
 }
 
 pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
+    // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
+    // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
+    // `!(js_mode & JS_MODE_STRICT) && has_simple_parameter_list`). zjs's
+    // embedder `forceRuntimeStrict` (eval_entry.zig:60,252) can turn a
+    // sloppy-parsed function strict AFTER the prologue already emitted the
+    // subtype-1 (mapped) special_object, so the override arm must re-apply the
+    // same effective-strictness gate the else arm uses. A force-strict frame
+    // therefore downgrades to an UNMAPPED arguments object (spec-correct for
+    // strict functions), which needs no open-ref window and never reaches
+    // ensureFrameVarRefCell — matching has_mapped_arguments=false in the view.
     const mapped = if (mapped_override) |requested|
-        requested and frame.function.flags.has_simple_parameter_list
+        requested and !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list
     else
         !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list;
     const args = if (mapped)

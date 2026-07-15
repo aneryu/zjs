@@ -95,13 +95,16 @@ pub fn execGetArg(
     opc: u8,
 ) !void {
     frame.pc += consume;
-    _ = ctx;
     _ = opc;
     if (idx >= frame.args.len) {
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
-    try pushSlotValue(stack, frame.args[idx]);
+    const value = frame.args[idx];
+    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
+    const owned = value.dup();
+    errdefer owned.free(ctx.runtime);
+    try stack.pushOwned(owned);
 }
 
 pub fn execPutArg(
@@ -116,7 +119,14 @@ pub fn execPutArg(
     _ = opc;
     if (idx >= frame.args.len) return error.InvalidBytecode;
     const value = try stack.pop();
-    try setSlotValue(ctx, &frame.args[idx], value);
+    const old_value = frame.args[idx];
+    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(old_value) == null);
+    // Symmetric with the gateway's fail-closed hardening (setSlotValueRefCounted
+    // unwrapped an incoming cell before the store): the bare arg slot must never
+    // receive a VarRef cell value, so assert the incoming value is not a cell.
+    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
+    frame.args[idx] = value;
+    old_value.free(ctx.runtime);
 }
 
 pub fn execSetArg(
@@ -131,8 +141,13 @@ pub fn execSetArg(
     _ = opc;
     if (idx >= frame.args.len) return error.InvalidBytecode;
     const value = stack.peek() orelse return error.StackUnderflow;
-    defer value.free(ctx.runtime);
-    try setSlotValue(ctx, &frame.args[idx], value.dup());
+    const old_value = frame.args[idx];
+    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(old_value) == null);
+    // Symmetric with the gateway's fail-closed hardening (see execPutArg): the
+    // bare arg slot must never receive a VarRef cell value.
+    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
+    frame.args[idx] = value;
+    old_value.free(ctx.runtime);
 }
 
 pub fn execGetVarRef(
@@ -450,20 +465,35 @@ pub fn ensureVarRefCell(ctx: *core.JSContext, slot: *core.JSValue) !core.JSValue
 }
 
 pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot: *core.JSValue) !core.JSValue {
-    if (varRefCellFromValue(slot.*) != null) return ensureVarRefCell(ctx, slot);
-    if (!frameSlotCanOpenAlias(frame, slot)) return ensureVarRefCell(ctx, slot);
-    if (frame.open_var_refs.len == 0) return ensureVarRefCell(ctx, slot);
+    // Locals-first classification: compute membership and cell presence once.
+    // Ordering locals before args lets the hot local-alias channel short-circuit
+    // without the redundant slotInSlice(args) / double varRefCellFromValue the
+    // previous frameSlotCanOpenAlias + guard sequence incurred. Behavior is
+    // identical: neither slice -> InvalidBytecode; an existing cell on an arg
+    // slot fails closed while a local reuses its closed cell.
+    const in_locals = slotInSlice(slot, frame.locals);
+    const is_arg_slot = slotInSlice(slot, frame.args);
+    if (!in_locals and !is_arg_slot) return error.InvalidBytecode;
+    if (varRefCellFromValue(slot.*) != null) {
+        if (is_arg_slot) return error.InvalidBytecode;
+        return ensureVarRefCell(ctx, slot);
+    }
+    if (frame.open_var_refs.len == 0) {
+        if (is_arg_slot) return error.InvalidBytecode;
+        return ensureVarRefCell(ctx, slot);
+    }
     if (frame.findOpenVarRef(slot)) |cell| return cell.valueRef().dup();
 
     // The frame owns the initial reference; callers receive an additional
     // reference and may drop it on error without leaving the open list dangling.
     const cell = try core.VarRef.createOpen(ctx.runtime, slot);
     if (!frame.addOpenVarRef(cell)) {
-        // A malformed/synthetic Bytecode may understate its compile-time open
-        // reference count. Preserve correctness without leaking the temporary
-        // open cell; finalized parser output sizes this table exactly.
         cell.close(ctx.runtime);
         cell.freeCell(ctx.runtime);
+        // A bare arg handler cannot safely consume a fallback cell. Parser
+        // output reserves the mapped argument window; malformed/synthetic
+        // metadata therefore fails closed without rewriting the arg slot.
+        if (is_arg_slot) return error.InvalidBytecode;
         return ensureVarRefCell(ctx, slot);
     }
     return cell.valueRef().dup();
@@ -536,16 +566,6 @@ pub inline fn setVarRefSlotValue(ctx: *core.JSContext, frame: *frame_mod.Frame, 
 pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !core.JSValue {
     _ = ctx;
     return frame.var_refs[idx].valueRef().dup();
-}
-
-fn frameSlotCanOpenAlias(frame: *const frame_mod.Frame, slot: *const core.JSValue) bool {
-    if (slotInSlice(slot, frame.locals)) return true;
-    if (!slotInSlice(slot, frame.args)) return false;
-    // Generator/async parameter prologues run before their resident frame is
-    // parked. A mapped Arguments object created there can outlive the live
-    // Frame argument view, so parameter aliases remain closed cells. Resident
-    // locals use the stable combined backing and keep the open-alias fast path.
-    return !frame.function.flags.is_generator and !frame.function.flags.is_async;
 }
 
 fn slotInSlice(slot: *const core.JSValue, values: []const core.JSValue) bool {

@@ -20,6 +20,7 @@
 //! ops are individual handlers via the §6 template.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -1523,7 +1524,7 @@ pub fn op_push_small(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 
 pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = vm.arg_buf[pc[0] - op.get_arg0];
-    if (slot_ops.varRefCellFromValue(v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (comptime builtin.mode == .Debug) std.debug.assert(slot_ops.varRefCellFromValue(v) == null);
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }

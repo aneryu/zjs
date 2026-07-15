@@ -1,0 +1,61 @@
+date_utc=2026-07-15T15:35:20Z
+repo_head=f615af3f9ba4b7bd6094f3faf3cd571f54288c13
+quickjs_head=04be246001599f5995fa2f2d8c91a0f198d3f34c
+kernel=Linux spark-6d77 6.17.0-1014-nvidia #14-Ubuntu SMP PREEMPT_DYNAMIC Tue Mar 17 19:01:40 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+cpu=Cortex-X925
+cpu_pin=19
+governor=performance
+perf=perf version 6.17.9
+build_command=zig build zjs -Doptimize=ReleaseFast --summary all
+block_order=guard,dual,candidate,candidate,dual,guard
+warmups_per_binary_per_benchmark=5
+031282a6d1a62e6bcd6e07ba232643b763b245f516a3f443a75b61cbfb768b30  /tmp/zjs-arg-slot-guard
+dba18078bc4e39a4b34b097b87316a02ef22b14681bb7406f78ffb9559bcd852  /tmp/zjs-arg-slot-dual
+0fdc3bc466e2bf3ea6c355f3503864d719c6685426e989d59f06ecf63dd255d5  /tmp/zjs-arg-slot-candidate
+b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d  /home/aneryu/quickjs/qjs
+   text	   data	    bss	    dec	    hex	filename
+5092201	 203512	 264896	5560609	 54d921	/tmp/zjs-arg-slot-guard
+5092421	 205560	 262592	5560573	 54d8fd	/tmp/zjs-arg-slot-dual
+5092833	 203512	 264272	5560617	 54d929	/tmp/zjs-arg-slot-candidate
+ 996267	  30008	    208	1026483	  fa9b3	/home/aneryu/quickjs/qjs
+b2e20ebd63d3dd231060d060e7a28d5030e8bb801bc3e20b6103dba2924208b0  /tmp/fib30x3.js
+ccf4770e7ee133094c80c26d68189b97d610cfe1a8009a9016b319b450cf3906  /home/aneryu/zjs/tests/perf/qjs-align/call-add-two-arg-10m.js
+1048d04ff5bd9f432be5e87c20ca7fb43352eca037dd4cf42d1253a4b6ef9146  /home/aneryu/zjs/tests/perf/qjs-align/call-closure-two-arg-10m.js
+bf05b6beb7f79880d0bf98ec28cfd6adf39a96f411af1bec89d788d23ba30abb  /home/aneryu/zjs/tests/perf/qjs-align/call-const-zero-arg-10m.js
+e49098de7a3eab016344d7bd599b4c01dc560f30350a427bf7bf26bb388c2c18  /home/aneryu/zjs/tests/perf/qjs-align/call-control-inline-add-10m.js
+22cf45564239c5bcb7c2eaac6263ad5c96a97e2de2c803841713520fa44a58c5  /home/aneryu/zjs/tests/perf/qjs-align/call-empty-zero-arg-10m.js
+d4add8a89fb20b372cb0bfba296eeb2f7e59e657ef003ee2edad32277b21257c  /home/aneryu/zjs/tests/perf/qjs-align/call-method-missing-one-arg-10m.js
+b52dbb750b721b5a503352e2b4686da4e8785f535a44fed012ffa94a83d0a495  /home/aneryu/zjs/tests/perf/qjs-align/call-method-this-zero-arg-5m.js
+59b7239f2048d91520b67e1fa9a9dad3760d44083b32bfce67b97ade577edfa3  /home/aneryu/zjs/tests/perf/qjs-align/call-method-three-arg-1m.js
+946524ba355db91c4348a89aaff15fa581f4bf8eb4513e12490691c44a02b44d  /home/aneryu/zjs/tests/perf/qjs-align/call-method-zero-arg-10m.js
+2727743cceaa5b917ccd5dd0d8dc34702dbe4c12de9e21a3a656ad51811051b9  /home/aneryu/zjs/tests/perf/qjs-align/call-missing-one-arg-10m.js
+dae5bcd5a057f9b615f3391e1cb8e78214c637cba8bf011bc281179ca43b6abd  /home/aneryu/zjs/tests/perf/qjs-align/call-missing-two-arg-10m.js
+066a21d6d1c16550c7a90294f16b2eac660c80b8c5e33402402c6a6c7ec4393e  /home/aneryu/zjs/tests/perf/qjs-align/call-named-function-expression-two-arg-10m.js
+ed56d3f6ce26d58d2f498a5b46382f1a33e3bd9e797183587d1bbd5e5bd7df03  /home/aneryu/zjs/tests/perf/qjs-align/call-plain-primitive-property-zero-arg-5m.js
+96290440eea531645160f4c496fff4d5d11140aec9aae30a061ada70802a49ce  /home/aneryu/zjs/tests/perf/qjs-align/call-plain-property-zero-arg-10m.js
+1f97005b5ae66f4945cd8b6e436aedf415cd9b739584e70ae2a2677ef36401b7  /home/aneryu/zjs/tests/perf/qjs-align/call-sloppy-method-arguments-exact-one-arg-1m.js
+e2b4a8513681ded24bc86703fbd588b1bf79532bf0fccf7335e1e59d643df358  /home/aneryu/zjs/tests/perf/qjs-align/call-sloppy-method-arguments-missing-one-arg-1m.js
+6e749767e02a74f9ba6891c020b17099c2229cfa7f8e0fab5279ee02effc9b4c  /home/aneryu/zjs/tests/perf/qjs-align/call-sloppy-primitive-method-zero-arg-5m.js
+e4678813d1923dc9fa67be6621d0b5ecd5ee2ad187a72efced6eb8ef0800726e  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-add-two-arg-10m.js
+650bfaf23fbee2bb9a05067455ed4980da28cdb78e67dccb7d15a12d4279efda  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-arguments-missing-one-arg-1m.js
+73228ef245b6b4941ab046706393ea98a6389b14b44bff7a251cb48907a6f392  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-arguments-cold-exact-one-arg-1m.js
+fdbecb706d413a57252ecac96b54d65d3482a31cd5d746400971f1dfdebd5ccf  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-arguments-cold-missing-one-arg-1m.js
+5269e1d709efe4967cde0b6673026b180958fd104f02012cdb0efb31324a8d02  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-arguments-exact-one-arg-1m.js
+48e0bf6d1b657ffc069d82fdaec61923f3579e6783ddd1e9a773eaa3229ecf08  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-arguments-missing-one-arg-1m.js
+6178e35db043a9e5d97781b41da6ca9123bc185c27f8588495963f5795295ec4  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-arguments-missing-one-arg-5m.js
+aac3f11da4270bd3b2888768a477a56a0a4f68ad11e8d95dd59461ea6b9e87da  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-missing-one-arg-10m.js
+024c2733bd52dadf7f7d041992feeffd0ed19655c72f6cf31487a11be8e41755  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-method-noarguments-missing-one-arg-1m.js
+6b2d67ee8e8c5d9ddb5f774f316f0002be1952c3f1a37ef790504dd0dcb28a7b  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-missing-one-arg-10m.js
+0a17cdd17aef0669eae1dcab2b4d4e55aa282bf186fc71a97f513d2cab4d70d3  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-primitive-method-zero-arg-5m.js
+74fea233200aa068bd7889dbf1afc6b040fd683a8cbcfdfe5b8bdaa547034f43  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-primitive-this-zero-arg-5m.js
+3687a0b1ac87c0d05e4710e770af46c8ed494e0955fe03718c7465196a9c06dd  /home/aneryu/zjs/tests/perf/qjs-align/call-strict-zero-arg-10m.js
+fb9b168639efb1f00046b63e1d4c55d0baa47d3821ecc565f0913da837b675f7  /home/aneryu/zjs/tests/perf/qjs-align/call-zero-one-arg-10m.js
+events=instructions,cycles
+pairing=per-block arithmetic mean of each binary's two order-balanced observations
+summary=median ratio, unscaled MAD, deterministic 50000-resample bootstrap 95% CI
+acceptance=all cycles CI95 upper bounds below 1.015; fib candidate/guard instruction median below 1.0
+raw_rows=2880
+raw_csv_sha256=6ae8437db126c218aa06b5c59008926684551c7880c21aa9ebd720c5ed5078de
+summary_csv_sha256=2f0f0e7e32093f259d1efbe6d38518ffd52b24d3e0b6ae72056e0f1f60832df1
+output_check=QuickJS, guard, dual, and candidate outputs matched byte-for-byte for every benchmark; every measured run rechecked candidate output
+overall=pass

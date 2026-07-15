@@ -8783,6 +8783,49 @@ const function_mod = struct {
         return false;
     }
 
+    /// zjs-side adaptation (R1): qjs always resolves an in-function `arguments`
+    /// read to the arguments pseudo-var local (resolve_scope_var /
+    /// add_arguments_var, quickjs.c:32970-32974, 24220-24227) and explicitly
+    /// skips the annexB var binding for the name (create_func_var gate,
+    /// quickjs.c:36579-36586), so its prologue eagerly emits OP_special_object
+    /// mapped_arguments and there is never a get_var of the `arguments` name.
+    /// zjs's parser instead leaves a same-named NESTED binding in place (annexB
+    /// block-level `function arguments(){}`, `catch(arguments)`):
+    /// ensureImplicitArgumentsLocal (parser.zig:5413) bails on findVar/findArg,
+    /// so arguments_var_idx stays -1 and no prologue is emitted, and the body
+    /// `arguments` read is lowered to a global OP_get_var / OP_get_var_undef
+    /// whose handler materializes the mapped arguments object at runtime
+    /// (vm_property_globals.getVar rescue, vm_property_globals.zig:213-218,
+    /// 276-278). That rescue calls ensureFrameVarRefCell(&frame.args[i]) and so
+    /// needs the SAME per-arg open-ref window reserved as the prologue path.
+    /// Detect the get_var(arguments) rescue shape here so has_mapped_arguments
+    /// (whose sole production reader is frameOpenVarRefStorageCount) reserves the
+    /// window; the strict-inline classification stays keyed to
+    /// functionMaterializesArgumentsObject. The operand atom is resolved through
+    /// fb.closureVar() — the same slice the runtime rescue reads as
+    /// globalVarAtom (var_ref_names is empty on the finalized view) — so this
+    /// scan sees the identical atom the rescue sees.
+    fn functionRescuesImplicitArgumentsViaGetVar(fb: *const FunctionBytecode) bool {
+        // Arrow functions never hit the rescue: `arguments` in an arrow resolves
+        // to the enclosing function's binding, not a global get_var.
+        if (fb.flags.is_arrow_function) return false;
+        const arguments_atom = atom.ids.arguments;
+        const closure_vars = fb.closureVar();
+        const code = fb.byteCode();
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size = opcode.sizeOf(op_id);
+            if (size == 0 or pc + size > code.len) return false;
+            if (op_id == opcode.op.get_var or op_id == opcode.op.get_var_undef) {
+                const ref_idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                if (ref_idx < closure_vars.len and closure_vars[ref_idx].var_name == arguments_atom) return true;
+            }
+            pc += size;
+        }
+        return false;
+    }
+
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
     ///
     /// The returned value does not own any slices and must not be deinitialized.
@@ -8799,6 +8842,7 @@ const function_mod = struct {
             !fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
             fb.global_vars_len == 0;
         const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
+        const rescues_implicit_arguments = functionRescuesImplicitArgumentsViaGetVar(fb);
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -8823,7 +8867,7 @@ const function_mod = struct {
                 .has_eval_call = fb.flags.has_eval_call,
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
-                .has_mapped_arguments = materializes_arguments_object and !strict_mode and fb.flags.has_simple_parameter_list,
+                .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
             },
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,

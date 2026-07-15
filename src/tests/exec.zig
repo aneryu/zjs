@@ -10,6 +10,7 @@ const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
+const object_ops = zjs.exec.object_ops;
 const frame_mod = zjs.exec.frame;
 
 const makeFunction = helpers.makeFunction;
@@ -98,6 +99,70 @@ test "local growth rejects an owned composite frame slab" {
     try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(4)));
     try std.testing.expectEqual(storage_ptr, exec_frame.storage_values.ptr);
     try std.testing.expectEqual(locals_ptr, exec_frame.locals.ptr);
+}
+
+test "arg aliases reject missing open-ref storage without cellifying the slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const name = try js.runtime.internAtom("frame-arg-open-ref-capacity-test");
+    defer js.runtime.atoms.free(name);
+    var function = bytecode.Bytecode.init(&js.runtime.memory, &js.runtime.atoms, name);
+    defer function.deinit(js.runtime);
+    function.flags.has_simple_parameter_list = true;
+
+    var args = [_]core.JSValue{core.JSValue.int32(41)};
+    var no_open_refs = [_]?*core.VarRef{};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&js.runtime.memory, js.runtime);
+    exec_frame.args = &args;
+    exec_frame.actual_arg_count = args.len;
+    exec_frame.open_var_refs = &no_open_refs;
+    exec_frame.ownership.storage = .borrowed;
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    var rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+        args[0].free(js.runtime);
+        args[0] = core.JSValue.int32(41);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
+
+    var occupied_value = core.JSValue.int32(7);
+    const occupied_ref = try core.VarRef.createOpen(js.runtime, &occupied_value);
+    var full_open_refs = [_]?*core.VarRef{occupied_ref};
+    exec_frame.open_var_refs = &full_open_refs;
+    rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
+    try std.testing.expectEqual(occupied_ref, full_open_refs[0].?);
+
+    const malformed_cell = try core.VarRef.createClosed(js.runtime, args[0]);
+    args[0] = malformed_cell.valueRef();
+    rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(malformed_cell, core.VarRef.fromValue(args[0]).?);
+    args[0].free(js.runtime);
+    args[0] = core.JSValue.int32(41);
 }
 
 test "local growth rebases open var-ref cells" {
@@ -1006,6 +1071,49 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
 
     try std.testing.expectEqual(this_symbol, result.asSymbolAtom().?);
     try std.testing.expect(rt.atoms.name(this_symbol) != null);
+}
+
+test "derived constructor arrow and direct eval observe the same this value" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [32]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\new class extends class {} {
+        \\  constructor() {
+        \\    super();
+        \\    print(this === (() => this)(), this === eval("this"));
+        \\  }
+        \\}();
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true true\n", output.buffered());
+}
+
+test "derived constructor direct eval this shortcut preserves TDZ" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [96]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\new class extends Object {
+        \\  constructor() {
+        \\    let shortcut = "no", full = "no";
+        \\    try { eval("this"); } catch (error) { shortcut = error.name; }
+        \\    try { eval("this;"); } catch (error) { full = error.name; }
+        \\    print(shortcut, full);
+        \\    super();
+        \\  }
+        \\}();
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError ReferenceError\n", output.buffered());
 }
 
 test "bound function call skips zero-length combined args allocation" {
@@ -4932,6 +5040,29 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
     try std.testing.expectEqualStrings("true\ntrue\ntrue\ncliLocalFunction\ntrue\ntrue\n5\ntrue\ntrue\n", stream.buffered());
 }
 
+test "runtime-strict eval overrides parse-time mapped arguments subtype" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [96]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileWithOutputModeRuntimeStrict(
+        \\function forcedArguments(value) {
+        \\  const before = arguments[0];
+        \\  value = 7;
+        \\  arguments[0] = 9;
+        \\  let callee = "no-throw";
+        \\  try { arguments.callee; } catch (error) { callee = error.name; }
+        \\  print(before, value, arguments[0], callee);
+        \\}
+        \\forcedArguments(5);
+    , &output, .script, "runtime-strict-arguments.js", true);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("5 7 9 TypeError\n", output.buffered());
+}
+
 test "Engine strict script top-level this remains the global object" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -6506,6 +6637,316 @@ test "resident generators preserve mapped arguments parameter aliases" {
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "implicit arguments runtime rescue preserves mapped aliases" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function annexRead(value) {
+        \\  { function arguments() {} }
+        \\  return arguments[0];
+        \\}
+        \\function annexAliasFromArguments(value) {
+        \\  { function arguments() {} }
+        \\  arguments[0] = 5;
+        \\  return value;
+        \\}
+        \\function annexAliasFromParameter(value) {
+        \\  { function arguments() {} }
+        \\  value = 7;
+        \\  return arguments[0];
+        \\}
+        \\function annexCaptured(first, second) {
+        \\  { function arguments() {} }
+        \\  const read = () => first;
+        \\  arguments[0] = 5;
+        \\  second = 7;
+        \\  return read() + ":" + arguments[1];
+        \\}
+        \\function* annexGenerator(value) {
+        \\  { function arguments() {} }
+        \\  yield arguments[0];
+        \\}
+        \\print(annexRead(42));
+        \\print(annexAliasFromArguments(42));
+        \\print(annexAliasFromParameter(42));
+        \\print(annexCaptured(1, 2));
+        \\print(annexGenerator(9).next().value);
+        \\try { print(annexRead(43)); } catch (error) { print("caught", error.name); }
+        \\print("after");
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("42\n5\n7\n5:7\n9\n43\nafter\n", output.buffered());
+}
+
+test "resident mapped arguments share one open bare arg slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* mappedArgStorage(first) {
+        \\  globalThis.__mappedArgArguments = arguments;
+        \\  yield first;
+        \\  first += 1;
+        \\  yield first;
+        \\}
+        \\globalThis.__mappedArgGenerator = mappedArgStorage(41);
+        \\__mappedArgGenerator.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__mappedArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+    const state = generator.generatorExecutionState();
+    const arg_slot = &state.storage.frame.args[0];
+
+    const arguments_key = try js.runtime.internAtom("__mappedArgArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const argument_refs = arguments.argumentsVarRefs();
+    try std.testing.expectEqual(@as(usize, 1), argument_refs.len);
+    const cell = core.VarRef.fromValue(argument_refs[0]) orelse return error.TypeError;
+
+    try std.testing.expectEqual(@as(?i32, 41), arg_slot.asInt32());
+    try std.testing.expect(core.VarRef.fromValue(arg_slot.*) == null);
+    try std.testing.expect(cell.is_open);
+    try std.testing.expect(cell.pvalue == arg_slot);
+    var identity_matches: usize = 0;
+    for (state.storage.frame.open_var_refs) |maybe_ref| {
+        if (maybe_ref == cell) identity_matches += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), identity_matches);
+
+    const resumed = try js.eval(
+        \\const step = __mappedArgGenerator.next();
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, false);
+    );
+    defer resumed.free(js.runtime);
+    try std.testing.expect(arg_slot == &generator.generatorExecutionState().storage.frame.args[0]);
+    try std.testing.expect(cell.pvalue == arg_slot);
+    try std.testing.expectEqual(@as(?i32, 42), arg_slot.asInt32());
+}
+
+test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* genericArgStorage(a, b, c, d, fifth) {
+        \\  globalThis.__genericArgArguments = arguments;
+        \\  arguments[4] = 50;
+        \\  yield fifth;
+        \\  fifth = 51;
+        \\  yield arguments[4];
+        \\  yield (fifth = 52);
+        \\  return arguments[4];
+        \\}
+        \\globalThis.__genericArgGenerator = genericArgStorage(1, 2, 3, 4, 5);
+        \\const first = __genericArgGenerator.next();
+        \\assert.sameValue(first.value, 50);
+        \\assert.sameValue(first.done, false);
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__genericArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+    const fifth_slot = &generator.generatorExecutionState().storage.frame.args[4];
+    try std.testing.expectEqual(@as(?i32, 50), fifth_slot.asInt32());
+    try std.testing.expect(core.VarRef.fromValue(fifth_slot.*) == null);
+
+    const completion = try js.eval(
+        \\let step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 51);
+        \\assert.sameValue(step.done, false);
+        \\step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 52);
+        \\assert.sameValue(step.done, false);
+        \\step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 52);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+}
+
+test "generator mapped arguments closures and direct eval share one alias across resumes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* aliasedGenerator(argument) {
+        \\  globalThis.__aliasedArguments = arguments;
+        \\  globalThis.__aliasedRead = function() { return argument; };
+        \\  globalThis.__aliasedWrite = function(value) { argument = value; };
+        \\  arguments[0] = 20;
+        \\  yield __aliasedRead();
+        \\  eval('argument = 30');
+        \\  yield arguments[0];
+        \\  argument = 40;
+        \\  yield __aliasedRead();
+        \\}
+        \\globalThis.__aliasedGenerator = aliasedGenerator(10);
+        \\let step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 20);
+        \\assert.sameValue(__aliasedRead(), 20);
+        \\__aliasedArguments[0] = 25;
+        \\assert.sameValue(__aliasedRead(), 25);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 30);
+        \\assert.sameValue(__aliasedRead(), 30);
+        \\__aliasedWrite(35);
+        \\assert.sameValue(__aliasedArguments[0], 35);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 40);
+        \\assert.sameValue(__aliasedArguments[0], 40);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.done, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "async mapped arguments and closures retain one alias across await" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\async function mappedAsync(argument) {
+        \\  const read = function() { return argument; };
+        \\  arguments[0] = 55;
+        \\  print('before', read());
+        \\  const awaited = await Promise.resolve(argument);
+        \\  print('after', arguments[0], read(), awaited);
+        \\  return read();
+        \\}
+        \\mappedAsync(10).then(
+        \\  function(value) { print('resolved', value); },
+        \\  function(error) { print('rejected', error.name); }
+        \\);
+    , &stream);
+    defer result.free(js.runtime);
+    try js.runJobs();
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "before 55\nafter 55 55 55\nresolved 55\n",
+        stream.buffered(),
+    );
+}
+
+test "cycle collection closes escaped generator arg aliases before releasing resident backing" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\var __argCycleHolder;
+        \\function* argCycle(argument) {
+        \\  const self = __argCycleHolder;
+        \\  globalThis.__argCycleArguments = arguments;
+        \\  globalThis.__argCycleRead = function() { return argument; };
+        \\  globalThis.__argCycleWrite = function(value) { argument = value; };
+        \\  yield 0;
+        \\  return self;
+        \\}
+        \\__argCycleHolder = argCycle(41);
+        \\__argCycleHolder.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const arguments_key = try js.runtime.internAtom("__argCycleArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const refs = arguments.argumentsVarRefs();
+    try std.testing.expectEqual(@as(usize, 1), refs.len);
+    const cell = core.VarRef.fromValue(refs[0]) orelse return error.TypeError;
+    try std.testing.expect(cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+
+    const release = try js.eval("__argCycleHolder = null;");
+    release.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    try std.testing.expect(!cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+
+    const escaped = try js.eval(
+        \\assert.sameValue(__argCycleRead(), 41);
+        \\__argCycleArguments[0] = 52;
+        \\assert.sameValue(__argCycleRead(), 52);
+        \\__argCycleWrite(63);
+        \\assert.sameValue(__argCycleArguments[0], 63);
+    );
+    defer escaped.free(js.runtime);
+    try std.testing.expect(escaped.isUndefined());
+}
+
+test "generator completion closes escaped arg aliases before releasing resident backing" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* completingArgAlias(argument) {
+        \\  globalThis.__completedArgArguments = arguments;
+        \\  globalThis.__completedArgRead = function() { return argument; };
+        \\  yield 0;
+        \\  return argument;
+        \\}
+        \\globalThis.__completedArgGenerator = completingArgAlias(41);
+        \\__completedArgGenerator.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__completedArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+
+    const arguments_key = try js.runtime.internAtom("__completedArgArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const cell = core.VarRef.fromValue(arguments.argumentsVarRefs()[0]) orelse return error.TypeError;
+    try std.testing.expect(cell.is_open);
+
+    const completion = try js.eval(
+        \\const step = __completedArgGenerator.next();
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(!cell.is_open);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+
+    const escaped = try js.eval(
+        \\__completedArgArguments[0] = 52;
+        \\assert.sameValue(__completedArgRead(), 52);
+    );
+    defer escaped.free(js.runtime);
+    try std.testing.expect(escaped.isUndefined());
 }
 
 test "get_length preserves qjs own-property-before-exotic ordering and actions" {

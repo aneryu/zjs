@@ -4,6 +4,7 @@ const engine = zjs;
 
 const bytecode = zjs.bytecode;
 const core = zjs.core;
+const frame_mod = zjs.exec.frame;
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -3272,6 +3273,51 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
     }
 }
 
+test "implicit arguments get_var rescue reserves mapped arg aliases" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("implicit-arguments-get-var-rescue");
+    const arg_name = try rt.internAtom("value");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(arg_name);
+
+    for ([_]u8{ bytecode.opcode.op.get_var, bytecode.opcode.op.get_var_undef }) |get_op| {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        _ = try fd.appendArg(.{
+            .var_name = arg_name,
+            .scope_level = 0,
+            .is_lexical = false,
+        });
+        _ = try fd.addClosureVar(.{
+            .closure_type = .global,
+            .is_lexical = false,
+            .is_const = false,
+            .var_kind = .normal,
+            .var_idx = 0,
+            .var_name = core.atom.ids.arguments,
+        });
+
+        var code = [_]u8{ get_op, 0, 0, bytecode.opcode.op.drop, bytecode.opcode.op.return_undef };
+        std.mem.writeInt(u16, code[1..3], 0, .little);
+        try fd.appendByteCode(&code);
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+
+        try std.testing.expect(view.flags.has_mapped_arguments);
+        try std.testing.expectEqual(
+            @as(usize, view.open_var_ref_count) + 1,
+            frame_mod.frameOpenVarRefStorageCount(&view, 1),
+        );
+    }
+}
+
 test "surviving local references reserve compact open VarRef storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3310,6 +3356,46 @@ test "surviving local references reserve compact open VarRef storage" {
     try std.testing.expect(!view.localMayBeBoxed(0));
 }
 
+test "surviving argument references lower to make_arg_ref and reserve storage" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("arg-open-ref-frame-sizing");
+    const arg_name = try rt.internAtom("value");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(arg_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.appendArg(.{
+        .var_name = arg_name,
+        .scope_level = 0,
+        .is_lexical = false,
+    });
+
+    var code = [_]u8{0} ** 14;
+    code[0] = bytecode.opcode.op.scope_make_ref;
+    std.mem.writeInt(u32, code[1..5], arg_name, .little);
+    std.mem.writeInt(u32, code[5..9], 0, .little);
+    std.mem.writeInt(u16, code[9..11], 0, .little);
+    code[11] = bytecode.opcode.op.get_ref_value;
+    code[12] = bytecode.opcode.op.drop;
+    code[13] = bytecode.opcode.op.return_undef;
+    try fd.appendByteCode(&code);
+    try fd.appendAtomOperand(arg_name);
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
+    try std.testing.expect(fd.args[0].is_captured);
+    try std.testing.expectEqual(bytecode.opcode.op.make_arg_ref, fb.byteCode()[0]);
+    try std.testing.expectEqual(arg_name, std.mem.readInt(u32, fb.byteCode()[1..5], .little));
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[5..7], .little));
+}
+
 test "direct Bytecode retains compact open VarRef frame sizing" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3342,6 +3428,39 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
     try std.testing.expect(fd.vars[0].is_captured);
     try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, function.code[0]);
+}
+
+test "mapped frames reserve runtime arg aliases for every frame kind" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("mapped-arg-open-ref-frame-sizing");
+    defer rt.atoms.free(function_name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
+    defer function.deinit(rt);
+    function.open_var_ref_count = 2;
+    function.flags.has_mapped_arguments = true;
+
+    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    function.flags.is_generator = true;
+    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    function.flags.is_generator = false;
+    function.flags.is_async = true;
+    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    function.flags.is_async = false;
+    function.flags.has_mapped_arguments = false;
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+
+    const open_count: usize = 7;
+    const storage_len = try frame_mod.FrameSlab.requiredStorageSlots(5, 0, 2, 3, 3, open_count);
+    const storage = try rt.memory.alloc(core.JSValue, storage_len);
+    defer rt.memory.free(core.JSValue, storage);
+    const slab = frame_mod.FrameSlab.partitionStorage(storage, 5, 0, 2, 3, 3, open_count);
+    try std.testing.expectEqual(@as(usize, 5), slab.args.len);
+    try std.testing.expectEqual(@as(usize, 3), slab.var_refs.len);
+    try std.testing.expectEqual(open_count, slab.open_var_refs.len);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(slab.open_var_refs.ptr) % @alignOf(?*core.VarRef));
+    for (slab.open_var_refs) |entry| try std.testing.expect(entry == null);
 }
 
 test "createFunctionBytecode: copies global var records from FunctionDef" {

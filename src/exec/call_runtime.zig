@@ -4431,7 +4431,17 @@ pub fn evalSimpleCallerExpression(
     const frame = caller_frame orelse return null;
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
     if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
-    if (std.mem.eql(u8, trimmed, "this")) return (try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame)).dup();
+    if (std.mem.eql(u8, trimmed, "this")) {
+        const this_value = try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame);
+        // zjs-side adaptation: a derived constructor may keep its lexical
+        // `this` in an internal VarRef cell. Match the full eval `push_this`
+        // path (vm_value.pushThis) exactly: first honor the TDZ arm — a
+        // derived constructor that reads `this` before `super()` must throw
+        // ReferenceError, not leak the uninitialized sentinel — then return
+        // the cell's value, never the cell representation.
+        if (slot_ops.varRefSlotIsUninitialized(this_value)) return error.ReferenceError;
+        return slot_ops.slotValueDup(this_value);
+    }
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
         _ = frame;
         return null;

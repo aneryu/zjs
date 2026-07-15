@@ -243,12 +243,11 @@ pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var
 
 pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode, frame_arg_count: usize) usize {
     const static_count: usize = function.open_var_ref_count;
-    if (!function.flags.has_mapped_arguments or function.flags.is_generator or function.flags.is_async) return static_count;
+    if (!function.flags.has_mapped_arguments) return static_count;
     // Mapped Arguments aliases are created for the supplied-argument window at
-    // runtime in ordinary frames. Generator/async parameter aliases stay
-    // closed across the resident-frame handoff, so only ordinary calls add
-    // this dynamic upper bound; explicitly-captured args may leave spare null
-    // entries in that bound.
+    // runtime. zjs-side adaptation: generator/async args share their resident
+    // frame backing with locals, so they use the same open-alias capacity rule
+    // as ordinary frames; explicitly-captured args may leave spare null entries.
     return std.math.add(usize, static_count, frame_arg_count) catch std.math.maxInt(usize);
 }
 
@@ -711,6 +710,25 @@ pub const Frame = struct {
             ref.close(rt);
             ref.valueRef().free(rt);
         }
+    }
+
+    /// Close parameter-environment aliases at the generator body boundary
+    /// while retaining aliases into the resident argument backing.
+    pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) void {
+        for (self.open_var_refs) |*slot| {
+            const ref = slot.* orelse continue;
+            if (self.argSlotContains(ref.pvalue)) continue;
+            slot.* = null;
+            ref.close(rt);
+            ref.valueRef().free(rt);
+        }
+    }
+
+    fn argSlotContains(self: *const Frame, slot: *const JSValue) bool {
+        // A live `self.args` slice occupies mapped memory, so its byte length
+        // and end address cannot overflow; the shared slotIndexInSlice predicate
+        // (byte-range + stride, end-exclusive) has identical membership semantics.
+        return slotIndexInSlice(slot, self.args) != null;
     }
 
     pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) void {
