@@ -125,7 +125,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
     // same builtin `constructWithPrototype` previously imported here. Misses
     // (no native id / non-constructor record) fall through to the name cascade
     // and the ordinary-instance fallback below.
-    if (core.function.decodeNativeBuiltinId(constructor.nativeFunctionIdSlot().*)) |native_ref| {
+    if (core.function.decodeNativeBuiltinId(constructor.nativeFunctionId())) |native_ref| {
         if (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, constructor, native_ref, prototype, rooted_args, null, null)) |value| return value;
     }
 
@@ -145,9 +145,8 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
             if (rooted_args.len < 2) return error.TypeError;
             _ = try expectObject(rooted_args[0]);
             _ = try expectObject(rooted_args[1]);
-            const proxy = try core.Object.create(rt, core.class.ids.object, null);
+            const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
             errdefer core.Object.destroyFromHeader(rt, &proxy.header);
-            proxy.flags.is_proxy = true;
             try proxy.ensureProxyPayload(rt);
             try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
             try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
@@ -257,7 +256,7 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, prototype: ?*core.Object, e
     const buffer = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.int32(0);
     if (buffer.isObject()) {
         const source = try expectObject(buffer);
-        if (source.flags.is_array) return constructTypedArrayArrayInput(rt, prototype, element, source, global);
+        if (source.isArray()) return constructTypedArrayArrayInput(rt, prototype, element, source, global);
         if (core.object.isTypedArrayObject(source)) return constructTypedArrayTypedArrayInput(rt, prototype, element, source, global);
         if (source.class_id != core.class.ids.array_buffer and source.class_id != core.class.ids.shared_array_buffer) return constructTypedArrayArrayLikeInput(rt, prototype, element, source, global);
         return core.typed_array.typedArrayConstructWithOptions(rt, element.size, element.kind, buffer, rooted_args, prototype);
@@ -483,7 +482,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 
     if (rooted_args.len < 1 or !rooted_args[0].isObject()) return error.TypeError;
     const errors_source = try expectObject(rooted_args[0]);
-    if (!errors_source.flags.is_array) return error.TypeError;
+    if (!errors_source.isArray()) return error.TypeError;
     if (rooted_args.len >= 2 and !rooted_args[1].isUndefined()) {
         const message = try value_ops.toStringValue(rt, rooted_args[1]);
         defer message.free(rt);
@@ -930,7 +929,7 @@ fn constructCollectionValue(
     if (!isCallableObject(adder)) return error.TypeError;
 
     const source = try expectObject(args[0]);
-    if (!source.flags.is_array) {
+    if (!source.isArray()) {
         try constructCollectionFromIterator(ctx, collection_value, kind, args[0], adder, adder_name, globals);
         return collection_value;
     }
@@ -940,7 +939,7 @@ fn constructCollectionValue(
         defer entry_value.free(rt);
         if (kind == 1 or kind == 3) {
             const entry = try expectObject(entry_value);
-            if (!entry.flags.is_array) return error.TypeError;
+            if (!entry.isArray()) return error.TypeError;
             const key = entry.getProperty(core.atom.atomFromUInt32(0));
             defer key.free(rt);
             const value = entry.getProperty(core.atom.atomFromUInt32(1));

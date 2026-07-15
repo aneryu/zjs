@@ -345,7 +345,7 @@ pub noinline fn field(
 /// and objects with a `length` getter fall to the cold getLength.
 pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
-    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.isArray() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
     const len = object.arrayLength();
     if (len <= @as(u32, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(len));
     return core.JSValue.float64(@floatFromInt(len));
@@ -638,7 +638,7 @@ pub inline fn atomPropertyValueForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     if (objectFromValue(receiver)) |object| {
-        if (object.class_id == core.class.ids.object or object.flags.is_array or object.flags.is_global) {
+        if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal()) {
             return switch (property_ic.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
                 .value => |value| .{ .borrowed = value },
                 .getter => |getter| .{ .getter = getter },
@@ -724,7 +724,7 @@ fn setArrayLengthForPutFieldFastPath(
     const length = value.asInt32() orelse return false;
     if (length < 0) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return false;
+    if (!object.isArray() or object.hasExoticMethods() or object.proxyTarget() != null) return false;
     if (!object.flags.length_writable) return false;
     const new_len: u32 = @intCast(length);
     if (new_len < object.arrayLength()) {
@@ -1062,7 +1062,7 @@ fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom
         method.free(rt);
         return null;
     };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
         method.free(rt);
         return null;
     };
@@ -1085,7 +1085,7 @@ fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, 
         method.free(rt);
         return null;
     };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
         method.free(rt);
         return null;
     };

@@ -928,9 +928,11 @@ pub const AtomTable = struct {
         if (backing.len != 0) account.free(DynamicAtom, backing);
     }
 
-    /// Drop every cached atom string (dynamic and predefined). Called by
-    /// the runtime during teardown, while string destruction is still
-    /// fully operational, so `deinit` never has to touch the GC.
+    /// Drop ordinary cached atom strings and predefined symbol bodies before
+    /// the GC registry teardown. Dynamic value-symbol bodies are deliberately
+    /// left live here: their string-header rc is the atom's strong-ref count,
+    /// not a separate table-cache reference, and shapes destroyed by
+    /// `gc.Registry.deinit` can still own such atoms.
     pub fn releaseCachedStrings(self: *AtomTable, rt: anytype) void {
         for (&self.predefined_str) |*slot| {
             if (slot.*) |cached| {
@@ -942,15 +944,27 @@ pub const AtomTable = struct {
         }
         for (self.entries) |*entry| {
             if (entry.str) |cached| {
+                if (isValueSymbolKind(entry.kind)) continue;
                 entry.str = null;
                 cached.atom_id = string.String.no_atom_id;
-                if (isValueSymbolKind(entry.kind)) {
-                    cached.header().rc = 1;
-                    gc.release(rt, cached.header());
-                } else {
-                    gc.release(rt, cached.header());
-                }
+                gc.release(rt, cached.header());
             }
+        }
+    }
+
+    /// Drop any dynamic value-symbol bodies that remain after the GC registry
+    /// has destroyed objects, bytecode, VarRefs, and (last) shapes. At this
+    /// point no GC-managed owner can still free a property-key atom, so forcing
+    /// the residual registry/manual references to zero cannot invalidate a
+    /// later shape teardown.
+    pub fn releaseValueSymbolBodiesAfterGc(self: *AtomTable, rt: anytype) void {
+        for (self.entries) |*entry| {
+            if (!isValueSymbolKind(entry.kind)) continue;
+            const body = entry.str orelse continue;
+            entry.str = null;
+            body.atom_id = string.String.no_atom_id;
+            body.header().rc = 1;
+            gc.release(rt, body.header());
         }
     }
 

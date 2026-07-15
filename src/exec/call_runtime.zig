@@ -492,10 +492,10 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (function_object.nativeRecord()) |record| {
                 break :blk .{ .resolved_record = record };
             }
-            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKindSlot().* != 0) break :blk .host_function;
+            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -568,7 +568,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
             if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             if (result.isObject()) return result;
             result.free(ctx.runtime);
             return this_value.dup();
@@ -581,7 +581,7 @@ fn callValueOrBytecodeClassModeDispatch(
             if (!fb.flags.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
         const effective_this = function_object.functionLexicalThis() orelse this_value;
         const effective_new_target = if (fb.flags.is_arrow_function) blk: {
@@ -589,7 +589,7 @@ fn callValueOrBytecodeClassModeDispatch(
             break :blk core.JSValue.undefinedValue();
         } else core.JSValue.undefinedValue();
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
+        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
@@ -964,7 +964,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "[Symbol.split]")) {
             if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
             if (native_ref.domain == .regexp and
                 core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
             {
@@ -1179,7 +1179,7 @@ pub fn ordinaryHasInstance(
     // the generic getValueProperty (which materializes / traps correctly).
     const proto_value = blk: {
         if (object_ops.objectFromValue(constructor_value)) |co| {
-            if (!co.flags.is_proxy) {
+            if (!co.isProxy()) {
                 if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
             }
         }
@@ -1194,7 +1194,7 @@ pub fn ordinaryHasInstance(
     // objects.
     var current: ?*core.Object = object;
     while (current) |candidate| {
-        const next = if (candidate.flags.is_proxy or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
+        const next = if (candidate.isProxy() or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
             try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame)
         else
             candidate.getPrototype();
@@ -1615,7 +1615,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         // `super(...)` (new_target != func) is intercepted above by
         // `constructBuiltinSuperConstructor`, exactly as for the other builtin
         // constructors.
-        const construct_native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*);
+        const construct_native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId());
         if (construct_native_ref) |native_ref| {
             // QuickJS `js_object_constructor`: when new.target is the active
             // Object function, construction shares the same nullish/ToObject
@@ -1728,7 +1728,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
         }
-        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
         }
         if (function_object.class_id == core.class.ids.c_function and !isBuiltinConstructorName(name)) return error.TypeError;
@@ -1766,12 +1766,12 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             // Derived class ctor: no eager instance / prototype lookup (qjs quickjs.c:20837); see above.
             if (fb.flags.is_derived_class_constructor) {
-                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCapturesSlot().*, output, function_global, new_target, core.JSValue.undefinedValue());
+                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
             }
             const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
             errdefer instance.free(ctx.runtime);
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCapturesSlot().*, output, function_global, new_target, core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
             if (result.isObject()) {
                 instance.free(ctx.runtime);
                 return result;
@@ -1789,7 +1789,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -2951,7 +2951,7 @@ pub fn appendSpreadValuesEnumerate(
         if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == ArrayIteratorKind.value
         const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
         const target_obj = object_ops.objectFromValue(target_value) orelse break :fast;
-        if (!target_obj.flags.is_array or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
+        if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
         const elements = target_obj.arrayElements(); // len == array_count
         const length: usize = @intCast(target_obj.arrayLength());
         if (length != elements.len) break :fast; // qjs: len != count32 -> general_case
@@ -6379,7 +6379,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
             return isConstructorLike(ctx, target);
         }
         if (function_object.flags.is_html_dda) return false;
-        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }
         if (function_object.class_id == core.class.ids.c_closure) return true;
@@ -6387,7 +6387,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
         // RegExp/String) is a constructor regardless of its dispatch name
         // (Phase 6b-3e: replaces the `date.isConstructorRecord` short circuit
         // with the generic table probe, which also covers RegExp/String).
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
             if (builtin_dispatch.isConstructRecordRef(ctx.runtime, native_ref)) return true;
         }
         // The native-record name lookup allocates; an allocation failure
@@ -6542,7 +6542,7 @@ pub fn qjsReflectSetCall(
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
-    if (!object.flags.is_array or atom_id != core.atom.ids.length) {
+    if (!object.isArray() or atom_id != core.atom.ids.length) {
         const receiver_value = if (args.len >= 4) args[3] else args[0];
         if (object.proxyTarget() != null) {
             const ok = try object_ops.proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
@@ -6751,7 +6751,7 @@ pub fn qjsReflectConstructGenericCallable(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, resolved.new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCaptures(), output, function_global, resolved.new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -7085,7 +7085,7 @@ pub fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, caller_frame: ?*frame_mod.
     const function_object = object_ops.objectFromValue(frame.current_function) orelse return atom_id;
     const function_atom = object_ops.remapPrivateAtomFromObject(rt, function_object, atom_id);
     if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObjectSlot().* orelse return atom_id;
+    const home_object = function_object.functionHomeObject() orelse return atom_id;
     return object_ops.remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 

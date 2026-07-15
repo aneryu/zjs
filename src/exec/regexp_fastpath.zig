@@ -995,7 +995,7 @@ pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usiz
 
 pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize) !void {
     const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return;
-    if (regexp_ctor.class_payload_kind != .function) return;
+    if (regexp_ctor.flags.class_payload_kind != .function) return;
     const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
     const already_lazy_no_capture = legacy.lazy_no_capture_match;
 

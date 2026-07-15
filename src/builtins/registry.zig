@@ -380,7 +380,7 @@ fn defineSharedLazyNativeMethod(
     shared_cache_slot: u8,
 ) !void {
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
-    if (target.flags.is_array) {
+    if (target.isArray()) {
         try target.defineAutoInitNonIndexPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, global, native_builtin_id, shared_cache_slot);
         return;
     }
@@ -1048,7 +1048,7 @@ fn wireStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, const
 
         const proto = constructorPrototypeObject(rt, ctor) orelse continue;
         if (!proto.hasOwnProperty(core.atom.ids.constructor)) {
-            if (proto.flags.is_array) {
+            if (proto.isArray()) {
                 try defineData(rt, proto, "constructor", ctor.value(), Flags{ .writable = true, .enumerable = false, .configurable = true });
             } else {
                 try defineDataAssumingNew(rt, proto, "constructor", ctor.value(), Flags{ .writable = true, .enumerable = false, .configurable = true });
@@ -2304,8 +2304,6 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor:
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
     try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.shape_ref.prop_count + 1);
     try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.shape_ref.prop_count + 2);
-    proto.flags.is_array = true;
-    proto.flags.needs_slow_property = true;
 
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol).?;
     try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)), accessor_flags);

@@ -127,8 +127,8 @@ fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
         }
         return core.object.typedArrayLength(rt, source) catch 0;
     }
-    if (!source.flags.is_array or !source.flags.fast_array) return null;
-    if (source.flags.is_proxy or source.hasExoticMethods()) return null;
+    if (!source.isArray() or !source.flags.fast_array) return null;
+    if (source.isProxy() or source.hasExoticMethods()) return null;
     for (source.shapeProps()) |prop| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
         if (prop_flags.deleted) continue;

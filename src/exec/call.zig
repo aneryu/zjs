@@ -182,8 +182,8 @@ pub fn callValueWithThisGlobalsAndGlobal(
     if (try promiseResolvingFunctionCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCapabilityExecutorCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCombinatorElementCall(ctx, output, global, globals, object, args)) |value| return value;
-    if (object.hostFunctionKindSlot().* != 0) {
-        const record = hostFunctionRecordFromId(object.hostFunctionKindSlot().*) orelse return error.TypeError;
+    if (object.hostFunctionKind() != 0) {
+        const record = hostFunctionRecordFromId(object.hostFunctionKind()) orelse return error.TypeError;
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
     if (object.class_id == core.class.ids.bytecode_function or
@@ -254,7 +254,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
             try writer.writeAll("[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try writer.writeAll("[object Promise]");
-        } else if (object_value.flags.is_array) {
+        } else if (object_value.isArray()) {
             try printArray(rt, writer, object_value);
         } else {
             try writer.writeAll("[object Object]");
@@ -550,7 +550,7 @@ pub fn callHostFunctionObjectForVm(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const kind = object.hostFunctionKindSlot().*;
+    const kind = object.hostFunctionKind();
     if (kind == 0) return null;
     if (!hostFunctionCanDispatchFromVmWithoutGlobals(kind)) return null;
     const record = hostFunctionRecordFromId(kind) orelse return error.TypeError;
@@ -1525,7 +1525,7 @@ pub fn callNativeFunctionRecord(
             caller_frame,
         );
     }
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {
         // Migrated to the internal record table (rt.internal_builtins);
@@ -1685,7 +1685,7 @@ pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
     );
     var realm_global_owned = true;
     errdefer if (realm_global_owned) realm_global.value().free(rt);
-    realm_global.flags.is_global = true;
+    _ = try realm_global.ensureRealmPayload(rt);
     try rt.installStandardGlobals(realm_global);
     try defineGlobalThisProperty(rt, realm_global);
     try tagRealmEval(rt, realm_global);
@@ -1816,7 +1816,6 @@ pub fn callObjectStatic(
             try expectObjectArg(args[0]);
         const object = try core.Object.create(rt, core.class.ids.object, proto);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
-        object.flags.null_prototype = args[0].isNull();
         if (args.len >= 2 and !args[1].isUndefined()) {
             try definePropertiesFromObject(rt, object, args[1]);
         }
@@ -2622,7 +2621,7 @@ fn finalizationRegistryAppendCell(
 }
 
 fn defaultObjectTag(object: *core.Object) []const u8 {
-    if (object.flags.is_array) return "[object Array]";
+    if (object.isArray()) return "[object Array]";
     return switch (object.class_id) {
         core.class.ids.c_function,
         core.class.ids.bytecode_function,
@@ -2668,7 +2667,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
     }
 
     const object = thisObject(value) orelse return error.TypeError;
-    if (object.flags.is_proxy) {
+    if (object.isProxy()) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         if (!isFunctionToStringCallable(target)) return error.TypeError;
@@ -2854,7 +2853,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (value.isFunctionBytecode()) return true;
     const object = thisObject(value) orelse return false;
     if (object.class_id == core.class.ids.bytecode_function or isFunctionClass(object.class_id)) return true;
-    if (!object.flags.is_proxy or object.proxyHandler() == null) return false;
+    if (!object.isProxy() or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
 }

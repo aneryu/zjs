@@ -39,25 +39,26 @@ pub const RegionLayout = enum {
 };
 
 pub const InlineTarget = struct {
-    /// Pointer to the bytecode function payload's stable captures slice. QJS
-    /// carries `p->u.func.var_refs` from target resolution into frame setup;
-    /// retaining this field instead of the enclosing object avoids redispatching
-    /// its payload kind on every call without increasing InlineTarget's size.
-    captures: *const []*core.VarRef,
+    /// qjs `p->u.func.var_refs`, resolved once while the callable Object is hot.
+    /// The callable below roots the owning Object; the immutable count lives on
+    /// `fb`, exactly like qjs's `closure_var_count`. Keeping the bare pointer in
+    /// the target avoids reloading the whole on-object union arm in each frame
+    /// setup specialization.
+    var_refs: [*]*core.VarRef,
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
     /// The pointer-stable per-FB cached execution view (`cachedBytecodeView`,
-    /// built once per FB), or null for an FB with no cache slot
-    /// (fixture/synthetic, no debug box) — `setupInlineEntry` then rebuilds a
-    /// per-call view into an Entry-owned heap box. qjs's OP_call hands
+    /// built once per FB). Cache construction failure declines the same-Machine
+    /// path before an InlineTarget exists; the authoritative generic call can
+    /// execute the FB without this compatibility cache. qjs's OP_call hands
     /// `JS_CallInternal` only the 16B `func_obj` and the callee prologue
     /// dereferences `p->u.func.function_bytecode` (quickjs.c:17800) — zero
     /// struct freight. Keeping only pointers here keeps the target (and the
     /// `InlineCallRequest` riding through the dispatch driver) at qjs's
     /// scalars-only scale instead of dragging a by-value `Bytecode` through
     /// every call.
-    view: ?*const bytecode.Bytecode,
+    view: *const bytecode.Bytecode,
     /// Raw receiver before [[Call]] `this` boxing: an arrow target's lexical
     /// `this` (arrows ignore any provided receiver), otherwise the call
     /// receiver — `undefined` for plain calls, the property base for method
@@ -69,6 +70,10 @@ pub const InlineTarget = struct {
     /// Lexical `new.target` for arrow targets, `undefined` otherwise.
     /// Borrowed; valid while `callable` is rooted.
     new_target: core.JSValue,
+
+    pub inline fn captureSlice(self: InlineTarget) []*core.VarRef {
+        return self.var_refs[0..self.fb.var_refs_len];
+    }
 };
 
 /// Resolve `func` to an inline-eligible bytecode call target for a call with
@@ -87,22 +92,19 @@ pub const InlineTarget = struct {
 /// frame at arrow creation and is preserved verbatim here.
 pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
-    const function_payload = function_object.bytecodeFunctionPayloadPtr();
-    const fb = function_payload.functionBytecodePtr();
+    const function_data = function_object.bytecodeFunctionStoragePtr();
+    const fb = function_data.function_bytecode orelse return null;
+    std.debug.assert(function_data.captureSlice().len == fb.var_refs_len);
+    const var_refs = function_data.var_refs;
     if (fb.flags.func_kind != .normal) return null;
     if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
-    // Realm gate. qjs's callee prologue reads the realm as ONE unconditional
-    // load off the hot function struct (`ctx = b->realm`, quickjs.c:17871);
-    // zjs's single-global inline machinery COMPARES instead of adopting, but
-    // the read must keep qjs's shape: the payload-resident pointer, inline
-    // (`bytecodeFunctionRealmGlobalPtr` — class_id is proven, so
-    // `objectRealmGlobal`'s bound-function recursion is dead and the old
-    // out-of-line `bl` + caller-saved shuffle around it are gone). A null
-    // pointer falls back to the rare JSValue-slot resolution out of line,
-    // which re-runs the same null ptr check and then the rare-payload leg —
-    // bit-identical to the old `objectRealmGlobal(function_object)` result.
-    const function_global = function_payload.realm_global_ptr orelse
-        (object_ops.objectRealmGlobal(function_object) orelse global);
+    // Realm gate: qjs reads `ctx = b->realm` from the shared FB. With FB now
+    // resident directly in Object.u.func this is one dependent load, without a
+    // per-closure realm cache or borrowed-holder registration.
+    const function_global = if (fb.realm_global_header) |realm_header|
+        @as(*core.Object, @fieldParentPtr("header", realm_header))
+    else
+        global;
     if (function_global != global) return null;
     // Arrow bindings are resolved OUT OF LINE: qjs's callee prologue has no
     // arrow branch at all (an arrow's this/new.target are ordinary closure
@@ -120,29 +122,17 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
         new_target = bindings.new_target;
     }
     const rt = ctx.runtime;
-    // qjs's JSObject.u overlays native and bytecode call payloads. The zjs
-    // FunctionPayload mirrors that arrangement with one non-owning call-cache
-    // slot: native functions store their InternalRecord there, while a bytecode
-    // closure memoizes the pointer-stable execution view after its first call.
-    // Cache-less fixture/synthetic FBs retain the existing null/general path.
-    const view: ?*const bytecode.Bytecode = if (function_payload.call_cache.bytecode_view) |cached|
-        @ptrCast(@alignCast(cached))
-    else
-        cacheBytecodeCallView(function_payload, fb, rt);
+    // qjs executes FB directly. ZJS's compatibility Bytecode view is shared by
+    // the FB, never memoized once per closure.
+    const view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms) orelse return null;
     return .{
-        .captures = &function_payload.captures,
+        .var_refs = var_refs,
         .callable = func,
         .fb = fb,
         .view = view,
         .this_value = this_value,
         .new_target = new_target,
     };
-}
-
-noinline fn cacheBytecodeCallView(function_payload: *core.object.FunctionPayload, fb: *const bytecode.FunctionBytecode, rt: *core.JSRuntime) ?*const bytecode.Bytecode {
-    const view = bytecode.cachedBytecodeView(fb, &rt.memory, &rt.atoms) orelse return null;
-    function_payload.call_cache.bytecode_view = @ptrCast(view);
-    return view;
 }
 
 const ArrowBindings = struct {
@@ -166,34 +156,43 @@ noinline fn resolveArrowBindings(function_object: *core.Object) ArrowBindings {
 /// storage; `frame`, `stack`, and the frame's execution view are referenced by
 /// the dispatch loop and backtrace pc borrows while the level is alive.
 /// Work the caller must finish after an inline callee returns. Ordinary calls
-/// push the result and resume immediately. A Proxy `get` trap must instead
-/// validate the trap result against the target's *post-call* own descriptor
-/// before the property opcode can produce its value.
+/// push the result and resume immediately. Proxy `get` validates the trap
+/// result against the target's post-call descriptor; generic for-of consumes
+/// the returned iterator-result object before resuming the loop body.
 pub const ReturnAction = enum(u8) {
     next,
     proxy_get,
+    for_of_next,
 };
 
 pub const ReturnContinuation = struct {
     action: ReturnAction,
-    /// Owned by the continuation when non-null. Proxy property keys keep only
-    /// a weak atom back-pointer, so this strong reference must span user trap
-    /// execution and any tail-call frame replacements it performs.
-    atom_id: core.Atom,
+    /// Tagged by `action`: an owned Atom for `.proxy_get`, the for-of bytecode
+    /// depth operand for `.for_of_next`, and zero for `.next`.
+    payload: u32,
 
     pub fn deinit(self: *ReturnContinuation, rt: *core.JSRuntime) void {
-        if (self.atom_id != core.atom.null_atom) rt.atoms.free(self.atom_id);
+        if (self.action == .proxy_get and self.payload != core.atom.null_atom) {
+            rt.atoms.free(@intCast(self.payload));
+        }
         self.action = .next;
-        self.atom_id = core.atom.null_atom;
+        self.payload = 0;
     }
 
     /// Move the owned atom into the caller's continuation slot.
     pub fn takeAtom(self: *ReturnContinuation) core.Atom {
         std.debug.assert(self.action == .proxy_get);
-        std.debug.assert(self.atom_id != core.atom.null_atom);
-        const atom_id = self.atom_id;
-        self.atom_id = core.atom.null_atom;
+        std.debug.assert(self.payload != core.atom.null_atom);
+        const atom_id: core.Atom = @intCast(self.payload);
+        self.payload = 0;
         return atom_id;
+    }
+
+    pub fn takeForOfDepth(self: *ReturnContinuation) u8 {
+        std.debug.assert(self.action == .for_of_next);
+        const depth: u8 = @intCast(self.payload);
+        self.payload = 0;
+        return depth;
     }
 };
 
@@ -203,10 +202,12 @@ pub const Entry = struct {
     /// dispatches through one `JSFunctionBytecode *b` instead of mirroring it
     /// in an outer frame wrapper.
     frame: frame_mod.Frame,
-    /// Heap box for the per-call view rebuilt when the FB has no cache slot
-    /// (fixture/synthetic, no debug box). Null on the common cached path;
-    /// `frame.function` borrows this box until teardown.
-    owned_view: ?*bytecode.Bytecode,
+    /// Keep the default NaN-boxed Entry at its 256-byte power-of-two stride
+    /// after removing the obsolete per-call owned Bytecode view. `entryAt` can
+    /// then retain shift-only element addressing on the production layout. The
+    /// 16-byte reference representation needs no replacement padding; this
+    /// field carries no state and is never initialized in either mode.
+    _stride_padding: [if (core.value.nan_boxing) @sizeOf(usize) else 0]u8,
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
@@ -218,7 +219,7 @@ pub const Entry = struct {
     /// `this` is borrowed or owned; this flag records only teardown shape.
     simple_teardown: bool,
     return_action: ReturnAction,
-    continuation_atom: core.Atom,
+    continuation_payload: u32,
     /// Native Function.call record skipped by transparent forwarding. Owned by
     /// this entry so a stack captured inside the bytecode target still sees the
     /// qjs frame order `target -> call (native) -> caller`.
@@ -232,25 +233,24 @@ pub const Entry = struct {
     prev: ?*Entry,
 
     /// Move the post-call work out before this frame releases its resources.
-    /// The returned value owns `atom_id` when non-null.
+    /// The returned value owns its action-tagged payload. The retired Entry keeps
+    /// stale, non-owning bits until its slot is initialized by the next push;
+    /// clearing them here only added two stores to every ordinary return.
     fn takeContinuation(self: *Entry) ReturnContinuation {
-        const continuation = ReturnContinuation{
+        return .{
             .action = self.return_action,
-            .atom_id = self.continuation_atom,
+            .payload = self.continuation_payload,
         };
-        self.return_action = .next;
-        self.continuation_atom = core.atom.null_atom;
-        return continuation;
     }
 
     /// Move post-call work from a retired frame into its tail-call replacement.
     fn adoptContinuation(self: *Entry, continuation: *ReturnContinuation) void {
         std.debug.assert(self.return_action == .next);
-        std.debug.assert(self.continuation_atom == core.atom.null_atom);
+        std.debug.assert(self.continuation_payload == 0);
         self.return_action = continuation.action;
-        self.continuation_atom = continuation.atom_id;
+        self.continuation_payload = continuation.payload;
         continuation.action = .next;
-        continuation.atom_id = core.atom.null_atom;
+        continuation.payload = 0;
     }
 
     inline fn canUseSimpleTeardown(self: *const Entry) bool {
@@ -261,7 +261,6 @@ pub const Entry = struct {
     /// Release this frame after its continuation has been moved out. This is
     /// the single owner of the simple/general teardown decision.
     inline fn deinit(self: *Entry, ctx: *core.JSContext) void {
-        std.debug.assert(self.continuation_atom == core.atom.null_atom);
         if (self.canUseSimpleTeardown())
             self.deinitSimple(ctx)
         else
@@ -273,7 +272,6 @@ pub const Entry = struct {
         const rt = ctx.runtime;
         const frame = &self.frame;
         std.debug.assert(self.canUseSimpleTeardown());
-        std.debug.assert(self.owned_view == null);
         std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
         std.debug.assert(frame.locals.ptr + frame.locals.len == self.stack.values.ptr);
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
@@ -295,20 +293,18 @@ pub const Entry = struct {
         self.native_caller.free(rt);
         self.stack.deinit(rt);
         self.frame.deinitInlineCall(&rt.memory, rt);
-        self.deinitOwnedView(rt);
         rt.vm_stack.restore(self.arena_mark);
         self.profile_guard.deinit();
     }
-
-    /// Free the per-call rebuilt view of a cache-less FB. The view is
-    /// non-owning (its slices borrow the FB), so only the box is freed.
-    fn deinitOwnedView(self: *Entry, rt: *core.JSRuntime) void {
-        if (self.owned_view) |view| {
-            rt.memory.destroy(bytecode.Bytecode, view);
-            self.owned_view = null;
-        }
-    }
 };
+
+comptime {
+    const expected_size: usize = if (core.value.nan_boxing) 256 else 280;
+    if (@sizeOf(Entry) != expected_size) @compileError(std.fmt.comptimePrint(
+        "inline Entry layout drifted: expected {d} bytes, found {d}",
+        .{ expected_size, @sizeOf(Entry) },
+    ));
+}
 
 /// The mutable execution resources for one active bytecode level. `frame`
 /// owns the authoritative execution view (`frame.function`); the operand
@@ -518,6 +514,12 @@ pub const Machine = struct {
         },
     };
 
+    const FrameSetupPath = enum {
+        generic,
+        moved_method,
+        borrowed_iterator,
+    };
+
     /// Push an inline call frame for `target`. Shared between plain inline
     /// calls (`pushCall`) and tail-call frame reuse (`tailCallReuse`).
     /// `target` rides by pointer end-to-end (qjs OP_call passes only the 16B
@@ -526,19 +528,40 @@ pub const Machine = struct {
     /// callee frame address is the `alloca` result already in a register
     /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
     /// would redo the chunk multiply for nothing.
-    fn pushFrame(self: *Machine, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
+    fn pushFrame(self: *Machine, comptime setup_path: FrameSetupPath, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
         try vm_call.enterInlineCallDepth(self.ctx, global);
         errdefer self.ctx.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.native_caller = core.JSValue.undefinedValue();
-        entry.return_action = .next;
-        entry.continuation_atom = core.atom.null_atom;
-        if (isSimpleInlineFrame(target, source))
-            try setupSimpleInlineEntry(false, false, false, false, false, self.ctx, global, entry, target, source)
-        else if (isStrictSimpleInlineFrame(false, target, source))
-            try setupSimpleInlineEntry(true, false, false, false, false, self.ctx, global, entry, target, source)
-        else
+        // Generic calls own an ordinary `.next` continuation immediately.
+        // The moved-method and borrowed-iterator instances are reached only
+        // through scoped push helpers, which publish their real action/payload
+        // after setup succeeds. Until then the Entry is unlinked, so
+        // initializing `.next/0` here merely writes two values that its sole
+        // owner overwrites before any read.
+        if (setup_path == .generic) {
+            entry.return_action = .next;
+            entry.continuation_payload = 0;
+        }
+        if (setup_path == .borrowed_iterator) {
+            try setupBorrowedIteratorEntry(self.ctx, entry, target);
+        } else if (setup_path == .moved_method) {
+            if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
+                .moved_exact => try setupSimpleInlineEntry(false, false, false, true, true, self.ctx, global, entry, target, source),
+                .moved_padded => try setupSimpleInlineEntry(false, false, true, true, true, self.ctx, global, entry, target, source),
+                .moved_snapshot_exact => try setupSimpleInlineEntry(false, true, false, true, true, self.ctx, global, entry, target, source),
+                .moved_snapshot_padded => try setupSimpleInlineEntry(false, true, true, true, true, self.ctx, global, entry, target, source),
+                .stack_exact, .stack_padded, .stack_snapshot_exact, .stack_snapshot_padded => unreachable,
+            } else {
+                try setupInlineEntry(self.ctx, global, entry, target, source);
+            }
+        } else if (isSimpleInlineFrame(target, source)) {
+            try setupSimpleInlineEntry(false, false, false, false, false, self.ctx, global, entry, target, source);
+        } else if (isStrictSimpleInlineFrame(false, target, source)) {
+            try setupSimpleInlineEntry(true, false, false, false, false, self.ctx, global, entry, target, source);
+        } else {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
+        }
         // Link the new frame into the chain — qjs `sf->prev_frame =
         // rt->current_stack_frame; rt->current_stack_frame = sf;`
         // (quickjs.c:17869-17870).
@@ -557,9 +580,7 @@ pub const Machine = struct {
     /// variants are selected by the outlined fallback. `setupInlineEntry`
     /// remains authoritative for arrows and non-simple parameters.
     fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
-        // A cache-less FB (view == null) needs the general path's per-call
-        // view rebuild.
-        const function = target.view orelse return false;
+        const function = target.view;
         // fb-derived half (normal, non-arrow, sloppy, simple params, no
         // global-var rebinds) is precomputed at view build:
         // one byte test instead of ~6 scattered FunctionBytecode bool loads
@@ -603,7 +624,7 @@ pub const Machine = struct {
     /// Keep this call-site-dependent classification in the outlined fallback
     /// so exact-arity `pushFrame` retains its established hot shape.
     fn paddedSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?PaddedSimpleInlineMode {
-        const function = target.view orelse return null;
+        const function = target.view;
         const region = switch (source) {
             .stack_region => |region| region,
             .moved => return null,
@@ -624,7 +645,7 @@ pub const Machine = struct {
     /// JS_CallInternal frame and performs sloppy substitution or boxing only
     /// at OP_push_this (quickjs.c:17924-17944).
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
-        const function = target.view orelse return null;
+        const function = target.view;
         const source_kind: enum { stack, moved } = switch (source) {
             .stack_region => |region| blk: {
                 if (!region.has_receiver) return null;
@@ -666,7 +687,7 @@ pub const Machine = struct {
     /// sloppy substitutes the realm global. A separate precomputed flag and
     /// setup instantiation keep that choice off the established sloppy path.
     fn isStrictSimpleInlineFrame(comptime snapshot_args: bool, target: *const InlineTarget, source: ArgsSource) bool {
-        const function = target.view orelse return false;
+        const function = target.view;
         const eligible = if (snapshot_args)
             function.strict_simple_snapshot_inline_eligible
         else
@@ -734,8 +755,7 @@ pub const Machine = struct {
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
     noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        const function = target.view.?; // every simple-frame selector requires a cached view
-        entry.owned_view = null;
+        const function = target.view;
         entry.catch_target = null;
         entry.simple_teardown = true;
         entry.profile_guard = vm_call.enterCallProfile(rt);
@@ -757,16 +777,14 @@ pub const Machine = struct {
         };
         std.debug.assert(region.has_receiver == method_receiver);
         const receiver_count: usize = @intFromBool(method_receiver);
-        const values = if (move_args) region.values else region.stack.values;
         const region_base: usize = if (move_args) 0 else region.region_base;
         const argc: usize = if (move_args) region.values.len - receiver_count - 1 else region.argc;
-        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[region_base] else null;
-        const callable_slot = &values[region_base + receiver_count];
-        const args = values[region_base + receiver_count + 1 ..][0..argc];
-        const actual_arg_count = args.len;
+        const source_value_count = region_base + receiver_count + 1 + argc;
+        if (!move_args) std.debug.assert(region.stack.values.len >= source_value_count);
+        const actual_arg_count = argc;
         const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
         const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
-        const snapshot_count: usize = if (snapshot_args) args.len else 0;
+        const snapshot_count: usize = if (snapshot_args) actual_arg_count else 0;
         if (pad_args) {
             std.debug.assert(actual_arg_count < frame_arg_count);
         } else {
@@ -839,6 +857,18 @@ pub const Machine = struct {
         @memset(locals, core.JSValue.undefinedValue()); // 17859-17860
         if (open_var_refs.len != 0) @memset(open_var_refs, null); // 17866-17867
 
+        // The source slots stay live in the caller's arena capacity after its
+        // logical stack length retreats. Rebuild their view only after the
+        // slab carve, matching qjs's late argv consumption and avoiding an
+        // args-start scalar live across every failable allocation point.
+        const values = if (move_args)
+            region.values
+        else
+            region.stack.values.ptr[0..source_value_count];
+        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[region_base] else null;
+        const callable_slot = &values[region_base + receiver_count];
+        const args = values[region_base + receiver_count + 1 ..][0..actual_arg_count];
+
         // zjs parameter writes update frame.args in place. An unmapped strict
         // arguments object must nevertheless expose the incoming values, so
         // its dedicated specialization snapshots them before the frame starts.
@@ -862,7 +892,7 @@ pub const Machine = struct {
             if (pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
         }
 
-        const captures = target.captures.*;
+        const captures = target.captureSlice();
         // Bind the frame in ONE shot — qjs sets sf's handful of fields
         // (17838-17845) with no default-init-then-overwrite pass. The setup
         // instantiation makes the receiver choice at compile time: a method
@@ -905,25 +935,17 @@ pub const Machine = struct {
     /// resource is released via the errdefers below.
     pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        // Point at the pointer-stable per-FB cached view (no copy); a
-        // cache-less FB (fixture/synthetic, no debug box) gets a fresh
-        // per-call view in an Entry-owned heap box — the old
-        // rebuild-per-call semantics.
-        entry.owned_view = null;
-        const function: *const bytecode.Bytecode = target.view orelse blk: {
-            const rebuilt = try rt.memory.create(bytecode.Bytecode);
-            rebuilt.* = bytecode.makeBytecodeView(target.fb, &rt.memory, &rt.atoms);
-            entry.owned_view = rebuilt;
-            break :blk rebuilt;
-        };
-        errdefer entry.deinitOwnedView(rt);
+        // Point at the pointer-stable per-FB cached view (no copy). Target
+        // resolution declines this same-Machine path if the once-per-FB cache
+        // allocation fails, so general frame setup has no nullable-view arm.
+        const function = target.view;
         entry.catch_target = null;
         entry.simple_teardown = false;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
 
         const callable_slot = sourceCallableSlot(source);
-        const frame_var_refs: []const *core.VarRef = target.captures.*;
+        const frame_var_refs: []const *core.VarRef = target.captureSlice();
 
         entry.arena_mark = rt.vm_stack.mark();
         errdefer rt.vm_stack.restore(entry.arena_mark);
@@ -1067,11 +1089,99 @@ pub const Machine = struct {
             // Alias the closure's captures (mutable slice; no merge replaced it).
             // The function object stays alive via
             // `frame.current_function`, so the cells outlive the frame.
-            entry.frame.var_refs = target.captures.*;
+            entry.frame.var_refs = target.captureSlice();
             entry.frame.ownership.var_refs = .borrowed;
         } else if (frame_var_refs.len != 0 or function.var_ref_names.len != 0) {
             try vm_call.initFrameVarRefs(ctx, global, function, &entry.frame, frame_var_refs, true, frame_windows);
         }
+    }
+
+    /// Eligibility for the qjs internal-IteratorNext binding contract. The
+    /// ordinary method selector proves the same FB conditions; this form has no
+    /// source-union switch because argc is statically zero and the receiver and
+    /// callable remain rooted in the suspended caller's iterator record.
+    inline fn isBorrowedIteratorSimpleInlineFrame(target: *const InlineTarget, iterator_record: []const core.JSValue) bool {
+        if (iterator_record.len != 2) return false;
+        if (!target.this_value.same(iterator_record[0])) return false;
+        if (!target.callable.same(iterator_record[1])) return false;
+        const function = target.view;
+        return function.simple_inline_eligible or
+            function.strict_simple_inline_eligible or
+            function.strict_simple_snapshot_inline_eligible;
+    }
+
+    /// Zero-argument method prologue for an iterator record borrowed from the
+    /// suspended caller. qjs's JS_CallInternal assigns `sf->cur_func = func_obj`
+    /// and reads `this_obj` without retaining either value; the caller operand
+    /// stack remains their owner. Keep this body separate from the established
+    /// plain/method setup instances so a narrow iterator optimization cannot
+    /// perturb their selector or register allocation.
+    noinline fn setupBorrowedIteratorEntry(ctx: *core.JSContext, entry: *Entry, target: *const InlineTarget) HostError!void {
+        const rt = ctx.runtime;
+        const function = target.view;
+        entry.catch_target = null;
+        entry.simple_teardown = true;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        const frame_arg_count: usize = @intCast(function.arg_count);
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function, frame_arg_count);
+        const open_slots = if (open_var_ref_count == 0)
+            0
+        else
+            (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
+        const total = frame_arg_count + var_count + stack_count + open_slots;
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+
+        var storage_on_heap = false;
+        const slab_values = rt.vm_stack.carve(&rt.memory, total) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, total);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+
+        const args = slab_values[0..frame_arg_count];
+        const locals_start = frame_arg_count;
+        const stack_start = locals_start + var_count;
+        const open_start = stack_start + stack_count;
+        const locals = slab_values[locals_start..][0..var_count];
+        const stack_window = slab_values[stack_start..][0..stack_count];
+        const open_var_refs: []?*core.VarRef = if (open_slots == 0)
+            &.{}
+        else
+            std.mem.bytesAsSlice(?*core.VarRef, std.mem.sliceAsBytes(slab_values[open_start..][0..open_slots]))[0..open_var_ref_count];
+
+        @memset(args, core.JSValue.undefinedValue());
+        @memset(locals, core.JSValue.undefinedValue());
+        if (open_var_refs.len != 0) @memset(open_var_refs, null);
+
+        const captures = target.captureSlice();
+        // All failable work is complete. Both call bindings borrow the caller
+        // iterator record; only the slab contents belong to this frame.
+        entry.frame = .{
+            .function = function,
+            .this_value = target.this_value,
+            .current_function = target.callable,
+            .new_target = target.new_target,
+            .actual_arg_count = 0,
+            .locals = locals,
+            .args = args,
+            .var_refs = captures,
+            .open_var_refs = open_var_refs,
+            .storage_values = if (storage_on_heap) slab_values else &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .current_function = .borrowed,
+                .var_refs = if (captures.len > 0) .borrowed else .owned,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, stack_window);
     }
 
     fn sourceCallableSlot(source: ArgsSource) *core.JSValue {
@@ -1179,7 +1289,7 @@ pub const Machine = struct {
         argc: u16,
         layout: RegionLayout,
     ) HostError!*Entry {
-        return self.pushFrame(global, target, switch (layout) {
+        return self.pushFrame(.generic, global, target, switch (layout) {
             .plain, .method => .{ .stack_region = .{
                 .stack = caller_stack,
                 .region_base = region_base,
@@ -1200,14 +1310,45 @@ pub const Machine = struct {
         moved_values: []core.JSValue,
         layout: RegionLayout,
         return_action: ReturnAction,
-        continuation_atom: core.Atom,
+        continuation_payload: u32,
     ) HostError!*Entry {
-        const entry = try self.pushFrame(global, target, .{ .moved = .{
+        const source: ArgsSource = .{ .moved = .{
             .values = moved_values,
             .has_receiver = layout == .method,
-        } });
+        } };
+        const entry = if (layout == .method)
+            try self.pushFrame(.moved_method, global, target, source)
+        else
+            try self.pushFrame(.generic, global, target, source);
         entry.return_action = return_action;
-        entry.continuation_atom = self.ctx.runtime.atoms.dup(continuation_atom);
+        entry.continuation_payload = switch (return_action) {
+            .next => 0,
+            .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
+            .for_of_next => continuation_payload,
+        };
+        return entry;
+    }
+
+    /// Try to push a simple bytecode iterator `next()` while borrowing the
+    /// persistent `[iterator, next]` record from the suspended caller frame.
+    /// A non-simple target returns null and retains the established dup/move
+    /// path, whose general setup may outlive or mutate its source bindings.
+    pub fn pushBorrowedIteratorNext(
+        self: *Machine,
+        global: *core.Object,
+        target: *const InlineTarget,
+        iterator_record: []core.JSValue,
+        depth: u8,
+    ) HostError!?*Entry {
+        if (!isBorrowedIteratorSimpleInlineFrame(target, iterator_record)) return null;
+        // The borrowed setup path ignores ArgsSource; pass the caller record as
+        // a diagnostic witness without changing or taking either slot.
+        const entry = try self.pushFrame(.borrowed_iterator, global, target, .{ .moved = .{
+            .values = iterator_record,
+            .has_receiver = true,
+        } });
+        entry.return_action = .for_of_next;
+        entry.continuation_payload = depth;
         return entry;
     }
 
@@ -1224,7 +1365,7 @@ pub const Machine = struct {
         layout: RegionLayout,
         native_caller: core.JSValue,
     ) HostError!*Entry {
-        const entry = try self.pushFrame(global, target, .{ .stack_region = .{
+        const entry = try self.pushFrame(.generic, global, target, .{ .stack_region = .{
             .stack = caller_stack,
             .region_base = region_base,
             .argc = argc,
@@ -1272,7 +1413,7 @@ pub const Machine = struct {
 
         var continuation = self.popFrame();
         defer continuation.deinit(rt);
-        const entry = try self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
+        const entry = try self.pushFrame(.generic, global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
         entry.adoptContinuation(&continuation);
         return entry;
     }
@@ -1299,7 +1440,7 @@ pub const Machine = struct {
     pub fn popReturn(self: *Machine, result: core.JSValue) ReturnContinuation {
         const continuation = self.popFrame();
         if (continuation.action == .next) {
-            std.debug.assert(continuation.atom_id == core.atom.null_atom);
+            std.debug.assert(continuation.payload == 0);
             self.currentLevel().stack.pushOwnedAssumeCapacity(result);
         }
         return continuation;
@@ -1319,10 +1460,17 @@ pub const Machine = struct {
                 call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, self.output, global, &failing.stack, &failing.frame);
             }
             var continuation = self.popFrame();
+            const iterator_next_abrupt = continuation.action == .for_of_next;
             continuation.deinit(ctx.runtime);
 
             const level = self.currentLevel();
-            try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            // A throw from IteratorNext propagates directly; IteratorClose is
+            // required for abrupt loop-body completion, not for a failing
+            // `next()` call itself. The continuation survives proper-tail-call
+            // replacement, so this remains exact even when next tail-calls.
+            if (!iterator_next_abrupt) {
+                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            }
             if (try call_runtime.tryCatchInFrame(ctx, level.stack, level.frame, level.catch_target, global, err)) return true;
             if (self.depth == 0) return false;
         }

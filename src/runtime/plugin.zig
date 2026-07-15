@@ -394,7 +394,7 @@ fn expectPlainTarget(rt: *core.JSRuntime, value: core.JSValue) InstallError!*cor
     const object: *core.Object = @fieldParentPtr("header", header);
     if (!rt.ownsObject(object)) return error.InvalidTarget;
     if (object.class_id != core.class.ids.object) return error.InvalidTarget;
-    if (object.class_payload_kind != .none and object.class_payload_kind != .ordinary) return error.InvalidTarget;
+    if (object.flags.class_payload_kind != .none and object.flags.class_payload_kind != .ordinary) return error.InvalidTarget;
     if (object.hasExoticMethods()) return error.InvalidTarget;
     if (object.proxyTarget() != null) return error.InvalidTarget;
     return object;

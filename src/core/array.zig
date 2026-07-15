@@ -74,14 +74,14 @@ pub fn isArrayValue(value: JSValue) !bool {
     // proxy (null handler) is a TypeError.
     var object = objectFromValue(value) orelse return false;
     var depth: usize = 0;
-    while (object.flags.is_proxy) {
+    while (object.isProxy()) {
         if (depth > 1000) return error.StackOverflow;
         depth += 1;
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         object = objectFromValue(target) orelse return false;
     }
-    return object.flags.is_array;
+    return object.isArray();
 }
 
 /// Coerce a value to an array `*Object` or fail with TypeError. Pure object
@@ -89,7 +89,7 @@ pub fn isArrayValue(value: JSValue) !bool {
 /// Phase 6b-3 STEP 2 and re-exported from `exec/array_builtin_ops.zig`.
 pub fn expectArray(value: JSValue) !*Object {
     const object = try expectObject(value);
-    if (!object.flags.is_array) return error.TypeError;
+    if (!object.isArray()) return error.TypeError;
     return object;
 }
 

@@ -619,7 +619,7 @@ fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, frame: ?*frame_mod.Frame, atom
     const function_object = objectFromValue(current_frame.current_function) orelse return atom_id;
     const function_atom = remapPrivateAtomFromObject(rt, function_object, atom_id);
     if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObjectSlot().* orelse return atom_id;
+    const home_object = function_object.functionHomeObject() orelse return atom_id;
     return remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 

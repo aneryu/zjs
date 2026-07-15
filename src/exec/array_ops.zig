@@ -162,7 +162,7 @@ pub fn arrayIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Obj
 
 pub fn isArrayMethodReceiver(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    return object.flags.is_array;
+    return object.isArray();
 }
 
 pub fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
@@ -222,7 +222,7 @@ pub fn qjsArrayMethodFastCall(
     // early-out moves zjs toward that structure for non-native-method receivers
     // without changing any matched-method behavior.
     const native_callable = callableObjectFromValue(func) orelse return null;
-    if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionIdSlot().*)) |native_ref| {
+    if (core.function.decodeNativeBuiltinId(native_callable.nativeFunctionId())) |native_ref| {
         if (native_ref.domain == .iterator) {
             if (try qjsIteratorCallForNativeRecord(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         }
@@ -487,7 +487,7 @@ pub fn constructArrayBufferNativeRecord(
     args: []const core.JSValue,
     new_target: core.JSValue,
 ) !?core.JSValue {
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (native_ref.domain != .buffer) return null;
     const shared = switch (native_ref.id) {
         @intFromEnum(method_ids.buffer.ConstructorMethod.array_buffer) => false,
@@ -1557,7 +1557,7 @@ pub fn qjsArrayForEachCall(
 ) !?core.JSValue {
     if (args.len < 1 or !isCallableValue(args[0])) return null;
     const object = property_ops.expectObject(receiver) catch return null;
-    if (!object.flags.is_array) return null;
+    if (!object.isArray()) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.for_each))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
@@ -1607,7 +1607,7 @@ pub fn qjsArrayAtCall(
     }
     const length = if (is_typed_array)
         @as(usize, @intCast(try core.object.typedArrayLength(ctx.runtime, object)))
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -1720,7 +1720,7 @@ pub fn qjsArrayIterationCall(
     const is_typed_array = core.object.isTypedArrayObject(object);
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -1759,7 +1759,7 @@ pub fn qjsArrayIterationCall(
                 if (index >= current_length) continue;
             }
             break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-        } else if (object.flags.is_array and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
+        } else if (object.isArray() and object.arrayElementStorageMode() == .dense and index <= std.math.maxInt(u32)) blk: {
             if (object.getDenseArrayElementValue(@intCast(index))) |dense_item| break :blk dense_item;
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
@@ -1966,7 +1966,7 @@ pub fn qjsArrayReduceCall(
     if (is_typed_method and !is_typed_array) return error.TypeError;
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2464,15 +2464,15 @@ pub fn qjsArraySliceCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return null;
     if (!primitive_non_string_receiver and
-        !object.flags.is_array and
-        !object.flags.is_proxy and
+        !object.isArray() and
+        !object.isProxy() and
         object.class_id != core.class.ids.object and
         object.class_id != core.class.ids.arguments and
         object.class_id != core.class.ids.mapped_arguments and
         !core.object.isTypedArrayObject(object)) return null;
     const length = if (primitive_non_string_receiver)
         0
-    else if (object.flags.is_array and !object.flags.is_proxy)
+    else if (object.isArray() and !object.isProxy())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2497,7 +2497,7 @@ pub fn qjsArraySliceCall(
     // bulk copy slices `arrayElements()` which is count-bounded, so the copied
     // range must lie fully inside `[0, count)`. A holey tail (count < length)
     // falls through to the per-element species path which reads via getProperty.
-    if (object.flags.is_array and !object.flags.is_proxy and
+    if (object.isArray() and !object.isProxy() and
         object.arrayElementStorageMode() == .dense and
         (start + count) <= @as(usize, @intCast(object.fastArrayCount())))
     {
@@ -2713,12 +2713,12 @@ pub fn qjsArraySpliceCall(
     var verify_own_length_write = false;
     if (object.getOwnProperty(ctx.runtime, core.atom.ids.length)) |length_desc| {
         defer length_desc.destroy(ctx.runtime);
-        verify_own_length_write = !object.flags.is_array;
+        verify_own_length_write = !object.isArray();
         if (length_desc.kind == .accessor and length_desc.setter.isUndefined()) return null;
         if (length_desc.kind == .generic) return null;
-        if (length_desc.kind == .data and !object.flags.is_array and isCallableValue(length_desc.value)) return null;
+        if (length_desc.kind == .data and !object.isArray() and isCallableValue(length_desc.value)) return null;
     }
-    const length = if (object.flags.is_array)
+    const length = if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2898,7 +2898,7 @@ pub fn qjsArrayCopyWithinCall(
     if (object.class_id == core.class.ids.string) return null;
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -2997,7 +2997,7 @@ pub fn qjsArrayFillCall(
 
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -3023,7 +3023,7 @@ pub fn qjsArrayFillCall(
     // dense extent. A holey array whose fill range begins past `array_count`
     // (e.g. `new Array(5).fill(7,2,4)`) would otherwise no-op the leading
     // appends; route those through the generic setValueProperty loop below.
-    if (object.flags.is_array and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
+    if (object.isArray() and !object.hasExoticMethods() and object.proxyTarget() == null and object.arrayElementStorageMode() == .dense and object.flags.extensible and arrayPrototypeChainHasNoIndexedProperties(object) and start <= @as(usize, @intCast(object.fastArrayCount()))) {
         if (final <= @as(usize, @intCast(std.math.maxInt(u32))) + 1) {
             var dense_index = start;
             if (object.canDefineDenseArrayDataPropertiesUnchecked()) {
@@ -3176,7 +3176,7 @@ pub fn qjsArrayPopCallImpl(
     if (object.class_id == core.class.ids.string) return error.TypeError;
     if (qjsFastDenseArrayPop(object)) |value| return value;
     if (try qjsFastEmptyArrayPop(ctx, global, object)) |value| return value;
-    const length: usize = if (object.flags.is_array)
+    const length: usize = if (object.isArray())
         @intCast(object.arrayLength())
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -3196,7 +3196,7 @@ pub fn qjsArrayPopCallImpl(
     const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
     errdefer value.free(ctx.runtime);
     try deleteValuePropertyOrThrow(ctx, output, global, receiver_object_value, object, key.atom);
-    if (object.flags.is_array and object.arrayLength() <= length) {
+    if (object.isArray() and object.arrayLength() <= length) {
         // The last indexed property has already been deleted, so qjs's final
         // JS_SetProperty(length, newLen) can update the actual Array length slot
         // directly while the current length has not grown past the captured
@@ -3215,7 +3215,7 @@ pub fn qjsArrayPopCallImpl(
 }
 
 fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
-    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (!object.isArray() or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
     // Only on a fully-dense array (count == length): pop removes a[length-1],
     // which must be a live dense element. A holey array (length > count) has a
@@ -3228,7 +3228,7 @@ fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
 /// that same slot or throws when it is non-writable. A Proxy/ordinary array-like
 /// is not `flags.is_array` and must keep the observable generic Get/Set path.
 fn qjsFastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *core.Object) !?core.JSValue {
-    if (!object.flags.is_array or object.arrayLength() != 0) return null;
+    if (!object.isArray() or object.arrayLength() != 0) return null;
     if (!object.flags.length_writable) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "'length' is read-only"));
     }
@@ -3237,7 +3237,7 @@ fn qjsFastEmptyArrayPop(ctx: *core.JSContext, global: *core.Object, object: *cor
 }
 
 pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
-    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (!object.isArray() or !object.flags.length_writable) return null;
     if (object.fastArrayCount() != object.arrayLength()) return null;
     const slot = object.borrowLastFastArrayElement() orelse return null;
     const value = slot.*;
@@ -3264,7 +3264,7 @@ pub fn qjsArrayShiftCall(
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
     if (qjsFastDenseArrayShift(object)) |value| return value;
-    const length = if (object.flags.is_array)
+    const length = if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -3305,7 +3305,7 @@ pub fn qjsArrayShiftCall(
 }
 
 fn qjsFastDenseArrayShift(object: *core.Object) ?core.JSValue {
-    if (!object.flags.is_array or !object.flags.length_writable) return null;
+    if (!object.isArray() or !object.flags.length_writable) return null;
     if (!object.isFastArray()) return null;
     // Shift moves the whole [1, length) range down and lowers .length. Only run
     // on a fully-dense array (count == length); a holey array (length > count)
@@ -3343,7 +3343,7 @@ fn qjsFastDenseArrayUnshift(
     // and an ordinary, extensible, length-writable dense fast array with no
     // exotic [[Set]]/[[DefineOwnProperty]] behaviour.
     if (objectFromValue(receiver) != object) return null;
-    if (!object.flags.is_array or !object.isFastArray()) return null;
+    if (!object.isArray() or !object.isFastArray()) return null;
     if (object.hasExoticMethods() or object.proxyTarget() != null) return null;
     if (!object.flags.length_writable or !object.flags.extensible) return null;
     // Any inherited indexed property would make the generic [[Set]] of a
@@ -3406,7 +3406,7 @@ pub fn qjsArrayUnshiftCall(
         return lengthIndexValue(new_length_fast);
     }
 
-    const length = if (object.flags.is_array)
+    const length = if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -3482,7 +3482,7 @@ pub fn qjsArrayReverseCall(
     }
     const length = if (core.object.isTypedArrayObject(object))
         try arrayMethodTypedArrayLength(ctx.runtime, object, false)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
@@ -3738,7 +3738,7 @@ pub fn arraySpeciesCreate(
 // holds, ArraySpeciesCreate is allowed to produce a fresh plain Array. Returns the
 // realm's Array.prototype so callers can build that array.
 pub fn arrayHasDefaultSpecies(rt: *core.JSRuntime, global: *core.Object, original: *core.Object) ?*core.Object {
-    if (!original.flags.is_array or original.proxyTarget() != null) return null;
+    if (!original.isArray() or original.proxyTarget() != null) return null;
     if (original.getOwnProperty(rt, core.atom.ids.constructor)) |desc| {
         desc.destroy(rt);
         return null;
@@ -3788,8 +3788,8 @@ pub fn arrayConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*c
 }
 
 pub fn arraySpeciesOriginalIsArray(object: *core.Object) !bool {
-    if (object.flags.is_array) return true;
-    if (!object.flags.is_proxy) return false;
+    if (object.isArray()) return true;
+    if (!object.isProxy()) return false;
     const target_value = object.proxyTarget() orelse return error.TypeError;
     const handler_value = object.proxyHandler() orelse return error.TypeError;
     _ = handler_value;
@@ -3840,7 +3840,7 @@ pub fn qjsArrayFromCall(
     const source = args[0];
     if (typedArrayConstructorObject(constructor_value) != null) {
         if (objectFromValue(source)) |source_object| {
-            if (source_object.flags.is_array) {
+            if (source_object.isArray()) {
                 return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), source_object.arrayLength(), map_fn, this_arg, caller_function, caller_frame);
             }
         }
@@ -3858,7 +3858,7 @@ pub fn qjsArrayFromCall(
         if (source_object.class_id == core.class.ids.generator or source_object.class_id == core.class.ids.async_generator) {
             return try qjsArrayFromIteratorLike(ctx, output, global, constructor_value, source, map_fn, this_arg, caller_function, caller_frame);
         }
-        if (source_object.flags.is_array) {
+        if (source_object.isArray()) {
             return try qjsArrayFromArrayLike(ctx, output, global, constructor_value, source_object.value(), null, map_fn, this_arg, caller_function, caller_frame);
         }
         if (source_object.class_id == core.class.ids.set or source_object.class_id == core.class.ids.map) {
@@ -4641,7 +4641,7 @@ pub fn qjsArrayFromArrayLike(
     const out = objectFromValue(out_value) orelse return error.TypeError;
     if (fixed_length) |length| {
         if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-        if (out.flags.is_array) out.setArrayLength(@intCast(length));
+        if (out.isArray()) out.setArrayLength(@intCast(length));
     }
 
     var index: usize = 0;
@@ -4903,7 +4903,7 @@ pub fn qjsArrayMapCall(
 ) !?core.JSValue {
     if (args.len != 1 or !isCallableValue(args[0])) return null;
     const object = property_ops.expectObject(receiver) catch return null;
-    if (!object.flags.is_array) return null;
+    if (!object.isArray()) return null;
     const function_object = callableObjectFromValue(func) orelse return null;
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.map))) {
         const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
@@ -4972,7 +4972,7 @@ pub fn qjsArraySortCall(
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else if (!receiver.isObject() and !receiver.isString())
         @as(usize, 0)
@@ -5166,7 +5166,7 @@ pub fn qjsArrayByCopyCall(
         if (try qjsTypedArrayByCopyCall(ctx, output, global, object, name, args, caller_function, caller_frame)) |value| return value;
     }
 
-    const length = if (object.flags.is_array)
+    const length = if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -5412,7 +5412,7 @@ pub fn qjsArrayFlatCall(
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const source = objectFromValue(receiver_object_value) orelse return null;
-    const source_length = if (source.flags.is_array)
+    const source_length = if (source.isArray())
         @as(usize, @intCast(source.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -5439,7 +5439,7 @@ pub fn qjsArrayFlatCall(
     errdefer out_value.free(ctx.runtime);
     const out = objectFromValue(out_value) orelse return error.TypeError;
     const written = try flattenIntoArray(ctx, output, global, out_value, out, receiver_object_value, source, source_length, 0, depth, mapper, this_arg, caller_function, caller_frame);
-    if (out.flags.is_array) {
+    if (out.isArray()) {
         const set_length = try setValueProperty(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(written), caller_function, caller_frame);
         set_length.free(ctx.runtime);
     }
@@ -5480,7 +5480,7 @@ pub fn flattenIntoArray(
 
         const element_object = objectFromValue(element);
         if (depth > 0 and element_object != null and try arraySpeciesOriginalIsArray(element_object.?)) {
-            const element_length = if (element_object.?.flags.is_array)
+            const element_length = if (element_object.?.isArray())
                 @as(usize, @intCast(element_object.?.arrayLength()))
             else blk: {
                 const length_value = try getValueProperty(ctx, output, global, element, core.atom.ids.length, caller_function, caller_frame);
@@ -5691,7 +5691,7 @@ pub fn arrayUsesDefaultIterator(
     source_value: core.JSValue,
     source: *core.Object,
 ) !bool {
-    if (!source.flags.is_array) return false;
+    if (!source.isArray()) return false;
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
     if (!isCallableValue(iterator_method)) return error.TypeError;
@@ -5963,7 +5963,7 @@ pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
 
 pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
     const object = property_ops.expectObject(object_value) catch return false;
-    if (!object.flags.is_array) return false;
+    if (!object.isArray()) return false;
     if (key.asInt32()) |index_i32| {
         if (index_i32 < 0 or index_i32 > core.array.max_array_index) return false;
         const index: u32 = @intCast(index_i32);
@@ -5984,7 +5984,7 @@ pub const max_apply_arguments: usize = 65534;
 
 pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSValue {
     const array = try property_ops.expectObject(array_value);
-    if (!array.flags.is_array) return error.TypeError;
+    if (!array.isArray()) return error.TypeError;
     // qjs build_arg_list cap (quickjs.c:41173): applies to the fast-array copy
     // path as well (the qjs length check precedes its fast_array branch).
     if (array.arrayLength() > max_apply_arguments) return error.RangeError;
@@ -6067,7 +6067,7 @@ pub fn argsFromArrayLike(
     caller_frame: ?*frame_mod.Frame,
 ) ![]core.JSValue {
     const object = objectFromValue(array_value) orelse return error.TypeError;
-    if (object.flags.is_array) {
+    if (object.isArray()) {
         return argsFromArray(ctx.runtime, array_value) catch |err| switch (err) {
             error.RangeError => {
                 _ = try exception_ops.throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
@@ -6304,7 +6304,7 @@ pub fn arrayLengthAssignmentValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.flags.is_array or atom_id != core.atom.ids.length or value.isNumber()) return value;
+    if (!object.isArray() or atom_id != core.atom.ids.length or value.isNumber()) return value;
     const first_primitive = try toPrimitiveForNumber(ctx, output, global, value);
     defer first_primitive.free(ctx.runtime);
     const first_number = try value_ops.toNumberValue(ctx.runtime, first_primitive);
@@ -6447,7 +6447,7 @@ pub fn qjsArrayJoinCall(
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, object_value, core.atom.ids.length, caller_function, caller_frame);
@@ -6490,7 +6490,7 @@ pub fn qjsFastDensePrimitiveArrayJoin(
     object: *core.Object,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!object.flags.is_array or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.isArray() or object.hasExoticMethods() or object.arrayElementStorageMode() != .dense) return null;
     if (object.shape_ref.prop_count != 0) return null;
 
     const length: usize = @intCast(object.arrayLength());

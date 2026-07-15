@@ -438,7 +438,7 @@ pub const JSContext = struct {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
         var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(&self.core, options.output, global, object, property_name, null, null) orelse {
-            if (object.flags.is_global and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
+            if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
                 return Descriptor.data(object.value().dup(), true, false, true);
             }
             return null;
@@ -616,10 +616,10 @@ fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: 
 fn arrayObjectFromValue(value: JSValue) !?*Object {
     if (!value.isObject()) return null;
     const object = Object.expect(value) catch return null;
-    if (object.flags.is_proxy) {
+    if (object.isProxy()) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         return arrayObjectFromValue(target);
     }
-    return if (object.flags.is_array) object else null;
+    return if (object.isArray()) object else null;
 }

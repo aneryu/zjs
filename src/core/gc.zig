@@ -323,7 +323,10 @@ pub const BlockFlags = packed struct(u8) {
     /// The allocation has been added to the live-byte accounts. Kept separate
     /// from size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
-    _reserved: u1 = 0,
+    /// Object-only weak-identity membership bit. Keeping this lifecycle bit in
+    /// the already-resident GC metadata avoids widening JSObject's semantic
+    /// flag word; non-object GC kinds leave it false.
+    has_weak_id: bool = false,
 };
 
 /// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`

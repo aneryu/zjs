@@ -1963,7 +1963,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.flags.is_array) {
+        } else if (object_value.isArray()) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");

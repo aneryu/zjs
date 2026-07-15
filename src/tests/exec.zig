@@ -1642,7 +1642,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
-test "bytecode call view memo occupies the callable-class call cache" {
+test "bytecode call view memo is shared by the function bytecode" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1663,10 +1663,10 @@ test "bytecode call view memo occupies the callable-class call cache" {
     defer function_value.free(js.runtime);
     const function_object = engine.exec.object_ops.functionObjectFromValue(function_value) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
-
-    _ = function_object.functionBytecodeSlot();
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view == null);
+    const fb = function_object.bytecodeFunctionStoragePtr().function_bytecode orelse
+        return error.InvalidFunctionBytecode;
+    const cached_view = fb.cached_view orelse
+        return error.InvalidFunctionBytecode;
     const rerun = try js.eval(
         \\assert.sameValue(memoizedBytecodeView(3), 4);
         \\Promise.resolve(4)
@@ -1680,7 +1680,7 @@ test "bytecode call view memo occupies the callable-class call cache" {
         \\undefined;
     );
     defer rerun.free(js.runtime);
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+    try std.testing.expectEqual(cached_view, fb.cached_view.?);
 }
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
@@ -3269,7 +3269,7 @@ test "array static native builtin records ignore dispatch names" {
     const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
     defer direct_from_result.free(rt);
     const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
-    try std.testing.expect(direct_from_array.flags.is_array);
+    try std.testing.expect(direct_from_array.isArray());
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
@@ -3904,7 +3904,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
-    try std.testing.expect(exec_array.flags.is_array);
+    try std.testing.expect(exec_array.isArray());
     const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
@@ -4052,7 +4052,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
     defer split_result.free(rt);
     const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
-    try std.testing.expect(split_array.flags.is_array);
+    try std.testing.expect(split_array.isArray());
     try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");
@@ -7138,6 +7138,136 @@ test "proxy bytecode get continuation does not require spare operand capacity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "for-of bytecode next continuation preserves result and abrupt semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let events = [];
+        \\let step = 0;
+        \\function tailStep() {
+        \\    if (step++ === 0) {
+        \\        return {
+        \\            get done() { events.push("done:false"); return false; },
+        \\            get value() { events.push("value"); return 7; },
+        \\        };
+        \\    }
+        \\    return {
+        \\        get done() { events.push("done:true"); return true; },
+        \\        get value() { throw new Error("done value was read"); },
+        \\    };
+        \\}
+        \\const tailIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { "use strict"; return tailStep(); },
+        \\};
+        \\let sum = 0;
+        \\for (const value of tailIterator) sum += value;
+        \\assert.sameValue(sum, 7);
+        \\assert.sameValue(events.join(","), "done:false,value,done:true");
+        \\
+        \\let nextCalls = 0;
+        \\let closeCalls = 0;
+        \\const throwingIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        if (nextCalls++ === 0) return { value: 3, done: false };
+        \\        throw new Error("next sentinel");
+        \\    },
+        \\    return() { closeCalls++; return { done: true }; },
+        \\};
+        \\let caught = false;
+        \\try {
+        \\    for (const value of throwingIterator) assert.sameValue(value, 3);
+        \\} catch (error) {
+        \\    caught = error.message === "next sentinel";
+        \\}
+        \\assert.sameValue(caught, true);
+        \\assert.sameValue(closeCalls, 0);
+        \\
+        \\let arrowStep = 0;
+        \\const arrowIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next: () => arrowStep++ === 0
+        \\        ? { value: 11, done: false }
+        \\        : { done: true },
+        \\};
+        \\let arrowSum = 0;
+        \\for (const value of arrowIterator) arrowSum += value;
+        \\assert.sameValue(arrowSum, 11);
+        \\
+        \\let inheritedStep = 0;
+        \\const inheritedResult = Object.create({ value: 13 });
+        \\inheritedResult.done = false;
+        \\const inheritedIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { return inheritedStep++ === 0 ? inheritedResult : { done: true }; },
+        \\};
+        \\let inheritedSum = 0;
+        \\for (const value of inheritedIterator) inheritedSum += value;
+        \\assert.sameValue(inheritedSum, 13);
+        \\
+        \\let proxyStep = 0;
+        \\let proxyReads = [];
+        \\const proxyResult = new Proxy({ value: 17, done: false }, {
+        \\    get(target, key, receiver) {
+        \\        proxyReads.push(key);
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\const proxyIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { return proxyStep++ === 0 ? proxyResult : { done: true }; },
+        \\};
+        \\let proxySum = 0;
+        \\for (const value of proxyIterator) proxySum += value;
+        \\assert.sameValue(proxySum, 17);
+        \\assert.sameValue(proxyReads.join(","), "done,value");
+        \\
+        \\let paddedStep = 0;
+        \\const paddedIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next(unused) {
+        \\        "use strict";
+        \\        assert.sameValue(unused, undefined);
+        \\        assert.sameValue(arguments.length, 0);
+        \\        return paddedStep++ === 0 ? { value: 19, done: false } : { done: true };
+        \\    },
+        \\};
+        \\let paddedSum = 0;
+        \\for (const value of paddedIterator) paddedSum += value;
+        \\assert.sameValue(paddedSum, 19);
+        \\
+        \\let cachedStep = 0;
+        \\const cachedMethodIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        this.next = null;
+        \\        return cachedStep++ === 0 ? { value: 23, done: false } : { done: true };
+        \\    },
+        \\};
+        \\let cachedMethodSum = 0;
+        \\for (const value of cachedMethodIterator) cachedMethodSum += value;
+        \\assert.sameValue(cachedMethodSum, 23);
+        \\assert.sameValue(cachedMethodIterator.next, null);
+        \\
+        \\const falloffIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {},
+        \\};
+        \\let sawTypeError = false;
+        \\try {
+        \\    for (const value of falloffIterator) {}
+        \\} catch (error) {
+        \\    sawTypeError = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(sawTypeError, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
     engine.builtins.registry.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -7878,6 +8008,32 @@ test "iterator results reuse the realm shape without intermediate property growt
     try std.testing.expect(object.asDataAt(1).?.asBool().?);
 }
 
+test "bytecode closures reuse the final function-prototype shape" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        "(function () { function make() { return function () {}; } return [make(), make()]; })()",
+        .{ .filename = "<repl>" },
+    );
+    defer result.free(js.runtime);
+    const functions = try core.Object.expect(result);
+    const first_value = functions.getProperty(core.atom.atomFromUInt32(0));
+    defer first_value.free(js.runtime);
+    const second_value = functions.getProperty(core.atom.atomFromUInt32(1));
+    defer second_value.free(js.runtime);
+    const first = try core.Object.expect(first_value);
+    const second = try core.Object.expect(second_value);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    try std.testing.expectEqual(first.getPrototype(), second.getPrototype());
+    try std.testing.expectEqual(first.shape_ref, second.shape_ref);
+    try std.testing.expectEqual(global, first.bytecodeFunctionRealmGlobalPtr().?);
+    try std.testing.expectEqual(global, second.bytecodeFunctionRealmGlobalPtr().?);
+    try std.testing.expect(!first.flags.is_borrowed_reference_holder);
+    try std.testing.expect(!second.flags.is_borrowed_reference_holder);
+}
+
 test "generator creation avoids a second payload copy of rooted input slices" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -8465,7 +8621,7 @@ test "host global bootstrap installs and tears down builtin plus host domains" {
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
+    _ = try global.ensureRealmPayload(rt);
     defer global.value().free(rt);
 
     try helpers.installHostGlobalsBare(rt, global);
@@ -8478,7 +8634,7 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
+    _ = try global.ensureRealmPayload(rt);
     defer global.value().free(rt);
 
     try helpers.installHostGlobalsBare(rt, global);
@@ -8531,7 +8687,7 @@ test "reflect construct roots argument list while resolving prototype" {
     // installed to wire `rt.internal_builtins` before the construct record is
     // reachable.
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
-    realm_global.flags.is_global = true;
+    _ = try realm_global.ensureRealmPayload(rt);
     defer realm_global.value().free(rt);
     engine.builtins.registry.registerStandardGlobalsDefault();
     rt.install_standard_globals_cb = engine.builtins.registry.installStandardGlobals;

@@ -160,7 +160,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         call_mod.contextGlobalOwnPropertyCapacity(ctx.runtime),
     );
     errdefer global_object.value().free(ctx.runtime);
-    global_object.flags.is_global = true;
+    _ = try global_object.ensureRealmPayload(ctx.runtime);
     try call_mod.installHostGlobals(ctx.runtime, global_object);
     const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);

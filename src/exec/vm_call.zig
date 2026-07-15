@@ -598,7 +598,7 @@ inline fn fastNativeMethodCall(
     // identical across runtimes, never dangles, so the memo can never go stale.
     // A MISS falls through to null exactly as the pre-memo decode/probe did.
     const rec = function_object.nativeRecord() orelse blk: {
-        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
         const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
         function_object.nativeRecordSlot().* = r;
         break :blk r;
@@ -753,7 +753,7 @@ pub noinline fn constructor(
     errdefer result.free(ctx.runtime);
     if (frame.function.flags.is_derived_class_constructor and class_init_ops.isCurrentSuperConstructor(ctx, frame, func)) {
         if (object_ops.functionObjectFromValue(frame.current_function)) |function_object| {
-            if (function_object.functionHomeObjectSlot().*) |home_object| {
+            if (function_object.functionHomeObject()) |home_object| {
                 const instance_object = try property_ops.expectObject(result);
                 class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -828,7 +828,7 @@ pub fn initCtor(
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.new_target);
     errdefer result.free(ctx.runtime);
-    if (function_object.functionHomeObjectSlot().*) |home_object| {
+    if (function_object.functionHomeObject()) |home_object| {
         const instance_object = try property_ops.expectObject(result);
         try class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);
     }

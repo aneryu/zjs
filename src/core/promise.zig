@@ -767,7 +767,7 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
 fn arrayObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
-    if (!object.flags.is_array) return null;
+    if (!object.isArray()) return null;
     return object;
 }
 

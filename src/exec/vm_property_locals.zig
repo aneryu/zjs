@@ -924,7 +924,7 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
     if (pc + 2 > code.len or code[pc + 1] != op.get_array_el) return null;
     const object = objectFromValue(receiver) orelse return null;
     if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
-    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.isArray() or object.arrayElementStorageMode() != .dense) return null;
     if (index >= @as(usize, @intCast(object.arrayLength()))) return null;
     const elements = object.arrayElements();
     if (index >= elements.len) return null;
@@ -935,7 +935,7 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
 fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?IntRangeDeltaBounds {
     if (start > limit) return null;
     if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
-    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.isArray() or object.arrayElementStorageMode() != .dense) return null;
     if (limit > @as(usize, @intCast(object.arrayLength()))) return null;
     const elements = object.arrayElements();
     if (limit > elements.len) return null;

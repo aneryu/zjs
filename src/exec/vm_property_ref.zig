@@ -446,7 +446,7 @@ pub noinline fn deletePropertyVm(
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-    } else if (object.flags.is_array and atom_id == core.atom.ids.length)
+    } else if (object.isArray() and atom_id == core.atom.ids.length)
         false
     else if (try array_ops.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
         typed_deleted

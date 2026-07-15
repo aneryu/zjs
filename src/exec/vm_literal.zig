@@ -57,7 +57,7 @@ pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: c
     if (target.class_id != core.class.ids.object) return false;
     if (target.hasExoticMethods()) return false;
     if (target.proxyTarget() != null) return false;
-    if (target.flags.is_array) return false;
+    if (target.isArray()) return false;
     if (!target.flags.extensible) return false;
     target.definePlainDataPropertyKnownFast(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch return false;
     return true;
@@ -203,7 +203,7 @@ pub noinline fn defineField(
             if (target.class_id == core.class.ids.object and
                 !target.hasExoticMethods() and
                 target.proxyTarget() == null and
-                !target.flags.is_array and
+                !target.isArray() and
                 target.flags.extensible)
             {
                 try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
@@ -227,7 +227,7 @@ pub noinline fn defineField(
 
     const target = try property_ops.expectObject(obj);
     const effective_atom = call_runtime.remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
-    if (target.flags.is_array and effective_atom == core.atom.ids.length and
+    if (target.isArray() and effective_atom == core.atom.ids.length and
         target.flags.length_writable and target.shape_ref.prop_count == 0)
     {
         if (value.asInt32()) |length| {
@@ -242,7 +242,7 @@ pub noinline fn defineField(
             return .done;
         }
     }
-    if (target.flags.is_array) {
+    if (target.isArray()) {
         if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, effective_atom)) |index| {
             if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return .done;
         }
@@ -254,7 +254,7 @@ pub noinline fn defineField(
     if (target.class_id == core.class.ids.object and
         !target.hasExoticMethods() and
         target.proxyTarget() == null and
-        !target.flags.is_array and
+        !target.isArray() and
         target.flags.extensible and
         target.shape_ref.prop_count == 0)
     {
@@ -519,7 +519,7 @@ pub noinline fn specialObject(
         try stack.push(frame.new_target);
     } else if (subtype == 4) {
         if (property_ops.expectObject(frame.current_function)) |function_object| {
-            if (function_object.functionHomeObjectSlot().*) |home_object| {
+            if (function_object.functionHomeObject()) |home_object| {
                 try stack.push(home_object.value());
                 return;
             }
@@ -529,7 +529,6 @@ pub noinline fn specialObject(
         try stack.pushOwned(import_meta);
     } else if (subtype == special_object_subtype.var_object) {
         const var_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        var_object.flags.null_prototype = true;
         const value = var_object.value();
         errdefer value.free(ctx.runtime);
         try stack.pushOwned(value);

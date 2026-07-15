@@ -134,7 +134,8 @@ pub const Vm = struct {
 
     /// Outcome payloads (ride here, not in the u32 return).
     return_value: JSValue = JSValue.undefinedValue(),
-    return_atom: core.Atom = core.atom.null_atom,
+    return_action: inline_calls.ReturnAction = .next,
+    return_payload: u32 = 0,
     pending_error: HostError = error.OutOfMemory,
     tail_request: call_runtime.InlineCallRequest = undefined,
     /// On `.tail`: true => `tailCallReuse` (op.tail_call*/eval-tail), false => `pushCall`
@@ -375,6 +376,22 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
     return true;
 }
 
+/// `IteratorNext` itself is outside the IteratorClose-on-abrupt region (qjs
+/// `JS_IteratorNext2` propagates a failing `next()` directly). A same-Machine
+/// setup failure for that method therefore tries the caller catch without
+/// closing the iterator record first.
+noinline fn iteratorNextCallSetupRecover(vm: *Vm, err: HostError) bool {
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    if (!caught) {
+        vm.pending_error = err;
+        return false;
+    }
+    return true;
+}
+
 /// Complete an inline call INSIDE the handler — qjs's CASE(OP_call) shape
 /// (quickjs.c:18182-18202): push the callee frame, poll interrupts at call
 /// entry (17787), reload the per-frame registers, and tail-dispatch straight
@@ -421,11 +438,53 @@ inline fn pushMovedAndEnter(
     target: *const inline_calls.InlineTarget,
     moved_values: []JSValue,
     return_action: inline_calls.ReturnAction,
-    continuation_atom: core.Atom,
+    continuation_payload: u32,
 ) Outcome {
-    const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_atom) catch |err| {
-        if (!callSetupRecover(vm, err)) return .threw;
+    const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_payload) catch |err| {
+        const recovered = if (return_action == .for_of_next)
+            iteratorNextCallSetupRecover(vm, err)
+        else
+            callSetupRecover(vm, err);
+        if (!recovered) return .threw;
         return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    vm.function = entry.frame.function;
+    vm.frame = &entry.frame;
+    vm.stack = &entry.stack;
+    vm.catch_target = &entry.catch_target;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    vm.local_fast_blocked = false;
+    const pc2: [*]const u8 = vm.code_base;
+    const sp2: [*]JSValue = vm.stack.values.ptr + vm.stack.values.len;
+    const vb2: [*]JSValue = vm.frame.locals.ptr;
+    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+}
+
+/// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
+/// persistent iterator record. Keep the caller stack untouched and enter the
+/// child frame with borrowed call bindings; its continuation returns here
+/// before those two slots can be released or reused.
+inline fn pushBorrowedIteratorAndEnter(
+    vb: [*]JSValue,
+    vm: *Vm,
+    target: *const inline_calls.InlineTarget,
+    iterator_record: []JSValue,
+    depth: u8,
+) Outcome {
+    const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, target, iterator_record, depth) catch |err| {
+        if (!iteratorNextCallSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    const entry = maybe_entry orelse {
+        var moved = [2]JSValue{ iterator_record[0].dup(), iterator_record[1].dup() };
+        defer for (moved) |value| value.free(vm.ctx.runtime);
+        return pushMovedAndEnter(vb, vm, target, &moved, .for_of_next, depth);
     };
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
@@ -447,9 +506,9 @@ inline fn pushMovedAndEnter(
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
     const function_object = class_vm.callableObjectFromValue(method) orelse return false;
-    if (function_object.class_payload_kind != core.class.PayloadKind.function) return false;
+    if (function_object.flags.class_payload_kind != core.class.PayloadKind.function) return false;
     const record = function_object.nativeRecord() orelse blk: {
-        const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return false;
+        const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
         const resolved = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id) orelse return false;
         function_object.nativeRecordSlot().* = resolved;
         break :blk resolved;
@@ -588,15 +647,47 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
     stack.values = values[0 .. region_base + 1];
 }
 
-fn op_proxy_get_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+/// Cold post-return dispatcher. Keeping both continuation bodies out of
+/// `popAndResume` preserves the ordinary return's original one-compare shape;
+/// only calls that actually carry post-call work publish these fields.
+fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = pc;
     _ = sp;
     const result = vm.return_value;
-    const atom_id = vm.return_atom;
+    const action = vm.return_action;
+    const payload = vm.return_payload;
     vm.return_value = JSValue.undefinedValue();
-    vm.return_atom = core.atom.null_atom;
-    completeProxyGetContinuation(vm, result, atom_id) catch |err| return vm.fail(err);
+    vm.return_action = .next;
+    vm.return_payload = 0;
+    switch (action) {
+        .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .for_of_next => completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .next => unreachable,
+    }
     return coldNext(var_buf, vm);
+}
+
+fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!void {
+    iter_vm.finishForOfNextResult(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        depth,
+        result,
+    ) catch |err| {
+        const caught = try call_runtime.handleCatchableRuntimeError(
+            vm.ctx,
+            vm.stack,
+            vm.frame,
+            vm.catch_target,
+            vm.global,
+            err,
+        );
+        if (!caught) return err;
+    };
 }
 
 /// Fused popFrame + reload for an in-handler return to an inline caller —
@@ -611,19 +702,24 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var pc2: [*]const u8 = undefined;
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
-    reloadTop(vm, &pc2, &sp2, &vb2);
-    if (continuation.action == .proxy_get) {
-        vm.return_value = value;
-        vm.return_atom = continuation.takeAtom();
-        return @call(.always_tail, op_proxy_get_continuation, .{ pc2, sp2, vb2, vm });
+    // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
+    // state already distinguishes L0, so do not reload and test depth as well.
+    reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+    if (continuation.action == .next) {
+        std.debug.assert(continuation.payload == 0);
+        // Deliver the result on the (now-current) caller stack. AssumeCapacity
+        // never reallocs, so the stack_base reloadAfterPop captured stays
+        // valid; sp just advances past the pushed slot.
+        vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
-    std.debug.assert(continuation.atom_id == core.atom.null_atom);
-    // Deliver the result on the (now-current) caller stack. AssumeCapacity
-    // never reallocs, so the stack_base reloadTop captured stays valid; sp
-    // just advances past the pushed slot.
-    vm.stack.pushOwnedAssumeCapacity(value);
-    sp2 += 1;
-    return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    vm.return_value = value;
+    vm.return_action = continuation.action;
+    vm.return_payload = continuation.payload;
+    continuation.action = .next;
+    continuation.payload = 0;
+    return @call(.always_tail, op_post_call_continuation, .{ pc2, sp2, vb2, vm });
 }
 
 fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -633,21 +729,22 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(
     // (OP_check_ctor_return, quickjs.c:18273, emitted at parse time 28459) and
     // the depth-0/generator hand-off lives at the JS_CallInternal boundary —
     // neither is ever inline in OP_return's value dataflow. zjs's compiler does
-    // not emit a check-ctor op, so the flag test must remain, but only as a
-    // branch off to the cold sibling handler below: the hot leg carries the
-    // value as a plain JSValue (no `!JSValue` error union, no memory phi)
-    // straight into popAndResume.
-    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+    // not yet emit the qjs check-ctor sequence for every derived return, so the
+    // depth-0 cold helper retains that legality check. InlineTarget rejects
+    // class and derived constructors before a Machine frame is pushed, leaving
+    // the hot leg to carry the value as a plain JSValue (no `!JSValue` error
+    // union, no memory phi) into popAndResume.
+    if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
+    std.debug.assert(!vm.frame.function.flags.is_derived_class_constructor);
     // qjs moves the result out of the operand region before the done: cleanup
-    // (`ret_val = *--sp`).  Do the same here: shrinking the live slice keeps the
-    // raw result out of teardown, so refcounted results do not pay a dup+free
-    // round trip and plain results avoid two redundant tag tests.  Preserve the
-    // old malformed/empty-stack fallback even though valid OP_return bytecode
-    // always has a value.
-    const has_value = @intFromPtr(sp) > @intFromPtr(vm.stack_base);
-    const result_sp = if (has_value) sp - 1 else sp;
-    const value = if (has_value) result_sp[0] else JSValue.undefinedValue();
+    // with the check-free `ret_val = *--sp` (quickjs.c:18266). Valid `return`
+    // bytecode always has one result; valueless returns use `return_undef`.
+    // Keep that compiler/verifier contract explicit in Debug instead of
+    // cloning the complete teardown path for malformed bytecode in production.
+    std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack_base));
+    const result_sp = sp - 1;
+    const value = result_sp[0];
     vm.syncSp(result_sp);
     return popAndResume(vm, value);
 }
@@ -673,8 +770,9 @@ fn op_return_cold(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
 fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     // Same split as op_return — qjs OP_return_undef (quickjs.c:18270) is
     // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
-    if (vm.frame.function.flags.is_derived_class_constructor or vm.machine.depth == 0)
+    if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
+    std.debug.assert(!vm.frame.function.flags.is_derived_class_constructor);
     vm.syncSp(sp);
     return popAndResume(vm, JSValue.undefinedValue());
 }
@@ -769,6 +867,34 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             return .tail;
         },
     }
+}
+
+/// Generic for-of calls a bytecode iterator's zero-argument `next` method in
+/// the resident Machine, just like qjs's internal JS_CallInternal path. The
+/// iterator record itself remains on the suspended caller stack and roots the
+/// receiver/callable borrowed by the callee; the tagged continuation consumes
+/// `{ value, done }` after return. Native, cross-realm, async/generator and
+/// malformed records retain the authoritative helper.
+fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.publish(pc, sp);
+    if (@intFromPtr(pc + 1) < @intFromPtr(vm.code_end)) {
+        const depth = pc[1];
+        const stack_len = vm.stack.values.len;
+        if (stack_len >= @as(usize, depth) + 3) {
+            const iterator_index = stack_len - @as(usize, depth) - 3;
+            const receiver = vm.stack.values[iterator_index];
+            const method = vm.stack.values[iterator_index + 1];
+            if (!receiver.isUndefined()) {
+                if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
+                    vm.frame.pc += 1;
+                    const iterator_record = vm.stack.values[iterator_index..][0..2];
+                    return pushBorrowedIteratorAndEnter(vb, vm, &target, iterator_record, depth);
+                }
+            }
+        }
+    }
+    _ = iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
+    return coldNext(vb, vm);
 }
 fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
@@ -2292,6 +2418,7 @@ const specials: colds.SpecialHandlers = .{
     .op_return_undef = op_return_undef,
     .op_call = op_call,
     .op_call_method = op_call_method,
+    .op_for_of_next = op_for_of_next,
     .op_tail_call = op_tail_call,
     .op_tail_call_method = op_tail_call_method,
     .op_eval = op_eval,
@@ -2342,6 +2469,37 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
     var_buf.* = vm.frame.locals.ptr;
 }
 
+/// Return-only reload using the caller pointer popFrame already published in
+/// Machine.top. Null names L0, exactly like qjs's `prev_frame == NULL`; a
+/// non-null pointer names the caller directly and needs no depth/index lookup.
+inline fn reloadAfterPop(
+    vm: *Vm,
+    caller_entry: ?*inline_calls.Entry,
+    pc: *[*]const u8,
+    sp: *[*]JSValue,
+    var_buf: *[*]JSValue,
+) void {
+    if (caller_entry) |entry| {
+        vm.frame = &entry.frame;
+        vm.stack = &entry.stack;
+        vm.catch_target = &entry.catch_target;
+        vm.local_fast_blocked = false;
+    } else {
+        vm.frame = vm.machine.l0.level.frame;
+        vm.stack = vm.machine.l0.level.stack;
+        vm.catch_target = vm.machine.l0.level.catch_target;
+        vm.local_fast_blocked = vm.machine.l0.stop_before_pc != null;
+    }
+    vm.function = vm.frame.function;
+    vm.code_base = vm.function.code.ptr;
+    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.stack_base = vm.stack.values.ptr;
+    vm.arg_buf = vm.frame.args.ptr;
+    pc.* = vm.code_base + vm.frame.pc;
+    sp.* = vm.stack.values.ptr + vm.stack.values.len;
+    var_buf.* = vm.frame.locals.ptr;
+}
+
 /// Run the tail-call chain to completion for the current top frame.
 pub fn run(vm: *Vm) HostError!JSValue {
     vm.tbl = &dispatch_table; // resident table base (avoids per-dispatch adrp+add)
@@ -2356,14 +2514,18 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 if (vm.machine.depth == 0) return vm.return_value;
                 var continuation = vm.machine.popReturn(vm.return_value);
                 reloadTop(vm, &pc, &sp, &var_buf);
-                if (continuation.action == .proxy_get) {
-                    const result = vm.return_value;
-                    vm.return_value = JSValue.undefinedValue();
-                    try completeProxyGetContinuation(vm, result, continuation.takeAtom());
-                    reloadTop(vm, &pc, &sp, &var_buf);
-                } else {
-                    std.debug.assert(continuation.atom_id == core.atom.null_atom);
+                if (continuation.action == .next) {
+                    std.debug.assert(continuation.payload == 0);
+                    continue;
                 }
+                const result = vm.return_value;
+                vm.return_value = JSValue.undefinedValue();
+                switch (continuation.action) {
+                    .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
+                    .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .next => unreachable,
+                }
+                reloadTop(vm, &pc, &sp, &var_buf);
             },
             .threw => return vm.pending_error,
             .tail => {

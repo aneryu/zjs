@@ -881,7 +881,7 @@ fn localArrayLengthI32(frame: *const frame_mod.Frame, array_idx: u16) ?i32 {
     if (array_idx >= frame.locals.len) return null;
     if (slot_ops.varRefSlotIsUninitialized(frame.locals[array_idx])) return null;
     const object = objectFromValue(frame.locals[array_idx]) orelse return null;
-    if (object.proxyTarget() != null or object.hasExoticMethods() or !object.flags.is_array) return null;
+    if (object.proxyTarget() != null or object.hasExoticMethods() or !object.isArray()) return null;
     if (object.arrayLength() > @as(u32, @intCast(std.math.maxInt(i32)))) return null;
     return @intCast(object.arrayLength());
 }

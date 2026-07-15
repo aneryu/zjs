@@ -88,7 +88,7 @@ test "production embedding can own JSRuntime and JSContext directly" {
     try std.testing.expect(object.isObject());
 
     const global = try ctx.globalObject();
-    try std.testing.expect(global.flags.is_global);
+    try std.testing.expect(global.isGlobal());
 }
 
 test "production embedding API applies limits and releases eval handles" {
@@ -851,7 +851,7 @@ test "production embedding can create independent realms" {
     try std.testing.expect(realm_global.isObject());
 
     const realm_global_object = try ctx.realmGlobalObject(realm);
-    try std.testing.expect(realm_global_object.flags.is_global);
+    try std.testing.expect(realm_global_object.isGlobal());
 
     const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
     defer realm_global_this.free(rt);

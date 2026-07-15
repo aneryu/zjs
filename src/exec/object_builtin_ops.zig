@@ -558,7 +558,6 @@ pub fn qjsObjectCreateCall(
         objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not a prototype"));
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    object.flags.null_prototype = args[0].isNull();
     if (args.len >= 2 and !args[1].isUndefined()) {
         try qjsDefinePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
     }
@@ -891,7 +890,6 @@ pub fn qjsObjectGroupByCall(
     if (!isCallableValue(args[1])) return error.TypeError;
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    out.flags.null_prototype = true;
     const out_value = out.value();
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
@@ -1180,7 +1178,7 @@ pub fn qjsObjectPrototypeMethodFunctionPrototype(
 }
 
 pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
+    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .object and native_ref.id == id;
 }
 

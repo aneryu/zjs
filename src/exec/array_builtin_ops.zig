@@ -1160,7 +1160,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
     if (value.isObject()) {
         const header = value.refHeader() orelse unreachable;
         const object: *core.Object = @fieldParentPtr("header", header);
-        if (object.flags.is_array) {
+        if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
                 const item = object.getProperty(core.atom.atomFromUInt32(index));
@@ -1196,12 +1196,12 @@ pub const expectArray = core_array.expectArray;
 
 fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
-    if (object.flags.is_array or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
+    if (object.isArray() or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
     return error.TypeError;
 }
 
 fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) u32 {
-    if (object.flags.is_array) return object.arrayLength();
+    if (object.isArray()) return object.arrayLength();
     if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
     const length = object.getProperty(core.atom.ids.length);
     defer length.free(rt);
@@ -1284,7 +1284,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.flags.is_array) {
+        } else if (object_value.isArray()) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");

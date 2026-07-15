@@ -559,7 +559,7 @@ pub fn groupByWithCallbackHost(
     }
 
     const source = try expectObject(args[0]);
-    if (!source.flags.is_array) return error.TypeError;
+    if (!source.isArray()) return error.TypeError;
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
         const item = source.getProperty(core.atom.atomFromUInt32(index));
@@ -1345,7 +1345,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
     const iterable_value = try host.callWithThis(rt, keys_value, object.value(), &.{});
     defer iterable_value.free(rt);
     const iterable = try expectObject(iterable_value);
-    if (iterable.flags.is_array) {
+    if (iterable.isArray()) {
         var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
@@ -1501,7 +1501,7 @@ fn addGroupedItem(
 }
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
-    if (!array.flags.is_array) return error.TypeError;
+    if (!array.isArray()) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(value, true, true, true));
 }
 
@@ -2600,7 +2600,7 @@ fn qjsMapAppendGroupByValue(
 
     if (!existing.isUndefined()) {
         const group = try property_ops.expectObject(existing);
-        if (!group.flags.is_array) return error.TypeError;
+        if (!group.isArray()) return error.TypeError;
         try group.defineOwnProperty(
             ctx.runtime,
             core.atom.atomFromUInt32(group.arrayLength()),

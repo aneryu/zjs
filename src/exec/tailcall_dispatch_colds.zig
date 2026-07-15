@@ -131,6 +131,7 @@ pub const SpecialHandlers = struct {
     op_return_undef: Handler,
     op_call: Handler,
     op_call_method: Handler,
+    op_for_of_next: Handler,
     op_tail_call: Handler,
     op_tail_call_method: Handler,
     op_eval: Handler,
@@ -735,11 +736,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             _ = try iter_vm.iteratorCallVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.for_of_next] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
+    t[op.for_of_next] = s.op_for_of_next;
     t[op.for_await_of_next] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try iter_vm.forAwaitOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);

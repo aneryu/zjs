@@ -241,7 +241,7 @@ pub fn initializeClassInstanceElements(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const constructor_object = objectFromValue(constructor_value);
-    const remap_object = if (constructor_object) |object| object.functionHomeObjectSlot().* else null;
+    const remap_object = if (constructor_object) |object| object.functionHomeObject() else null;
     if (remap_object) |home_object| {
         const instance_object = try property_ops.expectObject(instance);
         try initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);

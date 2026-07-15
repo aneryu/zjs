@@ -951,7 +951,7 @@ pub const NumberStaticLiteralResult = struct {
 
 pub fn isHostOutputFunctionValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    return object.hostFunctionKindSlot().* == core.host_function.ids.output or
+    return object.hostFunctionKind() == core.host_function.ids.output or
         call_mod.isOutputExternalHostFunction(rt, object);
 }
 
@@ -1012,7 +1012,7 @@ pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const b
 fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
     if (function.varRefNamesLen() != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
-    if (function_object.functionCapturesSlot().*.len != 0) return true;
+    if (function_object.functionCaptures().len != 0) return true;
     return false;
 }
 
@@ -1051,7 +1051,7 @@ pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const f
 pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
     if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return null;
-    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return null;
+    if (!array_object.isArray() or array_object.arrayElementStorageMode() != .dense) return null;
     if (modulus > @as(usize, @intCast(array_object.arrayLength()))) return null;
     const elements = array_object.arrayElements();
     if (modulus > elements.len) return null;
@@ -1091,7 +1091,7 @@ fn nativeBuiltinIdMatches(native_builtin_id: i32, domain: core.function.NativeBu
 
 fn nativeBuiltinFunctionValueMatches(value: core.JSValue, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
     const function_object = objectFromValue(value) orelse return false;
-    return nativeBuiltinIdMatches(function_object.nativeFunctionIdSlot().*, domain, expected_id);
+    return nativeBuiltinIdMatches(function_object.nativeFunctionId(), domain, expected_id);
 }
 
 fn autoInitNativeBuiltinMatches(info: core.property.AutoInit, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
@@ -1100,7 +1100,7 @@ fn autoInitNativeBuiltinMatches(info: core.property.AutoInit, domain: core.funct
 
 fn nativeBuiltinFunctionValueMatchesCollectionOwner(value: core.JSValue, expected_id: u32, owner_class: core.ClassId) bool {
     const function_object = objectFromValue(value) orelse return false;
-    if (!nativeBuiltinIdMatches(function_object.nativeFunctionIdSlot().*, .collection, expected_id)) return false;
+    if (!nativeBuiltinIdMatches(function_object.nativeFunctionId(), .collection, expected_id)) return false;
     return function_object.collectionMethodOwnerClass() == owner_class;
 }
 
@@ -1157,7 +1157,7 @@ pub fn fastCollectionPrototypeMethodIsDefault(value: core.JSValue, atom_id: core
 
 pub fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     const object = objectFromValue(value) orelse return false;
-    if (!object.flags.is_array or object.hasOwnProperty(atom_id)) return false;
+    if (!object.isArray() or object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .array, expected_id);
 }

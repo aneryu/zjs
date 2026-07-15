@@ -1316,12 +1316,11 @@ pub const function_bytecode = struct {
         source_ptr: ?[*]const u8 = null,
         arg_names: [*]atom.Atom = @ptrFromInt(@alignOf(atom.Atom)),
         scope_parents: [*]i32 = @ptrFromInt(@alignOf(i32)),
-        /// Lazily-built per-FB execution view (see `cachedBytecodeView`). Stored
-        /// here in the out-of-line debug box so the 128B FunctionBytecode struct
-        /// stays unchanged while restoring the `execution_view` cache the
-        /// struct-alignment program removed. Non-owning (its slices borrow the FB
-        /// `block`); `FunctionBytecode.deinit` frees only the struct allocation.
-        cached_view: ?*function_mod.BytecodeImpl = null,
+        /// Base of the consolidated read-only storage allocation. This is cold
+        /// ownership metadata used only while finalizing/freeing an FB, so keep
+        /// it beside the other block-backed debug/source pointers rather than
+        /// on the per-call FunctionBytecode hot path.
+        block_ptr: [*]u8 = @ptrFromInt(@alignOf(u8)),
     };
 
     /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
@@ -1379,15 +1378,13 @@ pub const function_bytecode = struct {
         }
         header: gc.GCObjectHeader align(16),
 
-        /// Consolidated storage for the read-only slices below. When
-        /// `flags.from_block` is set, the bare-pointer slices all point into this
-        /// single block (the `createFunctionBytecode` path); otherwise the fields
-        /// were populated with individual allocations (fixture path) and each
-        /// slice owns its own storage. Stored as a bare `[*]u8` self-pointer with
-        /// no length — the block's total size is recomputed from the slice
-        /// lengths at free time (`computeBlockSize`), mirroring QuickJS's single
-        /// `js_malloc(function_size)` allocation held by self-pointer.
-        block_ptr: [*]u8 = noSlice(u8),
+        /// Lazily-built execution view shared by every closure instantiated from
+        /// this FB. qjs executes `JSFunctionBytecode` directly; until zjs removes
+        /// its compatibility `Bytecode` view, putting the pointer here makes the
+        /// cache hit one direct FB load instead of `fb.debug -> cached_view`.
+        /// Non-owning slices in the view borrow the consolidated block; `deinit`
+        /// frees only the view struct allocation.
+        cached_view: ?*function_mod.BytecodeImpl = null,
 
         // Flags (mirrors JSFunctionBytecode packed fields, same order as
         // quickjs.c:770-782). Packed into `Flags` to drop per-field padding.
@@ -1458,8 +1455,12 @@ pub const function_bytecode = struct {
         // machinery rebuilds a lightweight `Bytecode` view on demand per call
         // (`makeBytecodeView`) rather than caching one here. No cache fields.
 
-        // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
-        // tracks this differently via the runtime context.
+        // Owning realm edge, mirroring qjs `JSFunctionBytecode.realm` (a
+        // duplicated raw JSContext pointer). The header is retained/released
+        // explicitly and traced by the cycle GC; keeping it pointer-typed avoids
+        // a JSValue tag decode in every call prologue. It is bound when the FB is
+        // first instantiated; deserialized/never-instantiated bytecode is null.
+        realm_global_header: ?*gc.Header = null,
 
         // Constant pool (contains child Function objects) (quickjs.c:796)
         cpool: [*]JSValue = noSlice(JSValue),
@@ -1701,6 +1702,7 @@ pub const function_bytecode = struct {
             const from_block = self.flags.from_block;
             const owned = !from_block;
             const block_size: usize = if (from_block) self.computeBlockSize() else 0;
+            const block_ptr = if (self.debug) |dbg| dbg.block_ptr else noSlice(u8);
 
             const func_name = self.func_name;
             const filename = self.filename;
@@ -1791,6 +1793,10 @@ pub const function_bytecode = struct {
                 mem.destroy(JSValue, boxed);
             }
 
+            const realm_global_header = self.realm_global_header;
+            self.realm_global_header = null;
+            if (realm_global_header) |header| gc.release(rt, header);
+
             const cpool = self.cpoolSlice();
             self.cpool = noSlice(JSValue);
             self.cpool_count = 0;
@@ -1807,15 +1813,10 @@ pub const function_bytecode = struct {
             // the `DebugInfo` box itself is always a side allocation freed here.
             if (self.debug) |dbg| {
                 self.debug = null;
+                dbg.block_ptr = noSlice(u8);
                 const script_or_module = dbg.script_or_module;
                 dbg.script_or_module = atom.null_atom;
                 if (script_or_module != atom.null_atom) atoms.free(script_or_module);
-                // The cached execution view is non-owning (its slices borrow the
-                // FB block), so freeing the struct allocation is all that's needed.
-                if (dbg.cached_view) |view| {
-                    dbg.cached_view = null;
-                    mem.free(function_mod.BytecodeImpl, view[0..1]);
-                }
                 const pc2line_buf = dbg.pc2line_buf[0..@intCast(dbg.pc2line_len)];
                 if (owned and pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
                 if (dbg.source_ptr) |src_ptr| {
@@ -1825,8 +1826,12 @@ pub const function_bytecode = struct {
                 mem.free(DebugInfo, dbg[0..1]);
             }
 
-            const block_ptr = self.block_ptr;
-            self.block_ptr = noSlice(u8);
+            // The cached execution view is non-owning (its slices borrow the FB
+            // block), so freeing the struct allocation is all that's needed.
+            if (self.cached_view) |view| {
+                self.cached_view = null;
+                mem.free(function_mod.BytecodeImpl, view[0..1]);
+            }
             self.flags.from_block = false;
             if (from_block and block_size != 0) mem.freeAlignedBytes(block_ptr[0..block_size], block_alignment);
         }
@@ -7393,7 +7398,7 @@ pub const pipeline_finalize = struct {
 
         // Pack all read-only artifact slices into a single block allocation.
         // Segments are reserved largest-alignment-first to minimize padding;
-        // the slice fields below point into `fb.block_ptr` and `deinit` releases
+        // the slice fields below point into `fb.debug.block_ptr` and `deinit` releases
         // the whole block at once.
         const source_len: usize = if (fd.source_text) |source| source.len else 0;
         var layout = fb_mod.BlockBuilder{};
@@ -7424,7 +7429,7 @@ pub const pipeline_finalize = struct {
         fb.debug = &dbg[0];
 
         const block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
-        fb.block_ptr = block.ptr;
+        dbg[0].block_ptr = block.ptr;
         fb.flags.from_block = true;
 
         // Copy lowered bytecode.
@@ -8853,35 +8858,35 @@ const function_mod = struct {
     /// the older `Bytecode` view API, so `resolveInlineTarget` rebuilt the
     /// ~300B view via `makeBytecodeView` on EVERY call — ~43% of the call cost
     /// on call-heavy code (fib/funcall). The view is a pure function of the
-    /// immutable FB, so build it once and cache it OUT-OF-LINE in the
-    /// `DebugInfo` box; the 128B FB struct is unchanged. The cached view is
+    /// immutable FB, so build it once and cache its pointer directly on the FB.
+    /// The cold consolidated-block owner moved to `DebugInfo`, so the FB struct
+    /// size is unchanged. The cached view is
     /// non-owning (all slices borrow the FB `block`), so `deinit` frees only the
-    /// struct allocation. Returns null when the FB carries no `DebugInfo` box
-    /// (fixture/synthetic FBs) — the caller rebuilds per-call in that rare case.
+    /// struct allocation. Synthetic FBs can use the same cache even when they
+    /// carry no `DebugInfo` box.
     ///
     /// Behaviour-identical to `makeBytecodeView`: the returned view is copied by
     /// value into the per-call `InlineTarget`/`Entry.view_storage`, while the
     /// cached slices continue to borrow immutable FunctionBytecode storage.
     ///
     /// `inline` + the out-of-line build leg keep the per-call cost at the two
-    /// cache-hit loads (`fb.debug` -> `dbg.cached_view`): the resolve path in
+    /// cache-hit load (`fb.cached_view`): the resolve path in
     /// `op_call` previously paid a `bl` call boundary here on EVERY call
     /// because the cold alloc+build leg made LLVM keep the whole function
     /// out of line. qjs's callee prologue has no per-call call boundary at
     /// all — `b` IS the execution structure (`b = p->u.func.function_bytecode`,
     /// quickjs.c:17825) — so the hit leg must ride inline.
     pub inline fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
-        const dbg = fb.debug orelse return null;
-        return dbg.cached_view orelse buildCachedBytecodeView(dbg, fb, mem, atoms);
+        return fb.cached_view orelse buildCachedBytecodeView(@constCast(fb), mem, atoms);
     }
 
     /// Cold once-per-FB build leg of `cachedBytecodeView` (see above).
     /// `noinline` is load-bearing: keeping the alloc/build out of the caller
     /// is the whole point of the split.
-    noinline fn buildCachedBytecodeView(dbg: *function_bytecode_mod.DebugInfo, fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
+    noinline fn buildCachedBytecodeView(fb: *FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
         const slot = mem.alloc(BytecodeImpl, 1) catch return null;
         slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
-        dbg.cached_view = &slot[0];
+        fb.cached_view = &slot[0];
         return &slot[0];
     }
 
