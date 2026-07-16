@@ -27,6 +27,33 @@ test "QuickJS value tag constants are locked" {
     try std.testing.expectEqual(@as(i32, 8), core.Tag.float64);
 }
 
+test "every JSValue constructor recovers its QuickJS semantic tag" {
+    var header: core.gc.Header = undefined;
+    var string_header: core.gc.StringHeader = undefined;
+    var object_header: core.gc.GCObjectHeader = undefined;
+
+    const cases = [_]struct { value: core.JSValue, tag: i32 }{
+        .{ .value = core.JSValue.bigInt(&header), .tag = core.Tag.big_int },
+        .{ .value = core.JSValue.symbol(&string_header), .tag = core.Tag.symbol },
+        .{ .value = core.JSValue.string(&string_header), .tag = core.Tag.string },
+        .{ .value = core.JSValue.stringRope(&string_header), .tag = core.Tag.string_rope },
+        .{ .value = core.JSValue.module(&header), .tag = core.Tag.module },
+        .{ .value = core.JSValue.functionBytecode(&object_header), .tag = core.Tag.function_bytecode },
+        .{ .value = core.JSValue.object(&header), .tag = core.Tag.object },
+        .{ .value = core.JSValue.int32(-42), .tag = core.Tag.int },
+        .{ .value = core.JSValue.boolean(true), .tag = core.Tag.boolean },
+        .{ .value = core.JSValue.nullValue(), .tag = core.Tag.null_value },
+        .{ .value = core.JSValue.undefinedValue(), .tag = core.Tag.undefined_value },
+        .{ .value = core.JSValue.uninitialized(), .tag = core.Tag.uninitialized },
+        .{ .value = core.JSValue.catchOffset(-7), .tag = core.Tag.catch_offset },
+        .{ .value = core.JSValue.exception(), .tag = core.Tag.exception },
+        .{ .value = core.JSValue.shortBigInt(-123), .tag = core.Tag.short_big_int },
+        .{ .value = core.JSValue.float64(-1.5), .tag = core.Tag.float64 },
+    };
+
+    for (cases) |case| try std.testing.expectEqual(case.tag, case.value.tagOf());
+}
+
 test "primitive value predicates match QuickJS helpers" {
     try std.testing.expect(core.JSValue.int32(1).isNumber());
     try std.testing.expect(core.JSValue.float64(1.5).isNumber());

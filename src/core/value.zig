@@ -41,23 +41,20 @@ const NanBox = struct {
     const float_max: u64 = 0xFFF0_0000_0000_0000;
     const canonical_nan: u64 = 0x7FF8_0000_0000_0000;
 
-    // Ordered so the reference-counted tags occupy a CONTIGUOUS dense-index
-    // range, letting `requiresRefCount`/`dup`/`free` test them with a single
-    // prefix range compare instead of a `tag_by_index` table lookup (QuickJS's
-    // `JS_VALUE_HAS_REF_COUNT` is likewise a single `tag >= FIRST` range test).
-    // Refcounted, in this order: full gc.Header tags and refcount-only
-    // string/symbol tags first, then function_bytecode, with the deinit-phase
-    // skip set {module, object, function_bytecode} placed last among them so it
-    // is also a contiguous range. Non-refcounted tags follow. `tag_assertions`
-    // below pins these invariants at comptime.
+    // Preserve QuickJS's semantic tag order inside the dense boxed prefix
+    // space. The two numeric tag runs [-9..-6] and [-3..7] map to prefix
+    // indexes [1..4] and [5..15], respectively, so `tagOf` can invert the
+    // encoding arithmetically instead of loading a tag from a lookup table.
+    // Reference-counted and deinit-skip tags remain contiguous, retaining the
+    // single range checks used by `requiresRefCount`/`dup`/`free`.
     const boxed_tags = [_]i32{
         Tag.big_int,
         Tag.symbol,
         Tag.string,
         Tag.string_rope,
         Tag.module,
-        Tag.object,
         Tag.function_bytecode,
+        Tag.object,
         Tag.int,
         Tag.boolean,
         Tag.null_value,
@@ -70,7 +67,7 @@ const NanBox = struct {
 
     /// Inclusive prefix range of all reference-counted tags.
     const refcount_min: u64 = prefixOf(Tag.big_int);
-    const refcount_max: u64 = prefixOf(Tag.function_bytecode);
+    const refcount_max: u64 = prefixOf(Tag.object);
     /// Lowest prefix of the deinit-phase skip set {module, object, function_bytecode}.
     const deinit_skip_min: u64 = prefixOf(Tag.module);
 
@@ -79,6 +76,12 @@ const NanBox = struct {
     }
 
     const tag_assertions = blk: {
+        // Dense indexes must decode to the semantic QuickJS tags without a
+        // table. This also pins the otherwise-unused -5/-4 holes in the tag
+        // number line between the two runs.
+        for (boxed_tags, 1..) |tag, index| {
+            if (tagFromIndex(index) != tag) @compileError("boxed tag order is not arithmetically decodable");
+        }
         // Refcounted tags must form the contiguous range [refcount_min, refcount_max].
         for ([_]i32{ Tag.big_int, Tag.symbol, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode }) |tag| {
             const p = prefixOf(tag);
@@ -103,36 +106,24 @@ const NanBox = struct {
     /// can collide with the canonical float range.
     fn indexOf(comptime tag: i32) u64 {
         return switch (tag) {
-            Tag.big_int => 1,
-            Tag.symbol => 2,
-            Tag.string => 3,
-            Tag.string_rope => 4,
-            Tag.module => 5,
-            Tag.object => 6,
-            Tag.function_bytecode => 7,
-            Tag.int => 8,
-            Tag.boolean => 9,
-            Tag.null_value => 10,
-            Tag.undefined_value => 11,
-            Tag.uninitialized => 12,
-            Tag.catch_offset => 13,
-            Tag.exception => 14,
-            Tag.short_big_int => 15,
+            Tag.big_int...Tag.string_rope => @intCast(tag + 10),
+            Tag.module...Tag.short_big_int => @intCast(tag + 8),
             else => @compileError("tag is not representable in the NaN-boxed encoding"),
         };
+    }
+
+    inline fn tagFromIndex(index: u64) i32 {
+        const dense: i32 = @intCast(index);
+        // Indexes 1..4 make `dense - 5` negative; its sign bit restores the
+        // two unused semantic tags before the second run without a branch.
+        const before_second_run: u32 = @bitCast(dense - 5);
+        return dense - 8 - @as(i32, @intCast((before_second_run >> 31) * 2));
     }
 
     /// High 16 bits of a boxed encoding for `tag`.
     fn prefixOf(comptime tag: i32) u64 {
         return (float_max >> payload_bits) | indexOf(tag);
     }
-
-    const tag_by_index: [boxed_tags.len + 1]i32 = blk: {
-        var table: [boxed_tags.len + 1]i32 = undefined;
-        table[0] = Tag.float64;
-        for (boxed_tags, 1..) |tag, index| table[index] = tag;
-        break :blk table;
-    };
 };
 
 pub const JSValue = extern struct {
@@ -147,6 +138,10 @@ pub const JSValue = extern struct {
     pub const Weak = @import("runtime.zig").WeakPersistentValue;
     pub const String = @import("string_view.zig").JSString(JSValue);
     pub const Bytes = @import("bytes_view.zig").JSBytes(JSValue);
+
+    /// Packed-value encoding revision included in the plugin ABI fingerprint.
+    /// Zero means the field layout fully describes the representation.
+    pub const abi_encoding_revision: u64 = if (nan_boxing) 2 else 0;
 
     pub const Repr = if (nan_boxing) extern struct {
         bits: u64,
@@ -292,7 +287,7 @@ pub const JSValue = extern struct {
     pub inline fn tagOf(self: JSValue) i32 {
         if (comptime nan_boxing) {
             if (self.repr.bits <= NanBox.float_max) return Tag.float64;
-            return NanBox.tag_by_index[@as(usize, @intCast((self.repr.bits >> NanBox.payload_bits) & 0xF))];
+            return NanBox.tagFromIndex((self.repr.bits >> NanBox.payload_bits) & 0xF);
         }
         return @intCast(self.repr.tag);
     }
