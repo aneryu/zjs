@@ -8399,6 +8399,31 @@ test "generator default argument stores release refcounted stack values" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "spread super brands derived instances before class field initializers" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Regression: super(...args) compiles to op.apply is_new=1, whose handler
+    // skipped the private-method brand install that op.call_constructor
+    // performs — `this.#m()` in a field initializer then threw TypeError.
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\  class A { constructor(a, b) { this.s = (a | 0) + (b | 0); } }
+        \\  class B extends A {
+        \\    #m() { return this.s + 7; }
+        \\    v = this.#m();
+        \\    constructor(...args) { super(...args); }
+        \\  }
+        \\  return new B(1, 2).v;
+        \\})();
+    ,
+        .{ .filename = "<repl>" },
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqual(@as(?i32, 10), result.asInt32());
+}
+
 test "started generator resumes preserve unmapped arguments from parked locals" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

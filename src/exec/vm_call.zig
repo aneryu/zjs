@@ -666,6 +666,26 @@ pub noinline fn apply(
         return err;
     };
     if (is_new != 0) {
+        // super(...spread) parity with op.call_constructor: brand the derived
+        // instance with the class's private methods before the class-fields
+        // init closure reads `this.#m` (mirrors vm_call.constructor's install;
+        // `allow_class_constructor_call` is exactly isCurrentSuperConstructor).
+        if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
+            if (object_ops.functionObjectFromValue(frame.current_function)) |function_object| {
+                if (function_object.functionHomeObject()) |home_object| {
+                    const instance_object = property_ops.expectObject(result) catch |err| {
+                        result.free(ctx.runtime);
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        return err;
+                    };
+                    class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
+                        result.free(ctx.runtime);
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        return err;
+                    };
+                }
+            }
+        }
         stack.pushOwned(result) catch |err| {
             result.free(ctx.runtime);
             return err;
