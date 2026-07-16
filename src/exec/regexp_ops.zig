@@ -14,7 +14,6 @@ const array_ops = @import("array_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -27,7 +26,7 @@ pub const StaticMethod = core.host_function.builtin_method_ids.regexp.StaticMeth
 
 // Relocated to engine core (`core/host_function.zig`, next to
 // `builtin_method_ids.regexp.StaticMethod`) in Phase 6b-3e so the VM construct
-// dispatchers can gate on the construct id without importing builtins;
+// dispatchers can gate on the construct id without importing this operation Module;
 // re-exported here so the install/dispatch side keeps the original name.
 pub const ConstructorMethod = core.host_function.builtin_method_ids.regexp.ConstructorMethod;
 
@@ -105,10 +104,10 @@ pub const legacyCaptureIndex = core.host_function.builtin_method_id_lookup.regex
 /// `call_runtime.zig`) and the matcher fast path also call them directly; the
 /// `Symbol.*` helpers additionally back `String.prototype.{match,replace,split,
 /// search,matchAll}` (BOTH — kept in exec, reused through a thin entry here).
-/// Property installation still resolves names/lengths through the registry's
-/// `regexp_prototype` Method table plus the `prototypeMethodId`/`accessorMethodId`/
+/// Property installation resolves names/lengths through the standard-global
+/// RegExp function list plus the `prototypeMethodId`/`accessorMethodId`/
 /// `LegacyAccessorMethod` id helpers above (like Date); this table is consumed
-/// only by the slow record-dispatch path (`rt.internal_builtins`).
+/// by the record-dispatch path (`rt.internal_builtins`).
 /// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
 /// (`nativeBuiltinSupportedWithoutFunctionObject`): only `RegExp.prototype.test`
 /// and `RegExp.prototype.exec` are callable without a materialized function
@@ -161,14 +160,30 @@ pub const internal_entries = regexpEntries: {
 };
 
 fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &regexpCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = prepared,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&regexpCall),
+    };
 }
 
 /// The RegExp constructor record: construct-capable so `new RegExp(...)`
 /// routes through the construct dispatch path into `regexpCall`'s construct
 /// branch.
 fn regexpConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &regexpCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&regexpCall),
+    };
 }
 
 /// Shared record handler for the `.regexp` domain. Mirrors the retired
@@ -179,7 +194,13 @@ fn regexpConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// delegate to `string_ops.zig`, and `RegExp.escape` runs in this module. All
 /// of those exec ops stay in exec because the RegExp opcode handlers and the
 /// matcher fast path also call them.
-fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
+fn regexpCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const id: u32 = host_call.magic;
@@ -190,7 +211,7 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
 
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new RegExp(pattern, flags)` arrives through the construct record
-        // path with `flags.constructor` set and the resolved instance prototype
+        // path with `is_constructor` set and the resolved instance prototype
         // in `new_target`. The construct branch reads only `args`/`new_target`,
         // so it runs before the `func_obj` requirement below: the VM construct
         // fast path (`regexp_fastpath.qjsRegExpConstructCall`) routes its
@@ -198,7 +219,7 @@ fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
         // `RegExp(...)` called as a function routes through the fast-path call
         // op (which itself handles the "return the argument unchanged when it is
         // already a RegExp and no flags are given" call-only behavior).
-        if (host_call.flags.constructor) {
+        if (host_call.is_constructor) {
             const rt = ctx.runtime;
             const pattern = if (args.len >= 1) args[0] else try createStringValue(rt, "");
             defer if (args.len < 1) pattern.free(rt);
@@ -892,7 +913,7 @@ fn trimLeadingZeroes(digits: []const u8) []const u8 {
 // Relocated to engine core (`core/regexp.zig`) in Phase 6b-3 STEP 2: the
 // character-class membership predicate and its class-range parsing primitives
 // are pure (std + core.unicode + libs/regexp.zig) and are consumed by the
-// VM string fast paths without importing builtins. Re-exported here so the
+// VM string fast paths through the owning core Module. Re-exported here so the
 // RegExp pattern validators below (hasDescendingCharacterClassRange /
 // scanClassForDescendingRange / hasUnicodeClassEscapeRange / invalidUnicodeEscape)
 // keep a single source of truth in core.

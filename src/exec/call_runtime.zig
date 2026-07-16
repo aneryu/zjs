@@ -342,9 +342,9 @@ pub fn callNativeBuiltinRecordForVm(
     // `func` is the function value; the table dispatch only needs the function
     // object (`function_object`), so the raw value is no longer consulted here.
     _ = func;
-    // Route the VM hot path through the same builtins-owned internal record
+    // Route the VM hot path through the same exec-owned internal record
     // table the slow record dispatch uses (`call.zig:callNativeFunctionRecord`),
-    // so exec carries zero compile-time knowledge of the migrated builtins. The
+    // so this generic call Module carries zero compile-time knowledge of domains. The
     // VM call site only has the realm `global` object (no `globals` slot array),
     // so pass the non-null `global` with an empty `globals`. Every migrated
     // builtin handler prefers `host_call.global` when it is set and only
@@ -353,15 +353,9 @@ pub fn callNativeBuiltinRecordForVm(
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| {
         return value;
     }
-    // `.atomics` is the only native-builtin domain reachable here that is not
-    // (yet) in the internal record table; keep its dedicated handler after the
-    // table probe, mirroring how the slow path retains `.atomics`/`.performance`/
-    // `.host`/`.promise`. Every other domain that is neither table-dispatched
-    // nor handled here returns null so the caller falls through to the
-    // host/promise/name dispatch exactly as before.
-    if (native_ref.domain == .atomics) {
-        return try qjsAtomicsCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame);
-    }
+    // Standard-native domains are table-dispatched. A null result identifies a
+    // host-domain callable or an invalid/stale native id for the caller to
+    // classify; this generic VM call Module does not know domain bodies.
     return null;
 }
 
@@ -416,17 +410,6 @@ pub fn callValueOrBytecodeClassModePreRooted(
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
     return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
-}
-
-/// Map a global URI-family function name to its `.uri` record id: the four
-/// `encodeURI`/`decodeURI` variants via the core `methodId` mode selector
-/// (1..4), plus the legacy `escape`/`unescape` pair. Used by the string-name
-/// call fallback to route these globals through the record table.
-fn uriGlobalRecordId(name: []const u8) ?u32 {
-    if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| return mode;
-    if (std.mem.eql(u8, name, "escape")) return core.uri.escape_id;
-    if (std.mem.eql(u8, name, "unescape")) return core.uri.unescape_id;
-    return null;
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -674,15 +657,6 @@ fn callValueOrBytecodeClassModeDispatch(
         }
         if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
             return value;
-        }
-        // The realm-aware Promise static dispatch must stay ahead of the
-        // generic native-record dispatch: the record handler reproduces the
-        // host-path receiver gates, while this handler also supports custom
-        // capability receivers (`Promise.resolve.call(P, ...)`).
-        if (promise_ops.qjsPromiseStaticMode(name)) |mode| {
-            if (try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
-                return promise_ops.qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
-            }
         }
         if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
@@ -1023,15 +997,6 @@ fn callValueOrBytecodeClassModeDispatch(
                 else => err,
             };
         }
-        if (uriGlobalRecordId(name)) |id| {
-            // encodeURI/decodeURI variants (`methodId` 1..4) plus the legacy
-            // escape/unescape pair (`core.uri.escape_id`/`unescape_id`). Route
-            // the raw input through the `.uri` record; the record handler does
-            // the Annex B ToString coercion before its body.
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = id };
-            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
-        }
     }
     if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
@@ -1305,7 +1270,7 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
 }
 
 /// Function.prototype.call body shared by the native-record owner and the
-/// transitional name-dispatch fallback. Keeping the VM caller pair preserves
+/// legacy name-only callable path. Keeping the VM caller pair preserves
 /// nested callsite/property-access context while the native record contributes
 /// the surrounding `call (native)` frame.
 pub fn qjsFunctionCallCall(

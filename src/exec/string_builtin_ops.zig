@@ -14,7 +14,7 @@ const builtin_glue = @import("builtin_glue.zig");
 const exceptions = @import("exceptions.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
+const NativeCall = builtin_dispatch.NativeCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -53,10 +53,10 @@ pub const encodePrototypeMethodId = string_id_lookup.encodePrototypeMethodId;
 /// statics and prototype methods delegate to exec VM ops in `string_ops.zig`,
 /// which stay in exec because the string opcode handlers
 /// (`vm_call.zig`/`call_runtime.zig`) and `regexp_fastpath.zig` also call them.
-/// Property installation still resolves names/lengths through
-/// the registry's `string_static`/`string_prototype` Method tables plus the
+/// Standard-global bootstrap resolves names/lengths through its String static
+/// and prototype method lists plus the
 /// `staticMethodId`/`prototypeMethodId` id helpers above (like Date/Number);
-/// this table is consumed only by the slow record-dispatch path
+/// this table is consumed by the record-dispatch path
 /// (`rt.internal_builtins`). `prepared_call_ok` mirrors the prepared-call gate
 /// in `vm_call.zig` (`nativeBuiltinSupportedWithoutFunctionObject`): only
 /// `String.fromCharCode` and `String.prototype.substring` are callable without a
@@ -66,7 +66,7 @@ pub const internal_entries = stringEntries: {
     break :stringEntries [_]Entry{
         // Constructor + statics. The `String` record serves both `String(...)`
         // (call path) and `new String(...)` (construct path), so it is marked
-        // construct-capable; `stringCall` branches on `flags.constructor`.
+        // construct-capable; `stringCall` branches on `is_constructor`.
         stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
         stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), true),
         stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point), false),
@@ -112,24 +112,50 @@ pub const internal_entries = stringEntries: {
 };
 
 fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &stringCall };
+    return stringEntryWithHandler(name, length, id, prepared, &stringCall);
 }
 
 fn stringDirectEntry(
     comptime name: []const u8,
     comptime length: u8,
     comptime id: u32,
-    comptime call: core.host_function.InternalCallFn,
+    comptime handler: anytype,
 ) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .call = call };
+    return stringEntryWithHandler(name, length, id, false, handler);
+}
+
+fn stringEntryWithHandler(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime prepared: bool,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = prepared,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(handler),
+    };
+}
+
+fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_function.NativeGenericMagicFn {
+    const native = entry.native_function orelse return null;
+    return switch (native) {
+        .generic_magic => |handler| handler,
+        else => null,
+    };
 }
 
 test "String case conversion methods have a dedicated native record handler" {
-    var upper_call: ?core.host_function.InternalCallFn = null;
-    var lower_call: ?core.host_function.InternalCallFn = null;
+    var upper_call: ?core.host_function.NativeGenericMagicFn = null;
+    var lower_call: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = entry.call;
-        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = entry.call;
+        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = genericMagicHandler(entry);
+        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = genericMagicHandler(entry);
     }
     try std.testing.expect(upper_call != null);
     try std.testing.expect(lower_call != null);
@@ -142,7 +168,15 @@ test "String case conversion methods have a dedicated native record handler" {
 /// routes through the construct dispatch path into `stringCall`'s construct
 /// branch (it still serves `String(...)` as a function on the call path).
 fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &stringCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&stringCall),
+    };
 }
 
 /// Shared record handler for the `.string` domain. Mirrors the retired
@@ -158,7 +192,7 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// observable ToString/ToNumber coercion tail into this shared handler. Keeping
 /// that rare path out of the direct index functions avoids cloning the whole
 /// coercion tower into each hot native entry.
-inline fn stringPrimitiveIndexRead(host_call: InternalCall, comptime mid: u32) HostError!?core.JSValue {
+inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) HostError!?core.JSValue {
     const string_value = host_call.this_value;
     if (!string_value.isString()) return null;
     const args = host_call.args;
@@ -208,25 +242,49 @@ inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
     return @intFromFloat(number);
 }
 
-fn stringCharCodeAtCall(host_call: InternalCall) HostError!core.JSValue {
+fn stringCharCodeAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
-    return stringCall(host_call);
+    return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
-fn stringAtCall(host_call: InternalCall) HostError!core.JSValue {
+fn stringAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try stringPrimitiveIndexRead(host_call, 30)) |value| return value;
-    return stringCall(host_call);
+    return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
-fn stringCodePointAtCall(host_call: InternalCall) HostError!core.JSValue {
+fn stringCodePointAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try stringPrimitiveIndexRead(host_call, 31)) |value| return value;
-    return stringCall(host_call);
+    return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
-fn stringCaseCall(host_call: InternalCall) HostError!core.JSValue {
+fn stringCaseCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const to_lower = host_call.magic == @intFromEnum(PrototypeMethod.to_lower_case);
     if (host_call.global == null) {
-        if (host_call.func_obj != null or host_call.flags.constructor) return error.TypeError;
+        if (host_call.func_obj != null or host_call.is_constructor) return error.TypeError;
         return unicodeCaseReceiver(host_call.ctx.runtime, host_call.this_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
     }
 
@@ -245,7 +303,13 @@ fn stringCaseCall(host_call: InternalCall) HostError!core.JSValue {
     return unicodeCaseOwnedString(host_call.ctx.runtime, string_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
 }
 
-fn stringCall(host_call: InternalCall) HostError!core.JSValue {
+fn stringCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const id: u32 = host_call.magic;
     const args = host_call.args;
@@ -261,11 +325,11 @@ fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     }
 
     // `new String(...)` arrives through the construct record path
-    // (`exec/construct.zig`) with `flags.constructor` set and the resolved
+    // (`exec/construct.zig`) with `is_constructor` set and the resolved
     // wrapper prototype in `new_target`; `String(...)` called as a function
     // falls through to `qjsStringFunctionCall` (the `ConstructorMethod.call`
     // case below).
-    if (host_call.flags.constructor and id == @intFromEnum(ConstructorMethod.call)) {
+    if (host_call.is_constructor and id == @intFromEnum(ConstructorMethod.call)) {
         return constructWithPrototype(ctx.runtime, args, host_call.new_target);
     }
 
@@ -285,7 +349,7 @@ fn stringCall(host_call: InternalCall) HostError!core.JSValue {
     // (`string_ops.qjsStringPrototypeMethod`) — routing back through it would
     // re-enter this record (the dispatcher's own body call is one of the
     // converted sites) and recurse.
-    if (host_call.func_obj == null and host_call.global == null and !host_call.flags.constructor) {
+    if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
         const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
         if (method_id == 0) {
             // `String.prototype.charAt` body (its own helper; `methodCall` does

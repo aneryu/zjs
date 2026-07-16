@@ -8,15 +8,12 @@ const exception_ops = @import("vm_exception_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
-/// Domain-local ids for the legacy `escape`/`unescape` globals (relocated to
-/// `core/uri.zig` so exec's string-name fallback can route their bodies
-/// through `callInternalRecord` without naming this builtin). The four
+/// Domain-local ids for the legacy `escape`/`unescape` globals, shared through
+/// `core/uri.zig`. The four
 /// `encodeURI`/`decodeURI` records use the `methodId` mode selector (1..4);
-/// these continue the same `.uri` id space. Reachable only through the record
-/// table (`bindUriNativeRecords` skips them, so the installed `escape`/
-/// `unescape` functions keep their existing dispatch).
+/// these continue the same `.uri` id space. All six installed globals carry
+/// their record directly.
 const escape_id = core.uri.escape_id;
 const unescape_id = core.uri.unescape_id;
 
@@ -44,7 +41,7 @@ fn throwUriErrorMessage(ctx: *core.JSContext, global: ?*core.Object, message: []
 /// Declaration table: one entry per global URI builtin plus the legacy
 /// `escape`/`unescape` globals. `id` is the `methodId` mode selector (1..4)
 /// for the URI functions and `escape_id`/`unescape_id` for the legacy pair,
-/// reused as the dispatch `magic`. The record `call` fn (`uriCall`) coerces
+/// reused as the dispatch `magic`. The typed record handler (`uriCall`) coerces
 /// the input through the VM Annex B ToString path when a realm global is
 /// present and falls back to the primitive-only bodies (`call`/`escape`/
 /// `unescape`) on bare runtimes.
@@ -53,12 +50,24 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     uriEntry("encodeURIComponent", 2),
     uriEntry("decodeURI", 3),
     uriEntry("decodeURIComponent", 4),
-    .{ .name = "escape", .length = 1, .id = escape_id, .magic = escape_id, .prepared_call_ok = true, .call = &uriCall },
-    .{ .name = "unescape", .length = 1, .id = unescape_id, .magic = unescape_id, .prepared_call_ok = true, .call = &uriCall },
+    uriNamedEntry("escape", escape_id),
+    uriNamedEntry("unescape", unescape_id),
 };
 
 fn uriEntry(comptime name: []const u8, comptime mode: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = 1, .id = mode, .magic = mode, .prepared_call_ok = true, .call = &uriCall };
+    return uriNamedEntry(name, mode);
+}
+
+fn uriNamedEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = 1,
+        .id = id,
+        .magic = id,
+        .prepared_call_ok = true,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&uriCall),
+    };
 }
 
 /// Shared record handler for the global URI functions and the legacy
@@ -67,7 +76,13 @@ fn uriEntry(comptime name: []const u8, comptime mode: u32) core.host_function.In
 /// preserve the legacy host behavior on bare runtimes. Both modes invoke the
 /// same method bodies (`call`/`escape`/`unescape`) below, so exec routes its
 /// direct call sites here through `callInternalRecord` instead of naming them.
-fn uriCall(host_call: InternalCall) HostError!core.JSValue {
+fn uriCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const mode: u32 = host_call.magic;
     const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
@@ -436,7 +451,6 @@ fn stringInputValue(input: core.JSValue) !?core.JSValue {
 fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
 }
-
 
 fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(u8), value: core.JSValue, component: bool) HostError!void {
     const rt = ctx.runtime;

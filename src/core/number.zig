@@ -3,9 +3,8 @@
 //! fallbacks. These are ASCII -> f64 arithmetic parsers with zero exec/VM
 //! dependencies: they only reach `std`, the `libs/{number_format,bigint,unicode}`
 //! helpers, and core value/string/object plumbing. The realm-coercing record
-//! handler and the `Number.prototype.*` formatting methods stay in
-//! `src/builtins/number.zig`, which re-exports the entry points below for the
-//! install path.
+//! handler and the `Number.prototype.*` formatting methods live in
+//! `src/exec/number_ops.zig`.
 
 const core = @import("root.zig");
 const bignum = @import("../libs/bigint.zig");

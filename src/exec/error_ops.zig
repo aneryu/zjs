@@ -7,7 +7,6 @@ const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 pub const PrototypeMethod = core.host_function.builtin_method_ids.error_object.PrototypeMethod;
 
@@ -32,10 +31,24 @@ pub const internal_entries = errorEntries: {
 };
 
 fn errorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &errorCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&errorCall),
+    };
 }
 
-fn errorCall(host_call: InternalCall) HostError!core.JSValue {
+fn errorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const id: u32 = host_call.magic;

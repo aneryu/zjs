@@ -1,9 +1,9 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
 const builtin_glue = @import("builtin_glue.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 
 const HostError = @import("exceptions.zig").HostError;
-const InternalCall = core.host_function.InternalCall;
 
 pub const StaticMethod = core.host_function.builtin_method_ids.buffer.StaticMethod;
 pub const ConstructorMethod = core.host_function.builtin_method_ids.buffer.ConstructorMethod;
@@ -80,9 +80,9 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 /// property semantics and the ArrayBuffer/SharedArrayBuffer constructors plus
 /// the construction-fusion peephole are NOT here — they are driven by opcode
 /// handlers / the construct path, never by function-object record dispatch.
-/// Property installation still resolves names/lengths through the registry's
-/// own buffer method tables and the `*MethodId` helpers above; this table is
-/// consumed by the slow record-dispatch path (`rt.internal_builtins`).
+/// Property installation resolves names/lengths through standard-global
+/// function lists and the `*MethodId` helpers above; this table is
+/// consumed by the record-dispatch path (`rt.internal_builtins`).
 /// `prepared_call_ok` is uniformly false: no buffer record was ever
 /// prepared-call eligible (`vm_call.nativeBuiltinSupportedWithoutFunctionObject`
 /// returns false for `.buffer`).
@@ -148,7 +148,15 @@ pub const internal_entries = bufferEntries: {
 };
 
 fn bufferEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &bufferCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&bufferCall),
+    };
 }
 
 /// Shared record handler for the `.buffer` domain. Mirrors the retired
@@ -156,18 +164,23 @@ fn bufferEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 /// exec dispatch glue, and surface the corrupt-id case (e.g. an ArrayBuffer
 /// constructor record invoked as a plain function) as a TypeError, exactly as
 /// before.
-fn bufferCall(host_call: InternalCall) HostError!core.JSValue {
+fn bufferCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (try builtin_glue.qjsBufferNativeRecord(host_call.ctx, host_call.this_value, host_call.magic, host_call.args)) |value| return value;
     return error.TypeError;
 }
-
 
 // The engine-core TypedArray / ArrayBuffer / DataView element-access, coercion,
 // and storage-operation mechanism now lives in core/typed_array.zig (QuickJS
 // places these in the engine core, with builtins as clients). This file keeps
 // the JS-visible construction primitives that read constructor options / coerce
 // arguments (construct-path entangled) plus the record-dispatch table and the
-// name/registry helpers above, and re-exports each moved primitive under its
+// name/id helpers above, and re-exports each moved primitive under its
 // original name so callers (and the construct-prim implementations below) keep
 // resolving them here.
 const typed_array_core = core.typed_array;

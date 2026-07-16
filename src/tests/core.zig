@@ -1210,7 +1210,7 @@ fn reentrantCollectionClearFinalizer(runtime: *anyopaque, _: *anyopaque, payload
     reentrant_collection_clear_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
     const map = reentrant_collection_clear_target orelse return;
-    const result = engine.builtins.collection.methodCall(rt, map.value(), 5, &.{}) catch return;
+    const result = engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{}) catch return;
     result.free(rt);
 }
 
@@ -1285,7 +1285,7 @@ fn reentrantArrayIteratorFinalizer(runtime: *anyopaque, _: *anyopaque, payload: 
     reentrant_array_iterator_calls += 1;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
     const iterator = reentrant_array_iterator_target orelse return;
-    const result = engine.builtins.array.methodCall(rt, iterator.value(), 20, &.{}) catch return;
+    const result = engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{}) catch return;
     result.free(rt);
 }
 
@@ -1417,7 +1417,7 @@ test "strong collection clear defers value finalizer reentry" {
     const map = try core.Object.create(rt, core.class.ids.map, null);
     defer map.value().free(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    const set_result = try engine.builtins.collection.methodCall(rt, map.value(), 1, &.{ core.JSValue.int32(1), value.value() });
+    const set_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 1, &.{ core.JSValue.int32(1), value.value() });
     set_result.free(rt);
     value.value().free(rt);
 
@@ -1429,7 +1429,7 @@ test "strong collection clear defers value finalizer reentry" {
         reentrant_collection_clear_calls = 0;
     }
 
-    const clear_result = try engine.builtins.collection.methodCall(rt, map.value(), 5, &.{});
+    const clear_result = try engine.exec.collection_ops.methodCall(rt, map.value(), 5, &.{});
     defer clear_result.free(rt);
 
     try std.testing.expect(clear_result.isUndefined());
@@ -1831,7 +1831,7 @@ test "array iterator target clear defers value finalizer reentry" {
         reentrant_array_iterator_calls = 0;
     }
 
-    const result = try engine.builtins.array.methodCall(rt, iterator.value(), 20, &.{});
+    const result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
     defer result.free(rt);
 
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
@@ -2067,7 +2067,7 @@ test "shared buffer store can back wrappers in separate runtimes" {
     left.installSharedByteStorage(left_rt, store);
     try std.testing.expect(left.sharedByteStorageStore() != null);
 
-    const right_value = try engine.builtins.buffer.sharedArrayBufferFromStore(right_rt, store, null, null);
+    const right_value = try engine.exec.buffer_ops.sharedArrayBufferFromStore(right_rt, store, null, null);
     defer right_value.free(right_rt);
     const right_header = right_value.refHeader() orelse return error.TestExpectedEqual;
     const right: *core.Object = @fieldParentPtr("header", right_header);
@@ -2080,14 +2080,14 @@ test "array buffer backing stores report external memory" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const buffer_value = try engine.builtins.buffer.arrayBufferConstructLength(rt, 16, 32, null);
+    const buffer_value = try engine.exec.buffer_ops.arrayBufferConstructLength(rt, 16, 32, null);
     try std.testing.expectEqual(@as(usize, 16), rt.externalMemoryBytes());
 
-    const resize_result = try engine.builtins.buffer.arrayBufferResizeLength(rt, buffer_value, 8);
+    const resize_result = try engine.exec.buffer_ops.arrayBufferResizeLength(rt, buffer_value, 8);
     resize_result.free(rt);
     try std.testing.expectEqual(@as(usize, 8), rt.externalMemoryBytes());
 
-    const detach_result = try engine.builtins.buffer.detachArrayBuffer(rt, buffer_value);
+    const detach_result = try engine.exec.buffer_ops.detachArrayBuffer(rt, buffer_value);
     detach_result.free(rt);
     const buffer_header = buffer_value.refHeader() orelse return error.TestExpectedEqual;
     const buffer: *core.Object = @fieldParentPtr("header", buffer_header);
@@ -5473,11 +5473,11 @@ test "weak collection delete and clear unregister empty borrowed holder" {
     const map_key = try core.Object.create(rt, core.class.ids.object, null);
     defer map_key.value().free(rt);
 
-    const set_result = try engine.builtins.collection.methodCall(rt, weakmap.value(), 1, &.{ map_key.value(), core.JSValue.int32(1) });
+    const set_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 1, &.{ map_key.value(), core.JSValue.int32(1) });
     set_result.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
 
-    const delete_result = try engine.builtins.collection.methodCall(rt, weakmap.value(), 4, &.{map_key.value()});
+    const delete_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 4, &.{map_key.value()});
     defer delete_result.free(rt);
     try std.testing.expectEqual(@as(?bool, true), delete_result.asBool());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
@@ -5488,11 +5488,11 @@ test "weak collection delete and clear unregister empty borrowed holder" {
     const set_key = try core.Object.create(rt, core.class.ids.object, null);
     defer set_key.value().free(rt);
 
-    const add_result = try engine.builtins.collection.methodCall(rt, weakset.value(), 6, &.{set_key.value()});
+    const add_result = try engine.exec.collection_ops.methodCall(rt, weakset.value(), 6, &.{set_key.value()});
     add_result.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
 
-    const clear_result = try engine.builtins.collection.methodCall(rt, weakset.value(), 5, &.{});
+    const clear_result = try engine.exec.collection_ops.methodCall(rt, weakset.value(), 5, &.{});
     defer clear_result.free(rt);
     try std.testing.expect(clear_result.isUndefined());
     try std.testing.expectEqual(@as(usize, 0), weakset.weakCollectionEntries().len);
@@ -5585,7 +5585,7 @@ test "weak collection delete tolerates value cleanup reentry" {
     try appendWeakCollectionEntry(rt, weakmap, key, key.value());
     key.value().free(rt);
 
-    const delete_result = try engine.builtins.collection.methodCall(rt, weakmap.value(), 4, &.{key.value()});
+    const delete_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 4, &.{key.value()});
     defer delete_result.free(rt);
 
     try std.testing.expectEqual(@as(?bool, true), delete_result.asBool());
@@ -5609,7 +5609,7 @@ test "weak collection clear tolerates value cleanup reentry" {
     middle.value().free(rt);
     tail.value().free(rt);
 
-    const clear_result = try engine.builtins.collection.methodCall(rt, weakmap.value(), 5, &.{});
+    const clear_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 5, &.{});
     defer clear_result.free(rt);
 
     try std.testing.expect(clear_result.isUndefined());
@@ -5674,7 +5674,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
         if (index == 0) {
             try key.defineOwnProperty(rt, self_key, core.Descriptor.data(key.value(), true, true, true));
         }
-        const result = try engine.builtins.collection.methodCall(rt, map.value(), 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
+        const result = try engine.exec.collection_ops.methodCall(rt, map.value(), 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map.weakCollectionEntries().len);
@@ -5691,7 +5691,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
 
     var index: usize = 1;
     while (index < key_count) : (index += 1) {
-        const value = try engine.builtins.collection.methodCall(rt, map.value(), 2, &.{keys[index].value()});
+        const value = try engine.exec.collection_ops.methodCall(rt, map.value(), 2, &.{keys[index].value()});
         defer value.free(rt);
         try std.testing.expectEqual(@as(?i32, @intCast(index)), value.asInt32());
     }

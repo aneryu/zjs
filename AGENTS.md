@@ -112,12 +112,12 @@ This is a single-context repository. See `docs/agents/domain.md`.
 - `src/parser.zig`: lexer, parser, source positions, and compile entry.
 - `src/bytecode.zig`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
-- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
-  promises, VM opcode shards, and job queue.
+- `src/exec/`: bytecode execution, standard-global bootstrap and built-in
+  behavior, calls, eval, exceptions, modules, promises, VM opcode shards, and
+  job queue.
 - `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
   module file graphs, plugins, and buffer operations.
 - `src/binding/`: FFI plugins, host binding helpers, and public API aliases.
-- `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
 - `src/tests/`: Zig unit and integration test entrypoints.
@@ -222,7 +222,7 @@ Missing or invalid arguments should print usage and exit non-zero.
   `src/exec/`.
 - Host/runtime policy helpers for event loop, cleanup, module file graphs,
   plugins, and buffer operations: `src/runtime/`.
-- Built-in object behavior: `src/builtins/`.
+- Standard-global installation and built-in object behavior: `src/exec/`.
 - RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
 - CLI behavior and test262 runner: `src/cli/`.
 

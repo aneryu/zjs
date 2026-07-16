@@ -7,7 +7,6 @@ const exceptions = @import("exceptions.zig");
 const reflect_ops = @import("reflect_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 pub const StaticMethod = core.host_function.builtin_method_ids.reflect.StaticMethod;
 
@@ -37,11 +36,10 @@ pub fn methodId(name: []const u8) ?u32 {
 /// dispatch, property lookups) are also reached from opcode handlers. `id`
 /// doubles as `magic`, so the record carries no extra selector.
 ///
-/// Property installation still resolves names/lengths through the registry's
-/// `reflect_methods` Method table and `methodId` (the `proxy_revocable` binding
-/// and the dynamically materialized `proxy_revoke` closure are bound by the
-/// registry / `reflect_ops.proxyRevocable` directly); this array is consumed by
-/// the slow record-dispatch path (`rt.internal_builtins`). All records set
+/// Standard-global bootstrap resolves names/lengths through its Reflect method
+/// list and `methodId`; `proxy_revocable` and the dynamically materialized
+/// `proxy_revoke` closure bind through `reflect_ops.proxyRevocable` directly.
+/// This array is consumed by the record-dispatch path (`rt.internal_builtins`). All records set
 /// `prepared_call_ok = false`: every Reflect method needs a realm global and/or
 /// the materialized function object, matching the prepared-call gate
 /// (`vm_call.nativeBuiltinSupportedWithoutFunctionObject` returns false for
@@ -68,7 +66,15 @@ pub const internal_entries = reflectEntries: {
 };
 
 fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &reflectCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&reflectCall),
+    };
 }
 
 /// Shared record handler for the `.reflect` domain. Mirrors the retired
@@ -77,7 +83,13 @@ fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
 /// statics route through `call_runtime.qjsReflectCallForNativeRecord` when a
 /// realm global is available and fall back to the primitive-only exec ops in
 /// the bare-runtime (no global) path.
-fn reflectCall(host_call: InternalCall) HostError!core.JSValue {
+fn reflectCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const global = host_call.global;

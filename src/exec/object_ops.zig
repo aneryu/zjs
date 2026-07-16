@@ -1406,7 +1406,7 @@ pub fn qjsPrimitivePrototypeMethod(
     // Methods 3..5 do not coerce `this` through the wrapper-prototype rules:
     // 3 is the constructor-called-as-function path, 4/5 are the Symbol
     // `description` getter and `[Symbol.toPrimitive]`, which validate their
-    // receiver themselves (ids: builtins.registry primitive_*_id constants).
+    // receiver themselves (ids: standard_globals primitive_*_id constants).
     switch (method_tag) {
         3 => switch (class_tag) {
             2 => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
@@ -1432,7 +1432,7 @@ pub fn qjsPrimitivePrototypeMethod(
     defer primitive.free(rt);
     return switch (method_tag) {
         1 => if (class_tag == 1) blk: {
-            // `Number.prototype.toString` body lives in `builtins/number.zig`;
+            // `Number.prototype.toString` body lives in `number_ops.zig`;
             // route the already-coerced number primitive through the `.number`
             // record (`primitivePrototypeThisValue` is idempotent for a number,
             // so the record's receiver re-check is a no-op) instead of naming
@@ -1546,7 +1546,7 @@ pub fn qjsNumberPrototypeMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // Route to the `.number` domain record (the method body lives in
-    // `builtins/number.zig`, which legally imports exec for its coercion). The
+    // `number_ops.zig`, beside its coercion boundary). The
     // record handler coerces the receiver/argument itself, so the raw
     // `this_value`/`args` are forwarded unchanged. Accept the legacy small ids
     // (1..5) used by historical fast-call sites as well as the

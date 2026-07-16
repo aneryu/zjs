@@ -6,7 +6,7 @@
 //! `exec/string_ops.zig` and carries no VM / opcode state: it depends only on
 //! `std`, `core.unicode` (ASCII / whitespace classifiers), and
 //! `libs/regexp.zig` (the supported-Unicode-property table). It lives
-//! in core so the VM can consume it without importing builtins.
+//! in core so every exec client shares the same neutral representation.
 //!
 //! The class-range parsing primitives (`readClassRangeAtom` / `ClassRangeAtom` /
 //! `consumeUnicodePropertyEscape` / `isCharacterClassEscape`) are shared with the

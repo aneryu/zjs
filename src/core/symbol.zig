@@ -5,9 +5,9 @@
 //! `canBeHeldWeakly` predicate used by `WeakRef` / `WeakMap` / `WeakSet` /
 //! `FinalizationRegistry`. They depend only on `core.atom` (atom kind / name /
 //! registered-symbol lookup) and the `core` value/runtime types, carrying zero
-//! exec/builtins/opcode dependency. They live in core and are consumed directly
+//! exec/opcode dependency. They live in core and are consumed directly
 //! by the VM (exec value/object/construct/reflect ops and builtin glue) as well
-//! as by the builtins Symbol install path (builtins/symbol.zig re-exports them).
+//! as by the standard-global Symbol install path.
 
 const core = @import("root.zig");
 const atom = @import("atom.zig");

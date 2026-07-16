@@ -44,15 +44,15 @@ pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
 /// Installs the standard ECMAScript global object (every builtin constructor,
 /// prototype, namespace, and the `rt.internal_builtins` record table) onto a
-/// freshly-created global `Object`. The implementation lives in the builtins
-/// subsystem (`builtins/registry.zig`); core only holds the function pointer so
-/// the bootstrap install can be invoked without core or exec naming builtins.
+/// freshly-created global `Object`. The implementation lives in
+/// `exec/standard_globals.zig`; core only holds the function pointer so
+/// bootstrap can run without a core -> exec dependency.
 /// This is the engine bootstrap seam: exec's context/realm initialization calls
-/// the runtime's installer rather than importing the builtins registry.
+/// the runtime's installer through this neutral interface.
 pub const StandardGlobalsInstaller = *const fn (rt: *JSRuntime, global: *Object) anyerror!void;
 
 /// Process-global default standard-globals installer, registered once by the
-/// builtins subsystem (`builtins.registry.registerStandardGlobalsDefault`). New
+/// exec bootstrap (`standard_globals.registerStandardGlobalsDefault`). New
 /// runtimes copy this into their per-runtime `install_standard_globals_cb` at
 /// `init`, so a bare `core.JSRuntime.create` (e.g. in engine unit tests) still
 /// gets the installer wired without the creator naming builtins. Mirrors the
@@ -62,7 +62,7 @@ var default_standard_global_own_property_capacity: usize = 0;
 
 /// Register (or clear, with `null`) the process-global standard-globals
 /// installer and the own-property capacity its global object reserves. Called by
-/// the builtins subsystem during engine setup; idempotent and safe to call more
+/// exec bootstrap during engine setup; idempotent and safe to call more
 /// than once with the same values.
 pub fn setDefaultStandardGlobalsInstaller(
     installer: ?StandardGlobalsInstaller,
@@ -691,9 +691,8 @@ pub const JSRuntime = struct {
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
-    /// process-global default at `init`; the builtins subsystem registers that
-    /// default (`builtins.registry.registerStandardGlobalsDefault`). Exec invokes
-    /// this through `installStandardGlobals` instead of importing builtins.
+    /// process-global default at `init`; `exec/standard_globals.zig` registers
+    /// that default. Core invokes it through this callback seam.
     install_standard_globals_cb: ?StandardGlobalsInstaller = null,
     /// Own-property count to reserve on a global object before running
     /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
@@ -819,8 +818,8 @@ pub const JSRuntime = struct {
     /// Static internal-builtin record table, indexed
     /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
     /// as the outer index (slot 0 unused). Built at comptime by
-    /// `builtins/internal_table.zig` and assigned by the builtins install
-    /// path (`registry.installStandardGlobals`); exec dispatches through
+    /// `exec/internal_builtins.zig` and assigned by the standard-global install
+    /// path; exec dispatches through
     /// `internalBuiltinRecord` with no compile-time knowledge of individual
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
@@ -1780,9 +1779,9 @@ pub const JSRuntime = struct {
 
     /// Internal-builtin record lookup: `domain_index` is the
     /// `NativeBuiltinDomain` enum value, `id` the domain-local method id.
-    /// Returns null for unmigrated domains/ids (caller falls back to the
-    /// transitional enum dispatch) and for runtimes whose builtins were never
-    /// installed. Two bounds-checked loads; no hashing or string compares.
+    /// Returns null for the separate host domain, invalid/gap ids, and runtimes
+    /// whose standard globals were never installed. Two bounds-checked loads;
+    /// no hashing or string compares.
     pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
         if (domain_index >= self.internal_builtins.len) return null;
         const records = self.internal_builtins[domain_index];
@@ -2327,11 +2326,11 @@ pub const JSRuntime = struct {
 
     /// Bootstrap the standard ECMAScript global object onto `global` via the
     /// registered installer. Fails with `error.InvalidBuiltinRegistry` if the
-    /// builtins subsystem never registered one (the installer also wires
+    /// exec bootstrap never registered one (the installer also wires
     /// `internal_builtins` and `materialize_builtin_namespace_cb`).
     ///
     /// The installer callback is typed `anyerror` so core need not name the
-    /// builtins error set, but the install only ever produces engine errors;
+    /// exec's error set, but the install only ever produces engine errors;
     /// narrow the result back to the engine-wide `DynamicImportError` set so the
     /// bounded-error callers of `installHostGlobals`/`contextGlobal` (notably the
     /// `DynamicImportCallback` host hook) keep a concrete error set.

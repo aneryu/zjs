@@ -183,7 +183,7 @@ fn expectStringValue(rt: *core.JSRuntime, value: core.JSValue, expected: []const
 /// Mirrors `installHostGlobalsBare` in the exec test tree. Idempotent and
 /// allocation-free, so it is safe to call before each injected attempt.
 fn ensureStandardGlobalsInstaller() void {
-    zjs.builtins.registry.registerStandardGlobalsDefault();
+    zjs.exec.standard_globals.registerStandardGlobalsDefault();
 }
 
 /// One full engine lifecycle around a corpus snippet. Shaped for

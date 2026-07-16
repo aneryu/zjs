@@ -3,7 +3,6 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
 const zjs = @import("../binding/root.zig");
-const builtins = @import("../builtins/root.zig");
 
 pub const event_loop = @import("event_loop.zig");
 pub const plugin = @import("plugin.zig");
@@ -45,7 +44,7 @@ fn runtimeListContains(list: []const *zjs.JSRuntime, runtime: *zjs.JSRuntime) bo
 }
 
 pub fn detachArrayBuffer(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
-    return builtins.buffer.detachArrayBuffer(ctx.runtimePtr(), value);
+    return exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), value);
 }
 
 pub fn evalFileModuleGraphWithOutput(

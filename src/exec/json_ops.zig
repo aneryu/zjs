@@ -17,7 +17,6 @@ const value_ops = @import("value_ops.zig");
 const Bytecode = builtin_dispatch.Bytecode;
 const Frame = builtin_dispatch.Frame;
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 const JsonStringifyError = std.mem.Allocator.Error || error{
     InvalidAtom,
@@ -47,23 +46,51 @@ const StringifyOptions = struct {
 
 // Method-id enum mirrored in `core.host_function.builtin_method_ids.json` so
 // import-free exec sites (e.g. exec/module.zig's synthetic JSON loader) can name
-// `JSON.parse`'s native id without importing builtins. Re-exported here so
+// `JSON.parse`'s native id without importing this operation Module. Re-exported here so
 // `internal_entries` and the install path keep referring to it locally.
 pub const StaticMethod = core.host_function.builtin_method_ids.json.StaticMethod;
 
 /// Declaration table: one entry per `JSON.*` method.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    .{ .name = "isRawJSON", .length = 1, .id = @intFromEnum(StaticMethod.is_raw_json), .prepared_call_ok = true, .call = &jsonIsRawJsonCall },
-    .{ .name = "parse", .length = 2, .id = @intFromEnum(StaticMethod.parse), .prepared_call_ok = true, .call = &jsonParseRecordCall },
-    .{ .name = "rawJSON", .length = 1, .id = @intFromEnum(StaticMethod.raw_json), .prepared_call_ok = true, .call = &jsonRawJsonCall },
-    .{ .name = "stringify", .length = 3, .id = @intFromEnum(StaticMethod.stringify), .prepared_call_ok = true, .call = &jsonStringifyRecordCall },
+    jsonEntry("isRawJSON", 1, @intFromEnum(StaticMethod.is_raw_json), &jsonIsRawJsonCall),
+    jsonEntry("parse", 2, @intFromEnum(StaticMethod.parse), &jsonParseRecordCall),
+    jsonEntry("rawJSON", 1, @intFromEnum(StaticMethod.raw_json), &jsonRawJsonCall),
+    jsonEntry("stringify", 3, @intFromEnum(StaticMethod.stringify), &jsonStringifyRecordCall),
 };
 
-fn jsonIsRawJsonCall(host_call: InternalCall) HostError!core.JSValue {
+fn jsonEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .prepared_call_ok = true,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(handler),
+    };
+}
+
+fn jsonIsRawJsonCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     return core.JSValue.boolean(host_call.args.len >= 1 and isRawJSON(host_call.args[0]));
 }
 
-fn jsonRawJsonCall(host_call: InternalCall) HostError!core.JSValue {
+fn jsonRawJsonCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
     if (host_call.global) |raw_global| {
         const input = if (!value.isString()) input: {
@@ -83,7 +110,13 @@ fn jsonRawJsonCall(host_call: InternalCall) HostError!core.JSValue {
     };
 }
 
-fn jsonParseRecordCall(host_call: InternalCall) HostError!core.JSValue {
+fn jsonParseRecordCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     if (host_call.global) |global| {
         if (try qjsJsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
@@ -96,7 +129,13 @@ fn jsonParseRecordCall(host_call: InternalCall) HostError!core.JSValue {
     };
 }
 
-fn jsonStringifyRecordCall(host_call: InternalCall) HostError!core.JSValue {
+fn jsonStringifyRecordCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     if (host_call.global) |global| {
         if (try qjsJsonStringifyCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;

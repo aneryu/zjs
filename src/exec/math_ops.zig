@@ -1,7 +1,7 @@
 //! QuickJS source map: js_math_obj / js_math_funcs in quickjs.c. Implementation
 //! and declaration table live side by side, matching QuickJS's
-//! JSCFunctionListEntry pattern. The transitional builtins installer consumes
-//! `internal_entries` until standard-global installation moves fully into exec.
+//! JSCFunctionListEntry pattern. Standard-global bootstrap consumes
+//! `internal_entries` directly from exec.
 
 const core = @import("../core/root.zig");
 const std = @import("std");
@@ -14,7 +14,6 @@ const exceptions = @import("exceptions.zig");
 const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toUint32Number = coercion_ops.toUint32Number;
 
@@ -32,7 +31,7 @@ pub const sum_precise_method_id: u32 = 37;
 /// Declaration table: one entry per `Math.*` method. `id` doubles as the
 /// dispatch `magic` for the shared numeric handler (QuickJS uses the same
 /// magic pattern for its js_math_op entries). Entry order is the namespace
-/// property definition order (kept from the legacy registry table).
+/// property definition order (kept from the former centralized install table).
 pub const internal_entries = [_]core.host_function.InternalEntry{
     mathOpEntry("min", 2, 7),
     mathOpEntry("max", 2, 8),
@@ -70,11 +69,28 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     mathUnaryEntry("fround", 28),
     mathOpEntry("imul", 2, 30),
     mathOpEntry("clz32", 1, 24),
-    .{ .name = "sumPrecise", .length = 1, .id = sum_precise_method_id, .prepared_call_ok = true, .call = &mathSumPreciseCall },
+    mathEntryWithHandler("sumPrecise", 1, sum_precise_method_id, &mathSumPreciseCall),
 };
 
 fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = id, .prepared_call_ok = true, .call = &mathOpCall };
+    return mathEntryWithHandler(name, length, id, &mathOpCall);
+}
+
+fn mathEntryWithHandler(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = id,
+        .prepared_call_ok = true,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(handler),
+    };
 }
 
 fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
@@ -85,8 +101,8 @@ fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_functio
         .magic = id,
         .prepared_call_ok = true,
         .cproto = .f_f,
-        .call = &mathOpCall,
         .native_function = .{ .f_f = mathUnaryNative(id) },
+        .fallback_function = &mathOpCall,
     };
 }
 
@@ -98,8 +114,8 @@ fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_functi
         .magic = id,
         .prepared_call_ok = true,
         .cproto = .f_f_f,
-        .call = &mathOpCall,
         .native_function = .{ .f_f_f = mathBinaryNative(id) },
+        .fallback_function = &mathOpCall,
     };
 }
 
@@ -175,7 +191,13 @@ fn mathRandom(rt: *core.JSRuntime) f64 {
     return @as(f64, @bitCast(bits)) - 1.0;
 }
 
-fn mathOpCall(host_call: InternalCall) HostError!core.JSValue {
+fn mathOpCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (host_call.global == null) {
         if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx.runtime));
         const number = call(host_call.magic, host_call.args) catch return error.TypeError;
@@ -377,7 +399,13 @@ pub fn qjsMathSign(value: f64) f64 {
 
 // --- Math.sumPrecise ---------------------------------------------------------
 
-fn mathSumPreciseCall(host_call: InternalCall) HostError!core.JSValue {
+fn mathSumPreciseCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const global = host_call.global orelse return error.TypeError;
     return qjsMathSumPrecise(
         host_call.ctx,

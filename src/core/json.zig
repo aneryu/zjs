@@ -4,8 +4,8 @@
 //! building the result of `JSON.stringify`. They depend only on
 //! `core.string.String` (the flat string factory), `core.atom` (tagged-int /
 //! name lookups), `core.runtime` rooting, and the `libs/unicode` codec. They
-//! carry zero exec/builtins/opcode dependency, so they live in core and are
-//! consumed by the JSON serializer and install path in builtins/json.zig
+//! carry zero exec/opcode dependency, so they live in core and are
+//! consumed by the JSON serializer and standard-global install path
 //! (which re-exports them).
 
 const std = @import("std");

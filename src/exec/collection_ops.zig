@@ -17,10 +17,9 @@ const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 // The collection callback protocol relocated to engine core
-// (`core/host_function.zig`, beside ExternalCall/InternalCall) in Phase 6b-3
+// (`core/host_function.zig`, beside the neutral host-function ABI) in Phase 6b-3
 // STEP 2: it is a pure function-pointer protocol with zero VM dependence.
 // Re-exported here under the original names so the collection method bodies and
 // `collection_adapter` keep referencing them unchanged.
@@ -122,10 +121,10 @@ fn legacyBasePrototypeMethodId(id: u32) ?u32 {
 /// (`vm_call.zig` prepared path, `vm_property_*`) call the primitive impls
 /// directly. Constructors are not dispatched here (they run through the
 /// `new_collection` opcode); only the static `Map.groupBy` and the shared
-/// prototype methods route through the table. Property installation still
-/// resolves names through the registry's map_prototype/set_prototype/
-/// weak_*_prototype method tables; this table is consumed by the slow
-/// record-dispatch path (`rt.internal_builtins`). `prepared_call_ok` mirrors
+/// prototype methods route through the table. Standard-global bootstrap resolves
+/// names through its map/set/weak-collection prototype method lists; this table
+/// is consumed by the record-dispatch path (`rt.internal_builtins`).
+/// `prepared_call_ok` mirrors
 /// the prepared-call gate (`collectionNativeSupportedWithoutFunctionObject` in
 /// `vm_call.zig`).
 pub const internal_entries = collectionEntries: {
@@ -165,14 +164,30 @@ pub const internal_entries = collectionEntries: {
 };
 
 fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &collectionCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = prepared,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&collectionCall),
+    };
 }
 
 /// A collection constructor record (one per `ConstructorKind`): construct-capable
 /// so `new Map/Set/WeakMap/WeakSet(...)` reach `collectionCall`'s construct
 /// branch. Never prepared-eligible.
 fn collectionConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &collectionCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .constructor_magic,
+        .native_function = builtin_dispatch.constructorMagic(&collectionCall),
+    };
 }
 
 /// Shared record handler for the `.collection` domain. Mirrors the retired
@@ -181,7 +196,13 @@ fn collectionConstructorEntry(comptime name: []const u8, comptime length: u8, co
 /// or to the primitive-only collection entry points (bare-runtime
 /// fallback, no global). The weak-collection mutators reached from these methods
 /// keep their weak_id registry / GC interaction in exec.
-fn collectionCall(host_call: InternalCall) HostError!core.JSValue {
+fn collectionCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const id: u32 = host_call.magic;
@@ -311,7 +332,7 @@ fn collectionRecordWithoutGlobal(
 
 // Relocated to engine core (`core/value.zig`, beside `JSValue.sameValue`) in
 // Phase 6b-3 STEP 2: SameValueZero is a pure value comparison consumed by the
-// VM (Array.prototype.includes) without importing builtins. Kept here as a thin
+// VM (Array.prototype.includes) through the owning collection Module. Kept here as a thin
 // free-function shim so the Map/Set key-lookup callers below and the install
 // path keep the original `sameValueZero(a, b)` spelling.
 pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
@@ -1553,7 +1574,7 @@ pub const sweepWeakEntries = core.collection.sweepWeakEntries;
 // (`core/collection.zig`) in Phase 6b-3 STEP 7A: the strong/weak entry hashing,
 // bucket index linking/growth, entry append/take/rollback, weak-key identity
 // resolution, and weak sweep are pure `core.Object` storage-slot operations with
-// zero exec/builtins/VM dependence. They are re-exported here under the original
+// zero exec/VM dependence. They are re-exported here under the original
 // names so the collection method bodies above keep calling them unchanged, and
 // so the VM Map-fusion fast paths (`vm_property_locals`) and the WeakMap
 // test-support mutator (`closure`) can import them straight from core.

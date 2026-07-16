@@ -1,8 +1,8 @@
 //! Pure URI decode primitives shared by the URI builtin and the VM's
 //! `decodeURI(...) === String.fromCharCode(...)` fusion fast path. These touch
 //! no runtime/VM state (std + the unicode helper lib only), so they live in
-//! engine core and `src/builtins/uri.zig` re-exports them for its decode
-//! bodies. Relocated from `builtins/uri.zig` in Phase 6b-3 STEP 5B so exec can
+//! engine core and `src/exec/uri_ops.zig` consumes them in its decode
+//! bodies. Relocated in Phase 6b-3 STEP 5B so exec can
 //! reach the four-byte-escape probe without naming the builtin.
 
 const std = @import("std");
@@ -14,7 +14,7 @@ const string = @import("string.zig");
 /// The `encodeURI`/`decodeURI` records use the `methodId` mode selector
 /// (1..4); these continue the same id space. Load-bearing (baked into the
 /// `.uri` record table); exec routes the legacy globals' bodies through the
-/// table under these ids. `builtins/uri.zig` re-exports them.
+/// table under these ids.
 pub const escape_id: u32 = 5;
 pub const unescape_id: u32 = 6;
 

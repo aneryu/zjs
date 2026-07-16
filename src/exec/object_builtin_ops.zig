@@ -14,13 +14,10 @@ const value_ops = @import("value_ops.zig");
 const construct_mod = @import("construct.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
-// --- VM ops the relocated Object.* method implementations call back into.
-// These stay in exec because opcode handlers / other exec modules dispatch
-// them directly (builtins -> exec is the Phase 6 client model). The relocated
-// methods reference them through these aliases, mirroring the alias web that
-// lived alongside the implementations in object_ops.zig. ---
+// --- Shared VM ops used by the Object.* native methods below. Opcode handlers
+// and other exec modules call these operations too, so this domain module keeps
+// explicit aliases to their owning exec modules. ---
 const IntegrityLevel = call_runtime.IntegrityLevel;
 const objectFromValue = object_ops.objectFromValue;
 const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
@@ -180,11 +177,23 @@ pub fn prototypeMethodOrdinal(id: u32) ?i32 {
 }
 
 fn staticEntry(comptime name: []const u8, comptime length: u8, comptime method: StaticMethod) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = @intFromEnum(method), .magic = @intFromEnum(method), .prepared_call_ok = false, .call = &objectCall };
+    return objectEntry(name, length, @intFromEnum(method));
 }
 
 fn prototypeEntry(comptime name: []const u8, comptime length: u8, comptime method: PrototypeMethod) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = @intFromEnum(method), .magic = @intFromEnum(method), .prepared_call_ok = false, .call = &objectCall };
+    return objectEntry(name, length, @intFromEnum(method));
+}
+
+fn objectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&objectCall),
+    };
 }
 
 fn constructorEntry() core.host_function.InternalEntry {
@@ -193,16 +202,16 @@ fn constructorEntry() core.host_function.InternalEntry {
         .length = 1,
         .id = @intFromEnum(ConstructorMethod.call),
         .prepared_call_ok = false,
-        .constructor = true,
-        .call = &objectConstructorCall,
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&objectConstructorCall),
     };
 }
 
 /// Declaration table for the `.object` domain: the Object call entry plus one
 /// entry per `Object.*` static and `Object.prototype.*` method. Static/prototype
 /// `id`/`magic` values are consumed by `qjsObjectCallForNativeRecord` and the
-/// bare-runtime fallback, kept in lockstep with the install names in
-/// `registry.object_static`/`object_prototype`. Every record sets
+/// bare-runtime fallback, kept in lockstep with the visible install order in
+/// `standard_globals`. Every record sets
 /// `prepared_call_ok = false`: the constructor fallback and Object methods need
 /// a materialized function object, realm global, and/or the shared property
 /// helper web.
@@ -246,7 +255,13 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
 /// QuickJS `js_object_constructor` call/direct-construct body. Custom
 /// new-target construction is intercepted by the VM before this record; both
 /// remaining modes apply the same nullish-new-object / ToObject behavior.
-fn objectConstructorCall(host_call: InternalCall) HostError!core.JSValue {
+fn objectConstructorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (host_call.args.len != 0 and host_call.args[0].isObject()) return host_call.args[0].dup();
     const constructor = host_call.func_obj orelse return error.TypeError;
     return construct_mod.objectConstructorValue(host_call.ctx, host_call.args, constructor);
@@ -258,7 +273,13 @@ fn objectConstructorCall(host_call: InternalCall) HostError!core.JSValue {
 /// declaration table); the bare-runtime (no global) path takes the
 /// primitive-only `call.objectPrototypeMethodCall`/`call.callObjectStatic`
 /// fallbacks that live with the shared property helpers in call.zig.
-fn objectCall(host_call: InternalCall) HostError!core.JSValue {
+fn objectCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const global = host_call.global;
@@ -279,9 +300,8 @@ fn objectCall(host_call: InternalCall) HostError!core.JSValue {
     };
 }
 
-/// Realm-global dispatcher for the `.object` domain methods. Relocated from
-/// `exec/object_ops.zig` (Phase 6b-2): the builtins handler now holds the
-/// `Object.*` static/prototype dispatch directly instead of delegating to exec.
+/// Realm-global dispatcher for the `.object` domain methods. The domain module
+/// owns `Object.*` static/prototype dispatch directly.
 /// Branches whose implementation stays in exec — because an opcode handler or
 /// another exec module also calls it (`defineProperty`/`isExtensible`/
 /// `setPrototypeOf`/`keys`/`values`/`entries`/`defineProperties`) or it is a
@@ -514,8 +534,8 @@ fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
 // Moved verbatim from exec/object_ops.zig: these implementations are reachable
 // only through the .object record dispatch (objectCallForNativeRecord above),
 // so per the QuickJS client model they live with the declaration table. They
-// call back into exec VM ops (property/coercion/iterator/call helpers) through
-// the aliases declared near the top of this file (builtins -> exec is legal).
+// call shared exec VM ops (property/coercion/iterator/call helpers) through the
+// aliases declared near the top of this file.
 // ==========================================================================
 
 pub fn qjsObjectIsPrototypeOf(

@@ -4,7 +4,6 @@ const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 pub const description = core.symbol.description;
 pub const registryKey = core.symbol.registryKey;
@@ -68,14 +67,28 @@ pub const symbol_entries = [_]core.host_function.InternalEntry{
 };
 
 fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &primitiveCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&primitiveCall),
+    };
 }
 
 /// Shared record handler for the `.primitive` domain. It resolves the active
 /// realm global (call global, else the function object's realm, else the
 /// context global) and delegates to `qjsPrimitivePrototypeMethod`, which stays in
 /// exec because the VM's prototype-method fast path also calls it.
-pub fn primitiveCall(host_call: InternalCall) HostError!core.JSValue {
+pub fn primitiveCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const function_object = host_call.func_obj orelse return error.TypeError;
     const active_global = host_call.global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;

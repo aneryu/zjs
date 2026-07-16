@@ -8,7 +8,6 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 
 const HostError = @import("exceptions.zig").HostError;
-const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -115,8 +114,8 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// reached through this record table AND directly by the VM's residual
 /// fast-array fast-call (`qjsArrayMethodFastCall`) and the realm-fallback name
 /// cascade (`call_runtime.callValueOrBytecodeClassModeDispatch`) — so per the
-/// client model the implementation core stays in exec and builtins hosts only this thin
-/// record entry. (Phase 6b-relocate inventory: unlike String — whose six
+/// client model the implementation core and its record entry both stay in exec.
+/// (Phase 6b-relocate inventory: unlike String — whose six
 /// movable bodies were reachable only through `stringCall` — almost every
 /// Array.prototype / Array static body here is reached by the opcode-bound
 /// fast-array fast-call, so it is BOTH and stays. The only bodies reachable
@@ -133,8 +132,8 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// stack/frame primitives (`popCatchMarker`, `pushAdapterValue`,
 /// `pushFunctionClosure`) are NOT here — they are driven by opcode handlers,
 /// never by function-object record dispatch. Property installation still
-/// resolves names/lengths through the registry's own `array_static` /
-/// `array_prototype` method tables and the `staticMethodId` /
+/// resolves names/lengths through standard-global installation order and the
+/// `staticMethodId` /
 /// `prototypeMethodId` helpers above; this table is consumed by both the slow
 /// record-dispatch path and the VM hot paths (`rt.internal_builtins`).
 ///
@@ -204,40 +203,73 @@ pub const internal_entries = arrayEntries: {
 };
 
 fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayCall };
+    return arrayEntryWithHandler(name, length, id, &arrayCall);
 }
 
 fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayPushCall };
+    return arrayEntryWithHandler(name, length, id, &arrayPushCall);
 }
 
 fn arrayPopEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &arrayPopCall };
+    return arrayEntryWithHandler(name, length, id, &arrayPopCall);
+}
+
+fn arrayEntryWithHandler(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(handler),
+    };
+}
+
+fn genericMagicHandler(entry: core.host_function.InternalEntry) ?core.host_function.NativeGenericMagicFn {
+    const native = entry.native_function orelse return null;
+    return switch (native) {
+        .generic_magic => |handler| handler,
+        else => null,
+    };
 }
 
 test "Array.push has a dedicated native record handler" {
-    var push_call: ?core.host_function.InternalCallFn = null;
+    var push_call: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.push)) push_call = entry.call;
+        if (entry.id == @intFromEnum(PrototypeMethod.push)) push_call = genericMagicHandler(entry);
     }
     try std.testing.expect(push_call != null);
     try std.testing.expect(push_call.? == &arrayPushCall);
 }
 
 test "Array.pop has a dedicated native record handler" {
-    var pop_call: ?core.host_function.InternalCallFn = null;
+    var pop_call: ?core.host_function.NativeGenericMagicFn = null;
     for (internal_entries) |entry| {
-        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = entry.call;
+        if (entry.id == @intFromEnum(PrototypeMethod.pop)) pop_call = genericMagicHandler(entry);
     }
     try std.testing.expect(pop_call != null);
     try std.testing.expect(pop_call.? == &arrayPopCall);
 }
 
 /// The Array constructor record: construct-capable so `new Array(...)` (and
-/// `Array(...)` called as a function, routed with `flags.constructor == false`)
+/// `Array(...)` called as a function, routed with `is_constructor == false`)
 /// reach `arrayCall`'s construct branch. Never prepared-eligible.
 fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &arrayCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&arrayCall),
+    };
 }
 
 /// The realm's default `Array.prototype` for the call-as-function construct
@@ -262,21 +294,27 @@ fn arrayPrototypeFromGlobal(global: *core.Object) ?*core.Object {
 /// to disambiguate Array vs `%TypedArray%` ids and to read species/callbacks.
 /// The VM caller bytecode/frame are recovered and threaded so the relocated
 /// table path keeps its inline-cache hint.
-fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
+fn arrayCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const id: u32 = host_call.magic;
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new Array(...)` arrives through the construct record path with
-        // `flags.constructor` set and the resolved instance prototype in
+        // `is_constructor` set and the resolved instance prototype in
         // `new_target`. `Array(...)` called as a function behaves identically
         // (per spec) but is currently name-dispatched and so does not reach this
-        // id; the `flags.constructor == false` branch falls back to the realm's
+        // id; the `is_constructor == false` branch falls back to the realm's
         // default Array.prototype (null when no realm global is threaded — e.g.
         // a bare `Reflect.construct` against an unwired native function — which
         // yields the engine default prototype). The construct branch runs before
         // the `global` requirement below because it needs no realm global, just
         // like the Date/RegExp/String construct records. RangeError surfaces
         // unchanged for an invalid `new Array(length)`.
-        const prototype = if (host_call.flags.constructor)
+        const prototype = if (host_call.is_constructor)
             host_call.new_target
         else if (host_call.global) |global|
             arrayPrototypeFromGlobal(global)
@@ -309,7 +347,13 @@ fn arrayCall(host_call: InternalCall) HostError!core.JSValue {
 /// full-context ABI as the shared array record handler, so proxy/accessor and
 /// cross-realm behavior keep their existing output/global/caller threading;
 /// only the magic-switch and redundant function-object recognition disappear.
-fn arrayPushCall(host_call: InternalCall) HostError!core.JSValue {
+fn arrayPushCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const global = host_call.global orelse return error.TypeError;
     return (try builtin_glue.qjsArrayPushNativeRecord(
         host_call.ctx,
@@ -326,7 +370,13 @@ fn arrayPushCall(host_call: InternalCall) HostError!core.JSValue {
 /// `js_array_pop(..., shift = 0)`, it enters the complete pop body directly;
 /// the body itself retains the dense-array arm and the observable generic
 /// length/property/delete fallback.
-fn arrayPopCall(host_call: InternalCall) HostError!core.JSValue {
+fn arrayPopCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const global = host_call.global orelse return error.TypeError;
     return (try builtin_glue.qjsArrayPopNativeRecord(
         host_call.ctx,
@@ -395,7 +445,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
 
 // `constructLiteralWithPrototype` (the array-literal opcode helper) is pure and
 // was relocated to engine core (`core/array.zig`) in Phase 6b-3 STEP 4 so
-// `src/exec/vm_literal.zig` can call it without importing builtins; it is not
+// `src/exec/vm_literal.zig` can call it through the owning Module; it is not
 // re-exported here because the only caller was that exec opcode handler.
 
 fn arrayLengthFromNumber(value: core.JSValue) ?u32 {

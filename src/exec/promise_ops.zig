@@ -20,6 +20,8 @@ pub fn legacyStaticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
     if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
     if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
+    if (std.mem.eql(u8, name, "allKeyed")) return @intFromEnum(LegacyStaticMethod.all_keyed);
+    if (std.mem.eql(u8, name, "allSettledKeyed")) return @intFromEnum(LegacyStaticMethod.all_settled_keyed);
     return null;
 }
 
@@ -2013,33 +2015,6 @@ pub fn qjsPromiseRejectCapabilityForError(
     const reason = try qjsPromiseErrorValue(ctx, global, err);
     defer reason.free(ctx.runtime);
     try qjsPromiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
-}
-
-pub fn qjsPromiseStaticMode(name: []const u8) ?PromiseStaticMode {
-    if (std.mem.eql(u8, name, "resolve")) return .resolve;
-    if (std.mem.eql(u8, name, "all")) return .all;
-    if (std.mem.eql(u8, name, "allKeyed")) return .all_keyed;
-    if (std.mem.eql(u8, name, "race")) return .race;
-    if (std.mem.eql(u8, name, "reject")) return .reject;
-    if (std.mem.eql(u8, name, "allSettled")) return .all_settled;
-    if (std.mem.eql(u8, name, "allSettledKeyed")) return .all_settled_keyed;
-    if (std.mem.eql(u8, name, "any")) return .any;
-    if (std.mem.eql(u8, name, "try")) return .try_;
-    if (std.mem.eql(u8, name, "withResolvers")) return .with_resolvers;
-    return null;
-}
-
-pub fn qjsPromiseStaticBuiltinCallee(rt: *core.JSRuntime, global: *core.Object, function_object: *core.Object, name: []const u8) !bool {
-    const ctor_key = try rt.internAtom("Promise");
-    defer rt.atoms.free(ctor_key);
-    const ctor_value = global.getProperty(ctor_key);
-    defer ctor_value.free(rt);
-    const ctor_object = objectFromValue(ctor_value) orelse return false;
-    const method_key = try rt.internAtom(name);
-    defer rt.atoms.free(method_key);
-    const method_value = ctor_object.getProperty(method_key);
-    defer method_value.free(rt);
-    return method_value.sameValue(function_object.value());
 }
 
 pub fn qjsPromiseResolveIdentity(

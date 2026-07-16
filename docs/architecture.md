@@ -224,28 +224,34 @@ payload (`realm`, `cproto`, `magic`, and function pointer).
 The zjs target mirrors that shape:
 
 - `core/host_function.zig` owns the neutral native-function ABI:
-  `NativeCProto`, QJS-style function-pointer variants, `InternalRecord`, and
-  the transitional `.zjs_internal_call` cproto.
-- `exec/builtin_dispatch.zig` is the native C-function dispatch bridge. Today it
-  still invokes legacy `InternalCall` records; domains migrate toward QJS-style
-  `NativeCProto` entries without adding a facade.
-- Long term, standard-global installation belongs in exec (the
-  `JS_AddIntrinsic*` equivalent). It should be a hand-written installer with
-  helpers analogous to `JS_SetPropertyFunctionList`, `JS_NewCFunction3`, and
-  `JS_NewCConstructor`, not a generic descriptor registry.
-- Domain function-list tables should live beside the implementation they point
-  at (`exec/*_ops.zig` or `libs/*` for pure algorithms). Method bodies are placed
-  by role: VM/property/call/coercion/iterator behavior stays in exec; pure
-  algorithms stay in core/libs.
-- `src/builtins/` is transitional migration debt: it currently hosts the
-  standard-global installer, per-domain tables, and many record bodies. It is
-  not a desired architecture layer, and it should disappear once the installer
-  and domain tables have moved into the engine.
+  `NativeCProto`, QJS-style function-pointer variants, and `InternalRecord`.
+  Construct capability is encoded by the cproto; records do not carry a second
+  generic call pointer or constructor flag.
+- `exec/builtin_dispatch.zig` is the typed native C-function dispatch bridge.
+  Realm/output/VM caller state is stack-local exec state; it is not part of the
+  core record ABI. Every standard native record dispatches through its
+  cproto-tagged function pointer, including the observable-coercion fallback
+  for numeric cprotos.
+- `exec/standard_globals.zig` owns the hand-written `JS_AddIntrinsic*`
+  equivalent: global constructors, prototypes, namespaces, descriptors, and
+  installation ordering. Constructor installation is an explicit ordered call
+  sequence rather than a generic `ConstructorSpec` registry. `configureRuntime`
+  is the setup interface for an existing runtime; core retains only a callback
+  Adapter so it does not depend on exec.
+- `exec/internal_builtins.zig` aggregates the compile-time record table for
+  every engine-owned standard-native domain, including Atomics, performance,
+  and every Promise static. Each domain function-list table lives beside
+  the implementation it points at (`exec/*_ops.zig`). VM/property/call/
+  coercion/iterator behavior stays in exec; pure algorithms stay in core/libs.
+  The `.host` domain remains deliberately separate: it represents embedder
+  helpers rather than standard native functions.
+- The former `src/builtins/` compatibility layer has been retired. The
+  architecture check rejects recreating it, and callers use the owning exec or
+  core Module directly.
 
-During the transition, `exec -> builtins` remains forbidden so the old directory
-cannot become an engine dependency. `builtins -> exec` is allowed because the old
-directory is acting as misplaced engine bootstrap/native-function code, not as a
-separate layer. `builtins -> bytecode/parser/runtime/cli` remains forbidden.
+The architecture check guards all three completed migration boundaries: the
+retired directory, the retired generic native-call ABI, and the retired generic
+constructor registry.
 
 `exec/call.zig`'s `HostFunction` enum is a separate mechanism: it dispatches
 embedder/runtime host helpers (`print` output, destructuring runtime helpers,

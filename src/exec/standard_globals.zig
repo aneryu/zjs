@@ -1,24 +1,29 @@
+//! Standard ECMAScript global bootstrap.
+//!
+//! This module owns the JS-visible constructor, namespace, prototype, and
+//! method tables. Native operation bodies and record declarations live beside
+//! it in exec; callers only need the installer interface below.
+
 const core = @import("../core/root.zig");
-const array_builtin = @import("../exec/array_builtin_ops.zig");
-const buffer_builtin = @import("../exec/buffer_ops.zig");
-const collection_builtin = @import("../exec/collection_ops.zig");
-const date_builtin = @import("../exec/date_ops.zig");
-const error_builtin = @import("../exec/error_ops.zig");
-const error_names = core.error_names;
-const iterator_builtin = @import("../exec/iterator_builtin_ops.zig");
-const object_builtin = @import("../exec/object_builtin_ops.zig");
-const regexp_builtin = @import("../exec/regexp_ops.zig");
-const string_builtin = @import("../exec/string_builtin_ops.zig");
-const atomics_builtin = @import("../exec/atomics_ops.zig");
-const reflect_builtin = @import("../exec/reflect_proxy_ops.zig");
+const array_builtin = @import("array_builtin_ops.zig");
+const buffer_builtin = @import("buffer_ops.zig");
+const collection_builtin = @import("collection_ops.zig");
+const date_builtin = @import("date_ops.zig");
+const error_builtin = @import("error_ops.zig");
+const iterator_builtin = @import("iterator_builtin_ops.zig");
+const object_builtin = @import("object_builtin_ops.zig");
+const regexp_builtin = @import("regexp_ops.zig");
+const string_builtin = @import("string_builtin_ops.zig");
+const atomics_builtin = @import("atomics_ops.zig");
+const reflect_builtin = @import("reflect_proxy_ops.zig");
 const typed_array_names = core.typed_array_names;
-const internal_table = @import("internal_table.zig");
-const function_ops = @import("../exec/function_ops.zig");
-const json_builtin = @import("../exec/json_ops.zig");
-const math_builtin = @import("../exec/math_ops.zig");
-const number_builtin = @import("../exec/number_ops.zig");
-const promise_ops = @import("../exec/promise_ops.zig");
-const uri_builtin = @import("../exec/uri_ops.zig");
+const internal_builtins = @import("internal_builtins.zig");
+const function_ops = @import("function_ops.zig");
+const json_builtin = @import("json_ops.zig");
+const math_builtin = @import("math_ops.zig");
+const number_builtin = @import("number_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const uri_builtin = @import("uri_ops.zig");
 const std = @import("std");
 
 pub const Flags = struct {
@@ -33,7 +38,6 @@ pub const Method = struct {
 };
 
 const ConstructorKind = enum {
-    ordinary,
     object,
     function,
     array,
@@ -84,13 +88,7 @@ const ConstructorKind = enum {
     iterator,
 };
 
-const ConstructorSpec = struct {
-    name: []const u8,
-    kind: ConstructorKind = .ordinary,
-    length: i32,
-    static_methods: []const Method = &.{},
-    prototype_methods: []const Method = &.{},
-};
+const constructor_kind_count = @typeInfo(ConstructorKind).@"enum".fields.len;
 
 pub const global_flags = Flags{ .writable = true, .enumerable = false, .configurable = true };
 pub const method_flags = Flags{ .writable = true, .enumerable = false, .configurable = true };
@@ -314,7 +312,7 @@ pub fn defineNativeMethods(rt: *core.JSRuntime, target: *core.Object, methods: [
 /// transition) vs the ~100us each that eager `nativeFunction` was
 /// paying for the Object.create + 3 property defines + string alloc.
 pub fn defineNativeMethodsAssumingNew(rt: *core.JSRuntime, target: *core.Object, methods: []const Method) !void {
-    // registry.Flags has the local subset (no `.accessor`); translate
+    // Standard-global Flags has the local subset (no `.accessor`); translate
     // to the on-disk property.Flags packed-struct representation that
     // `defineAutoInitProperty` writes into the property table.
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
@@ -512,24 +510,24 @@ const number_constant_property_count: usize = 8;
 const global_lazy_function_property_count: usize = 15;
 
 pub fn standardGlobalOwnPropertyCapacity() usize {
-    return constructor_specs.len +
+    return constructor_kind_count +
         4 + // Math, JSON, Reflect, Atomics
         2 + // performance, navigator
         global_lazy_function_property_count;
 }
 
-fn constructorOwnPropertyCapacity(spec: ConstructorSpec) usize {
-    const prototype_count: usize = if (spec.kind == .proxy) 0 else 1;
-    return 2 + prototype_count + spec.static_methods.len + constructorExtraPropertyCount(spec.kind);
+fn constructorOwnPropertyCapacity(kind: ConstructorKind, static_method_count: usize) usize {
+    const prototype_count: usize = if (kind == .proxy) 0 else 1;
+    return 2 + prototype_count + static_method_count + constructorExtraPropertyCount(kind);
 }
 
-fn prototypeOwnPropertyCapacity(spec: ConstructorSpec) usize {
-    if (spec.kind == .proxy) return 0;
-    const function_prototype_base: usize = if (spec.kind == .function) 2 else 0;
+fn prototypeOwnPropertyCapacity(kind: ConstructorKind, prototype_method_count: usize) usize {
+    if (kind == .proxy) return 0;
+    const function_prototype_base: usize = if (kind == .function) 2 else 0;
     return function_prototype_base +
-        spec.prototype_methods.len +
+        prototype_method_count +
         1 + // constructor, as data property or Iterator accessor
-        prototypeExtraPropertyCount(spec.kind);
+        prototypeExtraPropertyCount(kind);
 }
 
 fn constructorExtraPropertyCount(kind: ConstructorKind) usize {
@@ -652,28 +650,31 @@ fn prototypeMethodsAreInstalledByExtras(kind: ConstructorKind) bool {
     };
 }
 
-pub fn defineConstructor(
+fn defineConstructor(
     rt: *core.JSRuntime,
     global: *core.Object,
-    spec: ConstructorSpec,
+    name: []const u8,
+    kind: ConstructorKind,
+    length: i32,
+    static_methods: []const Method,
+    prototype_methods: []const Method,
 ) !core.JSValue {
-    const name = spec.name;
-    const constructor_value = try core.function.nativeFunctionWithLazyNameAndCapacity(rt, name, spec.length, constructorOwnPropertyCapacity(spec));
+    const constructor_value = try core.function.nativeFunctionWithLazyNameAndCapacity(rt, name, length, constructorOwnPropertyCapacity(kind, static_methods.len));
     errdefer constructor_value.free(rt);
     const constructor = expectObject(constructor_value);
     try constructor.setFunctionRealmGlobalPtr(rt, global);
 
-    if (spec.kind != .proxy) {
-        const prototype_capacity = prototypeOwnPropertyCapacity(spec);
-        const prototype_value = if (spec.kind == .function)
+    if (kind != .proxy) {
+        const prototype_capacity = prototypeOwnPropertyCapacity(kind, prototype_methods.len);
+        const prototype_value = if (kind == .function)
             try core.function.nativeFunctionWithLazyNameAndCapacity(rt, "", 0, prototype_capacity)
-        else if (spec.kind == .array)
+        else if (kind == .array)
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, prototype_capacity)).value()
-        else if (spec.kind == .string)
+        else if (kind == .string)
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.string, null, prototype_capacity)).value()
-        else if (spec.kind == .number)
+        else if (kind == .number)
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.number, null, prototype_capacity)).value()
-        else if (spec.kind == .boolean)
+        else if (kind == .boolean)
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.boolean, null, prototype_capacity)).value()
         else
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, prototype_capacity)).value();
@@ -684,41 +685,41 @@ pub fn defineConstructor(
         // skips the duplicate-property scan in `defineOwnProperty`.
         // Method-table names are unique within their slice and prototype
         // starts empty, so the precondition holds.
-        if (spec.kind == .date)
+        if (kind == .date)
             try defineDatePrototypeMethodsAssumingNew(rt, global, prototype)
-        else if (spec.kind == .object)
+        else if (kind == .object)
             try defineObjectPrototypeMethodsAssumingNew(rt, prototype)
-        else if (!prototypeMethodsAreInstalledByExtras(spec.kind))
-            try defineNativeMethodsAssumingNew(rt, prototype, spec.prototype_methods);
-        if (spec.kind == .number) {
+        else if (!prototypeMethodsAreInstalledByExtras(kind))
+            try defineNativeMethodsAssumingNew(rt, prototype, prototype_methods);
+        if (kind == .number) {
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), core.JSValue.int32(0));
         }
-        if (spec.kind == .string) {
+        if (kind == .string) {
             const empty = try createBuiltinAsciiStringValue(rt, "");
             defer empty.free(rt);
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), empty.dup());
         }
-        if (spec.kind == .boolean) {
+        if (kind == .boolean) {
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), core.JSValue.boolean(false));
         }
-        if (isErrorConstructorKind(spec.kind)) {
+        if (isErrorConstructorKind(kind)) {
             try defineStringConstantAtomAssumingNew(rt, prototype, core.atom.ids.name, name, Flags{ .writable = true, .enumerable = false, .configurable = true });
             try defineStringConstantAtomAssumingNew(rt, prototype, core.atom.predefinedId("message", .string).?, "", Flags{ .writable = true, .enumerable = false, .configurable = true });
         }
-        if (constructorStaticMethodsBeforePrototype(spec.kind)) {
+        if (constructorStaticMethodsBeforePrototype(kind)) {
             // QuickJS's intrinsic setup installs `JSCFunctionListEntry` static
             // entries before `JS_SetConstructor2` attaches `.prototype`.
-            try defineNativeMethodsAssumingNew(rt, constructor, spec.static_methods);
+            try defineNativeMethodsAssumingNew(rt, constructor, static_methods);
         }
-        if (spec.kind == .number) {
+        if (kind == .number) {
             try installNumberConstants(rt, constructor);
         }
-        if (spec.kind == .symbol) {
+        if (kind == .symbol) {
             try installWellKnownSymbolProperties(rt, constructor);
         }
-        if (typed_array_names.element(spec.name)) |element| {
+        if (typed_array_names.element(name)) |element| {
             try installTypedArrayConstructorElementSize(rt, constructor, @intCast(element.size));
-            if (spec.kind == .uint8_array) try installUint8ArrayConstructorCodecExtras(rt, constructor);
+            if (kind == .uint8_array) try installUint8ArrayConstructorCodecExtras(rt, constructor);
         }
         // Constructor is freshly created above; "prototype" is unique among its
         // existing visible properties. For most constructors those are only
@@ -727,18 +728,13 @@ pub fn defineConstructor(
         prototype_value.free(rt);
     }
 
-    // The global accumulates one entry per spec inside the
-    // `installStandardGlobals` loop; spec names are mutually distinct,
-    // so the new-property precondition holds for the install path.
+    // `installStandardConstructors` invokes this once per distinct global
+    // constructor name, so the new-property precondition holds for bootstrap.
     // Other callers of `defineConstructor` are absent today (this entry
-    // point is internal to the registry); add a duplicate-tolerant
+    // point is internal to bootstrap); add a duplicate-tolerant
     // wrapper here if that ever changes.
     try defineDataAssumingNew(rt, global, name, constructor_value, global_flags);
     return constructor_value;
-}
-
-fn isErrorConstructorSpecName(name: []const u8) bool {
-    return error_names.isErrorConstructorName(name);
 }
 
 fn isErrorConstructorKind(kind: ConstructorKind) bool {
@@ -764,10 +760,7 @@ fn expectObject(value: core.JSValue) *core.Object {
 }
 
 fn installedConstructor(constructors: []const ?*core.Object, kind: ConstructorKind) ?*core.Object {
-    for (constructor_specs, 0..) |spec, index| {
-        if (spec.kind == kind) return constructors[index];
-    }
-    return null;
+    return constructors[@intFromEnum(kind)];
 }
 
 fn constructorPrototypeObject(rt: *core.JSRuntime, ctor: *core.Object) ?*core.Object {
@@ -782,168 +775,223 @@ fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: 
     return try materializeBuiltinNamespaceAutoInit(rt, global, kind);
 }
 
-/// Register this subsystem's standard-globals installer as the engine-wide
-/// default so `core.JSRuntime` (which must not name builtins) can bootstrap the
-/// global object through `rt.installStandardGlobals`. Idempotent; call during
-/// engine/runtime setup before the first global object is built. The exec layer
-/// drives the install via the runtime callback rather than importing this
-/// registry directly (Phase 6b-3 STEP 7B: the last exec->builtins holdout).
+/// Register exec's standard-globals installer as the process-wide default.
+/// New bare `core.JSRuntime` instances copy this callback and capacity during
+/// initialization without introducing a core -> exec dependency.
 pub fn registerStandardGlobalsDefault() void {
     core.runtime.setDefaultStandardGlobalsInstaller(installStandardGlobals, standardGlobalOwnPropertyCapacity());
+}
+
+/// Configure an existing runtime for standard-global bootstrap. This is the
+/// single setup interface for binding and test callers that already own a
+/// runtime; it keeps the callback and its capacity invariant together.
+pub fn configureRuntime(rt: *core.JSRuntime) void {
+    registerStandardGlobalsDefault();
+    rt.install_standard_globals_cb = installStandardGlobals;
+    rt.standard_global_own_property_capacity = standardGlobalOwnPropertyCapacity();
+}
+
+/// Install one explicitly named standard constructor. The caller supplies the
+/// domain-local function-list tables directly; installation order is expressed
+/// by `installStandardConstructors`, not by a generic descriptor registry.
+fn installStandardConstructor(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    constructors: *[constructor_kind_count]?*core.Object,
+    name: []const u8,
+    kind: ConstructorKind,
+    length: i32,
+    static_methods: []const Method,
+    prototype_methods: []const Method,
+) !void {
+    const constructor_value = try defineConstructor(rt, global, name, kind, length, static_methods, prototype_methods);
+    defer constructor_value.free(rt);
+    const constructor = expectObject(constructor_value);
+    constructors[@intFromEnum(kind)] = constructor;
+
+    // The constructor is fresh: static names cannot collide with the visible
+    // length/name/prototype fields (Proxy has no prototype field).
+    if (!constructorStaticMethodsBeforePrototype(kind)) try defineNativeMethodsAssumingNew(rt, constructor, static_methods);
+    switch (kind) {
+        .object => {
+            const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .object_prototype);
+            try global.setOptionalValueSlot(rt, cached, object_proto.value().dup());
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
+            try bindObjectStaticNativeRecords(rt, constructor);
+            try bindObjectPrototypeNativeRecords(rt, constructor);
+        },
+        .symbol => {
+            const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .symbol_prototype);
+            try global.setOptionalValueSlot(rt, cached, symbol_proto.value().dup());
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
+            try installSymbolExtras(rt, constructor);
+        },
+        .boolean => {
+            const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .boolean_prototype);
+            try global.setOptionalValueSlot(rt, cached, boolean_proto.value().dup());
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
+        },
+        .proxy => try bindNativeRecordByName(rt, constructor, "revocable", .reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable)),
+        .array => {
+            (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
+            const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .array_prototype);
+            try global.setOptionalValueSlot(rt, cached, array_proto.value().dup());
+            try bindArrayNativeRecords(rt, constructor);
+            try installArrayPrototypeSymbols(rt, global, constructor);
+            try tagArrayPrototypeMethods(rt, constructor);
+            try bindArrayPrototypeNativeRecords(rt, constructor);
+            const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
+            const values = array_proto.getProperty(values_key);
+            defer values.free(rt);
+            const cached_values = try global.cachedRealmValueSlot(rt, .array_prototype_values);
+            try global.setOptionalValueSlot(rt, cached_values, values.dup());
+        },
+        .string => {
+            const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .string_prototype);
+            try global.setOptionalValueSlot(rt, cached, string_proto.value().dup());
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
+            try installStringPrototypeAliases(rt, global, constructor);
+            try bindStringNativeRecords(rt, constructor);
+        },
+        .number => {
+            const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .number_prototype);
+            try global.setOptionalValueSlot(rt, cached, number_proto.value().dup());
+            try bindNumberNativeRecords(rt, constructor);
+        },
+        .bigint => {
+            const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+            const cached = try global.cachedRealmValueSlot(rt, .bigint_prototype);
+            try global.setOptionalValueSlot(rt, cached, bigint_proto.value().dup());
+        },
+        .regexp => {
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
+            const cached = try global.cachedRealmValueSlot(rt, .regexp_constructor);
+            try global.setOptionalValueSlot(rt, cached, constructor.value().dup());
+            try installRegExpExtras(rt, constructor);
+        },
+        .promise => try installPromiseExtras(rt, global, constructor),
+        .error_ => {
+            try installErrorPrototypeExtras(rt, constructor);
+            try bindNativeRecordByName(rt, constructor, "captureStackTrace", .error_object, @intFromEnum(error_builtin.StaticMethod.capture_stack_trace));
+            try defineDataAssumingNew(rt, constructor, "stackTraceLimit", core.JSValue.int32(10), Flags{ .writable = true, .enumerable = false, .configurable = true });
+        },
+        .date => {
+            try bindDateNativeRecords(rt, constructor);
+            try installDatePrototypeAliases(rt, global, constructor);
+        },
+        .function => {
+            try installFunctionPrototypeExtras(rt, constructor);
+            try global.setCachedFunctionProto(rt, constructorPrototypeObject(rt, constructor));
+        },
+        .array_buffer => {
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_builtin.ConstructorMethod.array_buffer)));
+            try installArrayBufferExtras(rt, constructor);
+            try bindArrayBufferStaticNativeRecords(rt, constructor);
+            try bindBufferPrototypeNativeRecords(rt, constructor, 1);
+        },
+        .shared_array_buffer => {
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_builtin.ConstructorMethod.shared_array_buffer)));
+            try installSharedArrayBufferExtras(rt, constructor);
+            try bindBufferPrototypeNativeRecords(rt, constructor, 2);
+        },
+        .data_view => try installDataViewExtras(rt, constructor),
+        .iterator => try installIteratorExtras(rt, global, constructor),
+        .dom_exception => {
+            constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call)));
+            try installDOMExceptionExtras(rt, constructor);
+        },
+        .disposable_stack => try installDisposableStackExtras(rt, global, constructor),
+        .async_disposable_stack => try installAsyncDisposableStackExtras(rt, global, constructor),
+        else => {},
+    }
+
+    switch (kind) {
+        .bigint, .promise, .weak_ref, .finalization_registry => try installPrototypeToStringTag(rt, name, constructor),
+        else => {},
+    }
+    if (primitivePrototypeTagForKind(kind)) |tag| try bindPrimitivePrototypeNativeRecordsWithTag(rt, constructor, tag);
+    if (typed_array_names.element(name)) |element| {
+        try installTypedArrayElementSize(rt, constructor, @intCast(element.size), element.kind);
+        try installTypedArrayArrayBufferPrototype(rt, global, constructor);
+    }
+    if (kind == .uint8_array) try installUint8ArrayCodecExtras(rt, constructor);
+    if (collectionNameForKind(kind)) |collection_name| try installCollectionExtras(rt, global, collection_name, constructor);
+}
+
+fn installStandardConstructors(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    constructors: *[constructor_kind_count]?*core.Object,
+) !void {
+    try installStandardConstructor(rt, global, constructors, "Object", .object, 1, &object_static, &object_prototype);
+    try installStandardConstructor(rt, global, constructors, "Function", .function, 1, &no_methods, &function_prototype);
+    try installStandardConstructor(rt, global, constructors, "Array", .array, 1, &array_static, &array_prototype);
+    try installStandardConstructor(rt, global, constructors, "String", .string, 1, &string_static, &string_prototype);
+    try installStandardConstructor(rt, global, constructors, "Number", .number, 1, &number_static, &number_prototype);
+    try installStandardConstructor(rt, global, constructors, "Boolean", .boolean, 1, &no_methods, &primitive_prototype);
+    try installStandardConstructor(rt, global, constructors, "Symbol", .symbol, 0, &symbol_static, &primitive_prototype);
+    try installStandardConstructor(rt, global, constructors, "BigInt", .bigint, 1, &bigint_static, &primitive_prototype);
+    try installStandardConstructor(rt, global, constructors, "Date", .date, 7, &date_static, &date_prototype);
+    try installStandardConstructor(rt, global, constructors, "RegExp", .regexp, 2, &no_methods, &regexp_prototype);
+    try installStandardConstructor(rt, global, constructors, "AggregateError", .aggregate_error, 2, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "SuppressedError", .suppressed_error, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Error", .error_, 1, &error_static, &error_prototype);
+    try installStandardConstructor(rt, global, constructors, "EvalError", .eval_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "RangeError", .range_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "ReferenceError", .reference_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "SyntaxError", .syntax_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "TypeError", .type_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "URIError", .uri_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "InternalError", .internal_error, 1, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "DOMException", .dom_exception, 2, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "DisposableStack", .disposable_stack, 0, &no_methods, &disposable_stack_prototype);
+    try installStandardConstructor(rt, global, constructors, "AsyncDisposableStack", .async_disposable_stack, 0, &no_methods, &async_disposable_stack_prototype);
+    try installStandardConstructor(rt, global, constructors, "Promise", .promise, 1, &promise_static, &promise_prototype);
+    try installStandardConstructor(rt, global, constructors, "Map", .map, 0, &map_static, &map_prototype);
+    try installStandardConstructor(rt, global, constructors, "Set", .set, 0, &no_methods, &set_prototype);
+    try installStandardConstructor(rt, global, constructors, "WeakMap", .weak_map, 0, &no_methods, &weak_map_prototype);
+    try installStandardConstructor(rt, global, constructors, "WeakSet", .weak_set, 0, &no_methods, &weak_set_prototype);
+    try installStandardConstructor(rt, global, constructors, "WeakRef", .weak_ref, 1, &no_methods, &weak_ref_prototype);
+    try installStandardConstructor(rt, global, constructors, "FinalizationRegistry", .finalization_registry, 1, &no_methods, &finalization_registry_prototype);
+    try installStandardConstructor(rt, global, constructors, "ArrayBuffer", .array_buffer, 1, &array_buffer_static, &buffer_prototype);
+    try installStandardConstructor(rt, global, constructors, "SharedArrayBuffer", .shared_array_buffer, 1, &no_methods, &shared_buffer_prototype);
+    try installStandardConstructor(rt, global, constructors, "TypedArray", .typed_array, 0, &typed_array_static, &typed_array_prototype);
+    try installStandardConstructor(rt, global, constructors, "Int8Array", .int8_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Uint8Array", .uint8_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Uint8ClampedArray", .uint8_clamped_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Int16Array", .int16_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Uint16Array", .uint16_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Int32Array", .int32_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Uint32Array", .uint32_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Float16Array", .float16_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Float32Array", .float32_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Float64Array", .float64_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "BigInt64Array", .bigint64_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "BigUint64Array", .biguint64_array, 3, &no_methods, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "DataView", .data_view, 1, &no_methods, &data_view_prototype);
+    try installStandardConstructor(rt, global, constructors, "Proxy", .proxy, 2, &proxy_static, &no_methods);
+    try installStandardConstructor(rt, global, constructors, "Iterator", .iterator, 0, &iterator_static, &iterator_prototype);
+
+    for (constructors) |constructor| {
+        if (constructor == null) return error.InvalidBuiltinRegistry;
+    }
 }
 
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     // Keep the per-runtime + process-global installer hooks live for any later
     // runtime/realm built off this one, even when bootstrap reached us directly.
-    registerStandardGlobalsDefault();
-    rt.install_standard_globals_cb = installStandardGlobals;
-    rt.standard_global_own_property_capacity = standardGlobalOwnPropertyCapacity();
+    configureRuntime(rt);
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
-    rt.internal_builtins = &internal_table.table;
+    rt.internal_builtins = &internal_builtins.table;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, standardGlobalOwnPropertyCapacity());
-    var installed_constructors: [constructor_specs.len]?*core.Object = @splat(null);
-    for (constructor_specs, 0..) |spec, index| {
-        {
-            const constructor_value = try defineConstructor(rt, global, spec);
-            defer constructor_value.free(rt);
-            const constructor = expectObject(constructor_value);
-            installed_constructors[index] = constructor;
-            // Constructor object is freshly returned from
-            // `defineConstructor`; it currently holds only visible
-            // `length`, `name`, and `prototype` properties (the latter
-            // skipped for `Proxy`). Static-method names per spec do not
-            // collide with those, so fast-path is safe.
-            if (!constructorStaticMethodsBeforePrototype(spec.kind)) try defineNativeMethodsAssumingNew(rt, constructor, spec.static_methods);
-            switch (spec.kind) {
-                .object => {
-                    const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .object_prototype);
-                    try global.setOptionalValueSlot(rt, cached, object_proto.value().dup());
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.object, @intFromEnum(object_builtin.ConstructorMethod.call)));
-                    try bindObjectStaticNativeRecords(rt, constructor);
-                    try bindObjectPrototypeNativeRecords(rt, constructor);
-                },
-                .symbol => {
-                    const symbol_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .symbol_prototype);
-                    try global.setOptionalValueSlot(rt, cached, symbol_proto.value().dup());
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_symbol_ctor_call_id));
-                    try installSymbolExtras(rt, constructor);
-                },
-                .boolean => {
-                    const boolean_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .boolean_prototype);
-                    try global.setOptionalValueSlot(rt, cached, boolean_proto.value().dup());
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.primitive, primitive_boolean_ctor_call_id));
-                },
-                .proxy => {
-                    try bindNativeRecordByName(rt, constructor, "revocable", .reflect, @intFromEnum(reflect_builtin.StaticMethod.proxy_revocable));
-                },
-                .array => {
-                    (try constructor.arrayBuiltinMarkerSlot(rt)).* = .constructor;
-                    const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .array_prototype);
-                    try global.setOptionalValueSlot(rt, cached, array_proto.value().dup());
-                    try bindArrayNativeRecords(rt, constructor);
-                    try installArrayPrototypeSymbols(rt, global, constructor);
-                    try tagArrayPrototypeMethods(rt, constructor);
-                    try bindArrayPrototypeNativeRecords(rt, constructor);
-                    const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return error.InvalidBuiltinRegistry;
-                    const values = array_proto.getProperty(values_key);
-                    defer values.free(rt);
-                    const cached_values = try global.cachedRealmValueSlot(rt, .array_prototype_values);
-                    try global.setOptionalValueSlot(rt, cached_values, values.dup());
-                },
-                .string => {
-                    const string_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .string_prototype);
-                    try global.setOptionalValueSlot(rt, cached, string_proto.value().dup());
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.ConstructorMethod.call)));
-                    try installStringPrototypeAliases(rt, global, constructor);
-                    try bindStringNativeRecords(rt, constructor);
-                },
-                .number => {
-                    const number_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .number_prototype);
-                    try global.setOptionalValueSlot(rt, cached, number_proto.value().dup());
-                    try bindNumberNativeRecords(rt, constructor);
-                },
-                .bigint => {
-                    const bigint_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-                    const cached = try global.cachedRealmValueSlot(rt, .bigint_prototype);
-                    try global.setOptionalValueSlot(rt, cached, bigint_proto.value().dup());
-                },
-                .regexp => {
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
-                    const cached = try global.cachedRealmValueSlot(rt, .regexp_constructor);
-                    try global.setOptionalValueSlot(rt, cached, constructor.value().dup());
-                    try installRegExpExtras(rt, constructor);
-                },
-                .promise => try installPromiseExtras(rt, global, constructor),
-                .aggregate_error,
-                .suppressed_error,
-                .error_,
-                .eval_error,
-                .range_error,
-                .reference_error,
-                .syntax_error,
-                .type_error,
-                .uri_error,
-                .internal_error,
-                => {
-                    if (spec.kind == .error_) {
-                        try installErrorPrototypeExtras(rt, constructor);
-                        try bindNativeRecordByName(rt, constructor, "captureStackTrace", .error_object, @intFromEnum(error_builtin.StaticMethod.capture_stack_trace));
-                        try defineDataAssumingNew(rt, constructor, "stackTraceLimit", core.JSValue.int32(10), Flags{ .writable = true, .enumerable = false, .configurable = true });
-                    }
-                },
-                .date => {
-                    try bindDateNativeRecords(rt, constructor);
-                    try installDatePrototypeAliases(rt, global, constructor);
-                },
-                .function => {
-                    try installFunctionPrototypeExtras(rt, constructor);
-                    // Stash Function.prototype on the realm global so the lazy
-                    // `auto_init` materializer can wire each on-demand
-                    // native function's `[[Prototype]]` without re-walking
-                    // the global object. The realm cache retains the
-                    // intrinsic so global property mutation cannot dangle it.
-                    try global.setCachedFunctionProto(rt, constructorPrototypeObject(rt, constructor));
-                },
-                .array_buffer => {
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_builtin.ConstructorMethod.array_buffer)));
-                    try installArrayBufferExtras(rt, constructor);
-                    try bindArrayBufferStaticNativeRecords(rt, constructor);
-                    try bindBufferPrototypeNativeRecords(rt, constructor, 1);
-                },
-                .shared_array_buffer => {
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.buffer, @intFromEnum(buffer_builtin.ConstructorMethod.shared_array_buffer)));
-                    try installSharedArrayBufferExtras(rt, constructor);
-                    try bindBufferPrototypeNativeRecords(rt, constructor, 2);
-                },
-                .data_view => try installDataViewExtras(rt, constructor),
-                .iterator => try installIteratorExtras(rt, global, constructor),
-                .dom_exception => {
-                    constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call)));
-                    try installDOMExceptionExtras(rt, constructor);
-                },
-                .disposable_stack => try installDisposableStackExtras(rt, global, constructor),
-                .async_disposable_stack => try installAsyncDisposableStackExtras(rt, global, constructor),
-                else => {},
-            }
-            switch (spec.kind) {
-                .bigint, .promise, .weak_ref, .finalization_registry => try installPrototypeToStringTag(rt, spec.name, constructor),
-                else => {},
-            }
-            if (primitivePrototypeTagForKind(spec.kind)) |tag| try bindPrimitivePrototypeNativeRecordsWithTag(rt, constructor, tag);
-            if (typed_array_names.element(spec.name)) |element| {
-                try installTypedArrayElementSize(rt, constructor, @intCast(element.size), element.kind);
-                try installTypedArrayArrayBufferPrototype(rt, global, constructor);
-            }
-            if (spec.kind == .uint8_array) try installUint8ArrayCodecExtras(rt, constructor);
-            if (collectionNameForKind(spec.kind)) |collection_name| try installCollectionExtras(rt, global, collection_name, constructor);
-        }
-    }
+    var installed_constructors: [constructor_kind_count]?*core.Object = @splat(null);
+    try installStandardConstructors(rt, global, &installed_constructors);
     try wireStandardConstructorGraph(rt, global, &installed_constructors);
     const object_ctor = installedConstructor(&installed_constructors, .object) orelse return error.InvalidBuiltinRegistry;
     const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
@@ -956,7 +1004,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try installPerformance(rt, global);
     try installNavigator(rt, global);
 
-    const number_mod = @import("../exec/number_ops.zig");
+    const number_mod = @import("number_ops.zig");
     try defineGlobalSharedLazyNativeFunction(rt, global, "parseInt", 2, .number, @intFromEnum(number_mod.StaticMethod.parse_int), shared_lazy_parse_int_slot);
     try defineGlobalSharedLazyNativeFunction(rt, global, "parseFloat", 1, .number, @intFromEnum(number_mod.StaticMethod.parse_float), shared_lazy_parse_float_slot);
     const number_constructor = installedConstructor(&installed_constructors, .number) orelse return error.InvalidBuiltinRegistry;
@@ -964,13 +1012,13 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try defineGlobalLazyNativeFunction(rt, global, "isNaN", 1, .number, @intFromEnum(number_mod.StaticMethod.is_nan));
     try defineGlobalLazyNativeFunction(rt, global, "isFinite", 1, .number, @intFromEnum(number_mod.StaticMethod.is_finite));
     try defineGlobalLazyFunction(rt, global, "eval", 1);
-    const uri_mod = @import("../exec/uri_ops.zig");
+    const uri_mod = @import("uri_ops.zig");
     try defineGlobalLazyNativeFunction(rt, global, "encodeURI", 1, .uri, uri_mod.methodId("encodeURI").?);
     try defineGlobalLazyNativeFunction(rt, global, "decodeURI", 1, .uri, uri_mod.methodId("decodeURI").?);
     try defineGlobalLazyNativeFunction(rt, global, "encodeURIComponent", 1, .uri, uri_mod.methodId("encodeURIComponent").?);
     try defineGlobalLazyNativeFunction(rt, global, "decodeURIComponent", 1, .uri, uri_mod.methodId("decodeURIComponent").?);
-    try defineGlobalLazyFunction(rt, global, "escape", 1);
-    try defineGlobalLazyFunction(rt, global, "unescape", 1);
+    try defineGlobalLazyNativeFunction(rt, global, "escape", 1, .uri, core.uri.escape_id);
+    try defineGlobalLazyNativeFunction(rt, global, "unescape", 1, .uri, core.uri.unescape_id);
     try defineGlobalLazyNativeFunction(rt, global, "btoa", 1, .host, @intFromEnum(core.function.HostGlobalMethod.btoa));
     try defineGlobalLazyNativeFunction(rt, global, "atob", 1, .host, @intFromEnum(core.function.HostGlobalMethod.atob));
     try defineGlobalLazyNativeFunction(rt, global, "queueMicrotask", 1, .host, @intFromEnum(core.function.HostGlobalMethod.queue_microtask));
@@ -979,7 +1027,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
 }
 
 fn bindNumberGlobalNativeRecords(rt: *core.JSRuntime, global: *core.Object) !void {
-    const number_mod = @import("../exec/number_ops.zig");
+    const number_mod = @import("number_ops.zig");
     const names = [_][]const u8{ "parseInt", "parseFloat", "isNaN", "isFinite" };
     for (names) |name| {
         const id = number_mod.staticMethodId(name) orelse continue;
@@ -988,7 +1036,7 @@ fn bindNumberGlobalNativeRecords(rt: *core.JSRuntime, global: *core.Object) !voi
 }
 
 fn installNumberParseAliases(rt: *core.JSRuntime, global: *core.Object, number: *core.Object) !void {
-    const number_mod = @import("../exec/number_ops.zig");
+    const number_mod = @import("number_ops.zig");
     const aliases = [_]struct {
         name: []const u8,
         length: i32,
@@ -1038,9 +1086,10 @@ fn wireStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, const
     const error_ctor = installedConstructor(constructors, .error_) orelse return error.InvalidBuiltinRegistry;
     const error_proto = constructorPrototypeObject(rt, error_ctor) orelse return error.InvalidBuiltinRegistry;
 
-    for (constructor_specs, 0..) |spec, index| {
-        const ctor = constructors[index] orelse continue;
-        if (isNativeErrorSubclassKind(spec.kind)) {
+    const constructor_kinds = comptime std.enums.values(ConstructorKind);
+    for (constructor_kinds) |kind| {
+        const ctor = installedConstructor(constructors, kind) orelse continue;
+        if (isNativeErrorSubclassKind(kind)) {
             try ctor.setPrototype(rt, error_ctor);
         } else {
             try ctor.setPrototype(rt, function_proto);
@@ -1054,10 +1103,10 @@ fn wireStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, const
                 try defineDataAssumingNew(rt, proto, "constructor", ctor.value(), Flags{ .writable = true, .enumerable = false, .configurable = true });
             }
         }
-        if (spec.kind == .object) {
+        if (kind == .object) {
             try proto.setPrototype(rt, null);
             proto.markImmutablePrototype();
-        } else if (isNativeErrorSubclassKind(spec.kind) or spec.kind == .dom_exception) {
+        } else if (isNativeErrorSubclassKind(kind) or kind == .dom_exception) {
             try proto.setPrototype(rt, error_proto);
         } else {
             try proto.setPrototype(rt, object_proto);
@@ -1114,18 +1163,27 @@ fn wireTypedArrayConstructorGraph(rt: *core.JSRuntime, constructors: []const ?*c
     const typed_array_ctor = installedConstructor(constructors, .typed_array) orelse return;
     const typed_array_proto = constructorPrototypeObject(rt, typed_array_ctor) orelse return;
 
-    for (constructor_specs, 0..) |spec, index| {
-        if (!isConcreteTypedArrayName(spec.name)) continue;
-        const ctor = constructors[index] orelse continue;
+    const concrete_kinds = [_]ConstructorKind{
+        .int8_array,
+        .uint8_array,
+        .uint8_clamped_array,
+        .int16_array,
+        .uint16_array,
+        .int32_array,
+        .uint32_array,
+        .float16_array,
+        .float32_array,
+        .float64_array,
+        .bigint64_array,
+        .biguint64_array,
+    };
+    for (concrete_kinds) |kind| {
+        const ctor = installedConstructor(constructors, kind) orelse continue;
         try ctor.setPrototype(rt, typed_array_ctor);
 
         const proto = constructorPrototypeObject(rt, ctor) orelse continue;
         try proto.setPrototype(rt, typed_array_proto);
     }
-}
-
-fn isConcreteTypedArrayName(name: []const u8) bool {
-    return typed_array_names.isConcrete(name);
 }
 
 fn installObjectConstructorPrimitivePrototypes(
@@ -1186,9 +1244,8 @@ fn bindMathNativeRecords(rt: *core.JSRuntime, math: *core.Object) !void {
 }
 
 fn bindAtomicsNativeRecords(rt: *core.JSRuntime, atomics: *core.Object) !void {
-    for (atomics_methods) |method| {
-        const id = atomics_builtin.methodId(method.name) orelse continue;
-        try bindNativeRecordByName(rt, atomics, method.name, .atomics, id);
+    for (atomics_builtin.internal_entries) |entry| {
+        try bindNativeRecordByName(rt, atomics, entry.name, .atomics, entry.id);
     }
 }
 
@@ -1216,16 +1273,12 @@ fn bindObjectPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !vo
 
 fn bindUriNativeRecords(rt: *core.JSRuntime, global: *core.Object) !void {
     for (uri_builtin.internal_entries) |entry| {
-        // The legacy `escape`/`unescape` records are reachable only through the
-        // table (exec routes their bodies via `callInternalRecord`); leave the
-        // installed globals on their existing dispatch by skipping the bind.
-        if (std.mem.eql(u8, entry.name, "escape") or std.mem.eql(u8, entry.name, "unescape")) continue;
         try bindNativeRecordByName(rt, global, entry.name, .uri, entry.id);
     }
 }
 
 fn bindNumberNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
-    const number_mod = @import("../exec/number_ops.zig");
+    const number_mod = @import("number_ops.zig");
     for (number_static) |method| {
         if (std.mem.eql(u8, method.name, "parseInt") or std.mem.eql(u8, method.name, "parseFloat")) continue;
         const id = number_mod.staticMethodId(method.name) orelse continue;
@@ -1240,7 +1293,7 @@ fn bindNumberNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
 }
 
 fn bindStringNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
-    const string_mod = @import("../exec/string_builtin_ops.zig");
+    const string_mod = @import("string_builtin_ops.zig");
     for (string_static) |method| {
         const id = string_mod.staticMethodId(method.name) orelse continue;
         try bindNativeRecordByName(rt, ctor, method.name, .string, id);
@@ -1275,7 +1328,7 @@ fn defineCollectionSizeAccessorAssumingNew(rt: *core.JSRuntime, proto: *core.Obj
 }
 
 fn bindDateNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
-    const date_mod = @import("../exec/date_ops.zig");
+    const date_mod = @import("date_ops.zig");
     ctor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.date, @intFromEnum(date_mod.ConstructorMethod.construct)));
     for (date_static) |method| {
         const id = date_mod.staticMethodId(method.name) orelse continue;
@@ -1305,7 +1358,7 @@ fn bindArrayBufferStaticNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !
 }
 
 fn bindArrayNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
-    const array_mod = @import("../exec/array_builtin_ops.zig");
+    const array_mod = @import("array_builtin_ops.zig");
     for (array_static) |method| {
         const id = array_mod.staticMethodId(method.name) orelse continue;
         try bindNativeRecordByName(rt, ctor, method.name, .array, id);
@@ -1314,7 +1367,7 @@ fn bindArrayNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
 
 fn bindArrayPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return;
-    const array_mod = @import("../exec/array_builtin_ops.zig");
+    const array_mod = @import("array_builtin_ops.zig");
     for (array_prototype) |method| {
         const id = array_mod.prototypeMethodId(method.name) orelse continue;
         try bindNativeRecordByName(rt, proto, method.name, .array, id);
@@ -2127,57 +2180,6 @@ const iterator_prototype = [_]Method{
     .{ .name = "some", .length = 1 },
     .{ .name = "reduce", .length = 1 },
     .{ .name = "toArray", .length = 0 },
-};
-
-const constructor_specs = [_]ConstructorSpec{
-    .{ .name = "Object", .kind = .object, .length = 1, .static_methods = &object_static, .prototype_methods = &object_prototype },
-    .{ .name = "Function", .kind = .function, .length = 1, .prototype_methods = &function_prototype },
-    .{ .name = "Array", .kind = .array, .length = 1, .static_methods = &array_static, .prototype_methods = &array_prototype },
-    .{ .name = "String", .kind = .string, .length = 1, .static_methods = &string_static, .prototype_methods = &string_prototype },
-    .{ .name = "Number", .kind = .number, .length = 1, .static_methods = &number_static, .prototype_methods = &number_prototype },
-    .{ .name = "Boolean", .kind = .boolean, .length = 1, .prototype_methods = &primitive_prototype },
-    .{ .name = "Symbol", .kind = .symbol, .length = 0, .static_methods = &symbol_static, .prototype_methods = &primitive_prototype },
-    .{ .name = "BigInt", .kind = .bigint, .length = 1, .static_methods = &bigint_static, .prototype_methods = &primitive_prototype },
-    .{ .name = "Date", .kind = .date, .length = 7, .static_methods = &date_static, .prototype_methods = &date_prototype },
-    .{ .name = "RegExp", .kind = .regexp, .length = 2, .prototype_methods = &regexp_prototype },
-    .{ .name = "AggregateError", .kind = .aggregate_error, .length = 2, .prototype_methods = &no_methods },
-    .{ .name = "SuppressedError", .kind = .suppressed_error, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Error", .kind = .error_, .length = 1, .static_methods = &error_static, .prototype_methods = &error_prototype },
-    .{ .name = "EvalError", .kind = .eval_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "RangeError", .kind = .range_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "ReferenceError", .kind = .reference_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "SyntaxError", .kind = .syntax_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "TypeError", .kind = .type_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "URIError", .kind = .uri_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "InternalError", .kind = .internal_error, .length = 1, .prototype_methods = &no_methods },
-    .{ .name = "DOMException", .kind = .dom_exception, .length = 2, .prototype_methods = &no_methods },
-    .{ .name = "DisposableStack", .kind = .disposable_stack, .length = 0, .prototype_methods = &disposable_stack_prototype },
-    .{ .name = "AsyncDisposableStack", .kind = .async_disposable_stack, .length = 0, .prototype_methods = &async_disposable_stack_prototype },
-    .{ .name = "Promise", .kind = .promise, .length = 1, .static_methods = &promise_static, .prototype_methods = &promise_prototype },
-    .{ .name = "Map", .kind = .map, .length = 0, .static_methods = &map_static, .prototype_methods = &map_prototype },
-    .{ .name = "Set", .kind = .set, .length = 0, .prototype_methods = &set_prototype },
-    .{ .name = "WeakMap", .kind = .weak_map, .length = 0, .prototype_methods = &weak_map_prototype },
-    .{ .name = "WeakSet", .kind = .weak_set, .length = 0, .prototype_methods = &weak_set_prototype },
-    .{ .name = "WeakRef", .kind = .weak_ref, .length = 1, .prototype_methods = &weak_ref_prototype },
-    .{ .name = "FinalizationRegistry", .kind = .finalization_registry, .length = 1, .prototype_methods = &finalization_registry_prototype },
-    .{ .name = "ArrayBuffer", .kind = .array_buffer, .length = 1, .static_methods = &array_buffer_static, .prototype_methods = &buffer_prototype },
-    .{ .name = "SharedArrayBuffer", .kind = .shared_array_buffer, .length = 1, .prototype_methods = &shared_buffer_prototype },
-    .{ .name = "TypedArray", .kind = .typed_array, .length = 0, .static_methods = &typed_array_static, .prototype_methods = &typed_array_prototype },
-    .{ .name = "Int8Array", .kind = .int8_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Uint8Array", .kind = .uint8_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Uint8ClampedArray", .kind = .uint8_clamped_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Int16Array", .kind = .int16_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Uint16Array", .kind = .uint16_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Int32Array", .kind = .int32_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Uint32Array", .kind = .uint32_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Float16Array", .kind = .float16_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Float32Array", .kind = .float32_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "Float64Array", .kind = .float64_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "BigInt64Array", .kind = .bigint64_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "BigUint64Array", .kind = .biguint64_array, .length = 3, .prototype_methods = &no_methods },
-    .{ .name = "DataView", .kind = .data_view, .length = 1, .prototype_methods = &data_view_prototype },
-    .{ .name = "Proxy", .kind = .proxy, .length = 2, .static_methods = &proxy_static },
-    .{ .name = "Iterator", .kind = .iterator, .length = 0, .static_methods = &iterator_static, .prototype_methods = &iterator_prototype },
 };
 
 // Math/JSON method declarations live with their implementations
@@ -3106,4 +3108,150 @@ fn wireNativeFunctionPrototype(rt: *core.JSRuntime, value: core.JSValue, functio
         => try object.setPrototype(rt, function_proto),
         else => {},
     }
+}
+
+pub const Intrinsics = struct {
+    global: *core.Object,
+
+    pub fn init(rt: *core.JSRuntime) !Intrinsics {
+        const global = try core.Object.createWithOwnPropertyCapacity(
+            rt,
+            core.class.ids.object,
+            null,
+            standardGlobalOwnPropertyCapacity(),
+        );
+        errdefer global.value().free(rt);
+        try installStandardGlobals(rt, global);
+        return .{ .global = global };
+    }
+
+    pub fn deinit(self: *Intrinsics, rt: *core.JSRuntime) void {
+        self.global.value().free(rt);
+    }
+};
+
+const standard_global_domains = [_][]const u8{
+    "Object",
+    "Function",
+    "Array",
+    "String",
+    "Number",
+    "Boolean",
+    "Symbol",
+    "BigInt",
+    "Math",
+    "Date",
+    "JSON",
+    "RegExp",
+    "Error",
+    "Promise",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "ArrayBuffer",
+    "TypedArray",
+    "DataView",
+    "Reflect",
+    "Proxy",
+    "Iterator",
+    "Atomics",
+};
+
+test "intrinsic bootstrap registers global builtin domains through object properties" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var intrinsics = try Intrinsics.init(rt);
+    defer intrinsics.deinit(rt);
+
+    for (standard_global_domains) |name| {
+        const atom_id = try rt.internAtom(name);
+        defer rt.atoms.free(atom_id);
+        try std.testing.expect(intrinsics.global.hasOwnProperty(atom_id));
+        const desc = intrinsics.global.getOwnProperty(rt, atom_id).?;
+        defer desc.destroy(rt);
+        try std.testing.expectEqual(true, desc.writable.?);
+        try std.testing.expectEqual(false, desc.enumerable.?);
+        try std.testing.expectEqual(true, desc.configurable.?);
+    }
+
+    const map_atom = try rt.internAtom("Map");
+    defer rt.atoms.free(map_atom);
+    const map_ctor = intrinsics.global.getProperty(map_atom);
+    defer map_ctor.free(rt);
+    try std.testing.expect(map_ctor.isObject());
+    const map_ctor_object: *core.Object = @fieldParentPtr("header", map_ctor.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
+
+    const prototype_atom = try rt.internAtom("prototype");
+    defer rt.atoms.free(prototype_atom);
+    const prototype_desc = map_ctor_object.getOwnProperty(rt, prototype_atom).?;
+    defer prototype_desc.destroy(rt);
+    try std.testing.expectEqual(false, prototype_desc.writable.?);
+    try std.testing.expectEqual(false, prototype_desc.enumerable.?);
+    try std.testing.expectEqual(false, prototype_desc.configurable.?);
+    try std.testing.expect(prototype_desc.value.isObject());
+    const map_proto: *core.Object = @fieldParentPtr("header", prototype_desc.value.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
+
+    const set_atom = try rt.internAtom("set");
+    defer rt.atoms.free(set_atom);
+    const set_desc = map_proto.getOwnProperty(rt, set_atom).?;
+    defer set_desc.destroy(rt);
+    try std.testing.expectEqual(true, set_desc.writable.?);
+    try std.testing.expectEqual(false, set_desc.enumerable.?);
+    try std.testing.expectEqual(true, set_desc.configurable.?);
+    try std.testing.expect(set_desc.value.isObject());
+    const set_func_obj: *core.Object = @fieldParentPtr("header", set_desc.value.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
+}
+
+test "lazy standard functions attach typed records for every formerly exceptional domain" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var intrinsics = try Intrinsics.init(rt);
+    defer intrinsics.deinit(rt);
+
+    const Expected = struct {
+        owner: []const u8,
+        method: []const u8,
+        domain: core.function.NativeBuiltinDomain,
+        id: u32,
+    };
+    const expected = [_]Expected{
+        .{ .owner = "Atomics", .method = "waitAsync", .domain = .atomics, .id = @intFromEnum(atomics_builtin.StaticMethod.wait_async) },
+        .{ .owner = "performance", .method = "now", .domain = .performance, .id = 1 },
+        .{ .owner = "Promise", .method = "all", .domain = .promise, .id = @intFromEnum(promise_ops.LegacyStaticMethod.all) },
+        .{ .owner = "Promise", .method = "allKeyed", .domain = .promise, .id = @intFromEnum(promise_ops.LegacyStaticMethod.all_keyed) },
+        .{ .owner = "Promise", .method = "withResolvers", .domain = .promise, .id = @intFromEnum(promise_ops.LegacyStaticMethod.with_resolvers) },
+    };
+
+    for (expected) |item| {
+        const owner_key = try temporaryStringAtom(rt, item.owner);
+        defer freeTemporaryStringAtom(rt, owner_key);
+        const owner_value = intrinsics.global.getProperty(owner_key);
+        defer owner_value.free(rt);
+        const owner = expectObject(owner_value);
+
+        const method_key = try temporaryStringAtom(rt, item.method);
+        defer freeTemporaryStringAtom(rt, method_key);
+        const method_value = owner.getProperty(method_key);
+        defer method_value.free(rt);
+        const function_object = expectObject(method_value);
+
+        try std.testing.expectEqual(core.function.nativeBuiltinId(item.domain, item.id), function_object.nativeFunctionId());
+        const record = function_object.nativeRecord() orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(core.host_function.NativeCProto.generic_magic, record.cproto);
+        try std.testing.expect(record.native_function != null);
+    }
+
+    const escape_key = try temporaryStringAtom(rt, "escape");
+    defer freeTemporaryStringAtom(rt, escape_key);
+    const escape_value = intrinsics.global.getProperty(escape_key);
+    defer escape_value.free(rt);
+    const escape_function = expectObject(escape_value);
+    try std.testing.expectEqual(core.function.nativeBuiltinId(.uri, core.uri.escape_id), escape_function.nativeFunctionId());
+    try std.testing.expect(escape_function.nativeRecord() != null);
 }

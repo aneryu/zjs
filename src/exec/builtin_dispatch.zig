@@ -1,18 +1,10 @@
-//! Bridge between exec's native-record dispatch sites and the
-//! builtins-owned internal record table (`rt.internal_builtins`).
+//! Typed bridge between exec's native-record dispatch sites and the
+//! runtime's standard native record table (`rt.internal_builtins`).
 //!
 //! QuickJS source map: the JSCFunctionListEntry dispatch inside
-//! JS_CallInternal. Exec probes the per-runtime table first; a hit calls the
-//! record with zero compile-time knowledge of the builtin, a miss falls back
-//! to the transitional per-domain enum dispatch (deleted class by class as
-//! Phase 6 migrates them).
-//!
-//! This module also owns the typed erase/recover helpers for the VM caller
-//! threading pair: `core.host_function.InternalCall` stores
-//! (`?*const Bytecode`, `?*Frame`) as opaque pointers because core cannot
-//! name exec/bytecode types. Builtins recover them through
-//! `callerBytecode`/`callerFrame` and use the `Bytecode`/`Frame` aliases in
-//! their own signatures instead of importing `src/bytecode.zig` directly.
+//! JS_CallInternal. The record holds a cproto-tagged function pointer; realm,
+//! host-output and VM caller state live in a stack-local exec environment,
+//! never in the core ABI payload.
 
 const std = @import("std");
 const core = @import("../core/root.zig");
@@ -26,6 +18,77 @@ const HostError = exceptions.HostError;
 
 pub const Bytecode = bytecode.Bytecode;
 pub const Frame = frame_mod.Frame;
+
+const NativeCallEnvironment = struct {
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    func_obj: ?*core.Object,
+    is_constructor: bool,
+    new_target: ?*core.Object,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+};
+
+/// Exec-side convenience view for native implementations that need more than
+/// their typed cproto arguments. It is reconstructed from the current
+/// stack-local environment and is not stored in `InternalRecord`.
+pub const NativeCall = struct {
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    magic: u16,
+    is_constructor: bool,
+    new_target: ?*core.Object,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+};
+
+inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
+    const opaque_ptr = ctx.active_native_call orelse return null;
+    return @ptrCast(@alignCast(opaque_ptr));
+}
+
+/// Recover the current exec environment while preserving the QJS-style typed
+/// native function signature at the record boundary.
+pub inline fn nativeCall(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    magic: i32,
+) ?NativeCall {
+    const env = activeNativeEnvironment(ctx) orelse return null;
+    return .{
+        .ctx = ctx,
+        .output = env.output,
+        .global = env.global,
+        .globals = env.globals,
+        .func_obj = env.func_obj,
+        .this_value = this_value,
+        .args = args,
+        .magic = @intCast(magic),
+        .is_constructor = env.is_constructor,
+        .new_target = env.new_target,
+        .caller_function = env.caller_function,
+        .caller_frame = env.caller_frame,
+    };
+}
+
+pub fn genericMagicFunction(comptime implementation: core.host_function.NativeGenericMagicFn) core.host_function.NativeFunctionPtr {
+    return .{ .generic_magic = implementation };
+}
+
+pub fn constructorOrFunctionMagic(comptime implementation: core.host_function.NativeGenericMagicFn) core.host_function.NativeFunctionPtr {
+    return .{ .constructor_or_func_magic = implementation };
+}
+
+pub fn constructorMagic(comptime implementation: core.host_function.NativeGenericMagicFn) core.host_function.NativeFunctionPtr {
+    return .{ .constructor_magic = implementation };
+}
 
 const NativeBacktraceData = struct {
     function_value: core.JSValue,
@@ -94,8 +157,8 @@ pub fn materializeRuntimeError(ctx: *core.JSContext, global: ?*core.Object, err:
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record.
-/// Returns null when the id is not (yet) table-dispatched so the caller can
-/// continue with the transitional enum dispatch.
+/// Returns null for the separate host domain, an invalid/gap id, or a runtime
+/// that has not installed standard globals yet.
 pub fn callInternalRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -116,8 +179,7 @@ pub fn callInternalRecord(
 /// probe. Divergence B: `fastNativeMethodCall` memoizes the resolved record on
 /// the func-object payload (qjs `func = p->u.cfunc.c_function`), and the memo only
 /// ever stores records that already passed the probe, so re-validating on every
-/// hot call is pure overhead. Shares the `InternalCall` build with
-/// `callInternalRecord`. Returns the record's result (unwrapped, never null — a
+/// hot call is pure overhead. Returns the record's result (unwrapped, never null — a
 /// resolved record always dispatches).
 pub inline fn callInternalRecordDirect(
     ctx: *core.JSContext,
@@ -140,7 +202,21 @@ pub inline fn callInternalRecordDirect(
     native_scope.push();
     defer native_scope.deinit();
 
-    return invokeResolvedInternalRecord(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame) catch |err| {
+    const native_env: NativeCallEnvironment = .{
+        .output = output,
+        .global = global,
+        .globals = globals,
+        .func_obj = func_obj,
+        .is_constructor = false,
+        .new_target = null,
+        .caller_function = caller_function,
+        .caller_frame = caller_frame,
+    };
+    const previous_native_call = ctx.active_native_call;
+    ctx.active_native_call = &native_env;
+    defer ctx.active_native_call = previous_native_call;
+
+    return invokeResolvedInternalRecord(ctx, this_value, record, args) catch |err| {
         try materializeRuntimeError(ctx, global, err);
         return err;
     };
@@ -148,75 +224,122 @@ pub inline fn callInternalRecordDirect(
 
 inline fn invokeResolvedInternalRecord(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []core.global_slots.Slot,
-    func_obj: ?*core.Object,
     this_value: core.JSValue,
     record: *const core.host_function.InternalRecord,
     args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    // Most records are still on the transitional ABI. Keep its single compare
-    // as the first branch so adding typed cprotos does not tax unmigrated
-    // builtins on every call.
-    if (record.cproto == .zjs_internal_call) {
-        const call_fn = record.call orelse blk: {
-            const native = record.native_function orelse return error.TypeError;
-            break :blk native.zjs_internal_call;
-        };
-        return invokeInternalCall(call_fn, ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
-    }
-
-    return callTypedInternalRecordDirect(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
+    return callTypedInternalRecordDirect(ctx, this_value, record, args);
 }
 
-/// Outlined so extending the typed-cproto set cannot push the overwhelmingly
-/// common transitional branch out of its callers. Typed records take one cold
-/// ABI-selection call, then their numeric function pointer remains direct.
+/// Outlined so the ABI-selection switch does not inflate hot call sites.
 noinline fn callTypedInternalRecordDirect(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []core.global_slots.Slot,
-    func_obj: ?*core.Object,
     this_value: core.JSValue,
     record: *const core.host_function.InternalRecord,
     args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
 ) HostError!core.JSValue {
+    const native = record.native_function orelse return error.TypeError;
     switch (record.cproto) {
+        .generic => {
+            const native_fn = switch (native) {
+                .generic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .constructor => {
+            const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
+            if (!env.is_constructor) return error.TypeError;
+            const native_fn = switch (native) {
+                .constructor => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .constructor_or_func => {
+            const native_fn = switch (native) {
+                .constructor_or_func => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .generic_magic => {
+            const native_fn = switch (native) {
+                .generic_magic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .constructor_magic => {
+            const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
+            if (!env.is_constructor) return error.TypeError;
+            const native_fn = switch (native) {
+                .constructor_magic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .constructor_or_func_magic => {
+            const native_fn = switch (native) {
+                .constructor_or_func_magic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .getter => {
+            const native_fn = switch (native) {
+                .getter => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .setter => {
+            const native_fn = switch (native) {
+                .setter => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .getter_magic => {
+            const native_fn = switch (native) {
+                .getter_magic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, record.magic) catch |err| return @as(HostError, @errorCast(err));
+        },
+        .setter_magic => {
+            const native_fn = switch (native) {
+                .setter_magic => |function| function,
+                else => return error.TypeError,
+            };
+            return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic) catch |err| return @as(HostError, @errorCast(err));
+        },
         .f_f => {
-            const native = record.native_function orelse return error.TypeError;
             const native_fn = switch (native) {
                 .f_f => |function| function,
                 else => return error.TypeError,
             };
             const value = primitiveF64Arg(args, 0) orelse
-                return callInternalRecordFallback(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
+                return callInternalRecordFallback(ctx, this_value, record, args);
             return value_ops.numberToValue(native_fn(value));
         },
         .f_f_f => {
-            const native = record.native_function orelse return error.TypeError;
             const native_fn = switch (native) {
                 .f_f_f => |function| function,
                 else => return error.TypeError,
             };
             const lhs = primitiveF64Arg(args, 0) orelse
-                return callInternalRecordFallback(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
+                return callInternalRecordFallback(ctx, this_value, record, args);
             const rhs = primitiveF64Arg(args, 1) orelse
-                return callInternalRecordFallback(ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
+                return callInternalRecordFallback(ctx, this_value, record, args);
             return value_ops.numberToValue(native_fn(lhs, rhs));
         },
-        else => return error.TypeError,
     }
 }
 
 /// Numeric C-proto calls mirror QuickJS's primitive JS_ToFloat64 fast path.
 /// Strings, objects, BigInts and Symbols deliberately miss: the record's cold
-/// InternalCall fallback owns their full, observable ToNumber semantics.
+/// typed generic+magic fallback owns their full, observable ToNumber semantics.
 inline fn primitiveF64Arg(args: []const core.JSValue, index: usize) ?f64 {
     if (index >= args.len) return std.math.nan(f64);
     const value = args[index];
@@ -230,58 +353,22 @@ inline fn primitiveF64Arg(args: []const core.JSValue, index: usize) ?f64 {
 
 noinline fn callInternalRecordFallback(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []core.global_slots.Slot,
-    func_obj: ?*core.Object,
     this_value: core.JSValue,
     record: *const core.host_function.InternalRecord,
     args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    const call_fn = record.call orelse return error.TypeError;
-    return invokeInternalCall(call_fn, ctx, output, global, globals, func_obj, this_value, record, args, caller_function, caller_frame);
-}
-
-inline fn invokeInternalCall(
-    call_fn: core.host_function.InternalCallFn,
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []core.global_slots.Slot,
-    func_obj: ?*core.Object,
-    this_value: core.JSValue,
-    record: *const core.host_function.InternalRecord,
-    args: []const core.JSValue,
-    caller_function: ?*const Bytecode,
-    caller_frame: ?*Frame,
-) HostError!core.JSValue {
-    // Record implementations are declared with error sets contained in
-    // HostError and only widen to anyerror at the table boundary, so the
-    // narrowing cast cannot fail at runtime.
-    return call_fn(.{
-        .ctx = ctx,
-        .output = output,
-        .global = global,
-        .globals = globals,
-        .func_obj = func_obj,
-        .this_value = this_value,
-        .args = args,
-        .magic = record.magic,
-        .caller_function = caller_function,
-        .caller_frame = caller_frame,
-    }) catch |err| return @as(HostError, @errorCast(err));
+    const fallback = record.fallback_function orelse return error.TypeError;
+    return fallback(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
 }
 
 /// Probe the internal-builtin table for `native_ref` and invoke the record on
-/// the construct (`new X()`) path: `flags.constructor` is set and `prototype`
+/// the construct (`new X()`) path: the current native environment is marked as
+/// a constructor and `prototype`
 /// (the resolved new.target instance `[[Prototype]]`) is threaded so the
 /// record's construct branch can forward it to `constructWithPrototype`.
 /// Returns null when the id is not table-dispatched so the caller can fall back
 /// to its name/class construct cascade. QuickJS routes `new X()` through the
-/// same C-function pointer as a call with `JS_CFUNC_constructor`'s cproto;
-/// `flags.constructor` is the analogue selector.
+/// same C-function pointer as a call with a constructor cproto.
 ///
 /// `func_obj` is optional: the migrated construct branches (Date/RegExp/String)
 /// read only `args`/`new_target`, so VM construct fast paths that already hold
@@ -335,34 +422,30 @@ fn callConstructRecordImpl(
     caller_frame: ?*Frame,
 ) HostError!?core.JSValue {
     const record = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id) orelse return null;
-    // Only construct-capable records (the `JS_CFUNC_constructor` cproto
-    // analogue) honor `flags.constructor`; a plain record at this id (e.g. a
+    // Only construct-capable records honor the construct environment; a plain
+    // record at this id (e.g. a
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
-    if (!record.constructor) return null;
-    if (record.cproto != .zjs_internal_call) return error.TypeError;
-    const call_fn = record.call orelse blk: {
-        const native = record.native_function orelse return error.TypeError;
-        break :blk native.zjs_internal_call;
-    };
+    if (!record.isConstructor()) return null;
     var native_scope = NativeBacktraceScope.init(ctx, func_obj);
     if (push_native_frame) native_scope.push();
     defer native_scope.deinit();
 
-    return call_fn(.{
-        .ctx = ctx,
+    const native_env: NativeCallEnvironment = .{
         .output = output,
         .global = global,
         .globals = globals,
         .func_obj = func_obj,
-        .this_value = core.JSValue.undefinedValue(),
-        .args = args,
-        .magic = record.magic,
-        .flags = .{ .constructor = true },
+        .is_constructor = true,
         .new_target = prototype,
         .caller_function = caller_function,
         .caller_frame = caller_frame,
-    }) catch |err| {
+    };
+    const previous_native_call = ctx.active_native_call;
+    ctx.active_native_call = &native_env;
+    defer ctx.active_native_call = previous_native_call;
+
+    return invokeResolvedInternalRecord(ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
         const host_err = @as(HostError, @errorCast(err));
         try materializeRuntimeError(ctx, global, host_err);
         return host_err;
@@ -377,23 +460,21 @@ fn callConstructRecordImpl(
 /// custom `name` still validates as a constructor. Misses report false.
 pub fn isConstructRecordRef(rt: *const core.JSRuntime, native_ref: core.function.NativeBuiltinRef) bool {
     const record = rt.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id) orelse return false;
-    return record.constructor;
+    return record.isConstructor();
 }
 
-/// Recover the typed VM caller bytecode from an internal call.
-pub fn callerBytecode(call: core.host_function.InternalCall) ?*const Bytecode {
-    const ptr = call.caller_function orelse return null;
-    return @ptrCast(@alignCast(ptr));
+/// Recover the typed VM caller bytecode from a native call.
+pub fn callerBytecode(call: NativeCall) ?*const Bytecode {
+    return call.caller_function;
 }
 
-/// Recover the typed VM caller frame from an internal call.
-pub fn callerFrame(call: core.host_function.InternalCall) ?*Frame {
-    const ptr = call.caller_frame orelse return null;
-    return @ptrCast(@alignCast(ptr));
+/// Recover the typed VM caller frame from a native call.
+pub fn callerFrame(call: NativeCall) ?*Frame {
+    return call.caller_frame;
 }
 
 /// True when the instruction the VM caller will execute on return is `drop`,
-/// i.e. the call result is discarded. Builtins use this to take the
+/// i.e. the call result is discarded. Native operation domains use this to take the
 /// result-free mutation fast path (e.g. `Map.prototype.set`/`Set.prototype.add`
 /// in statement position) without importing `src/bytecode.zig` for the opcode
 /// constant. Mirrors `vm_call.zig`'s `preparedCallResultIsDropped`.

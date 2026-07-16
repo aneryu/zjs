@@ -176,53 +176,12 @@ pub const CallbackHost = struct {
 // QuickJS source map: JSCFunctionListEntry (quickjs.h) + JS_CallInternal's
 // C-function dispatch. The target shape is engine-owned standard-global
 // bootstrap plus per-domain function-list tables near their implementations.
-// During migration, `src/builtins/*` still declares many tables/bodies and
-// `src/builtins/internal_table.zig` materializes the static per-domain record
-// table at comptime.
+// Domain tables and implementations live in exec; `src/exec/internal_builtins.zig`
+// materializes their static per-domain record table at comptime.
 
-/// Per-call selector flags (QuickJS C-function cproto analogue). `constructor`
-/// distinguishes the construct (`new X()`) path from a plain call: when set,
-/// the record handler runs its construct branch (using `InternalCall.new_target`
-/// as the resolved instance `[[Prototype]]`) instead of the call body.
-pub const InternalCallFlags = struct {
-    constructor: bool = false,
-};
-
-/// Argument pack for one internal-builtin invocation. Mirrors the exec-side
-/// `HostCall` shape (ctx/output/global/globals/func_obj/this/args) plus the
-/// `magic` selector from the record (JSCFunctionListEntry.magic analogue) and
-/// the VM caller threading pair. The caller pair is exec's
-/// (`?*const bytecode.Bytecode`, `?*Frame`) erased to opaque pointers because
-/// core cannot name exec types; `exec/builtin_dispatch.zig` owns the typed
-/// erase/recover helpers.
-pub const InternalCall = struct {
-    ctx: *JSContext,
-    output: ?*std.Io.Writer = null,
-    global: ?*Object = null,
-    globals: []global_slots.Slot = &.{},
-    func_obj: ?*Object = null,
-    this_value: JSValue,
-    args: []const JSValue,
-    magic: u16 = 0,
-    flags: InternalCallFlags = .{},
-    /// Construct [[Prototype]] for the constructor record's construct branch
-    /// (only meaningful when `flags.constructor` is set). See
-    /// `InternalCallFlags` doc above.
-    new_target: ?*Object = null,
-    caller_function: ?*const anyopaque = null,
-    caller_frame: ?*anyopaque = null,
-};
-
-/// Record implementations are declared with concrete error sets and coerce to
-/// `anyerror` at the table boundary; the exec dispatch site narrows back to its
-/// host error set (same contract as `ExternalCallFn`).
-pub const InternalCallFn = *const fn (call: InternalCall) anyerror!JSValue;
-
-/// QuickJS `JSCFunctionEnum` analogue. Most existing zjs records start on the
-/// transitional `.zjs_internal_call` cproto; simpler domains can migrate to the
-/// QJS-style signatures without changing the native function object ABI again.
+/// QuickJS `JSCFunctionEnum` analogue. A record's cproto is its complete call
+/// ABI and construct capability; there is no parallel generic-call payload.
 pub const NativeCProto = enum(u8) {
-    zjs_internal_call,
     generic,
     generic_magic,
     constructor,
@@ -235,7 +194,6 @@ pub const NativeCProto = enum(u8) {
     setter_magic,
     f_f,
     f_f_f,
-    iterator_next,
 };
 
 pub const NativeGenericFn = *const fn (
@@ -258,16 +216,7 @@ pub const NativeSetterMagicFn = *const fn (ctx: *JSContext, this_value: JSValue,
 pub const NativeF64Fn = *const fn (value: f64) f64;
 pub const NativeF64F64Fn = *const fn (lhs: f64, rhs: f64) f64;
 
-pub const NativeIteratorNextFn = *const fn (
-    ctx: *JSContext,
-    this_value: JSValue,
-    args: []const JSValue,
-    magic: i32,
-    done: *i32,
-) anyerror!JSValue;
-
 pub const NativeFunctionPtr = union(NativeCProto) {
-    zjs_internal_call: InternalCallFn,
     generic: NativeGenericFn,
     generic_magic: NativeGenericMagicFn,
     constructor: NativeGenericFn,
@@ -280,41 +229,42 @@ pub const NativeFunctionPtr = union(NativeCProto) {
     setter_magic: NativeSetterMagicFn,
     f_f: NativeF64Fn,
     f_f_f: NativeF64F64Fn,
-    iterator_next: NativeIteratorNextFn,
 };
 
-/// One dispatchable builtin. Slots whose `call` is null are unoccupied
-/// (unmigrated or gap ids); lookups treat them as missing.
+pub fn isConstructorCProto(cproto: NativeCProto) bool {
+    return switch (cproto) {
+        .constructor, .constructor_magic, .constructor_or_func, .constructor_or_func_magic => true,
+        else => false,
+    };
+}
+
+/// One dispatchable builtin. Slots whose `native_function` is null are
+/// unoccupied gap ids; lookups treat them as missing.
 pub const InternalRecord = struct {
     /// Spec `length` of the function (JSCFunctionListEntry.length analogue).
     length: u8 = 0,
-    /// Selector forwarded to `call` so one implementation can serve several
+    /// Selector forwarded to the typed handler so one implementation can serve several
     /// ids (JSCFunctionListEntry.magic analogue).
     magic: u16 = 0,
     /// True when the record may be invoked without a materialized function
     /// object (prepared-call eligibility: no func_obj/realm dependence).
     prepared_call_ok: bool = false,
-    /// True when the record's `call` honors the construct (`new X()`) path:
-    /// its handler branches on `InternalCall.flags.constructor` and uses
-    /// `InternalCall.new_target` (the resolved instance prototype). The
-    /// QuickJS `JS_CFUNC_constructor` cproto analogue. Construct dispatch
-    /// (`exec/builtin_dispatch.callConstructRecord`) only invokes records with
-    /// this set; other records report a miss so the caller falls through to
-    /// its construct cascade.
-    constructor: bool = false,
     /// Function.prototype.call-style transparent forwarding. The VM may reuse
     /// its current bytecode Machine for an eligible target while retaining this
     /// record as a synthetic native frame in observable error stacks.
     forwards_call: bool = false,
-    cproto: NativeCProto = .zjs_internal_call,
-    /// Primary handler for `.zjs_internal_call`; optional cold coercion
-    /// fallback for typed cprotos such as `.f_f`/`.f_f_f` when their arguments
-    /// are not already primitive numbers.
-    call: ?InternalCallFn = null,
+    cproto: NativeCProto = .generic,
     native_function: ?NativeFunctionPtr = null,
+    /// Cold observable-coercion path for numeric cprotos. It uses the same
+    /// typed generic+magic ABI as ordinary native records.
+    fallback_function: ?NativeGenericMagicFn = null,
 
     pub fn hasCallable(self: InternalRecord) bool {
-        return self.call != null or self.native_function != null;
+        return self.native_function != null;
+    }
+
+    pub fn isConstructor(self: InternalRecord) bool {
+        return isConstructorCProto(self.cproto);
     }
 };
 
@@ -329,16 +279,12 @@ pub const InternalEntry = struct {
     id: u32,
     magic: u16 = 0,
     prepared_call_ok: bool = false,
-    /// See `InternalRecord.constructor`: marks a construct-capable record so
-    /// the construct dispatch path routes `new X()` here.
-    constructor: bool = false,
     /// See `InternalRecord.forwards_call`.
     forwards_call: bool = false,
-    cproto: NativeCProto = .zjs_internal_call,
-    /// See `InternalRecord.call`: typed cproto entries may retain a slow
-    /// InternalCall fallback for observable coercion cases.
-    call: ?InternalCallFn = null,
+    cproto: NativeCProto = .generic,
     native_function: ?NativeFunctionPtr = null,
+    /// See `InternalRecord.fallback_function`.
+    fallback_function: ?NativeGenericMagicFn = null,
 };
 
 // --- Builtin method-id enums ------------------------------------------------
@@ -346,10 +292,8 @@ pub const InternalEntry = struct {
 // Domain-local method-id namespace: the low part of the encoded native builtin
 // id (`function.nativeBuiltinId(domain, id)`), companion to `NativeBuiltinDomain`
 // in `core/function.zig`. These enums are pure data shared by the VM (prepared
-// gates + decoded-id comparison in exec) and the builtin dispatch/install side.
-// They live in core so exec can reference ids without importing builtins;
-// `src/builtins/*` re-exports each enum under its original name, so builtin
-// dispatch code keeps using `StaticMethod.foo` unchanged. Enum *values* are
+// gates + decoded-id comparison in exec) and the standard-native dispatch/install side.
+// They live in core so exec modules share one neutral id namespace. Enum *values* are
 // load-bearing: they are baked into the comptime record tables and into already
 // compiled bytecode's native-builtin ids, so they must never change here.
 pub const builtin_method_ids = struct {
@@ -421,8 +365,8 @@ pub const builtin_method_ids = struct {
         // `JSON.*` static method ids. Mirrored here (next to the other domain
         // id enums) so import-free exec sites -- e.g. the synthetic JSON module
         // loader in exec/module.zig -- can name `JSON.parse`'s native id when
-        // routing through the internal record table without importing builtins.
-        // `builtins/json.zig` re-exports this as its `StaticMethod`.
+        // routing through the internal record table without importing the JSON
+        // operation module.
         pub const StaticMethod = enum(u32) {
             is_raw_json = 1,
             parse = 2,
@@ -752,6 +696,8 @@ pub const builtin_method_ids = struct {
             any = 6,
             try_ = 7,
             with_resolvers = 8,
+            all_keyed = 9,
+            all_settled_keyed = 10,
         };
     };
 
@@ -861,11 +807,10 @@ pub const builtin_method_ids = struct {
 // above. These are engine metadata (the QuickJS analogue lives next to the
 // JSCFunctionListEntry tables), consulted by the VM prepared-call gates and the
 // decoded-id comparison in exec, by the legacy method-call cascade, and by the
-// builtins property-install side. They depend only on `std`, the enum values
+// standard-global property-install side. They depend only on `std`, the enum values
 // here, and `class.ClassId`; they touch no runtime state (no install/registry
-// table) and run no VM machinery, so they live in core and exec/builtins are
-// clients. `src/builtins/*` re-exports each helper under its original name so
-// the dispatch/install code keeps calling them unchanged. The returned *values*
+// table) and run no VM machinery, so they live in core and exec is the client.
+// The returned *values*
 // are load-bearing (baked into comptime record tables, compiled bytecode native
 // ids, and the legacy method-id numbering) and must never change here.
 pub const builtin_method_id_lookup = struct {
@@ -1486,7 +1431,7 @@ pub const builtin_method_id_lookup = struct {
         /// Maps a global URI function name to its encode/decode mode selector
         /// (1=encodeURI, 2=encodeURIComponent, 3=decodeURI,
         /// 4=decodeURIComponent). Pure name->id mapping; relocated to engine
-        /// core in Phase 6b-3 STEP 2. `builtins/uri.zig` re-exports it.
+        /// core in Phase 6b-3 STEP 2.
         pub fn methodId(name: []const u8) ?u32 {
             if (std.mem.eql(u8, name, "encodeURI")) return 1;
             if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;

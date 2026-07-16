@@ -3102,7 +3102,7 @@ pub const Object = extern struct {
         if (!self.isArray()) return true;
         // During intrinsic installation %Array.prototype% is a real Array but
         // owns no dense element buffer. Its only class-union pointer is the
-        // cold ordinary payload used by the transitional lazy-builtin layer.
+        // cold ordinary payload used while standard globals are bootstrapped.
         return !self.flags.fast_array and
             self.flags.class_payload_kind == .ordinary and
             self.u.array.capacity == 0;

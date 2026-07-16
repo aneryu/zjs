@@ -1,7 +1,6 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
-const builtins = @import("../builtins/root.zig");
 
 const JSRuntime = core.JSRuntime;
 const Object = core.Object;
@@ -21,12 +20,10 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
         }.cb;
     }
     // The context-global materializer above bootstraps the standard globals
-    // through `rt.installStandardGlobals`; wire the installer here so exec
-    // never names the registry directly.
+    // through `rt.installStandardGlobals`; configure the callback and its
+    // matching capacity together before the first realm is materialized.
     if (rt.install_standard_globals_cb == null) {
-        builtins.registry.registerStandardGlobalsDefault();
-        rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
-        rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
+        exec.standard_globals.configureRuntime(rt);
     }
 }
 

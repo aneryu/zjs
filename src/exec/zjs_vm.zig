@@ -586,5 +586,5 @@ pub const getValueProperty = class_vm.getValueProperty;
 
 // `engine eval host globals and throw intrinsic tear down cleanly` was relocated
 // to `src/tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
-// standard globals through `rt.installStandardGlobals`, which needs the builtins
-// installer registered, and exec source must not name the builtins registry.
+// standard globals through `rt.installStandardGlobals`, with the installer
+// registered through the runtime bootstrap seam.

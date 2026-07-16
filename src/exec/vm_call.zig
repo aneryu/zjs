@@ -549,10 +549,10 @@ inline fn fastNativeMethodCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     // QuickJS uniform dispatch: the `call_method` opcode hot
-    // path routes through the same builtins-owned internal record table the slow
+    // path routes through the same exec-owned internal record table the general
     // record dispatch (`call.zig:callNativeFunctionRecord`) and the plain-call
     // VM fast path (`call_runtime.callNativeBuiltinRecordForVm`) use, so exec
-    // carries zero compile-time knowledge of the migrated builtins. The retired
+    // carries zero compile-time knowledge of individual native domains. The retired
     // per-domain hot subset (math min/max primitives, the URI string fast path,
     // Number.parse{Int,Float}, String.fromCharCode / substring primitive, the
     // Array prototype hub, the collection / regexp / JSON record glue) is gone:
@@ -576,9 +576,9 @@ inline fn fastNativeMethodCall(
     // A table MISS returns null so the caller falls through to the array
     // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
     // name-based TypedArray slice/subarray path that has no native-builtin id)
-    // and then the generic value/bytecode dispatch — the same fall-through the
-    // non-table domains (`.atomics` / `.performance` / `.host`) and the
-    // still-unmigrated Promise record ids already relied on.
+    // and then the generic value/bytecode dispatch. Among encoded native
+    // domains, only the separate host mechanism intentionally has no standard
+    // record table.
     const function_object = property_ops.expectObject(func) catch return null;
     // This is specifically the native c_function fast path. Bytecode functions
     // use the same FunctionPayload kind, but qjs discriminates their overlaid

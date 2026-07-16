@@ -274,15 +274,10 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
 pub const helpers = struct {
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
     /// tests that build a runtime directly (bypassing the binding-layer context
-    /// create that wires the installer). Phase 6b-3 STEP 7B routed the install
-    /// through `rt.installStandardGlobals`, which needs the builtins installer
-    /// registered first; exec source cannot name the builtins registry, so the
-    /// test tree (which imports builtins) registers it here. Idempotent.
+    /// create that wires the installer). The deep setup interface keeps the
+    /// installer callback and its capacity invariant together. Idempotent.
     pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void {
-        const registry = engine.builtins.registry;
-        registry.registerStandardGlobalsDefault();
-        rt.install_standard_globals_cb = registry.installStandardGlobals;
-        rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+        engine.exec.standard_globals.configureRuntime(rt);
     }
 
     pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
@@ -647,7 +642,7 @@ pub const helpers = struct {
                 .call = call,
                 .finalizer = finalizer,
             });
-            const function_value = try engine.builtins.function.nativeFunction(self.runtime, name, length);
+            const function_value = try engine.core.function.nativeFunction(self.runtime, name, length);
             errdefer function_value.free(self.runtime);
 
             const function_object = try engine.exec.property_ops.expectObject(function_value);
@@ -1256,7 +1251,7 @@ test "value ops own primitive VM semantics" {
     defer same_string.free(rt);
     try std.testing.expect(same_string.same(one_string));
 
-    const boxed_one = try engine.builtins.string.constructWithPrototype(rt, &.{one_string}, null);
+    const boxed_one = try engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{one_string}, null);
     defer boxed_one.free(rt);
     const boxed_one_object: *core.Object = @fieldParentPtr("header", boxed_one.refHeader().?);
     const boxed_one_data = boxed_one_object.objectData() orelse return error.TypeError;
@@ -1264,7 +1259,7 @@ test "value ops own primitive VM semantics" {
 
     const symbol_atom = try rt.atoms.newSymbol("boxed", .symbol);
     defer rt.atoms.free(symbol_atom);
-    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
+    try std.testing.expectError(error.TypeError, engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
 
     const name = try rt.internAtom("loose-eq");
     defer rt.atoms.free(name);
@@ -1374,7 +1369,7 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
 }
 
 test "global closure get before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1402,7 +1397,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
 }
 
 test "global closure set before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1419,7 +1414,7 @@ test "global closure set before top-level lexical initialization honors TDZ" {
 }
 
 test "global closure update before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1436,7 +1431,7 @@ test "global closure update before top-level lexical initialization honors TDZ" 
 }
 
 test "Annex B block function updates existing global function binding" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1458,7 +1453,7 @@ test "Annex B block function updates existing global function binding" {
 }
 
 test "Annex B eval block function updates global function binding mirrors" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1486,7 +1481,7 @@ test "Annex B eval block function updates global function binding mirrors" {
 }
 
 test "Annex B direct eval global function does not block later script lexical declaration" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1513,7 +1508,7 @@ test "Annex B direct eval global function does not block later script lexical de
 }
 
 test "sloppy global assignment creates deletable object property" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1661,7 +1656,7 @@ test "call subsystem installs and invokes host globals" {
     defer test262_error.free(rt);
     try std.testing.expect(test262_error.isObject());
 
-    const map_value = try engine.builtins.collection.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.construct(rt, 1);
     defer map_value.free(rt);
     const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
     const set_key = try rt.internAtom("set");
@@ -1725,7 +1720,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqual(core.host_function.NativeCProto.f_f_f, atan2_record.cproto);
     try std.testing.expect(atan2_record.native_function != null);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notMathAbs", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notMathAbs", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = abs_object.nativeFunctionIdSlot().*;
@@ -1805,7 +1800,7 @@ test "bytecode call view memo is shared by the function bytecode" {
 }
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1826,7 +1821,7 @@ test "Math cproto dispatch preserves observable ToNumber semantics" {
 }
 
 test "local add_loc retains string snapshots while using a rope tail" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1870,7 +1865,7 @@ test "local add_loc retains string snapshots while using a rope tail" {
 }
 
 test "checked lexical string accumulation keeps rope depth bounded" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1987,7 +1982,7 @@ test "native dispatch metadata is internal and ignores user properties" {
 }
 
 test "scope resolver skips popped lexical shadow for destructured parameter" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -2943,7 +2938,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const is_integer_object: *core.Object = @fieldParentPtr("header", is_integer_value.refHeader().?);
     try std.testing.expect(is_integer_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_static = try engine.builtins.function.nativeFunction(rt, "notNumberIsInteger", 1);
+    const fake_static = try engine.core.function.nativeFunction(rt, "notNumberIsInteger", 1);
     defer fake_static.free(rt);
     const fake_static_object: *core.Object = @fieldParentPtr("header", fake_static.refHeader().?);
     fake_static_object.nativeFunctionIdSlot().* = is_integer_object.nativeFunctionIdSlot().*;
@@ -2963,7 +2958,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const to_fixed_object: *core.Object = @fieldParentPtr("header", to_fixed_value.refHeader().?);
     try std.testing.expect(to_fixed_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_proto = try engine.builtins.function.nativeFunction(rt, "notNumberToFixed", 1);
+    const fake_proto = try engine.core.function.nativeFunction(rt, "notNumberToFixed", 1);
     defer fake_proto.free(rt);
     const fake_proto_object: *core.Object = @fieldParentPtr("header", fake_proto.refHeader().?);
     fake_proto_object.nativeFunctionIdSlot().* = to_fixed_object.nativeFunctionIdSlot().*;
@@ -3016,7 +3011,7 @@ test "string static native builtin records ignore dispatch names" {
     const from_code_point_object: *core.Object = @fieldParentPtr("header", from_code_point_value.refHeader().?);
     try std.testing.expect(from_code_point_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notStringFromCodePoint", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notStringFromCodePoint", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = from_code_point_object.nativeFunctionIdSlot().*;
@@ -3070,7 +3065,7 @@ test "string prototype native builtin records ignore dispatch names" {
     const index_of_object: *core.Object = @fieldParentPtr("header", index_of_value.refHeader().?);
     try std.testing.expect(index_of_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notStringIndexOf", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notStringIndexOf", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = index_of_object.nativeFunctionIdSlot().*;
@@ -3163,7 +3158,7 @@ test "date static native builtin records ignore dispatch names" {
     const utc_object: *core.Object = @fieldParentPtr("header", utc_value.refHeader().?);
     try std.testing.expect(utc_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateUTC", 7);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateUTC", 7);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = utc_object.nativeFunctionIdSlot().*;
@@ -3208,7 +3203,7 @@ test "date constructor native builtin records ignore dispatch names" {
     const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
     try std.testing.expect(date_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateConstructor", 7);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateConstructor", 7);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = date_object.nativeFunctionIdSlot().*;
@@ -3231,7 +3226,7 @@ test "date constructor native builtin records ignore dispatch names" {
 
     const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
-    const construct_ms = try engine.builtins.date.methodCall(rt, construct_result, 1);
+    const construct_ms = try engine.exec.date_ops.methodCall(rt, construct_result, 1);
     defer construct_ms.free(rt);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(construct_ms).?);
 
@@ -3307,7 +3302,7 @@ test "date prototype native builtin records ignore dispatch names" {
     const set_time_object: *core.Object = @fieldParentPtr("header", set_time_value.refHeader().?);
     try std.testing.expect(set_time_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateSetTime", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateSetTime", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = set_time_object.nativeFunctionIdSlot().*;
@@ -3315,7 +3310,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notDateSetTime", dispatch_name);
 
-    const direct_receiver = try engine.builtins.date.construct(rt, &.{core.JSValue.int32(0)});
+    const direct_receiver = try engine.exec.date_ops.construct(rt, &.{core.JSValue.int32(0)});
     defer direct_receiver.free(rt);
     const direct_args = [_]core.JSValue{core.JSValue.int32(1)};
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_receiver, fake, &direct_args);
@@ -3365,7 +3360,7 @@ test "array static native builtin records ignore dispatch names" {
     const from_object: *core.Object = @fieldParentPtr("header", from_value.refHeader().?);
     try std.testing.expect(from_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_is_array = try engine.builtins.function.nativeFunction(rt, "notArrayIsArray", 1);
+    const fake_is_array = try engine.core.function.nativeFunction(rt, "notArrayIsArray", 1);
     defer fake_is_array.free(rt);
     const fake_is_array_object: *core.Object = @fieldParentPtr("header", fake_is_array.refHeader().?);
     fake_is_array_object.nativeFunctionIdSlot().* = is_array_object.nativeFunctionIdSlot().*;
@@ -3373,14 +3368,14 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(is_array_dispatch_name);
     try std.testing.expectEqualStrings("notArrayIsArray", is_array_dispatch_name);
 
-    const direct_array = try engine.builtins.array.construct(rt, &.{core.JSValue.int32(1)});
+    const direct_array = try engine.exec.array_builtin_ops.construct(rt, &.{core.JSValue.int32(1)});
     defer direct_array.free(rt);
     const direct_is_array_args = [_]core.JSValue{direct_array};
     const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args);
     defer is_array_result.free(rt);
     try std.testing.expectEqual(true, is_array_result.asBool().?);
 
-    const fake_from = try engine.builtins.function.nativeFunction(rt, "notArrayFrom", 1);
+    const fake_from = try engine.core.function.nativeFunction(rt, "notArrayFrom", 1);
     defer fake_from.free(rt);
     const fake_from_object: *core.Object = @fieldParentPtr("header", fake_from.refHeader().?);
     fake_from_object.nativeFunctionIdSlot().* = from_object.nativeFunctionIdSlot().*;
@@ -3458,7 +3453,7 @@ test "array prototype native builtin records ignore dispatch names" {
     const values_object: *core.Object = @fieldParentPtr("header", values_value.refHeader().?);
     try std.testing.expect(values_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_join = try engine.builtins.function.nativeFunction(rt, "notArrayJoin", 1);
+    const fake_join = try engine.core.function.nativeFunction(rt, "notArrayJoin", 1);
     defer fake_join.free(rt);
     const fake_join_object: *core.Object = @fieldParentPtr("header", fake_join.refHeader().?);
     fake_join_object.nativeFunctionIdSlot().* = join_object.nativeFunctionIdSlot().*;
@@ -3466,7 +3461,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(join_dispatch_name);
     try std.testing.expectEqualStrings("notArrayJoin", join_dispatch_name);
 
-    const direct_array = try engine.builtins.array.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
+    const direct_array = try engine.exec.array_builtin_ops.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
     defer direct_array.free(rt);
     const separator = (try core.string.String.createUtf8(rt, ":")).value();
     defer separator.free(rt);
@@ -3477,7 +3472,7 @@ test "array prototype native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &join_text, join_result);
     try std.testing.expectEqualStrings("1:2", join_text.items);
 
-    const fake_to_string = try engine.builtins.function.nativeFunction(rt, "notArrayToString", 0);
+    const fake_to_string = try engine.core.function.nativeFunction(rt, "notArrayToString", 0);
     defer fake_to_string.free(rt);
     const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
@@ -3488,11 +3483,11 @@ test "array prototype native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &to_string_text, to_string_result);
     try std.testing.expectEqualStrings("1,2", to_string_text.items);
 
-    const fake_map = try engine.builtins.function.nativeFunction(rt, "notArrayMap", 1);
+    const fake_map = try engine.core.function.nativeFunction(rt, "notArrayMap", 1);
     defer fake_map.free(rt);
     const fake_map_object: *core.Object = @fieldParentPtr("header", fake_map.refHeader().?);
     fake_map_object.nativeFunctionIdSlot().* = map_object.nativeFunctionIdSlot().*;
-    const fake_values = try engine.builtins.function.nativeFunction(rt, "notArrayValues", 0);
+    const fake_values = try engine.core.function.nativeFunction(rt, "notArrayValues", 0);
     defer fake_values.free(rt);
     const fake_values_object: *core.Object = @fieldParentPtr("header", fake_values.refHeader().?);
     fake_values_object.nativeFunctionIdSlot().* = values_object.nativeFunctionIdSlot().*;
@@ -3576,7 +3571,7 @@ test "collection native builtin records ignore dispatch names" {
     const set_values_object: *core.Object = @fieldParentPtr("header", set_values_value.refHeader().?);
     try std.testing.expect(set_values_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_map_set = try engine.builtins.function.nativeFunction(rt, "notMapSet", 2);
+    const fake_map_set = try engine.core.function.nativeFunction(rt, "notMapSet", 2);
     defer fake_map_set.free(rt);
     const fake_map_set_object: *core.Object = @fieldParentPtr("header", fake_map_set.refHeader().?);
     fake_map_set_object.nativeFunctionIdSlot().* = map_set_object.nativeFunctionIdSlot().*;
@@ -3584,7 +3579,7 @@ test "collection native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notMapSet", dispatch_name);
 
-    const direct_map = try engine.builtins.collection.constructWithPrototype(rt, 1, map_prototype_object);
+    const direct_map = try engine.exec.collection_ops.constructWithPrototype(rt, 1, map_prototype_object);
     defer direct_map.free(rt);
     const direct_key = (try core.string.String.createUtf8(rt, "direct")).value();
     defer direct_key.free(rt);
@@ -3592,23 +3587,23 @@ test "collection native builtin records ignore dispatch names" {
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_map, fake_map_set, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expect(direct_result.same(direct_map));
-    const direct_get_result = try engine.builtins.collection.methodCall(rt, direct_map, 2, &.{direct_key});
+    const direct_get_result = try engine.exec.collection_ops.methodCall(rt, direct_map, 2, &.{direct_key});
     defer direct_get_result.free(rt);
     try std.testing.expectEqual(@as(?i32, 7), direct_get_result.asInt32());
 
-    const fake_group_by = try engine.builtins.function.nativeFunction(rt, "notMapGroupBy", 2);
+    const fake_group_by = try engine.core.function.nativeFunction(rt, "notMapGroupBy", 2);
     defer fake_group_by.free(rt);
     const fake_group_by_object: *core.Object = @fieldParentPtr("header", fake_group_by.refHeader().?);
     fake_group_by_object.nativeFunctionIdSlot().* = group_by_object.nativeFunctionIdSlot().*;
-    const fake_map_for_each = try engine.builtins.function.nativeFunction(rt, "notMapForEach", 1);
+    const fake_map_for_each = try engine.core.function.nativeFunction(rt, "notMapForEach", 1);
     defer fake_map_for_each.free(rt);
     const fake_map_for_each_object: *core.Object = @fieldParentPtr("header", fake_map_for_each.refHeader().?);
     fake_map_for_each_object.nativeFunctionIdSlot().* = map_for_each_object.nativeFunctionIdSlot().*;
-    const fake_set_union = try engine.builtins.function.nativeFunction(rt, "notSetUnion", 1);
+    const fake_set_union = try engine.core.function.nativeFunction(rt, "notSetUnion", 1);
     defer fake_set_union.free(rt);
     const fake_set_union_object: *core.Object = @fieldParentPtr("header", fake_set_union.refHeader().?);
     fake_set_union_object.nativeFunctionIdSlot().* = set_union_object.nativeFunctionIdSlot().*;
-    const fake_set_values = try engine.builtins.function.nativeFunction(rt, "notSetValues", 0);
+    const fake_set_values = try engine.core.function.nativeFunction(rt, "notSetValues", 0);
     defer fake_set_values.free(rt);
     const fake_set_values_object: *core.Object = @fieldParentPtr("header", fake_set_values.refHeader().?);
     fake_set_values_object.nativeFunctionIdSlot().* = set_values_object.nativeFunctionIdSlot().*;
@@ -3718,31 +3713,31 @@ test "buffer native builtin records ignore dispatch names" {
     const data_view_byte_length_getter: *core.Object = @fieldParentPtr("header", data_view_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(data_view_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_is_view = try engine.builtins.function.nativeFunction(rt, "notArrayBufferIsView", 1);
+    const fake_is_view = try engine.core.function.nativeFunction(rt, "notArrayBufferIsView", 1);
     defer fake_is_view.free(rt);
     const fake_is_view_object: *core.Object = @fieldParentPtr("header", fake_is_view.refHeader().?);
     fake_is_view_object.nativeFunctionIdSlot().* = is_view_object.nativeFunctionIdSlot().*;
-    const fake_array_buffer_slice = try engine.builtins.function.nativeFunction(rt, "notArrayBufferSlice", 2);
+    const fake_array_buffer_slice = try engine.core.function.nativeFunction(rt, "notArrayBufferSlice", 2);
     defer fake_array_buffer_slice.free(rt);
     const fake_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_slice.refHeader().?);
     fake_array_buffer_slice_object.nativeFunctionIdSlot().* = array_buffer_slice_object.nativeFunctionIdSlot().*;
-    const fake_array_buffer_byte_length = try engine.builtins.function.nativeFunction(rt, "notArrayBufferByteLength", 0);
+    const fake_array_buffer_byte_length = try engine.core.function.nativeFunction(rt, "notArrayBufferByteLength", 0);
     defer fake_array_buffer_byte_length.free(rt);
     const fake_array_buffer_byte_length_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_byte_length.refHeader().?);
     fake_array_buffer_byte_length_object.nativeFunctionIdSlot().* = array_buffer_byte_length_getter.nativeFunctionIdSlot().*;
-    const fake_shared_array_buffer_slice = try engine.builtins.function.nativeFunction(rt, "notSharedArrayBufferSlice", 2);
+    const fake_shared_array_buffer_slice = try engine.core.function.nativeFunction(rt, "notSharedArrayBufferSlice", 2);
     defer fake_shared_array_buffer_slice.free(rt);
     const fake_shared_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_shared_array_buffer_slice.refHeader().?);
     fake_shared_array_buffer_slice_object.nativeFunctionIdSlot().* = shared_array_buffer_slice_object.nativeFunctionIdSlot().*;
-    const fake_data_view_get_uint8 = try engine.builtins.function.nativeFunction(rt, "notDataViewGetUint8", 1);
+    const fake_data_view_get_uint8 = try engine.core.function.nativeFunction(rt, "notDataViewGetUint8", 1);
     defer fake_data_view_get_uint8.free(rt);
     const fake_data_view_get_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_get_uint8.refHeader().?);
     fake_data_view_get_uint8_object.nativeFunctionIdSlot().* = get_uint8_object.nativeFunctionIdSlot().*;
-    const fake_data_view_set_uint8 = try engine.builtins.function.nativeFunction(rt, "notDataViewSetUint8", 2);
+    const fake_data_view_set_uint8 = try engine.core.function.nativeFunction(rt, "notDataViewSetUint8", 2);
     defer fake_data_view_set_uint8.free(rt);
     const fake_data_view_set_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_set_uint8.refHeader().?);
     fake_data_view_set_uint8_object.nativeFunctionIdSlot().* = set_uint8_object.nativeFunctionIdSlot().*;
-    const fake_data_view_byte_length = try engine.builtins.function.nativeFunction(rt, "notDataViewByteLength", 0);
+    const fake_data_view_byte_length = try engine.core.function.nativeFunction(rt, "notDataViewByteLength", 0);
     defer fake_data_view_byte_length.free(rt);
     const fake_data_view_byte_length_object: *core.Object = @fieldParentPtr("header", fake_data_view_byte_length.refHeader().?);
     fake_data_view_byte_length_object.nativeFunctionIdSlot().* = data_view_byte_length_getter.nativeFunctionIdSlot().*;
@@ -3751,7 +3746,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notArrayBufferSlice", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
+    const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
     defer direct_buffer.free(rt);
     const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) });
     defer direct_slice_result.free(rt);
@@ -3844,15 +3839,15 @@ test "typed array accessor native builtin records ignore dispatch names" {
     const tag_getter: *core.Object = @fieldParentPtr("header", tag_desc.getter.refHeader().?);
     try std.testing.expect(tag_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_byte_length = try engine.builtins.function.nativeFunction(rt, "notTypedArrayByteLength", 0);
+    const fake_byte_length = try engine.core.function.nativeFunction(rt, "notTypedArrayByteLength", 0);
     defer fake_byte_length.free(rt);
     const fake_byte_length_object: *core.Object = @fieldParentPtr("header", fake_byte_length.refHeader().?);
     fake_byte_length_object.nativeFunctionIdSlot().* = byte_length_getter.nativeFunctionIdSlot().*;
-    const fake_length = try engine.builtins.function.nativeFunction(rt, "notTypedArrayLength", 0);
+    const fake_length = try engine.core.function.nativeFunction(rt, "notTypedArrayLength", 0);
     defer fake_length.free(rt);
     const fake_length_object: *core.Object = @fieldParentPtr("header", fake_length.refHeader().?);
     fake_length_object.nativeFunctionIdSlot().* = length_getter.nativeFunctionIdSlot().*;
-    const fake_tag = try engine.builtins.function.nativeFunction(rt, "notTypedArrayTag", 0);
+    const fake_tag = try engine.core.function.nativeFunction(rt, "notTypedArrayTag", 0);
     defer fake_tag.free(rt);
     const fake_tag_object: *core.Object = @fieldParentPtr("header", fake_tag.refHeader().?);
     fake_tag_object.nativeFunctionIdSlot().* = tag_getter.nativeFunctionIdSlot().*;
@@ -3861,9 +3856,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notTypedArrayByteLength", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
+    const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
     defer direct_buffer.free(rt);
-    const direct_typed_array = try engine.builtins.buffer.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
+    const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
     defer direct_typed_array.free(rt);
     const direct_byte_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_byte_length, &.{});
     defer direct_byte_length.free(rt);
@@ -3921,7 +3916,7 @@ test "regexp static native builtin records ignore dispatch names" {
     const escape_object: *core.Object = @fieldParentPtr("header", escape_value.refHeader().?);
     try std.testing.expect(escape_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notRegExpEscape", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notRegExpEscape", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = escape_object.nativeFunctionIdSlot().*;
@@ -3990,7 +3985,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_exec = try engine.builtins.function.nativeFunction(rt, "notRegExpExec", 1);
+    const fake_exec = try engine.core.function.nativeFunction(rt, "notRegExpExec", 1);
     defer fake_exec.free(rt);
     const fake_exec_object: *core.Object = @fieldParentPtr("header", fake_exec.refHeader().?);
     fake_exec_object.nativeFunctionIdSlot().* = exec_object.nativeFunctionIdSlot().*;
@@ -3998,7 +3993,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(exec_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpExec", exec_dispatch_name);
 
-    const fake_test = try engine.builtins.function.nativeFunction(rt, "notRegExpTest", 1);
+    const fake_test = try engine.core.function.nativeFunction(rt, "notRegExpTest", 1);
     defer fake_test.free(rt);
     const fake_test_object: *core.Object = @fieldParentPtr("header", fake_test.refHeader().?);
     fake_test_object.nativeFunctionIdSlot().* = test_object.nativeFunctionIdSlot().*;
@@ -4006,7 +4001,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(test_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpTest", test_dispatch_name);
 
-    const fake_to_string = try engine.builtins.function.nativeFunction(rt, "notRegExpToString", 0);
+    const fake_to_string = try engine.core.function.nativeFunction(rt, "notRegExpToString", 0);
     defer fake_to_string.free(rt);
     const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
@@ -4018,7 +4013,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     defer input_string.value().free(rt);
@@ -4109,7 +4104,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_object: *core.Object = @fieldParentPtr("header", split_value.refHeader().?);
     try std.testing.expect(split_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_search = try engine.builtins.function.nativeFunction(rt, "notRegExpSearch", 1);
+    const fake_search = try engine.core.function.nativeFunction(rt, "notRegExpSearch", 1);
     defer fake_search.free(rt);
     const fake_search_object: *core.Object = @fieldParentPtr("header", fake_search.refHeader().?);
     fake_search_object.nativeFunctionIdSlot().* = search_object.nativeFunctionIdSlot().*;
@@ -4117,19 +4112,19 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(search_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpSearch", search_dispatch_name);
 
-    const fake_match = try engine.builtins.function.nativeFunction(rt, "notRegExpMatch", 1);
+    const fake_match = try engine.core.function.nativeFunction(rt, "notRegExpMatch", 1);
     defer fake_match.free(rt);
     const fake_match_object: *core.Object = @fieldParentPtr("header", fake_match.refHeader().?);
     fake_match_object.nativeFunctionIdSlot().* = match_object.nativeFunctionIdSlot().*;
-    const fake_match_all = try engine.builtins.function.nativeFunction(rt, "notRegExpMatchAll", 1);
+    const fake_match_all = try engine.core.function.nativeFunction(rt, "notRegExpMatchAll", 1);
     defer fake_match_all.free(rt);
     const fake_match_all_object: *core.Object = @fieldParentPtr("header", fake_match_all.refHeader().?);
     fake_match_all_object.nativeFunctionIdSlot().* = match_all_object.nativeFunctionIdSlot().*;
-    const fake_replace = try engine.builtins.function.nativeFunction(rt, "notRegExpReplace", 2);
+    const fake_replace = try engine.core.function.nativeFunction(rt, "notRegExpReplace", 2);
     defer fake_replace.free(rt);
     const fake_replace_object: *core.Object = @fieldParentPtr("header", fake_replace.refHeader().?);
     fake_replace_object.nativeFunctionIdSlot().* = replace_object.nativeFunctionIdSlot().*;
-    const fake_split = try engine.builtins.function.nativeFunction(rt, "notRegExpSplit", 2);
+    const fake_split = try engine.core.function.nativeFunction(rt, "notRegExpSplit", 2);
     defer fake_split.free(rt);
     const fake_split_object: *core.Object = @fieldParentPtr("header", fake_split.refHeader().?);
     fake_split_object.nativeFunctionIdSlot().* = split_object.nativeFunctionIdSlot().*;
@@ -4138,7 +4133,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     defer input_string.value().free(rt);
@@ -4243,7 +4238,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     const global_getter: *core.Object = @fieldParentPtr("header", global_desc.getter.refHeader().?);
     try std.testing.expect(global_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_source = try engine.builtins.function.nativeFunction(rt, "notRegExpSourceGetter", 0);
+    const fake_source = try engine.core.function.nativeFunction(rt, "notRegExpSourceGetter", 0);
     defer fake_source.free(rt);
     const fake_source_object: *core.Object = @fieldParentPtr("header", fake_source.refHeader().?);
     fake_source_object.nativeFunctionIdSlot().* = source_getter.nativeFunctionIdSlot().*;
@@ -4251,7 +4246,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(source_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpSourceGetter", source_dispatch_name);
 
-    const fake_global = try engine.builtins.function.nativeFunction(rt, "notRegExpGlobalGetter", 0);
+    const fake_global = try engine.core.function.nativeFunction(rt, "notRegExpGlobalGetter", 0);
     defer fake_global.free(rt);
     const fake_global_object: *core.Object = @fieldParentPtr("header", fake_global.refHeader().?);
     fake_global_object.nativeFunctionIdSlot().* = global_getter.nativeFunctionIdSlot().*;
@@ -4260,7 +4255,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "g");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
 
     const source_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_source, &.{});
@@ -5374,7 +5369,7 @@ test "job queue symbol roots preserve weak map values" {
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
     const weak_key = try rt.symbolValue(symbol_atom);
-    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, weak_key, value.value());
+    try engine.exec.collection_ops.setWeakMapEntry(rt, weak_map, weak_key, value.value());
 
     const queued_key = weak_key.dup();
     try queue.enqueueFunc(ctx, countJob, &.{queued_key});
@@ -7292,7 +7287,7 @@ test "method calls preserve receiver arguments eval captures and abrupt ownershi
 }
 
 test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -7403,7 +7398,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
 }
 
 test "computed named reads preserve prototype accessors proxies and operand ownership" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -7472,7 +7467,7 @@ test "computed named reads preserve prototype accessors proxies and operand owne
 }
 
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -7724,7 +7719,7 @@ test "for-of bytecode next continuation preserves result and abrupt semantics" {
 }
 
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -8828,10 +8823,8 @@ test "host commonjs wrapper passes directory dirname" {
 test "module graph evaluates block var declarations as module bindings" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [128]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -8857,10 +8850,8 @@ test "module graph evaluates block var declarations as module bindings" {
 test "module evaluation does not skip a body-leading function expression" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -8881,10 +8872,8 @@ test "module evaluation does not skip a body-leading function expression" {
 test "module top-level await resumes in Promise reaction FIFO order" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -8922,10 +8911,8 @@ test "module top-level await resumes in Promise reaction FIFO order" {
 test "module await reaction keeps its position on the awaited Promise" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [128]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -8956,10 +8943,8 @@ test "module await reaction keeps its position on the awaited Promise" {
 test "async module dependency does not preempt an independent sibling" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     const dir = ".zig-cache/module-async-sibling-order-test";
     const main_path = dir ++ "/main.mjs";
@@ -9105,9 +9090,8 @@ fn loadFixtureModule(
 
 // Bootstrap-integration tests relocated from src/exec/{call,zjs_vm}.zig during
 // Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
-// standard globals through `rt.installStandardGlobals`, which needs the builtins
-// installer wired; exec source must not name the builtins registry, so they live
-// here where the test tree may import builtins (via `helpers.installHostGlobalsBare`).
+// standard globals through `rt.installStandardGlobals`; the helper wires the
+// exec-owned bootstrap seam before installation.
 
 test "host global bootstrap installs and tears down builtin plus host domains" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -9182,9 +9166,7 @@ test "reflect construct roots argument list while resolving prototype" {
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
     _ = try realm_global.ensureRealmPayload(rt);
     defer realm_global.value().free(rt);
-    engine.builtins.registry.registerStandardGlobalsDefault();
-    rt.install_standard_globals_cb = engine.builtins.registry.installStandardGlobals;
-    rt.standard_global_own_property_capacity = engine.builtins.registry.standardGlobalOwnPropertyCapacity();
+    engine.exec.standard_globals.configureRuntime(rt);
     try rt.installStandardGlobals(realm_global);
 
     const target = try core.function.nativeFunction(rt, "Array", 1);
