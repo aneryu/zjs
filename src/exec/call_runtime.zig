@@ -3219,18 +3219,9 @@ pub fn qjsAtomicsReadModifyWrite(
     if (atomic_op != .load) try atomicsRevalidateIndex(ctx.runtime, view, index);
 
     const bytes = try atomicsElementBytes(view, index);
-    const old = atomicsReadBits(view, bytes);
-    const next = switch (atomic_op) {
-        .load => old,
-        .add => old +% operand,
-        .@"and" => old & operand,
-        .@"or" => old | operand,
-        .sub => old -% operand,
-        .xor => old ^ operand,
-        .exchange => operand,
-        .compareExchange => if (old == atomicsMaskBits(view, operand)) replacement else old,
-    };
-    if (atomic_op != .load) atomicsWriteBits(view, bytes, next);
+    // One atomic instruction per op (qjs js_atomics_op, quickjs.c:60637-60697);
+    // a plain read/compute/write here loses concurrent RMW updates.
+    const old = atomicsReadModifyWriteBits(view, bytes, atomic_op, operand, replacement);
     return atomicsValueFromBits(ctx.runtime, view, old);
 }
 
@@ -3592,24 +3583,77 @@ pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
     return buffer.byteStorage()[offset..][0..object.typedArrayElementSize()];
 }
 
+/// Seq-cst atomic element load (qjs js_atomics_op ATOMICS_OP_LOAD,
+/// quickjs.c:60659-60669; js_atomics_wait's value probe is likewise an
+/// atomic_load). Element pointers are naturally aligned: a typed array's
+/// byteOffset is a multiple of the element size and the backing allocation is
+/// at least 8-aligned.
 pub fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
     return switch (object.typedArrayElementSize()) {
-        1 => bytes[0],
-        2 => std.mem.readInt(u16, bytes[0..2], .little),
-        4 => std.mem.readInt(u32, bytes[0..4], .little),
-        8 => std.mem.readInt(u64, bytes[0..8], .little),
+        1 => @atomicLoad(u8, &bytes[0], .seq_cst),
+        2 => @atomicLoad(u16, @as(*const u16, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
+        4 => @atomicLoad(u32, @as(*const u32, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
+        8 => @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
         else => 0,
     };
 }
 
+/// Seq-cst atomic element store (qjs js_atomics_store, quickjs.c:60778-60790
+/// atomic_store per width).
 pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
     switch (object.typedArrayElementSize()) {
-        1 => bytes[0] = @truncate(value),
-        2 => std.mem.writeInt(u16, bytes[0..2], @truncate(value), .little),
-        4 => std.mem.writeInt(u32, bytes[0..4], @truncate(value), .little),
-        8 => std.mem.writeInt(u64, bytes[0..8], value, .little),
+        1 => @atomicStore(u8, &bytes[0], @truncate(value), .seq_cst),
+        2 => @atomicStore(u16, @as(*u16, @ptrCast(@alignCast(bytes.ptr))), @truncate(value), .seq_cst),
+        4 => @atomicStore(u32, @as(*u32, @ptrCast(@alignCast(bytes.ptr))), @truncate(value), .seq_cst),
+        8 => @atomicStore(u64, @as(*u64, @ptrCast(@alignCast(bytes.ptr))), value, .seq_cst),
         else => {},
     }
+}
+
+/// Single-instruction atomic read-modify-write on one typed-array element,
+/// mirroring qjs js_atomics_op's per-width `OP(...)` atomic builtins
+/// (quickjs.c:60637-60656) plus the LOAD (60659-60669) and COMPARE_EXCHANGE
+/// (60671-60697) arms. The pre-fix read/compute/write sequence lost concurrent
+/// updates (two agents' Atomics.add could interleave), deadlocking the
+/// multi-agent test262 wait protocols.
+fn atomicsRmwTyped(
+    comptime T: type,
+    ptr: *T,
+    atomic_op: AtomicsReadModifyOp,
+    operand: u64,
+    replacement: u64,
+) u64 {
+    const op_bits: T = @truncate(operand);
+    return switch (atomic_op) {
+        .load => @atomicLoad(T, ptr, .seq_cst),
+        .add => @atomicRmw(T, ptr, .Add, op_bits, .seq_cst),
+        .@"and" => @atomicRmw(T, ptr, .And, op_bits, .seq_cst),
+        .@"or" => @atomicRmw(T, ptr, .Or, op_bits, .seq_cst),
+        .sub => @atomicRmw(T, ptr, .Sub, op_bits, .seq_cst),
+        .xor => @atomicRmw(T, ptr, .Xor, op_bits, .seq_cst),
+        .exchange => @atomicRmw(T, ptr, .Xchg, op_bits, .seq_cst),
+        // A successful cmpxchg returns null; the old value then equals the
+        // expected operand (qjs returns `v1` unchanged on success, 60675).
+        .compareExchange => @cmpxchgStrong(T, ptr, op_bits, @as(T, @truncate(replacement)), .seq_cst, .seq_cst) orelse op_bits,
+    };
+}
+
+/// Width-dispatched atomic RMW; returns the previous element value
+/// zero-extended to u64 (the same convention as `atomicsReadBits`).
+pub fn atomicsReadModifyWriteBits(
+    object: *core.Object,
+    bytes: []u8,
+    atomic_op: AtomicsReadModifyOp,
+    operand: u64,
+    replacement: u64,
+) u64 {
+    return switch (object.typedArrayElementSize()) {
+        1 => atomicsRmwTyped(u8, &bytes[0], atomic_op, operand, replacement),
+        2 => atomicsRmwTyped(u16, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        4 => atomicsRmwTyped(u32, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        8 => atomicsRmwTyped(u64, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        else => 0,
+    };
 }
 
 pub fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
