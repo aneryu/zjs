@@ -54,6 +54,58 @@ test "every JSValue constructor recovers its QuickJS semantic tag" {
     for (cases) |case| try std.testing.expectEqual(case.tag, case.value.tagOf());
 }
 
+test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
+    const RawWideValue = extern struct {
+        payload: u64,
+        tag: i64,
+    };
+    const pointerPayload = struct {
+        fn get(value: core.JSValue) usize {
+            if (@sizeOf(core.JSValue) == @sizeOf(u64)) {
+                const bits: u64 = @bitCast(value);
+                return @intCast(bits & 0x0000_FFFF_FFFF_FFFF);
+            }
+            const raw: RawWideValue = @bitCast(value);
+            return @intCast(raw.payload);
+        }
+    }.get;
+
+    var gc_storage: [@sizeOf(core.gc.Metadata) + @sizeOf(core.gc.Header)]u8 align(@alignOf(core.gc.Header)) = undefined;
+    const gc_meta: *core.gc.Metadata = @ptrCast(@alignCast(&gc_storage));
+    const gc_header: *core.gc.Header = @ptrCast(@alignCast(&gc_storage[@sizeOf(core.gc.Metadata)]));
+    gc_meta.* = .{};
+    gc_header.* = .{};
+
+    var flat_storage: [core.gc.string_rc_prefix_size + @sizeOf(core.string.String)]u8 align(@alignOf(core.string.String)) = undefined;
+    const flat_rc: *core.gc.StringHeader = @ptrCast(@alignCast(&flat_storage));
+    const flat_body: *core.string.String = @ptrCast(@alignCast(&flat_storage[core.gc.string_rc_prefix_size]));
+    flat_rc.* = .{};
+
+    var rope_storage: [core.string.StringRope.rc_prefix_size + @sizeOf(core.string.StringRope)]u8 align(@alignOf(core.string.StringRope)) = undefined;
+    const rope_body: *core.string.StringRope = @ptrCast(@alignCast(&rope_storage[core.string.StringRope.rc_prefix_size]));
+    const rope_rc = rope_body.header();
+    rope_rc.* = .{};
+
+    const cases = [_]struct {
+        value: core.JSValue,
+        body_address: usize,
+        rc_address: usize,
+    }{
+        .{ .value = core.JSValue.bigInt(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
+        .{ .value = core.JSValue.symbol(flat_rc), .body_address = @intFromPtr(flat_body), .rc_address = @intFromPtr(flat_rc) },
+        .{ .value = core.JSValue.string(flat_rc), .body_address = @intFromPtr(flat_body), .rc_address = @intFromPtr(flat_rc) },
+        .{ .value = core.JSValue.stringRope(rope_rc), .body_address = @intFromPtr(rope_body), .rc_address = @intFromPtr(rope_rc) },
+        .{ .value = core.JSValue.module(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
+        .{ .value = core.JSValue.functionBytecode(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
+        .{ .value = core.JSValue.object(gc_header), .body_address = @intFromPtr(gc_header), .rc_address = @intFromPtr(&gc_meta.rc) },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(case.body_address, pointerPayload(case.value));
+        try std.testing.expectEqual(case.rc_address + @sizeOf(core.gc.StringHeader), pointerPayload(case.value));
+    }
+}
+
 test "primitive value predicates match QuickJS helpers" {
     try std.testing.expect(core.JSValue.int32(1).isNumber());
     try std.testing.expect(core.JSValue.float64(1.5).isNumber());

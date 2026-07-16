@@ -137,11 +137,17 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 ### 4.1 值表示与 dup/free（横切所有基准的乘数税）
 
-> 整改后：默认 16B 表示的 `requiresRefCount` 已改为与 qjs 同构的无符号范围比较；opcode profile 空测由 comptime 门裁掉。rc 物理偏移统一未捆绑实施，alternate representation 仍作为强制门禁。
+> 整改后：两种表示的 `requiresRefCount` 均使用连续 tag 范围；全部七种 refcounted
+> JSValue 的 payload 都指向 body，RC 与 qjs `__js_rc` 一样固定在 payload−4。
+> `dup` 直接访问共同 RC；`free` 先统一减计数，仅在归零后按 tag 进入销毁慢路。
+> opcode profile 空测仍由 comptime 门裁掉，alternate representation 保持强制门禁。
 
 **最重要横切项——dup/free 判别与 rc 布局**（A2-D1/A1-D6；反汇编量化摘要已记录，但原始反汇编未留存）：
 
-- [多做工+结构] zjs `requiresRefCount`（value.zig:358-370）默认 repr 是 7-tag 精确 switch（编译成 ~8 条 ALU），且 String 头 rc 在 payload+0、GC 头 rc 在 payload−4，命中后还要掩码分双腿（value.zig:576-625）。qjs `JS_VALUE_HAS_REF_COUNT` = `(unsigned)tag >= JS_TAG_FIRST` **1 条比较**（quickjs.h:287），全部 refcounted 类型统一 `JSRefCountHeader` 前缀 rc 偏移。每 dup zjs ≈3-11 insn vs qjs 2-5；每 free ≈8 vs 2。两侧 tag 数值集完全相同——qjs 故意把空洞 -5/-4 纳入宽松范围测试，zjs 花指令精确排除。**修法：默认 repr 退化为单比较 + 评估统一 rc 偏移**（nanbox altrepr 已是范围测试）。
+- [对齐] zjs 与 qjs 都以连续 tag 范围识别 refcounted value；string/symbol/rope
+  payload 已从旧 RC 前缀改为 body 指针，与 big-int/module/function/object 一样通过
+  固定 payload−4 访问共同 `RefCountHeader`。`dup` 不再按 string/GC 分腿，`free`
+  的 tag 分派已移到 RC 归零慢路；布局断言与双表示测试锁定七种 tag 的同一偏移。
 - [多做工] 每次 free 内联 `rt.gc.phase==.deinit` + `rt.opcode_profile` 空测探针（value.zig:606-612），≈+6 insn/3 载入 per free（A2-D8）。qjs JS_FreeValue 无探针。profile 空测可 comptime 门掉。
 - [对齐] JSValue 16B repr 逐字段对齐（payload 前 tag 后、tag i64、int/bool 低 32 位零扩展、float64 整存取不规范化 NaN）；`asInt32Pair` 融合 OR 测 ≙ `JS_VALUE_IS_BOTH_INT`。
 

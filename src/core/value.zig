@@ -141,7 +141,7 @@ pub const JSValue = extern struct {
 
     /// Packed-value encoding revision included in the plugin ABI fingerprint.
     /// Zero means the field layout fully describes the representation.
-    pub const abi_encoding_revision: u64 = if (nan_boxing) 2 else 0;
+    pub const abi_encoding_revision: u64 = if (nan_boxing) 3 else 1;
 
     pub const Repr = if (nan_boxing) extern struct {
         bits: u64,
@@ -241,15 +241,15 @@ pub const JSValue = extern struct {
     }
 
     pub fn string(header: *gc.StringHeader) JSValue {
-        return make(Tag.string, @intFromPtr(header));
+        return make(Tag.string, @intFromPtr(header) + gc.ref_count_offset_from_payload);
     }
 
     pub fn stringRope(header: *gc.StringHeader) JSValue {
-        return make(Tag.string_rope, @intFromPtr(header));
+        return make(Tag.string_rope, @intFromPtr(header) + gc.ref_count_offset_from_payload);
     }
 
     pub fn symbol(header: *gc.StringHeader) JSValue {
-        return make(Tag.symbol, @intFromPtr(header));
+        return make(Tag.symbol, @intFromPtr(header) + gc.ref_count_offset_from_payload);
     }
 
     pub fn object(header: *gc.Header) JSValue {
@@ -420,8 +420,7 @@ pub const JSValue = extern struct {
 
     pub fn asSymbolBody(self: JSValue) ?*string_mod.String {
         if (!self.hasTag(Tag.symbol)) return null;
-        const header = self.stringHeader() orelse return null;
-        return string_mod.String.fromHeader(header);
+        return ptrFromPayload(string_mod.String, self.payloadOf());
     }
 
     pub fn asShortBigInt(self: JSValue) ?i64 {
@@ -490,10 +489,7 @@ pub const JSValue = extern struct {
     /// string. `.string`/`.symbol` values return their body directly.
     pub fn asStringBody(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string, Tag.symbol => {
-                const header = self.stringHeader() orelse return null;
-                return string_mod.String.fromHeader(header);
-            },
+            Tag.string, Tag.symbol => return ptrFromPayload(string_mod.String, self.payloadOf()),
             Tag.string_rope => {
                 const node = self.ropeBody() orelse return null;
                 return node.flattenInfallible();
@@ -507,10 +503,7 @@ pub const JSValue = extern struct {
     /// Used by the rope-internal walkers that already discriminate on tag.
     pub fn asStringBodyRaw(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string, Tag.symbol => {
-                const header = self.stringHeader() orelse return null;
-                return string_mod.String.fromHeader(header);
-            },
+            Tag.string, Tag.symbol => return ptrFromPayload(string_mod.String, self.payloadOf()),
             else => return null,
         }
     }
@@ -518,8 +511,7 @@ pub const JSValue = extern struct {
     /// The `StringRope` behind a `.string_rope` value (null otherwise).
     pub fn ropeBody(self: JSValue) ?*string_mod.StringRope {
         if (!self.hasTag(Tag.string_rope)) return null;
-        const header = self.stringHeader() orelse return null;
-        return string_mod.StringRope.fromHeader(header);
+        return ptrFromPayload(string_mod.StringRope, self.payloadOf());
     }
 
     pub fn asBytes(self: JSValue, ctx: anytype) Bytes.Error!Bytes {
@@ -536,7 +528,7 @@ pub const JSValue = extern struct {
 
     pub fn stringHeader(self: JSValue) ?*gc.StringHeader {
         return switch (self.tagOf()) {
-            Tag.symbol, Tag.string, Tag.string_rope => ptrFromPayload(gc.StringHeader, self.payloadOf()),
+            Tag.symbol, Tag.string, Tag.string_rope => self.refCountWordAssumeRefCounted(),
             else => null,
         };
     }
@@ -548,7 +540,7 @@ pub const JSValue = extern struct {
     pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.StringHeader {
         const tag = self.tagOf();
         std.debug.assert(tag == Tag.string or tag == Tag.symbol or tag == Tag.string_rope);
-        return ptrFromPayload(gc.StringHeader, self.payloadOf()).?;
+        return self.refCountWordAssumeRefCounted();
     }
 
     pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader {
@@ -571,32 +563,19 @@ pub const JSValue = extern struct {
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p >= NanBox.refcount_min and p <= NanBox.refcount_max) {
-                // Keep the adjacent tags in equality form. LLVM folds this into
-                // one biased range compare with a shifted operand on AArch64;
-                // spelling the source as >= / <= materializes an extra shift in
-                // every dup hot path.
-                if (p == NanBox.prefixOf(Tag.symbol) or
-                    p == NanBox.prefixOf(Tag.string) or
-                    p == NanBox.prefixOf(Tag.string_rope))
-                {
-                    gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
-                } else {
-                    gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
-                }
+                gc.retain(self.refCountWordAssumeRefCounted());
             }
             return self;
         }
         if (!self.requiresRefCount()) return self;
-        const tag = self.tagOf();
-        if (tag >= Tag.symbol and tag <= Tag.string_rope) {
-            gc.retain(ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
-        } else {
-            gc.retain(ptrFromPayload(gc.Header, self.payloadOf()).?);
-        }
+        gc.retain(self.refCountWordAssumeRefCounted());
         return self;
     }
 
     pub inline fn free(self: JSValue, rt: anytype) void {
+        comptime {
+            @setEvalBranchQuota(10_000);
+        }
         if (comptime nan_boxing) {
             const p = NanBox.prefixBits(self.repr.bits);
             if (p < NanBox.refcount_min or p > NanBox.refcount_max) return;
@@ -606,13 +585,7 @@ pub const JSValue = extern struct {
             if (comptime build_options.zjs_enable_opcode_profile) {
                 if (rt.opcode_profile) |prof| prof.recordValueFree();
             }
-            if (p == NanBox.prefixOf(Tag.string_rope)) {
-                releaseRopeValue(rt, self);
-            } else if (p == NanBox.prefixOf(Tag.symbol) or p == NanBox.prefixOf(Tag.string)) {
-                gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
-            } else {
-                gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
-            }
+            self.releaseCommonRefCount(rt);
             return;
         }
         if (!self.requiresRefCount()) return;
@@ -621,25 +594,30 @@ pub const JSValue = extern struct {
         if (comptime build_options.zjs_enable_opcode_profile) {
             if (rt.opcode_profile) |prof| prof.recordValueFree();
         }
-        if (tag == Tag.string_rope) {
-            releaseRopeValue(rt, self);
-        } else if (tag >= Tag.symbol and tag <= Tag.string) {
-            gc.release(rt, ptrFromPayload(gc.StringHeader, self.payloadOf()).?);
-        } else {
-            gc.release(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
-        }
+        self.releaseCommonRefCount(rt);
     }
 
-    /// Refcount release for a `.string_rope` value: decrement the rope's
-    /// refcount and, at 0, destroy the depth-bounded rope object (never through
-    /// the flat-`String` `releaseFromHeader` path, whose `@fieldParentPtr` cast
-    /// assumes a `*String` layout).
-    fn releaseRopeValue(rt: anytype, self: JSValue) void {
-        const node = self.ropeBody() orelse return;
-        const hdr = node.header();
+    inline fn refCountWordAssumeRefCounted(self: JSValue) *gc.RefCountHeader {
+        const payload = ptrFromPayload(anyopaque, self.payloadOf()).?;
+        return gc.refCountHeaderFromPayload(payload);
+    }
+
+    inline fn releaseCommonRefCount(self: JSValue, rt: anytype) void {
+        const hdr = self.refCountWordAssumeRefCounted();
         std.debug.assert(hdr.rc > 0);
         hdr.rc -= 1;
-        if (hdr.rc == 0) string_mod.destroyRope(rt, node);
+        if (hdr.rc == 0) self.destroyZeroRef(rt);
+    }
+
+    /// QuickJS `__JS_FreeValue` analogue: tag dispatch is paid only when the
+    /// common payload-4 refcount reaches zero.
+    noinline fn destroyZeroRef(self: JSValue, rt: anytype) void {
+        switch (self.tagOf()) {
+            Tag.string, Tag.symbol => string_mod.String.destroyFromHeader(rt, self.refCountWordAssumeRefCounted()),
+            Tag.string_rope => string_mod.destroyRope(rt, self.ropeBody().?),
+            Tag.big_int, Tag.module, Tag.function_bytecode, Tag.object => gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?),
+            else => unreachable,
+        }
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {

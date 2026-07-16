@@ -390,29 +390,45 @@ pub const BlockHeader = extern struct {
     }
 };
 
-/// Standalone refcount word for flat strings and string ropes. It is NOT
-/// embedded in the `String`/`StringRope` structs (which stay at their exact qjs
-/// sizes): each string/rope allocation reserves this 4-byte prefix immediately
-/// ahead of the struct (`objectPtr - string_rc_prefix_size`), mirroring qjs's
-/// `JSRefCountHeader` prefix. The struct reaches it through `String.header()` /
-/// `StringRope.header()`, and a `Tag.string`/`Tag.string_rope`/`Tag.symbol`
-/// JSValue's pointer payload IS this prefix.
-pub const StringHeader = extern struct {
+/// Common QuickJS-style refcount word. Every refcounted JSValue payload points
+/// at its body, with this header at the fixed `payload - 4` offset (`__js_rc`
+/// in quickjs.h). Strings allocate it as a standalone prefix; GC objects store
+/// the same i32 in the tail of their 8-byte allocator Metadata prefix.
+pub const RefCountHeader = extern struct {
     rc: i32 = 1,
 
     comptime {
-        std.debug.assert(@sizeOf(StringHeader) == 4);
+        std.debug.assert(@sizeOf(RefCountHeader) == 4);
     }
 
-    pub inline fn retain(self: *StringHeader) void {
+    pub inline fn retain(self: *RefCountHeader) void {
         std.debug.assert(self.rc > 0);
         self.rc += 1;
     }
 };
 
+/// Compatibility alias for the standalone prefix used by String/StringRope.
+pub const StringHeader = RefCountHeader;
+
 /// Byte size of the refcount prefix reserved ahead of every flat `String` and
 /// `StringRope` allocation. Equal to `@sizeOf(StringHeader)` (4).
 pub const string_rc_prefix_size: usize = @sizeOf(StringHeader);
+
+/// QuickJS `__js_rc` displacement shared by every refcounted value payload.
+pub const ref_count_offset_from_payload: usize = @sizeOf(RefCountHeader);
+
+pub inline fn refCountHeaderFromPayload(payload: *anyopaque) *RefCountHeader {
+    const address = @intFromPtr(payload);
+    std.debug.assert(address >= ref_count_offset_from_payload);
+    return @ptrFromInt(address - ref_count_offset_from_payload);
+}
+
+comptime {
+    // A GC value stores `BlockHeader *` in its payload. Metadata immediately
+    // precedes that header, and its rc tail must land at the same payload - 4
+    // address used by strings, symbols, and ropes.
+    std.debug.assert(metadata_prefix_size - @offsetOf(Metadata, "rc") == ref_count_offset_from_payload);
+}
 
 pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
@@ -1573,10 +1589,14 @@ pub inline fn release(rt: anytype, header: anytype) void {
     std.debug.assert(header.meta().rc > 0);
     header.meta().rc -= 1;
 
-    if (header.meta().rc == 0) releaseAndDestroy(rt, header);
+    if (header.meta().rc == 0) destroyZeroRef(rt, header);
 }
 
-noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
+/// Slow path after the caller has already decremented the common RC word to 0.
+/// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
+/// GC owners also arrive here through `release` above.
+pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
+    std.debug.assert(header.meta().rc == 0);
     if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
     if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
