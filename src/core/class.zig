@@ -104,6 +104,7 @@ pub const PayloadKind = enum(u5) {
     std_file,
     disposable_stack,
     realm,
+    weak_ref,
 };
 
 pub const Payload = ?*anyopaque;
@@ -512,7 +513,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.generator, ids.async_generator => .generator,
         ids.proxy => .proxy,
         ids.promise, ids.promise_resolve_function, ids.promise_reject_function => .promise,
-        ids.weak_ref => .object_data,
+        ids.weak_ref => .weak_ref,
         ids.finalization_registry => .finalization_registry,
         else => .none,
     };

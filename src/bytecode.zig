@@ -1971,9 +1971,9 @@ pub const function_bytecode = struct {
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
         self.deinit(rt);
-        // Cycle removal: defer the struct-free to the Pass-B drain so a sibling
-        // still referencing this bytecode does not read freed memory.
-        if (rt.gc.phase == .remove_cycles) {
+        // Cycle removal and runtime deinit both defer the struct-free until all
+        // sibling resource destructors have released their edges.
+        if (rt.gc.phase == .remove_cycles or rt.gc.phase == .deinit) {
             rt.gc.deferCycleStructFree(header);
             return;
         }

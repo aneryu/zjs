@@ -507,7 +507,12 @@ fn runGeneratorPendingReturnRecovery(injector: *OneShotFailingAllocator) !void {
     const pending_object = try core.Object.create(rt, core.class.ids.object, null);
     defer pending_object.value().free(rt);
 
-    const initial_stack = try rt.memory.alloc(core.JSValue, 1);
+    // Keep both the existing buffer and its growth above the slab ceiling in
+    // either JSValue representation. Runtime allocator unification means a
+    // tiny stack can legitimately reuse a live slab arena without consulting
+    // the backing injector, which would make this targeted failure nondeterministic.
+    const initial_stack = try rt.memory.alloc(core.JSValue, 128);
+    @memset(initial_stack, core.JSValue.undefinedValue());
     initial_stack[0] = core.JSValue.int32(41);
     var replacement = core.object.SuspendedExecutionStorage{
         .stack = .{

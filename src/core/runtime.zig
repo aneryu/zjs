@@ -592,7 +592,7 @@ pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
 
 pub const DeferredWeakValueFree = struct {
     value: JSValue,
-    prequeued_identity: ?usize = null,
+    prepared_identity: ?usize = null,
 };
 
 pub const NativeCleanupJob = struct {
@@ -700,6 +700,8 @@ pub const JSRuntime = struct {
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
+    weak_reference_holder_head: ?*Object = null,
+    weak_reference_holder_tail: ?*Object = null,
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
     root_providers_inline: [root_provider_inline_capacity]RootProvider = undefined,
@@ -859,6 +861,11 @@ pub const JSRuntime = struct {
     fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
         rt.memory = account;
         rt.owns_self_allocation = owns_self_allocation;
+        // MemoryAccount's std.mem.Allocator facade stores a pointer to the
+        // account, so bind it only after the account reaches this stable field
+        // address. All runtime `.allocator` / `.persistent_allocator` users now
+        // participate in the same limit and live-byte accounting.
+        rt.memory.activateRuntimeAccounting();
         rt.memory.trigger_gc_fn = null;
         rt.memory.trigger_gc_ctx = null;
         rt.memory.setLimit(options.memory_limit);
@@ -878,6 +885,8 @@ pub const JSRuntime = struct {
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
+        rt.weak_reference_holder_head = null;
+        rt.weak_reference_holder_tail = null;
         rt.root_providers_inline = undefined;
         rt.root_providers = rt.root_providers_inline[0..0];
         rt.root_providers_capacity = rt.root_providers_inline.len;
@@ -1039,6 +1048,8 @@ pub const JSRuntime = struct {
         // until phase 3 of gc.deinit.
         self.atoms.releaseCachedStrings(self);
         self.gc.deinit(self);
+        std.debug.assert(self.weak_reference_holder_head == null);
+        std.debug.assert(self.weak_reference_holder_tail == null);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         // Shapes and every other GC-managed atom owner are now gone. Clear
@@ -1165,13 +1176,13 @@ pub const JSRuntime = struct {
         // gc_obj_list; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
         // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
-        // by requestGCForAllocation on every sub-allocation of the object body,
-        // property array, and payload (each NoTrigger alloc is wrapped by an
-        // explicit threshold check in allocRuntime*). By the time we link, the
-        // last such sub-alloc has already observed the final allocated_bytes
-        // and set major_request.pending iff over threshold, so re-loading
-        // allocated_bytes here is pure redundant work. Keep addWithSize (the
-        // faithful add_gc_object) and only service an already-pending request.
+        // by createInternal's collectBeforeObjectAllocation immediately before
+        // the object body allocation. Property arrays and separate payloads
+        // retain their existing allocRuntime* requests. By the time we link,
+        // those sub-allocations have observed the final allocated_bytes and set
+        // major_request.pending iff over threshold, so re-loading allocated_bytes
+        // here is pure redundant work. Keep addWithSize (the faithful
+        // add_gc_object) and only service an already-pending request.
         try self.registerObjectWithBytes(object, object.allocationSize(self));
     }
 
@@ -1202,8 +1213,58 @@ pub const JSRuntime = struct {
     /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
     /// teardown either (the slab block carries it).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
+        self.unregisterWeakReferenceHolder(object);
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObjectWithBytes(&object.header, bytes);
+    }
+
+    /// Link a weak-capable payload for its full object lifetime. This is
+    /// allocation-free and mirrors QuickJS's runtime weakref_list: collection
+    /// emptiness changes do not mutate the list while a GC weak pass traverses
+    /// it.
+    pub fn registerWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
+        std.debug.assert(object.isWeakReferenceHolderClass());
+        const link = object.weakReferenceHolderLink() orelse unreachable;
+        std.debug.assert(!link.registered);
+        std.debug.assert(link.previous == null);
+        std.debug.assert(link.next == null);
+
+        link.previous = self.weak_reference_holder_tail;
+        if (self.weak_reference_holder_tail) |tail| {
+            const tail_link = tail.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(tail_link.registered);
+            tail_link.next = object;
+        } else {
+            self.weak_reference_holder_head = object;
+        }
+        self.weak_reference_holder_tail = object;
+        link.registered = true;
+    }
+
+    pub fn unregisterWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
+        if (!object.isWeakReferenceHolderClass()) return;
+        const link = object.weakReferenceHolderLink() orelse return;
+        if (!link.registered) return;
+
+        if (link.previous) |previous| {
+            const previous_link = previous.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(previous_link.registered);
+            previous_link.next = link.next;
+        } else {
+            std.debug.assert(self.weak_reference_holder_head == object);
+            self.weak_reference_holder_head = link.next;
+        }
+        if (link.next) |next| {
+            const next_link = next.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(next_link.registered);
+            next_link.previous = link.previous;
+        } else {
+            std.debug.assert(self.weak_reference_holder_tail == object);
+            self.weak_reference_holder_tail = link.previous;
+        }
+        link.previous = null;
+        link.next = null;
+        link.registered = false;
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
@@ -2163,6 +2224,17 @@ pub const JSRuntime = struct {
         }
     }
 
+    /// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering
+    /// the allocator. Object construction uses this stronger boundary instead
+    /// of merely leaving a pending request for post-registration service: a
+    /// memory-limit check must be allowed to reuse space from reclaimable
+    /// cycles before rejecting the replacement object.
+    pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
+        self.requestGCForAllocation(size);
+        if (self.gc_running or !self.gc.hasPendingMajorRequest()) return;
+        _ = self.pollGC(null, .normal) catch {};
+    }
+
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));
         self.requestGCForAllocation(size);
@@ -2617,14 +2689,14 @@ pub const JSRuntime = struct {
     }
 
     pub fn enqueueDeferredWeakValueFree(self: *JSRuntime, value: JSValue) !void {
-        try self.enqueueDeferredWeakValueFreeWithPrequeuedIdentity(value, null);
+        try self.enqueueDeferredWeakValueFreeWithPreparedIdentity(value, null);
     }
 
-    pub fn enqueueDeferredWeakValueFreeWithPrequeuedIdentity(self: *JSRuntime, value: JSValue, prequeued_identity: ?usize) !void {
+    pub fn enqueueDeferredWeakValueFreeWithPreparedIdentity(self: *JSRuntime, value: JSValue, prepared_identity: ?usize) !void {
         const index = self.deferred_weak_value_frees.len;
         try self.ensureDeferredWeakValueFreeCapacity(index + 1);
         self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. index + 1];
-        self.deferred_weak_value_frees[index] = .{ .value = value, .prequeued_identity = prequeued_identity };
+        self.deferred_weak_value_frees[index] = .{ .value = value, .prepared_identity = prepared_identity };
     }
 
     pub fn hasDeferredWeakValueFrees(self: *const JSRuntime) bool {
@@ -2640,37 +2712,21 @@ pub const JSRuntime = struct {
             const old_len = self.deferred_weak_value_frees.len;
             const item = self.deferred_weak_value_frees[old_len - 1];
             self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. old_len - 1];
-            var skip_identity = item.prequeued_identity;
+            var skip_identity = item.prepared_identity;
             if (skip_identity == null) {
-                if (objectFromLastRefValue(item.value)) |object| {
-                    const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-                    if (self.borrowed_weak_cleanup_active) {
-                        if (object.isGlobal()) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
-                        if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-                        var enqueued_current_identity = true;
-                        self.enqueueBorrowedWeakCleanupIdentity(identity) catch {
-                            enqueued_current_identity = false;
-                        };
-                        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-                            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch {
-                                enqueued_current_identity = false;
-                            };
-                        }
-                        if (enqueued_current_identity) skip_identity = identity;
-                    }
-                }
+                skip_identity = self.prepareBorrowedWeakCleanupForLastRefValue(item.value);
             }
             const previous_skip_identity = self.current_deferred_weak_value_free_identity;
             self.current_deferred_weak_value_free_identity = skip_identity;
             defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
             if (item.value.refCountHeader()) |header| {
                 if (header.meta().rc == 0) {
-                    const already_consumed_prequeued_object =
+                    const already_consumed_prepared_object =
                         header.meta().kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
-                    std.debug.assert(already_consumed_prequeued_object);
-                    if (already_consumed_prequeued_object) continue;
+                    std.debug.assert(already_consumed_prepared_object);
+                    if (already_consumed_prepared_object) continue;
                 }
             }
             item.value.free(self);
@@ -2794,26 +2850,24 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identities[index] = identity;
     }
 
-    pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
-        const object = objectFromLastRefValue(value) orelse return;
-        const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.isGlobal()) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
-        if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-        try self.enqueueBorrowedWeakCleanupIdentity(identity);
-        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-            try self.enqueueBorrowedWeakCleanupIdentity(weak_identity);
-        }
-    }
-
-    pub fn prequeueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
+    /// Prepare borrowed-pointer cleanup before a last-ref value is released.
+    /// The raw identity is also returned when no holder can reference the
+    /// ordinary object; that records the completed liveness check so the
+    /// deferred free does not conservatively enqueue an irrelevant full-table
+    /// cleanup later.
+    pub fn prepareBorrowedWeakCleanupForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
         if (!self.borrowed_weak_cleanup_active) return null;
         const object = objectFromLastRefValue(value) orelse return null;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.isGlobal()) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        const weak_identity = self.peekWeakObjectIdentity(object);
+        if (!object.isGlobal() and weak_identity == null) return identity;
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-        self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
-        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch return null;
+        if (object.isGlobal()) {
+            self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+            self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
+        }
+        if (weak_identity) |stored_weak_identity| {
+            self.enqueueBorrowedWeakCleanupIdentity(stored_weak_identity) catch return null;
         }
         return identity;
     }

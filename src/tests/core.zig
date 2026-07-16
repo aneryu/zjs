@@ -170,6 +170,33 @@ test "heap BigInt value uses reserved QuickJS tag" {
     try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().kind);
 }
 
+test "heap BigInt limbs participate in runtime memory limit and accounting" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var source = try engine.libs.bigint.pow2(std.testing.allocator, 512 * 1024);
+    defer source.deinit();
+    const limb_bytes = source.limbs.len * @sizeOf(engine.libs.bigint.Limb);
+    const baseline = rt.memory.allocated_bytes;
+
+    // Leave room for the wrapper and a small margin, but not the retained limb
+    // storage. A raw persistent_allocator clone used to bypass this limit.
+    rt.setMemoryLimit(baseline + @sizeOf(core.bigint.BigInt) + 1024);
+    defer rt.setMemoryLimit(null);
+    if (core.bigint.BigInt.createFromBigInt(rt, source)) |unexpected| {
+        unexpected.valueRef().free(rt);
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+    }
+
+    rt.setMemoryLimit(null);
+    const stored = try core.bigint.BigInt.createFromBigInt(rt, source);
+    try std.testing.expect(rt.memory.allocated_bytes >= baseline + @sizeOf(core.bigint.BigInt) + limb_bytes);
+    stored.valueRef().free(rt);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
 test "runtime and context init-deinit are leak free" {
     var i: usize = 0;
     while (i < 3) : (i += 1) {
@@ -1132,6 +1159,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.c_function).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.bytecode_function).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.module_namespace, rt.classes.record(core.class.ids.module_ns).?.payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.weak_ref, core.class.standardPayloadKind(core.class.ids.weak_ref));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.disposable_stack));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.async_disposable_stack));
 }
@@ -3496,6 +3524,29 @@ test "memory account treats zero-length allocations as inert" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
+test "runtime allocator facades share memory accounting" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline = rt.memory.allocated_bytes;
+    const current = try rt.memory.allocator.alloc(u8, 2048);
+    var current_live = true;
+    defer if (current_live) rt.memory.allocator.free(current);
+    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
+
+    const persistent = try rt.memory.persistent_allocator.alloc(u8, 4096);
+    var persistent_live = true;
+    defer if (persistent_live) rt.memory.persistent_allocator.free(persistent);
+    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.memory.allocated_bytes);
+
+    rt.memory.persistent_allocator.free(persistent);
+    persistent_live = false;
+    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
+    rt.memory.allocator.free(current);
+    current_live = false;
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+}
+
 test "gc registry tracks live objects and intrusive list state" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4035,6 +4086,62 @@ test "gc object release does not allocate after refcount reaches zero" {
 
     // Clean up manually since we released/unlinked it
     core.Object.destroyFromHeader(rt, &obj.header);
+}
+
+const deep_gc_chain_length: usize = 20_000;
+
+fn createDeepOwnedPropertyChain(rt: *core.JSRuntime, key: core.Atom, length: usize) !*core.Object {
+    std.debug.assert(length != 0);
+    const head = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer head.value().free(rt);
+
+    var tail = head;
+    for (1..length) |_| {
+        const child = try core.Object.create(rt, core.class.ids.object, null);
+        tail.defineOwnProperty(
+            rt,
+            key,
+            core.Descriptor.data(child.value(), true, true, true),
+        ) catch |err| {
+            child.value().free(rt);
+            return err;
+        };
+        // The property is now the child's sole owner. Keeping only a raw tail
+        // pointer makes releasing `head` exercise the real RC cascade.
+        child.value().free(rt);
+        tail = child;
+    }
+    return head;
+}
+
+test "zero-ref release drains a deep acyclic object chain iteratively" {
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_threshold = 256 * 1024 * 1024,
+    });
+    defer rt.destroy();
+
+    const key = try rt.internAtom("deep-zero-ref-next");
+    defer rt.atoms.free(key);
+    const head = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+
+    head.value().free(rt);
+    try expectNoLiveGc(rt);
+}
+
+test "cycle scan preserves a deeply rooted object chain without recursion" {
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_threshold = 256 * 1024 * 1024,
+    });
+    defer rt.destroy();
+
+    const key = try rt.internAtom("deep-cycle-scan-next");
+    defer rt.atoms.free(key);
+    _ = try createDeepOwnedPropertyChain(rt, key, deep_gc_chain_length);
+
+    const before = rt.gc.liveCount();
+    const result = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
+    try std.testing.expectEqual(before, rt.gc.liveCount());
 }
 
 const live_empty_object_gc_count: usize = 2;
@@ -5055,6 +5162,95 @@ test "generator borrowed holder cache follows swap removal" {
     second.value().free(rt);
 }
 
+test "weak reference holders use a lifetime intrusive list" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const strong_map = try core.Object.create(rt, core.class.ids.map, null);
+    const first = try core.Object.create(rt, core.class.ids.weakmap, null);
+    const middle = try core.Object.create(rt, core.class.ids.weak_ref, null);
+    const last = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+
+    // QuickJS registers every weak-capable holder for its full payload
+    // lifetime, including an empty WeakMap / FinalizationRegistry. Strong
+    // Map shares the collection payload shape but must not enter this list.
+    try std.testing.expectEqual(first, rt.weak_reference_holder_head.?);
+    try std.testing.expectEqual(last, rt.weak_reference_holder_tail.?);
+    try std.testing.expectEqual(@as(?*core.Object, null), first.weakReferenceHolderPrevious());
+    try std.testing.expectEqual(@as(?*core.Object, middle), first.weakReferenceHolderNext());
+    try std.testing.expectEqual(@as(?*core.Object, first), middle.weakReferenceHolderPrevious());
+    try std.testing.expectEqual(@as(?*core.Object, last), middle.weakReferenceHolderNext());
+    try std.testing.expectEqual(@as(?*core.Object, middle), last.weakReferenceHolderPrevious());
+    try std.testing.expectEqual(@as(?*core.Object, null), last.weakReferenceHolderNext());
+
+    middle.value().free(rt);
+    try std.testing.expectEqual(@as(?*core.Object, last), first.weakReferenceHolderNext());
+    try std.testing.expectEqual(@as(?*core.Object, first), last.weakReferenceHolderPrevious());
+
+    first.value().free(rt);
+    try std.testing.expectEqual(last, rt.weak_reference_holder_head.?);
+    try std.testing.expectEqual(last, rt.weak_reference_holder_tail.?);
+
+    last.value().free(rt);
+    try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_head);
+    try std.testing.expectEqual(@as(?*core.Object, null), rt.weak_reference_holder_tail);
+    strong_map.value().free(rt);
+}
+
+test "weak collection borrowed holder cache supports reverse teardown" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var holders: [8]?*core.Object = @splat(null);
+    var keys: [8]?*core.Object = @splat(null);
+    defer {
+        for (&holders) |*holder| {
+            if (holder.*) |object| object.value().free(rt);
+            holder.* = null;
+        }
+        for (&keys) |*key| {
+            if (key.*) |object| object.value().free(rt);
+            key.* = null;
+        }
+    }
+
+    for (&holders, &keys, 0..) |*holder_slot, *key_slot, index| {
+        const holder = try core.Object.create(rt, core.class.ids.weakmap, null);
+        holder_slot.* = holder;
+        const key = try core.Object.create(rt, core.class.ids.object, null);
+        key_slot.* = key;
+        const value = try core.Object.create(rt, core.class.ids.object, null);
+        var value_owned = true;
+        defer if (value_owned) value.value().free(rt);
+        try appendWeakCollectionEntry(rt, holder, key, value.value());
+        value.value().free(rt);
+        value_owned = false;
+        try std.testing.expectEqual(@as(?usize, index), holder.borrowedReferenceHolderIndex());
+    }
+
+    var remaining = holders.len;
+    while (remaining != 0) {
+        remaining -= 1;
+        const holder = holders[remaining].?;
+        holder.value().free(rt);
+        holders[remaining] = null;
+        try std.testing.expectEqual(remaining, rt.borrowed_reference_holders.len);
+    }
+}
+
+test "ordinary last-ref values do not schedule irrelevant borrowed cleanup" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ordinary = try core.Object.create(rt, core.class.ids.object, null);
+    defer ordinary.value().free(rt);
+
+    rt.beginBorrowedWeakCleanup();
+    defer rt.endBorrowedWeakCleanup();
+    try std.testing.expect(rt.prepareBorrowedWeakCleanupForLastRefValue(ordinary.value()) != null);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowedWeakCleanupIdentityCount());
+}
+
 test "fresh object prototype rebinding reuses the shared empty root shape" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5833,6 +6029,30 @@ test "object allocation threshold triggers runtime cycle removal" {
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
+test "object allocation collects reclaimable cycles before memory-limit rejection" {
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_threshold = 256 * 1024 * 1024,
+    });
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.internAtom("gc-before-limit-self");
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), true, true, true));
+    object.value().free(rt);
+
+    // Exactly the current logical heap leaves no room for a replacement object
+    // unless the pending threshold collection runs before MemoryAccount checks
+    // the allocation. This is the ordering used by QJS JS_NewObjectFromShape.
+    rt.setGCThreshold(0);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+
+    const replacement = try core.Object.create(rt, core.class.ids.object, null);
+    replacement.value().free(rt);
+    try expectNoLiveGc(rt);
+}
+
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5841,6 +6061,7 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
     rt.setGCThreshold(0);
     try std.testing.expectEqual(@as(usize, 0), rt.gcThreshold());
 
+    const before_object_allocation = rt.memory.allocated_bytes;
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
 
@@ -5848,7 +6069,9 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         // Synthetic pre-allocation collections must not rewrite user policy.
         try std.testing.expectEqual(@as(usize, 0), rt.gcThreshold());
     } else {
-        const expected = rt.memory.allocated_bytes + (rt.memory.allocated_bytes >> 1);
+        // QJS resets malloc_gc_threshold immediately after its pre-object GC,
+        // before the triggering JSObject allocation is charged.
+        const expected = before_object_allocation + (before_object_allocation >> 1);
         try std.testing.expectEqual(expected, rt.gcThreshold());
     }
 }

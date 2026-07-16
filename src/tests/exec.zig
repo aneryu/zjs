@@ -1701,7 +1701,7 @@ test "call subsystem installs and invokes host globals" {
     const get_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_get, &.{stored_key});
     defer get_result.free(rt);
     var get_text = std.ArrayList(u8).empty;
-    defer get_text.deinit(std.testing.allocator);
+    defer get_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &get_text, get_result);
     try std.testing.expectEqualStrings("value", get_text.items);
 }
@@ -5997,6 +5997,52 @@ test "Engine eval preserves collection read host output semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n", stream.buffered());
+}
+
+test "runtime teardown preserves closure capture metadata until objects are destroyed" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Keeping a captured closure on a builtin prototype while constructing a
+    // lifetime-linked weak holder perturbs the intrusive GC-list order. Runtime
+    // teardown must not use that incidental order to destroy the closure's FB
+    // before the closure consumes FB.var_refs_len and frees its capture array.
+    const result = try js.eval(
+        \\function assert(value) { if (value !== true) throw 1; }
+        \\var calls = 0;
+        \\var originalSet = WeakMap.prototype.set;
+        \\WeakMap.prototype.set = function(value) {
+        \\    calls++;
+        \\    return originalSet.call(this, value);
+        \\};
+        \\var map = new WeakMap([]);
+        \\assert(map instanceof WeakMap);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "cycle teardown preserves restored strong counts for weakly referenced keys" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Each key is both strongly retained by a result record and weakly retained
+    // by the map. A cycle pass may visit the key before the map; the key must
+    // keep its restored strong refcount until those result properties release
+    // it, instead of being converted to an rc-zero weak husk prematurely.
+    const result = try js.eval(
+        \\var first = {};
+        \\var second = {};
+        \\var results = [];
+        \\var originalSet = WeakMap.prototype.set;
+        \\WeakMap.prototype.set = function(key, value) {
+        \\    results.push({ receiver: this, key: key, value: value });
+        \\    return originalSet.call(this, key, value);
+        \\};
+        \\var map = new WeakMap([[first, 42], [second, 43]]);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval preserves regexp UTF-16 test host output semantics" {

@@ -297,6 +297,18 @@ pub const IteratorPayload = struct {
     }
 };
 
+/// Per-payload node in the runtime's weak-holder list. The links point to the
+/// owning Object rather than to another node, so traversal does not need a
+/// payload-kind cast. `borrowed_holder_index` is the independent O(1) index
+/// into Runtime.borrowed_reference_holders; keeping both pieces here matches
+/// QuickJS's payload-resident JSWeakRefHeader without growing JSObject.
+pub const WeakReferenceHolderLink = struct {
+    previous: ?*Object = null,
+    next: ?*Object = null,
+    borrowed_holder_index: u32 = 0,
+    registered: bool = false,
+};
+
 pub const CollectionPayload = struct {
     entries: []CollectionEntry = &.{},
     entries_capacity: usize = 0,
@@ -305,6 +317,7 @@ pub const CollectionPayload = struct {
     weak_entries: []WeakCollectionEntry = &.{},
     weak_entries_capacity: usize = 0,
     realm_global_ptr: ?*Object = null,
+    weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *CollectionPayload, rt: *JSRuntime) void {
         const old_entries = self.entries;
@@ -331,8 +344,8 @@ pub const CollectionPayload = struct {
         defer if (started_borrowed_cleanup) rt.endBorrowedWeakCleanup();
         for (old_weak_entries) |entry| {
             rt.releaseWeakIdentity(entry.key_identity);
-            const prequeued_identity = rt.prequeueBorrowedWeakCleanupIdentityForLastRefValue(entry.value);
-            rt.enqueueDeferredWeakValueFreeWithPrequeuedIdentity(entry.value, prequeued_identity) catch |err| switch (err) {
+            const prepared_identity = rt.prepareBorrowedWeakCleanupForLastRefValue(entry.value);
+            rt.enqueueDeferredWeakValueFreeWithPreparedIdentity(entry.value, prepared_identity) catch |err| switch (err) {
                 error.OutOfMemory => entry.value.free(rt),
             };
         }
@@ -521,11 +534,19 @@ pub const ArgumentsPayload = struct {
 
 pub const ObjectDataPayload = struct {
     data: ?JSValue = null,
-    weak_target_identity: ?usize = null,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.data);
+    }
+};
+
+pub const WeakRefPayload = struct {
+    weak_target_identity: ?usize = null,
+    realm_global_ptr: ?*Object = null,
+    weak_holder_link: WeakReferenceHolderLink = .{},
+
+    pub fn destroy(self: *WeakRefPayload, rt: *JSRuntime) void {
         rt.clearWeakIdentitySlot(&self.weak_target_identity);
     }
 };
@@ -548,6 +569,7 @@ pub const FinalizationRegistryPayload = struct {
     cells: []FinalizationRegistryCell = &.{},
     cells_capacity: usize = 0,
     realm_global_ptr: ?*Object = null,
+    weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.cleanup_callback);
@@ -1563,6 +1585,11 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroy(rt);
             rt.memory.destroy(ObjectDataPayload, typed);
         },
+        .weak_ref => {
+            const typed: *WeakRefPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(WeakRefPayload, typed);
+        },
         .var_ref => {
             const typed: *VarRefPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
@@ -1872,10 +1899,16 @@ pub const Object = extern struct {
         // payload_finalizer, exotic) instead of an 88B SIMD block copy of Record.
         const class_record = rt.classes.recordPtr(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
+        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
         const self = if (inline_layout) |layout| blk: {
-            const bytes = try rt.allocRuntimeAlignedBytes(layout.allocation_size, layout.allocation_alignment);
+            // The object-level threshold/force-GC hook just ran above. Enter
+            // MemoryAccount directly so this same allocation does not request
+            // a second collection (observable to test allocation probes and
+            // unnecessarily expensive in force-GC builds).
+            const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
             break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
-        } else try rt.createRuntime(Object);
+        } else try rt.memory.createNoTrigger(Object);
         var initialized = false;
         errdefer {
             if (initialized) {
@@ -2004,8 +2037,8 @@ pub const Object = extern struct {
         // Reuse the inline-layout size computed at the top of createInternal
         // instead of recomputing it inside registerObject (mirror of the free
         // path's unregisterObjectWithBytes). Same value allocationSize derives.
-        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         try rt.registerObjectWithBytes(self, alloc_size);
+        if (self.isWeakReferenceHolderClass()) rt.registerWeakReferenceHolder(self);
         initialized = false;
         return self;
     }
@@ -2092,6 +2125,11 @@ pub const Object = extern struct {
                 payload.* = .{};
                 return @ptrCast(payload);
             },
+            .weak_ref => {
+                const payload = try rt.createRuntime(WeakRefPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
             .var_ref => {
                 const payload = try rt.createRuntime(VarRefPayload);
                 payload.* = .{};
@@ -2152,6 +2190,7 @@ pub const Object = extern struct {
             .proxy => rt.memory.destroy(ProxyPayload, @ptrCast(@alignCast(ptr))),
             .arguments => rt.memory.destroy(ArgumentsPayload, @ptrCast(@alignCast(ptr))),
             .object_data => rt.memory.destroy(ObjectDataPayload, @ptrCast(@alignCast(ptr))),
+            .weak_ref => rt.memory.destroy(WeakRefPayload, @ptrCast(@alignCast(ptr))),
             .var_ref => rt.memory.destroy(VarRefPayload, @ptrCast(@alignCast(ptr))),
             .promise => rt.memory.destroy(PromisePayload, @ptrCast(@alignCast(ptr))),
             .generator => {
@@ -2564,7 +2603,7 @@ pub const Object = extern struct {
         // Array elements live in the `u.array_values` union arm (gated by
         // `is_array`), orthogonal to the class-payload arm below.
         self.destroyArrayElements(rt);
-        // The 19 non-array class payloads all share the single `u.payload`
+        // The non-array class payloads all share the single `u.payload`
         // union slot, discriminated by `class_payload_kind` — at most ONE is
         // ever live per object. qjs frees the class-specific payload with a
         // SINGLE table lookup (`class_array[class_id].finalizer`,
@@ -2579,6 +2618,7 @@ pub const Object = extern struct {
             .ordinary => self.destroyOrdinaryPayload(rt),
             .arguments => self.destroyArgumentsPayload(rt),
             .object_data => self.destroyObjectDataPayload(rt),
+            .weak_ref => self.destroyWeakRefPayload(rt),
             .function => self.destroyFunctionPayload(rt),
             .bound_function => self.destroyBoundFunctionPayload(rt),
             .var_ref => self.destroyVarRefPayload(rt),
@@ -2601,16 +2641,23 @@ pub const Object = extern struct {
         if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
             rt.shapes.release(object_shape);
         }
-        if (rt.gc.phase != .deinit and self.weakref_count != 0) {
-            self.header.meta().rc = 0;
-            self.header.meta().flags.mark = false;
+        // Cycle removal and runtime deinit both use a resource pass followed by
+        // a struct-free pass: a not-yet-processed sibling (or a held Shape)
+        // may still decref and therefore dereference this header. Defer the
+        // allocation free until that resource pass completes (qjs free_object,
+        // quickjs.c:6382).
+        if (rt.gc.phase == .remove_cycles or rt.gc.phase == .deinit) {
+            rt.gc.deferCycleStructFree(&self.header);
             return;
         }
-        // Cycle removal: resources are gone but a not-yet-processed sibling in
-        // the batch may still decref (and thus dereference) this struct. Defer
-        // the struct-free to the Pass-B drain (qjs free_object, quickjs.c:6382).
-        if (rt.gc.phase == .remove_cycles) {
-            rt.gc.deferCycleStructFree(&self.header);
+        // Outside cycle removal, zero-ref destruction may need to leave the
+        // resource-stripped object as a weak husk. During REMOVE_CYCLES the
+        // restored refcount must remain intact until every condemned incoming
+        // edge has been released; Pass B below makes the keep/free decision,
+        // exactly like qjs free_object + gc_free_cycles.
+        if (self.weakref_count != 0) {
+            self.header.meta().rc = 0;
+            self.header.meta().flags.mark = false;
             return;
         }
         // qjs releases the weak-id mapping in its weak sweep, never per plain
@@ -2623,7 +2670,7 @@ pub const Object = extern struct {
 
     /// Pass-B drain of a cycle-deferred object: its resources were freed by the
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
-    /// (quickjs.c:6797). Non-weakref objects only (weakref'd ones husk earlier).
+    /// (quickjs.c:6797). Pass B filters retained weak husks before calling this.
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
         _ = rt.takeWeakObjectIdentity(self);
@@ -2803,7 +2850,7 @@ pub const Object = extern struct {
     }
 
     fn hasBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
-        if (self.objectDataPayloadConst()) |payload| {
+        if (self.weakRefPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
         if (self.collectionPayloadConst()) |payload| {
@@ -2824,7 +2871,7 @@ pub const Object = extern struct {
     }
 
     fn mayContainBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
-        if (self.objectDataPayloadConst()) |payload| {
+        if (self.weakRefPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
         if (self.collectionPayloadConst()) |payload| {
@@ -2849,39 +2896,27 @@ pub const Object = extern struct {
         return false;
     }
 
-    fn sweepCycleGarbageWeakCollectionEntries(
-        rt: *JSRuntime,
-        internal_bytecodes: *const ObjectVisitSet,
-    ) ObjectGraphError!void {
-        var weak_holders = &rt.gc.object_worklist;
-        weak_holders.clearRetainingCapacity();
-        {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                if (h.meta().kind != .object or h.meta().flags.mark) continue;
-                const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                const payload = obj.collectionPayloadConst() orelse continue;
-                if (payload.weak_entries.len == 0) continue;
-                gc.retain(&obj.header);
-                try weak_holders.append(rt.memory.persistent_allocator, obj);
-            }
-        }
-        defer {
-            for (weak_holders.items) |obj| obj.value().free(rt);
-            weak_holders.clearRetainingCapacity();
-        }
+    fn sweepCycleGarbageWeakCollectionEntries(rt: *JSRuntime) void {
+        rt.gc.beginDecrefPhase();
+        defer rt.gc.endDecrefPhase(rt);
 
-        for (weak_holders.items) |obj| {
-            if (obj.header.meta().rc == 0) continue;
-            obj.sweepCycleGarbageWeakCollectionEntriesForHolder(rt, internal_bytecodes);
+        var current = rt.weak_reference_holder_head;
+        while (current) |holder| {
+            // Destruction is deferred by the DECREF phase, but capture the
+            // link first just as qjs list traversal does. Condemned holders
+            // are already detached from the live GC partition and will have
+            // their complete payload destroyed by the cycle batch.
+            const next = holder.weakReferenceHolderNext();
+            if (!objectIsCycleGarbage(holder)) {
+                if (holder.collectionPayloadConst()) |payload| {
+                    if (payload.weak_entries.len != 0) holder.sweepCycleGarbageWeakCollectionEntriesForHolder(rt);
+                }
+            }
+            current = next;
         }
     }
 
-    fn sweepCycleGarbageWeakCollectionEntriesForHolder(
-        self: *Object,
-        rt: *JSRuntime,
-        internal_bytecodes: *const ObjectVisitSet,
-    ) void {
+    fn sweepCycleGarbageWeakCollectionEntriesForHolder(self: *Object, rt: *JSRuntime) void {
         const payload = self.collectionPayload() orelse return;
         var read_index: usize = 0;
         var write_index: usize = 0;
@@ -2895,7 +2930,7 @@ pub const Object = extern struct {
             }
 
             rt.releaseWeakIdentity(entry.key_identity);
-            clearValueReferenceToVisited(rt, &entry.value, internal_bytecodes);
+            clearValueReferenceToVisited(rt, &entry.value);
             entry.value.free(rt);
             removed = true;
         }
@@ -2932,7 +2967,7 @@ pub const Object = extern struct {
     }
 
     fn clearWeakIdentities(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        if (self.objectDataPayload()) |payload| {
+        if (self.weakRefPayload()) |payload| {
             if (payload.weak_target_identity) |identity| {
                 if (matcher.matches(rt, identity)) rt.clearWeakIdentitySlot(&payload.weak_target_identity);
             }
@@ -2995,14 +3030,14 @@ pub const Object = extern struct {
 
     fn deferWeakEntryValueFree(rt: *JSRuntime, entry: WeakCollectionEntry) void {
         rt.releaseWeakIdentity(entry.key_identity);
-        const prequeued_identity = prequeueBorrowedWeakCleanupIdentityForOwnedValue(rt, entry.value);
-        rt.enqueueDeferredWeakValueFreeWithPrequeuedIdentity(entry.value, prequeued_identity) catch |err| switch (err) {
+        const prepared_identity = prepareBorrowedWeakCleanupForOwnedValue(rt, entry.value);
+        rt.enqueueDeferredWeakValueFreeWithPreparedIdentity(entry.value, prepared_identity) catch |err| switch (err) {
             error.OutOfMemory => entry.value.free(rt),
         };
     }
 
-    fn prequeueBorrowedWeakCleanupIdentityForOwnedValue(rt: *JSRuntime, stored_value: JSValue) ?usize {
-        return rt.prequeueBorrowedWeakCleanupIdentityForLastRefValue(stored_value);
+    fn prepareBorrowedWeakCleanupForOwnedValue(rt: *JSRuntime, stored_value: JSValue) ?usize {
+        return rt.prepareBorrowedWeakCleanupForLastRefValue(stored_value);
     }
 
     fn clearRealmGlobalPtrs(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
@@ -3016,6 +3051,7 @@ pub const Object = extern struct {
         if (self.proxyPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.argumentsPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.objectDataPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
+        if (self.weakRefPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.varRefPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.finalizationRegistryPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.stdFilePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
@@ -4237,24 +4273,21 @@ pub const Object = extern struct {
 
         const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
-        const payload = self.objectDataPayload() orelse {
-            std.debug.assert(self.flags.class_payload_kind == .object_data);
+        const payload = self.weakRefPayload() orelse {
+            std.debug.assert(self.flags.class_payload_kind == .weak_ref);
             unreachable;
         };
-        const old_target = payload.data;
         const old_identity = payload.weak_target_identity;
-        payload.data = null;
         if (weak_target_identity) |identity| rt.retainWeakIdentity(identity);
         payload.weak_target_identity = weak_target_identity;
         try rt.registerBorrowedReferenceHolder(self);
         if (old_identity) |identity| rt.releaseWeakIdentity(identity);
-        if (old_target) |stored| stored.free(rt);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn weakRefDeref(self: *const Object, rt: *JSRuntime) JSValue {
         std.debug.assert(self.class_id == class.ids.weak_ref);
-        const payload = self.objectDataPayloadConst() orelse return JSValue.undefinedValue();
+        const payload = self.weakRefPayloadConst() orelse return JSValue.undefinedValue();
         const identity = payload.weak_target_identity orelse return JSValue.undefinedValue();
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
@@ -6047,6 +6080,7 @@ pub const Object = extern struct {
     pub fn functionRealmGlobalPtrSlot(self: *Object) *?*Object {
         if (self.ordinaryPayload()) |payload| return &payload.realm_global_ptr;
         if (self.objectDataPayload()) |payload| return &payload.realm_global_ptr;
+        if (self.weakRefPayload()) |payload| return &payload.realm_global_ptr;
         if (self.iteratorPayload()) |payload| return &payload.realm_global_ptr;
         if (self.collectionPayload()) |payload| return &payload.realm_global_ptr;
         if (self.bufferPayload()) |payload| return &payload.realm_global_ptr;
@@ -6112,7 +6146,7 @@ pub const Object = extern struct {
     }
 
     pub fn borrowedReferenceHolderIndex(self: *const Object) ?usize {
-        const encoded = if (self.functionPayloadConst()) |payload|
+        const compact_encoded = if (self.functionPayloadConst()) |payload|
             @as(u32, payload.borrowed_holder_index_lo) |
                 (@as(u32, payload.borrowed_holder_index_mid) << 8) |
                 (@as(u32, payload.borrowed_holder_index_hi) << 16)
@@ -6121,24 +6155,33 @@ pub const Object = extern struct {
                 (@as(u32, payload.borrowed_holder_index_mid) << 8) |
                 (@as(u32, payload.borrowed_holder_index_hi) << 16)
         else
-            return null;
-        return if (encoded == 0) null else @as(usize, encoded - 1);
+            0;
+        if (compact_encoded != 0) return @as(usize, compact_encoded - 1);
+        const link = self.weakReferenceHolderLinkConst() orelse return null;
+        return if (link.borrowed_holder_index == 0) null else @as(usize, link.borrowed_holder_index - 1);
     }
 
     pub fn setBorrowedReferenceHolderIndex(self: *Object, index: ?usize) void {
-        const encoded: u32 = if (index) |holder_index|
+        const compact_encoded: u32 = if (index) |holder_index|
             if (holder_index < std.math.maxInt(u24)) @intCast(holder_index + 1) else 0
         else
             0;
         if (self.functionPayload()) |payload| {
-            payload.borrowed_holder_index_lo = @truncate(encoded);
-            payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
-            payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
+            payload.borrowed_holder_index_lo = @truncate(compact_encoded);
+            payload.borrowed_holder_index_mid = @truncate(compact_encoded >> 8);
+            payload.borrowed_holder_index_hi = @truncate(compact_encoded >> 16);
+            return;
         } else if (self.generatorPayload()) |payload| {
-            payload.borrowed_holder_index_lo = @truncate(encoded);
-            payload.borrowed_holder_index_mid = @truncate(encoded >> 8);
-            payload.borrowed_holder_index_hi = @truncate(encoded >> 16);
+            payload.borrowed_holder_index_lo = @truncate(compact_encoded);
+            payload.borrowed_holder_index_mid = @truncate(compact_encoded >> 8);
+            payload.borrowed_holder_index_hi = @truncate(compact_encoded >> 16);
+            return;
         }
+        const link = self.weakReferenceHolderLink() orelse return;
+        link.borrowed_holder_index = if (index) |holder_index|
+            if (holder_index < std.math.maxInt(u32)) @intCast(holder_index + 1) else 0
+        else
+            0;
     }
 
     /// Realm-global pointer for a proven bytecode-function object. The common
@@ -6181,6 +6224,7 @@ pub const Object = extern struct {
         if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
+        if (self.weakRefPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.collectionPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.bufferPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -6274,6 +6318,57 @@ pub const Object = extern struct {
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
         rt.memory.destroy(FinalizationRegistryPayload, payload);
+    }
+
+    fn weakRefPayload(self: *Object) ?*WeakRefPayload {
+        if (self.flags.class_payload_kind != .weak_ref) return null;
+        const ptr = self.u.payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn weakRefPayloadConst(self: *const Object) ?*const WeakRefPayload {
+        if (self.flags.class_payload_kind != .weak_ref) return null;
+        const ptr = self.u.payload orelse return null;
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn destroyWeakRefPayload(self: *Object, rt: *JSRuntime) void {
+        const payload = self.weakRefPayload() orelse return;
+        self.u.payload = null;
+        self.flags.class_payload_kind = .none;
+        payload.destroy(rt);
+        rt.memory.destroy(WeakRefPayload, payload);
+    }
+
+    pub fn isWeakReferenceHolderClass(self: *const Object) bool {
+        return switch (self.class_id) {
+            class.ids.weakmap, class.ids.weakset, class.ids.weak_ref, class.ids.finalization_registry => true,
+            else => false,
+        };
+    }
+
+    pub fn weakReferenceHolderLink(self: *Object) ?*WeakReferenceHolderLink {
+        if (self.collectionPayload()) |payload| return &payload.weak_holder_link;
+        if (self.weakRefPayload()) |payload| return &payload.weak_holder_link;
+        if (self.finalizationRegistryPayload()) |payload| return &payload.weak_holder_link;
+        return null;
+    }
+
+    pub fn weakReferenceHolderLinkConst(self: *const Object) ?*const WeakReferenceHolderLink {
+        if (self.collectionPayloadConst()) |payload| return &payload.weak_holder_link;
+        if (self.weakRefPayloadConst()) |payload| return &payload.weak_holder_link;
+        if (self.finalizationRegistryPayloadConst()) |payload| return &payload.weak_holder_link;
+        return null;
+    }
+
+    pub fn weakReferenceHolderPrevious(self: *const Object) ?*Object {
+        const link = self.weakReferenceHolderLinkConst() orelse return null;
+        return link.previous;
+    }
+
+    pub fn weakReferenceHolderNext(self: *const Object) ?*Object {
+        const link = self.weakReferenceHolderLinkConst() orelse return null;
+        return link.next;
     }
 
     fn stdFilePayload(self: *Object) ?*StdFilePayload {
@@ -6724,7 +6819,8 @@ pub const Object = extern struct {
     };
 
     const ScanIncrefVisitor = struct {
-        rt: *JSRuntime,
+        registry: *gc.Registry,
+        garbage: *gc.HeaderList,
 
         pub fn visitValue(self: ScanIncrefVisitor, val: *JSValue) void {
             if (val.refCountHeader()) |h| {
@@ -6758,10 +6854,15 @@ pub const Object = extern struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
+            const was_zero = h.meta().rc == 0;
             h.meta().rc += 1;
-            if (headerHasTraceableChildren(h) and h.meta().flags.mark) {
+            if (was_zero and headerHasTraceableChildren(h) and h.meta().flags.mark) {
+                self.garbage.remove(h);
                 h.meta().flags.mark = false;
-                traceChildren(self.rt, h, self);
+                // Moving a newly revived zero-ref node to the main-list tail
+                // makes the enclosing list walk visit its children later,
+                // exactly like QuickJS gc_scan_incref_child.
+                self.registry.restoreCycleCandidate(h);
             }
         }
     };
@@ -6809,26 +6910,17 @@ pub const Object = extern struct {
     fn gcRemoveWeakObjects(rt: *JSRuntime) ObjectGraphError!void {
         sweepDeadWeakRootSlots(rt);
 
-        var weak_holders = &rt.gc.object_worklist;
-        weak_holders.clearRetainingCapacity();
-        {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                if (h.meta().kind != .object) continue;
-                const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                if (!obj.hasWeakPayloadReferences()) continue;
-                gc.retain(&obj.header);
-                try weak_holders.append(rt.memory.persistent_allocator, obj);
-            }
-        }
-        defer {
-            for (weak_holders.items) |obj| obj.value().free(rt);
-            weak_holders.clearRetainingCapacity();
-        }
-
-        for (weak_holders.items) |obj| {
-            if (obj.header.meta().rc == 0) continue;
-            try obj.sweepDeadWeakPayloadReferences(rt);
+        // Match qjs gc_remove_weak_objects: the payload-resident holder list is
+        // traversed exactly once while zero-ref destruction is deferred. Empty
+        // weak holders stay linked for their full lifetime, so this traversal
+        // has no allocation and no registry rescans or mark-bit side effects.
+        rt.gc.beginDecrefPhase();
+        defer rt.gc.endDecrefPhase(rt);
+        var current = rt.weak_reference_holder_head;
+        while (current) |holder| {
+            const next = holder.weakReferenceHolderNext();
+            try holder.sweepDeadWeakPayloadReferences(rt);
+            current = next;
         }
     }
 
@@ -6841,21 +6933,8 @@ pub const Object = extern struct {
         }
     }
 
-    fn hasWeakPayloadReferences(self: *const Object) bool {
-        if (self.objectDataPayloadConst()) |payload| {
-            if (payload.weak_target_identity != null) return true;
-        }
-        if (self.collectionPayloadConst()) |payload| {
-            if (payload.weak_entries.len != 0) return true;
-        }
-        if (self.finalizationRegistryPayloadConst()) |payload| {
-            if (payload.cells.len != 0) return true;
-        }
-        return false;
-    }
-
     fn sweepDeadWeakPayloadReferences(self: *Object, rt: *JSRuntime) ObjectGraphError!void {
-        if (self.objectDataPayload()) |payload| {
+        if (self.weakRefPayload()) |payload| {
             if (payload.weak_target_identity) |identity| {
                 if (!weakIdentityIsLive(rt, identity)) {
                     rt.clearWeakIdentitySlot(&payload.weak_target_identity);
@@ -6864,28 +6943,25 @@ pub const Object = extern struct {
         }
 
         if (self.collectionPayload()) |payload| {
-            var index: usize = 0;
+            var read_index: usize = 0;
+            var write_index: usize = 0;
             var removed_weak_entry = false;
-            while (index < payload.weak_entries.len) {
-                if (weakIdentityIsLive(rt, payload.weak_entries[index].key_identity)) {
-                    index += 1;
+            while (read_index < payload.weak_entries.len) : (read_index += 1) {
+                const entry = payload.weak_entries[read_index];
+                if (weakIdentityIsLive(rt, entry.key_identity)) {
+                    if (write_index != read_index) payload.weak_entries[write_index] = entry;
+                    write_index += 1;
                     continue;
                 }
 
-                const entry = payload.weak_entries[index];
-                if (index + 1 < payload.weak_entries.len) {
-                    std.mem.copyForwards(
-                        WeakCollectionEntry,
-                        payload.weak_entries[index .. payload.weak_entries.len - 1],
-                        payload.weak_entries[index + 1 ..],
-                    );
-                }
-                payload.weak_entries = payload.weak_entries.ptr[0 .. payload.weak_entries.len - 1];
                 rt.releaseWeakIdentity(entry.key_identity);
                 entry.value.free(rt);
                 removed_weak_entry = true;
             }
-            if (removed_weak_entry) self.clearCollectionIndex(rt);
+            if (removed_weak_entry) {
+                payload.weak_entries = payload.weak_entries.ptr[0..write_index];
+                self.clearCollectionIndex(rt);
+            }
         }
 
         const finalization_payload = self.finalizationRegistryPayload() orelse {
@@ -6944,11 +7020,19 @@ pub const Object = extern struct {
         rt.gc.stats.collections += 1;
         try gcRemoveWeakObjects(rt);
 
-        var garbage_headers = std.ArrayList(*gc.GCObjectHeader).empty;
-        try garbage_headers.ensureTotalCapacity(rt.memory.persistent_allocator, rt.gc.liveCount());
-        defer garbage_headers.deinit(rt.memory.persistent_allocator);
-
+        var garbage: gc.HeaderList = .{};
+        var garbage_committed = false;
         defer {
+            // Every fallible operation happens before destruction begins. If
+            // one fails, refcounts have already been restored; splice the
+            // condemned partition back into the registry before returning.
+            if (!garbage_committed) {
+                while (garbage.popFront()) |h| {
+                    h.meta().flags.mark = false;
+                    h.meta().flags.cycle_visited = false;
+                    rt.gc.restoreCycleCandidate(h);
+                }
+            }
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
                 h.meta().flags.mark = false;
@@ -6967,81 +7051,87 @@ pub const Object = extern struct {
             while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
             }
+
+            // QJS moves trial-zero nodes to tmp_obj_list. Partitioning after
+            // the decref walk is equivalent and keeps the visitor itself tiny.
+            var cursor = rt.gc.gc_object_head;
+            while (cursor) |h| {
+                const next = h.next;
+                if (h.meta().rc == 0) {
+                    rt.gc.detachCycleCandidate(h);
+                    garbage.append(h);
+                }
+                cursor = next;
+            }
         }
 
         // Phase 2: gc_scan
         {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                if (h.meta().rc > 0 and h.meta().flags.mark) {
-                    h.meta().flags.mark = false;
-                    traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
-                }
+            // Walk the live list dynamically: reviving a trial-zero child moves
+            // it from `garbage` to the registry tail, so it is visited without
+            // recursion or an auxiliary worklist.
+            var cursor = rt.gc.gc_object_head;
+            while (cursor) |h| {
+                std.debug.assert(h.meta().rc > 0);
+                h.meta().flags.mark = false;
+                traceChildren(rt, h, ScanIncrefVisitor{
+                    .registry = &rt.gc,
+                    .garbage = &garbage,
+                });
+                cursor = h.next;
             }
         }
 
-        // Phase 3: snapshot dead-cycle candidates. The registry keeps all
-        // candidates until destruction; `mark` distinguishes garbage from live
-        // entries for the rest of this round.
+        // Phase 3: restore refcounts of the detached dead-cycle partition.
         {
-            var gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
-                if (h.meta().flags.mark) garbage_headers.appendAssumeCapacity(h);
-            }
-        }
-
-        // Phase 3b: restore refcounts of all objects to be deleted.
-        {
-            for (garbage_headers.items) |h| {
+            var cursor = garbage.head;
+            while (cursor) |h| : (cursor = h.next) {
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
             }
         }
 
-        var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
-        defer free_internal_bytecodes.deinit();
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
                 h.meta().flags.cycle_visited = false;
             }
-            for (garbage_headers.items) |h| {
-                if (h.meta().flags.mark) h.meta().flags.cycle_visited = true;
-                if (h.meta().kind == .function_bytecode) {
-                    if (!h.meta().flags.mark) continue;
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    try free_internal_bytecodes.put(@intFromPtr(fb), {});
-                }
+            var cursor = garbage.head;
+            while (cursor) |h| : (cursor = h.next) {
+                h.meta().flags.cycle_visited = true;
             }
         }
 
-        try sweepCycleGarbageWeakCollectionEntries(rt, &free_internal_bytecodes);
+        sweepCycleGarbageWeakCollectionEntries(rt);
 
         var garbage_count: usize = 0;
         {
-            for (garbage_headers.items) |h| {
-                if ((h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape) and h.meta().flags.mark) garbage_count += 1;
+            var cursor = garbage.head;
+            while (cursor) |h| : (cursor = h.next) {
+                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape) garbage_count += 1;
             }
         }
 
-        // Reserve so the per-object Pass-B deferral (deferCycleStructFree) cannot
-        // OOM mid-batch; capacity bounds the whole garbage set.
-        try rt.gc.reserveCycleDeferred(garbage_headers.items.len);
+        // No fallible operation is allowed after this point. Split the detached
+        // partition by teardown order, reusing the same header links for each
+        // staging list and later for Registry's Pass-B deferred list.
+        var garbage_objects: gc.HeaderList = .{};
+        var garbage_bytecodes: gc.HeaderList = .{};
+        var garbage_var_refs: gc.HeaderList = .{};
+        var garbage_shapes: gc.HeaderList = .{};
+        garbage_committed = true;
+        while (garbage.popFront()) |h| {
+            switch (h.meta().kind) {
+                .object => garbage_objects.append(h),
+                .function_bytecode => garbage_bytecodes.append(h),
+                .var_ref => garbage_var_refs.append(h),
+                .shape => garbage_shapes.append(h),
+                else => unreachable,
+            }
+        }
 
         const old_phase = rt.gc.phase;
         rt.gc.phase = .remove_cycles;
         defer rt.gc.phase = old_phase;
-
-        if (garbage_count == 0) {
-            for (garbage_headers.items) |h| {
-                if (h.meta().kind == .function_bytecode) {
-                    if (!h.meta().flags.mark) continue;
-                    rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
-                    function_bytecode_mod.destroyFromHeader(rt, h);
-                }
-            }
-            drainCycleDeferredFrees(rt);
-            return 0;
-        }
 
         // STEP 3 (qjs faithful): no edge-nulling pre-pass. qjs has none — its
         // cascade defense is the REMOVE_CYCLES gate in __JS_FreeValueRT
@@ -7054,15 +7144,6 @@ pub const Object = extern struct {
 
         const freed = garbage_count;
 
-        var garbage_shapes = std.ArrayList(*shape.Shape).empty;
-        try garbage_shapes.ensureTotalCapacity(rt.memory.persistent_allocator, garbage_count);
-        defer garbage_shapes.deinit(rt.memory.persistent_allocator);
-        for (garbage_headers.items) |h| {
-            if (!h.meta().flags.mark or h.meta().kind != .shape) continue;
-            const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", h));
-            garbage_shapes.appendAssumeCapacity(shape_ref);
-        }
-
         // Resource teardown has a real ownership order even though every struct
         // survives until Pass B. A bytecode function object derives the length
         // of its `u.func.var_refs` allocation from its owning FB, exactly like
@@ -7071,25 +7152,20 @@ pub const Object = extern struct {
         // gc-list order could deinit an FB first and leak the capture-pointer
         // allocation when the closure followed. VarRef structs also stay valid
         // until their object owners have released the capture edges.
-        for (garbage_headers.items) |h| {
-            if (h.meta().flags.mark and h.meta().kind == .object) destroyFromHeader(rt, h);
+        while (garbage_objects.popFront()) |h| {
+            destroyFromHeader(rt, h);
         }
-        for (garbage_headers.items) |h| {
-            if (!h.meta().flags.mark or h.meta().kind != .function_bytecode) continue;
+        while (garbage_bytecodes.popFront()) |h| {
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             function_bytecode_mod.destroyFromHeader(rt, h);
         }
-        for (garbage_headers.items) |h| {
-            if (!h.meta().flags.mark or h.meta().kind != .var_ref) continue;
+        while (garbage_var_refs.popFront()) |h| {
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             var_ref_mod.VarRef.destroyFromHeader(rt, h);
         }
 
-        for (garbage_shapes.items) |shape_ref| {
-            const h = &shape_ref.header;
-            if (!h.meta().flags.mark) continue;
+        while (garbage_shapes.popFront()) |h| {
             if (h.meta().flags.finalizing) continue;
-            if (h.prev == null and h.next == null and rt.gc.gc_object_head != h and rt.gc.gc_object_tail != h) continue;
             rt.shapes.destroyFromHeader(h);
         }
 
@@ -7108,10 +7184,20 @@ pub const Object = extern struct {
     /// var_refs / function-bytecodes whose resources were torn down during the
     /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
-        for (rt.gc.cycle_deferred_frees.items) |h| {
+        while (rt.gc.popCycleDeferredFree()) |h| {
             switch (h.meta().kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
+                        // qjs keeps a cycle-freed object's stripped struct while
+                        // either strong teardown edges or weak identities still
+                        // point at it. It is no longer a GC-list member; the last
+                        // weak release reclaims an rc-zero husk.
+                        h.meta().flags.mark = false;
+                        h.meta().flags.cycle_visited = false;
+                        h.meta().flags.finalizing = false;
+                        continue;
+                    }
                     freeCycleDeferredStruct(rt, obj);
                 },
                 .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
@@ -7119,7 +7205,6 @@ pub const Object = extern struct {
                 else => {},
             }
         }
-        rt.gc.cycle_deferred_frees.clearRetainingCapacity();
     }
 
     pub fn releaseCallbackOwnedFunctionBytecodeCycles(rt: *JSRuntime) void {
@@ -7859,16 +7944,15 @@ pub const Object = extern struct {
     fn clearValueReferenceToVisited(
         rt: *JSRuntime,
         stored: *JSValue,
-        internal_bytecodes: *const ObjectVisitSet,
     ) void {
         if (valueReferencesVisited(stored.*)) {
             stored.* = JSValue.undefinedValue();
             return;
         }
         if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
-            if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
+            if (!headerIsCycleGarbage(&function_bytecode.header)) return;
             stored.* = JSValue.undefinedValue();
-            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
+            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode);
             return;
         }
         const cell = varRefCellFromValue(stored.*) orelse return;
@@ -7878,14 +7962,13 @@ pub const Object = extern struct {
     fn clearFunctionBytecodeReferencesToVisited(
         rt: *JSRuntime,
         function_bytecode: *FunctionBytecode,
-        internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        if (function_bytecode.class_fields_init) |stored| clearValueReferenceToVisited(rt, stored);
         if (function_bytecode.realm_global_header) |realm_header| {
             const realm_global: *Object = @fieldParentPtr("header", realm_header);
             if (objectIsCycleGarbage(realm_global)) function_bytecode.realm_global_header = null;
         }
-        for (function_bytecode.cpoolSlice()) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        for (function_bytecode.cpoolSlice()) |*stored| clearValueReferenceToVisited(rt, stored);
     }
 
     fn valueReferencesVisited(stored: JSValue) bool {
