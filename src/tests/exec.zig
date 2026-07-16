@@ -1313,6 +1313,26 @@ test "M1.3: returned closure can update and return captured counter" {
     try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
 }
 
+test "checked local replacement preserves int fast moves and refcounted fallbacks" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function () {
+        \\  let value = 1;
+        \\  value = 2;
+        \\  value = "left";
+        \\  value = "right";
+        \\  value = 3;
+        \\  return value;
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 3), result.asInt32());
+}
+
 test "TDZ: closure update and return of captured const throws TypeError" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

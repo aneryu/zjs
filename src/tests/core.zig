@@ -119,6 +119,32 @@ test "primitive value predicates match QuickJS helpers" {
     try std.testing.expectEqual(@as(?i32, null), core.JSValue.float64(7).asInt32());
 }
 
+test "int32 same-tag update preserves the value representation invariant" {
+    var value = core.JSValue.int32(-1);
+    value.setInt32AssumeInt(1234567);
+
+    try std.testing.expectEqual(core.Tag.int, value.tagOf());
+    try std.testing.expectEqual(@as(?i32, 1234567), value.asInt32());
+}
+
+test "int32 slot move selects only the representation where it removes an aggregate copy" {
+    var destination = core.JSValue.int32(11);
+    const source = core.JSValue.int32(22);
+    const optimized = destination.trySetInt32FromSlot(&source);
+
+    if (core.value.nan_boxing) {
+        try std.testing.expect(!optimized);
+        try std.testing.expectEqual(@as(?i32, 11), destination.asInt32());
+    } else {
+        try std.testing.expect(optimized);
+        try std.testing.expectEqual(@as(?i32, 22), destination.asInt32());
+    }
+
+    var non_int = core.JSValue.boolean(false);
+    try std.testing.expect(!non_int.trySetInt32FromSlot(&source));
+    try std.testing.expectEqual(@as(?bool, false), non_int.asBool());
+}
+
 test "float construction is valid across JSValue representations" {
     const finite = core.JSValue.float64(1.5);
     try std.testing.expectEqual(@as(?f64, 1.5), finite.asFloat64());

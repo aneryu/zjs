@@ -169,6 +169,10 @@ pub const JSValue = extern struct {
     pub const short_big_int_bits: u16 = if (nan_boxing) NanBox.payload_bits else 64;
     pub const short_big_int_min: i64 = if (nan_boxing) -(@as(i64, 1) << (NanBox.payload_bits - 1)) else std.math.minInt(i64);
     pub const short_big_int_max: i64 = if (nan_boxing) (@as(i64, 1) << (NanBox.payload_bits - 1)) - 1 else std.math.maxInt(i64);
+    /// Performance capability exposed without leaking representation fields.
+    /// Callers can compile out the attempted fast move when the adapter's normal
+    /// whole-value replacement is already cheaper.
+    pub const has_fast_int32_slot_move: bool = !nan_boxing;
 
     pub inline fn shortBigIntFits(value: i128) bool {
         return value >= short_big_int_min and value <= short_big_int_max;
@@ -371,6 +375,38 @@ pub const JSValue = extern struct {
     pub fn asInt32(self: JSValue) ?i32 {
         if (self.hasTag(Tag.int)) return payloadAsI32(self.payloadOf());
         return null;
+    }
+
+    /// Replace an already-proven int32 value without changing its semantic tag.
+    /// The caller must have classified this exact slot as `Tag.int`. Keeping the
+    /// operation in the JSValue module lets the 16-byte implementation update
+    /// only its payload while the NaN-boxed implementation retains the packed
+    /// constructor/store shape that is fastest for that adapter.
+    pub inline fn setInt32AssumeInt(self: *JSValue, value: i32) void {
+        std.debug.assert(self.hasTag(Tag.int));
+        if (comptime nan_boxing) {
+            self.* = int32(value);
+        } else {
+            self.repr.payload = payloadFromI32(value);
+        }
+    }
+
+    /// Try the representation-specific fast form of moving an int32 from one
+    /// live slot into another. The 16-byte adapter can preserve the proven int
+    /// tag and copy only the payload, avoiding an aggregate copy and refcount
+    /// classification. The packed adapter deliberately declines: its generic
+    /// replacement is already a single-register move and an extra tag guard is
+    /// slower. On false, neither slot is modified and the caller must use the
+    /// normal ownership-aware replacement path.
+    pub inline fn trySetInt32FromSlot(self: *JSValue, source: *const JSValue) bool {
+        if (comptime !has_fast_int32_slot_move) return false;
+        if (comptime Tag.int == 0) {
+            if ((self.repr.tag | source.repr.tag) != 0) return false;
+        } else {
+            if (((self.repr.tag ^ Tag.int) | (source.repr.tag ^ Tag.int)) != 0) return false;
+        }
+        self.repr.payload = source.repr.payload;
+        return true;
     }
 
     pub inline fn asInt32Pair(lhs: JSValue, rhs: JSValue) ?Int32Pair {
@@ -767,7 +803,7 @@ test "asInt64 / asUint64 on inline short BigInt and non-BigInt" {
     // NaN-boxed 48-bit window (±2^47) when nan_boxing is on, or the full i64
     // otherwise — so the test pins to the representation's own bounds. A raw
     // i64::MAX literal would overflow the 48-bit short payload and trip the
-    // `shortBigInt` construction assert under the default (NaN-boxed) build.
+    // `shortBigInt` construction assert under a NaN-boxed build.
     try t.expectEqual(@as(?i64, 0), JSValue.shortBigInt(0).asInt64());
     try t.expectEqual(@as(?i64, 42), JSValue.shortBigInt(42).asInt64());
     try t.expectEqual(@as(?i64, -42), JSValue.shortBigInt(-42).asInt64());

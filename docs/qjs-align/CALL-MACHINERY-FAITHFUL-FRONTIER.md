@@ -376,9 +376,9 @@ instructions per iteration.
 The call target now also carries a non-null pointer to the FB-shared cached
 execution view. Cache construction failure declines the same-Machine path and
 falls back to the authoritative generic call; a successful Entry never owns a
-per-call view. Removing that obsolete owner retains the default NaN-boxed
-Entry's 256-byte stride; the 16-byte reference representation omits the
-default-only padding and uses 280 bytes instead of the old 288. Compile-time
+per-call view. Removing that obsolete owner retains the NaN-boxed adapter's
+256-byte Entry stride; the canonical 64-bit 16-byte representation omits that
+adapter-only padding and uses 280 bytes instead of the old 288. Compile-time
 assertions lock both layouts. The cleanup eliminates one nullable/ownership
 check per ordinary call and two on the moved path. The moved-method instance
 publishes its real continuation exactly once after setup; a direct binary A/B

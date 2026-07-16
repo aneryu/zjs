@@ -153,13 +153,13 @@ This is a single-context repository. See `docs/agents/domain.md`.
   handing off substantial code changes)
 - `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
 - `zig build test-altrepr --summary all` (alternate JSValue representation
-  guard: runs the suite with the non-default 16-byte layout. REQUIRED
-  whenever a change touches `src/core/value.zig` or value-representation
-  semantics; for such changes also run the test262 gate once with
-  `-Dzjs_nan_boxing=false` at stage close. The default is the 8-byte
-  NaN-boxed layout — compute parity, ~10% lower RSS on value-dense heaps —
-  and the 16-byte layout stays as the reference representation; neither
-  mode may rot.)
+  guard: runs the suite with the representation opposite the target default.
+  REQUIRED whenever a change touches `src/core/value.zig` or
+  value-representation semantics; for such changes also run the test262 gate
+  once with `-Dzjs_nan_boxing=true` at stage close on 64-bit hosts. The 64-bit
+  default is the QuickJS-aligned 16-byte payload+tag layout; narrower targets
+  default to 8-byte NaN-boxing. The explicit option can select either mode and
+  neither may rot.)
 - `zig build test-oom --summary all` (OOM 注入门禁：corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus same-runtime recovery canaries; run at phase-close tier, not per-edit)
 
 - `git diff --check`

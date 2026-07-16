@@ -3,8 +3,9 @@
 - Generated: 2026-06-13 (architecture review round 5 refresh: string rope tail)
 - Zig version: 0.16.0
 - OS: Linux 6.17 (aarch64, Cortex-X925)
-- ZJS: `zig-out/bin/zjs` (ReleaseFast, default options; `zjs_nan_boxing=true` is
-  the default 8-byte NaN-boxed JSValue representation)
+- ZJS: `zig-out/bin/zjs` (ReleaseFast, default options at capture time; that
+  2026-06-13 build used the then-default `zjs_nan_boxing=true` 8-byte
+  representation. Current 64-bit defaults use the 16-byte representation.)
 - QJS: `../quickjs/build/qjs` (QuickJS-ng 0.15.0, v0.15.0-4-g967aa0b, CMake
   Release with mimalloc)
 - Benchmark iters: 30, warmup: 3

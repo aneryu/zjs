@@ -1118,14 +1118,14 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                     const r: i64 = @as(i64, a) + b;
                     const r32: i32 = @truncate(r);
                     if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0] = JSValue.int32(r32);
+                    (sp - 2)[0].setInt32AssumeInt(r32);
                 },
                 // qjs OP_sub int leg (19797-19805), same int64-widen form.
                 .sub => {
                     const r: i64 = @as(i64, a) - b;
                     const r32: i32 = @truncate(r);
                     if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0] = JSValue.int32(r32);
+                    (sp - 2)[0].setInt32AssumeInt(r32);
                 },
                 // qjs OP_mul int leg (19836-19852): 64-bit product truncation
                 // check, then the `r == 0 && (v1|v2) < 0` -0 test — both special
@@ -1135,7 +1135,7 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                     const r32: i32 = @truncate(r);
                     if (r32 != r) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
                     if (r == 0 and (a | b) < 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0] = JSValue.int32(r32);
+                    (sp - 2)[0].setInt32AssumeInt(r32);
                 },
                 // qjs OP_div int leg (19884-19889): always the double quotient,
                 // through the canonicalizing JS_NewFloat64 (= numberToValue).
@@ -1145,12 +1145,12 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                 // remainder is nonnegative % positive — plain int32.
                 .mod => {
                     if (a < 0 or b <= 0) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    (sp - 2)[0] = JSValue.int32(@rem(a, b));
+                    (sp - 2)[0].setInt32AssumeInt(@rem(a, b));
                 },
                 // qjs OP_shl int leg (20118-20124).
-                .shl => (sp - 2)[0] = JSValue.int32(a << @intCast(b & 31)),
+                .shl => (sp - 2)[0].setInt32AssumeInt(a << @intCast(b & 31)),
                 // qjs OP_sar int leg (20159-20164).
-                .sar => (sp - 2)[0] = JSValue.int32(a >> @intCast(b & 31)),
+                .sar => (sp - 2)[0].setInt32AssumeInt(a >> @intCast(b & 31)),
                 // qjs OP_shr int leg (20138-20145): JS_NewUint32 — result keeps
                 // the int tag while it fits int32, else the exact double (bare
                 // __JS_NewFloat64; >INT32_MAX is never int32-canonicalizable, so
@@ -1160,15 +1160,15 @@ pub fn opBinary(comptime kind: BinOp) Handler {
                 .shr => {
                     const r = @as(u32, @bitCast(a)) >> @intCast(b & 31);
                     if (r <= std.math.maxInt(i32)) {
-                        (sp - 2)[0] = JSValue.int32(@intCast(r));
+                        (sp - 2)[0].setInt32AssumeInt(@intCast(r));
                     } else {
                         (sp - 2)[0] = JSValue.float64(@floatFromInt(r));
                     }
                 },
                 // qjs OP_and/OP_or/OP_xor int legs (20179-20182/20197-20200/20215-20218).
-                .band => (sp - 2)[0] = JSValue.int32(a & b),
-                .bor => (sp - 2)[0] = JSValue.int32(a | b),
-                .bxor => (sp - 2)[0] = JSValue.int32(a ^ b),
+                .band => (sp - 2)[0].setInt32AssumeInt(a & b),
+                .bor => (sp - 2)[0].setInt32AssumeInt(a | b),
+                .bxor => (sp - 2)[0].setInt32AssumeInt(a ^ b),
             }
             return cont(pc + 1, sp - 1, var_buf, vm);
         }
@@ -1300,6 +1300,15 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 /// The checked encodings only exist in the u16 operand form (no short variants —
 /// bytecode.zig:442-445), so one handler per kind covers them.
 pub fn opLocCheck(comptime kind: LocKind) Handler {
+    if (comptime JSValue.has_fast_int32_slot_move) return opLocCheckWithInt32SlotMove(kind);
+    return opLocCheckGeneric(kind);
+}
+
+/// Keep adapters without a cheaper same-tag move on the original handler body.
+/// This is deliberately a separate instantiation rather than a comptime-false
+/// branch inside the wide handler: even a dead pointer-shaped branch perturbed
+/// the packed adapter's code layout and cost about 2% on the loop control.
+fn opLocCheckGeneric(comptime kind: LocKind) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
             if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -1318,6 +1327,42 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
                 },
                 .set => {
                     const value = (sp - 1)[0];
+                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
+                    return cont(pc + 3, sp, var_buf, vm);
+                },
+            }
+        }
+    }.h;
+}
+
+/// 16-byte adapter specialization: checked int-to-int writes preserve the
+/// destination tag and move only the payload. The generic ownership path stays
+/// immediately available for every other tag pair.
+fn opLocCheckWithInt32SlotMove(comptime kind: LocKind) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const idx: u16 = readInt(u16, pc + 1);
+            const old_v = var_buf[idx];
+            if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            switch (kind) {
+                .get => {
+                    sp[0] = value_slot.loadOwned(&var_buf[idx]);
+                    return cont(pc + 3, sp + 1, var_buf, vm);
+                },
+                .put => {
+                    const source = sp - 1;
+                    if (var_buf[idx].trySetInt32FromSlot(&source[0]))
+                        return cont(pc + 3, sp - 1, var_buf, vm);
+                    const value = source[0];
+                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
+                    return cont(pc + 3, sp - 1, var_buf, vm);
+                },
+                .set => {
+                    const source = sp - 1;
+                    if (var_buf[idx].trySetInt32FromSlot(&source[0]))
+                        return cont(pc + 3, sp, var_buf, vm);
+                    const value = source[0];
                     value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
                     return cont(pc + 3, sp, var_buf, vm);
                 },
@@ -2134,7 +2179,7 @@ pub fn op_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     if ((sp - 1)[0].asInt32()) |iv| {
         const res = if (opc == op.inc) @addWithOverflow(iv, 1) else @subWithOverflow(iv, 1);
         if (res[1] == 0) {
-            (sp - 1)[0] = JSValue.int32(res[0]);
+            (sp - 1)[0].setInt32AssumeInt(res[0]);
             return cont(pc + 1, sp, var_buf, vm);
         }
     }
@@ -2247,10 +2292,10 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // (rare) falls to the cold op, whose updateLocalAt redoes it with the float box.
     if (pc[0] == op.inc_loc) {
         if (iv == std.math.maxInt(i32)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        var_buf[idx] = JSValue.int32(iv + 1);
+        var_buf[idx].setInt32AssumeInt(iv + 1);
     } else {
         if (iv == std.math.minInt(i32)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        var_buf[idx] = JSValue.int32(iv - 1);
+        var_buf[idx].setInt32AssumeInt(iv - 1);
     }
     return cont(pc + 2, sp, var_buf, vm);
 }
@@ -2295,7 +2340,13 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     // to the cold js_add_slow shell, exactly as qjs routes it.
     if (old_v.asInt32()) |lhs| {
         if (rhs_v.asInt32()) |rhs| {
-            var_buf[idx] = arith_vm.fastInt32Add(lhs, rhs);
+            const r: i64 = @as(i64, lhs) + rhs;
+            const r32: i32 = @truncate(r);
+            if (r32 == r) {
+                var_buf[idx].setInt32AssumeInt(r32);
+            } else {
+                var_buf[idx] = core.JSValue.float64(@floatFromInt(r));
+            }
             return cont(pc + 2, sp - 1, var_buf, vm);
         }
     }

@@ -61,14 +61,15 @@ Phase 4 余项（均已完成）：
 JSValue 表示（Phase 5）：访问器封装 pass 已完成——`core/value.zig` 之外的
 直接 `tag`/`payload` 字段访问为零（仅 `binding/ffi.zig` 的 comptime 布局
 反射保留，用于 NaN-boxing 切换时自动失配 ABI 指纹）；NaN-boxing 的 8 字节
-表示已作为 build option（`-Dzjs_nan_boxing`）双模式落地，并在测量后成为
-默认（与 16 字节布局计算持平、值密集堆 RSS 更低）。
+表示已作为 build option（`-Dzjs_nan_boxing`）双模式落地。默认策略与
+QuickJS 一致：64 位目标使用 16 字节 `payload + int64 tag`，较窄目标使用
+8 字节 NaN-boxing；显式 build option 可覆盖目标默认。
 
 双表示是永久双模式，不是迁移过渡期：QuickJS 以 `#ifdef JS_NAN_BOXING`
-永久维护双布局，双模式即参照设计本身。zjs 的 16 字节布局保留为参考表示
-（reference layout），同时是 NaN-boxing 不可用平台的后路——例如指针超出
-NaN payload 可编码范围的环境。两种模式都不许 rot 是既定政策，由
-`test-altrepr` step（以非默认的 16 字节表示跑统一测试）守护。
+永久维护双布局，双模式即参照设计本身。zjs 的 16 字节布局是 64 位规范
+表示，并保留完整 i64 short-BigInt payload；8 字节布局是显式可选的紧凑
+adapter，在值密集堆上降低 RSS，但只有 48 位 payload。两种模式都不许 rot，
+由 `test-altrepr` step 以目标默认的相反表示运行统一测试来守护。
 
 ## 2. Parser And TypeScript Erasure
 

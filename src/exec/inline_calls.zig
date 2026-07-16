@@ -202,11 +202,11 @@ pub const Entry = struct {
     /// dispatches through one `JSFunctionBytecode *b` instead of mirroring it
     /// in an outer frame wrapper.
     frame: frame_mod.Frame,
-    /// Keep the default NaN-boxed Entry at its 256-byte power-of-two stride
-    /// after removing the obsolete per-call owned Bytecode view. `entryAt` can
-    /// then retain shift-only element addressing on the production layout. The
-    /// 16-byte reference representation needs no replacement padding; this
-    /// field carries no state and is never initialized in either mode.
+    /// Keep the NaN-boxed Entry at its 256-byte power-of-two stride after
+    /// removing the obsolete per-call owned Bytecode view. `entryAt` can then
+    /// retain shift-only element addressing in that adapter. The canonical
+    /// 64-bit 16-byte representation needs no replacement padding; this field
+    /// carries no state and is never initialized in either mode.
     _stride_padding: [if (core.value.nan_boxing) @sizeOf(usize) else 0]u8,
     stack: stack_mod.Stack,
     catch_target: ?usize,
