@@ -12,6 +12,7 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // slot-operation cluster).
@@ -22,8 +23,7 @@ const globalLexicalValue = call_runtime.globalLexicalValue;
 const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
-const pushSlotValue = array_ops.pushSlotValue;
-const pushSlotValueAssumeCapacity = array_ops.pushSlotValueAssumeCapacity;
+const pushAdapterValue = array_ops.pushAdapterValue;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
 const setGlobalLexicalValueForGlobal = call_runtime.setGlobalLexicalValueForGlobal;
@@ -52,7 +52,7 @@ pub fn execGetLoc(
     // every dispatched frame — the same trusted-compiler model as QuickJS's
     // bare `var_buf[idx]`. The stack is pre-sized (reserveEntryFrameCapacity),
     // so the push skips reserveAdditional, mirroring qjs's `*sp++`.
-    pushSlotValueAssumeCapacity(stack, frame.locals[idx]);
+    stack.pushOwnedAssumeCapacity(value_slot.loadOwned(&frame.locals[idx]));
 }
 
 pub noinline fn execPutLoc(
@@ -67,7 +67,7 @@ pub noinline fn execPutLoc(
     _ = opc;
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
     const value = try stack.pop();
-    try setSlotValue(ctx, &frame.locals[idx], value);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
 }
 
 pub fn execSetLoc(
@@ -81,9 +81,10 @@ pub fn execSetLoc(
     frame.pc += consume;
     _ = opc;
     // idx < var_count == frame.locals.len by construction (see execGetLoc).
-    const value = stack.peek() orelse return error.StackUnderflow;
-    defer value.free(ctx.runtime);
-    try setSlotValue(ctx, &frame.locals[idx], value.dup());
+    // set_loc leaves the operand on the stack; borrow it and let the
+    // ValueSlot take exactly one retained reference.
+    const value = stack.peekBorrowed() orelse return error.StackUnderflow;
+    value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], value);
 }
 
 pub fn execGetArg(
@@ -100,9 +101,7 @@ pub fn execGetArg(
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
-    const value = frame.args[idx];
-    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
-    const owned = value.dup();
+    const owned = value_slot.loadOwned(&frame.args[idx]);
     errdefer owned.free(ctx.runtime);
     try stack.pushOwned(owned);
 }
@@ -119,14 +118,7 @@ pub fn execPutArg(
     _ = opc;
     if (idx >= frame.args.len) return error.InvalidBytecode;
     const value = try stack.pop();
-    const old_value = frame.args[idx];
-    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(old_value) == null);
-    // Symmetric with the gateway's fail-closed hardening (setSlotValueRefCounted
-    // unwrapped an incoming cell before the store): the bare arg slot must never
-    // receive a VarRef cell value, so assert the incoming value is not a cell.
-    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
-    frame.args[idx] = value;
-    old_value.free(ctx.runtime);
+    value_slot.replaceOwned(ctx.runtime, &frame.args[idx], value);
 }
 
 pub fn execSetArg(
@@ -140,14 +132,9 @@ pub fn execSetArg(
     frame.pc += consume;
     _ = opc;
     if (idx >= frame.args.len) return error.InvalidBytecode;
-    const value = stack.peek() orelse return error.StackUnderflow;
-    const old_value = frame.args[idx];
-    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(old_value) == null);
-    // Symmetric with the gateway's fail-closed hardening (see execPutArg): the
-    // bare arg slot must never receive a VarRef cell value.
-    if (comptime builtin.mode == .Debug) std.debug.assert(varRefCellFromValue(value) == null);
-    frame.args[idx] = value;
-    old_value.free(ctx.runtime);
+    // set_arg has the same non-consuming ownership contract as set_loc.
+    const value = stack.peekBorrowed() orelse return error.StackUnderflow;
+    value_slot.replaceBorrowed(ctx.runtime, &frame.args[idx], value);
 }
 
 pub fn execGetVarRef(
@@ -161,7 +148,7 @@ pub fn execGetVarRef(
     frame.pc += consume;
     _ = opc;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
-    try pushSlotValue(stack, varRefSlot(frame, idx));
+    try pushAdapterValue(stack, varRefSlot(frame, idx));
 }
 
 pub fn execGetVarRefMaybeTdz(
@@ -209,7 +196,7 @@ pub fn execGetVarRefMaybeTdz(
     // Slot is a cell by type (qjs OP_get_var_ref_check, quickjs.c:18630);
     // the pre-typed raw-slot arm is gone with the type flip.
     const cell = varRefSlotCell(frame, idx);
-    const value = slotValueBorrow(cell.valueRef());
+    const value = cell.varRefValue();
     if (value.isUninitialized()) {
         // A deletable cell parked at UNINITIALIZED is a deleted
         // eval-created binding (qjs remove_global_object_property):
@@ -264,12 +251,16 @@ pub fn execPutVarRef(
             return throwTdzReference(ctx);
         }
     }
-    if (cell.varRefIsFunctionNameSlot().*) {
+    const capture_is_function_name = idx < function.closure_var.len and
+        function.closure_var[idx].var_kind == .function_name;
+    const capture_is_const = idx < function.closure_var.len and
+        function.closure_var[idx].is_const;
+    if (cell.varRefIsFunctionNameSlot().* or capture_is_function_name) {
         value.free(ctx.runtime);
         if (function.flags.is_strict) return error.TypeError;
         return;
     }
-    if (cell.varRefIsConstSlot().* and !constVarRefWriteAllowed(cell, opc)) {
+    if ((cell.varRefIsConstSlot().* or capture_is_const) and !constVarRefWriteAllowed(cell, opc)) {
         value.free(ctx.runtime);
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
@@ -279,11 +270,11 @@ pub fn execPutVarRef(
     }
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = slotValueDup(value);
+        assigned = adapterValueDup(value);
         value.free(ctx.runtime);
     }
     errdefer assigned.free(ctx.runtime);
-    try cell.setVarRefValue(ctx.runtime, assigned);
+    cell.setVarRefValue(ctx.runtime, assigned);
 }
 
 pub fn isVarRefInitOpcode(opc: u8) bool {
@@ -340,7 +331,7 @@ pub fn defineGlobalFunctionBindingValue(
         const flags = global.propFlagsAt(index);
         if (!flags.deleted and !flags.isAccessor()) {
             if (global.asVarRefAt(index)) |cell| {
-                try cell.setVarRefValue(rt, value.dup());
+                cell.setVarRefValue(rt, value.dup());
                 return;
             }
         }
@@ -377,14 +368,16 @@ pub fn execSetVarRef(
     _ = opc;
     const value = stack.peek() orelse return error.StackUnderflow;
     defer value.free(ctx.runtime);
-    try setVarRefSlotValue(ctx, frame, idx, value.dup());
+    replaceVarRefValueOwned(ctx, frame, idx, value.dup());
 }
 
-pub fn slotValueDup(slot: core.JSValue) core.JSValue {
-    return slotValueBorrow(slot).dup();
+/// Owned value view of a JSValue Adapter slot. Frame locals and arguments do
+/// not use this Interface; they are always plain ValueSlots.
+pub fn adapterValueDup(slot: core.JSValue) core.JSValue {
+    return adapterValueBorrow(slot).dup();
 }
 
-pub fn slotValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
+pub fn adapterValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
     // Terminal-state invariant: a cell's VALUE is never itself a cell — the
     // last nesting producer (the direct-eval const view) now pvalue-aliases
     // its target (eval_ops.directEvalOuterVarRefView) — so ONE unwrap reaches
@@ -397,112 +390,44 @@ pub fn slotValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
     return value;
 }
 
-pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).isUninitialized();
+pub fn adapterValueIsUninitialized(slot: core.JSValue) bool {
+    return adapterValueBorrow(slot).isUninitialized();
 }
 
 /// A deleted eval-created binding: its deletable cell was parked at
 /// UNINITIALIZED by ordinary global property deletion (qjs
 /// remove_global_object_property, quickjs.c:9289-9309). Distinct from a TDZ
 /// cell, which is uninitialized but NOT deletable.
-pub fn varRefSlotIsDeletedEvalBinding(slot: core.JSValue) bool {
+pub fn adapterIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
     if (!cell.varRefIsDeletableSlot().*) return false;
     return cell.varRefValue().isUninitialized();
 }
 
-// inline, mirroring QuickJS `static inline set_value`: the common store where
-// neither the outgoing slot nor the incoming value is reference-counted (the hot
-// numeric local-assign case) is a bare move with no call boundary, so a hot
-// handler need not spill its live values across it. The var-ref-cell / refcounted
-// teardown is outlined to keep the inlined footprint to a single branch + store.
-pub inline fn setSlotValue(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) !void {
+/// Replace an owned JSValue Adapter slot. Unlike `value_slot.replaceOwned`,
+/// this cold boundary accepts a VarRef handle on either side and preserves its
+/// write-through semantics. It must not be used for frame locals or arguments.
+pub inline fn replaceAdapterOwned(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
     if (!slot.requiresRefCount() and !value.requiresRefCount()) {
         slot.* = value;
         return;
     }
-    return setSlotValueRefCounted(ctx, slot, value);
+    replaceAdapterRefCounted(ctx, slot, value);
 }
 
-noinline fn setSlotValueRefCounted(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) !void {
+noinline fn replaceAdapterRefCounted(ctx: *core.JSContext, slot: *core.JSValue, value: core.JSValue) void {
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = slotValueDup(value);
+        assigned = adapterValueDup(value);
         value.free(ctx.runtime);
     }
     if (varRefCellFromValue(slot.*)) |cell| {
-        try cell.setVarRefValue(ctx.runtime, assigned);
+        cell.setVarRefValue(ctx.runtime, assigned);
         return;
     }
     const old_value = slot.*;
     slot.* = assigned;
     old_value.free(ctx.runtime);
-}
-
-pub fn derivedConstructorThisLocalSlot(frame: *frame_mod.Frame) ?*core.JSValue {
-    if (!frame.function.flags.is_derived_class_constructor) return null;
-    for (frame.function.vardefs, 0..) |vd, idx| {
-        if (vd.var_name == core.atom.ids.this_ and idx < frame.locals.len) return &frame.locals[idx];
-    }
-    return null;
-}
-
-pub fn closeLocalVarRef(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: u16) !void {
-    if (idx >= frame.locals.len) return error.InvalidBytecode;
-    frame.closeOpenVarRefForSlot(ctx.runtime, &frame.locals[idx]);
-    const cell = varRefCellFromValue(frame.locals[idx]) orelse return;
-    const value = cell.varRefValue().dup();
-    const old_value = frame.locals[idx];
-    frame.locals[idx] = value;
-    old_value.free(ctx.runtime);
-}
-
-pub fn ensureVarRefCell(ctx: *core.JSContext, slot: *core.JSValue) !core.JSValue {
-    if (varRefCellFromValue(slot.*) != null) return slot.*.dup();
-    const cell = try core.VarRef.createClosed(ctx.runtime, slot.*);
-    slot.* = cell.valueRef();
-    return slot.*.dup();
-}
-
-pub fn ensureFrameVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, slot: *core.JSValue) !core.JSValue {
-    // Locals-first classification: compute membership and cell presence once.
-    // Ordering locals before args lets the hot local-alias channel short-circuit
-    // without the redundant slotInSlice(args) / double varRefCellFromValue the
-    // previous frameSlotCanOpenAlias + guard sequence incurred. Behavior is
-    // identical: neither slice -> InvalidBytecode; an existing cell on an arg
-    // slot fails closed while a local reuses its closed cell.
-    const in_locals = slotInSlice(slot, frame.locals);
-    const is_arg_slot = slotInSlice(slot, frame.args);
-    if (!in_locals and !is_arg_slot) return error.InvalidBytecode;
-    if (varRefCellFromValue(slot.*) != null) {
-        if (is_arg_slot) return error.InvalidBytecode;
-        return ensureVarRefCell(ctx, slot);
-    }
-    if (frame.open_var_refs.len == 0) {
-        if (is_arg_slot) return error.InvalidBytecode;
-        return ensureVarRefCell(ctx, slot);
-    }
-    if (frame.findOpenVarRef(slot)) |cell| return cell.valueRef().dup();
-
-    // The frame owns the initial reference; callers receive an additional
-    // reference and may drop it on error without leaving the open list dangling.
-    const cell = try core.VarRef.createOpen(ctx.runtime, slot);
-    if (!frame.addOpenVarRef(cell)) {
-        cell.close(ctx.runtime);
-        cell.freeCell(ctx.runtime);
-        // A bare arg handler cannot safely consume a fallback cell. Parser
-        // output reserves the mapped argument window; malformed/synthetic
-        // metadata therefore fails closed without rewriting the arg slot.
-        if (is_arg_slot) return error.InvalidBytecode;
-        return ensureVarRefCell(ctx, slot);
-    }
-    return cell.valueRef().dup();
-}
-
-pub fn ensureLocalVarRefCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, is_lexical: bool) !core.JSValue {
-    if (varRefSlotIsUninitialized(frame.locals[idx])) return ensureVarRefCell(ctx, &frame.locals[idx]);
-    if (is_lexical) return ensureVarRefCell(ctx, &frame.locals[idx]);
-    return ensureFrameVarRefCell(ctx, frame, &frame.locals[idx]);
 }
 
 pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
@@ -549,30 +474,13 @@ pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JS
 
 /// Write-through store into the slot's cell (qjs OP_put_var_ref
 /// `set_value(ctx, var_refs[idx]->pvalue, ...)`, quickjs.c:18638). Preserves
-/// the setSlotValueRefCounted unwrap: an incoming cell VALUE is dereferenced
+/// the Adapter replacement unwrap: an incoming cell VALUE is dereferenced
 /// before the store so cell values never nest through writes.
-pub inline fn setVarRefSlotValue(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) !void {
+pub inline fn replaceVarRefValueOwned(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) void {
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
-        assigned = slotValueDup(value);
+        assigned = adapterValueDup(value);
         value.free(ctx.runtime);
     }
-    return frame.var_refs[idx].setVarRefValue(ctx.runtime, assigned);
-}
-
-/// Owned JSValue ref to the slot's cell. Pre-flip this cellified a raw slot
-/// in place; the slot type now guarantees the cell, so this is a pure rc++
-/// (qjs JS_CLOSURE_REF pointer copy + ref_count++, quickjs.c:17322-17324).
-pub inline fn ensureVarRefSlotCell(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !core.JSValue {
-    _ = ctx;
-    return frame.var_refs[idx].valueRef().dup();
-}
-
-fn slotInSlice(slot: *const core.JSValue, values: []const core.JSValue) bool {
-    if (values.len == 0) return false;
-    const slot_addr = @intFromPtr(slot);
-    const start = @intFromPtr(values.ptr);
-    const byte_len = values.len * @sizeOf(core.JSValue);
-    const end = start + byte_len;
-    return slot_addr >= start and slot_addr < end and (slot_addr - start) % @sizeOf(core.JSValue) == 0;
+    frame.var_refs[idx].setVarRefValue(ctx.runtime, assigned);
 }

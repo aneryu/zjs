@@ -52,6 +52,7 @@ const builtin_glue = @import("builtin_glue.zig");
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
 const eval_ops = @import("eval_ops.zig");
@@ -145,9 +146,9 @@ pub fn execCall(
     popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
-        if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
+        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
+            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
                     return .continue_loop;
@@ -160,7 +161,7 @@ pub fn execCall(
             }
             return error.ReferenceError;
         }
-        try array_ops.pushSlotValue(stack, frame.this_value);
+        try array_ops.pushAdapterValue(stack, frame.this_value);
         return .done;
     }
     if (is_arrow_super_constructor) {
@@ -3987,12 +3988,14 @@ pub fn defineGlobalDeclVarCell(
         rebound = true;
     }
     const local_count = @min(function.vardefs.len, frame.locals.len);
+    const global_cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
     for (function.vardefs[0..local_count], 0..) |vd, local_idx| {
         if (!atomIdOrNameEql(ctx.runtime, vd.var_name, atom_id)) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
-        const old_slot = frame.locals[local_idx];
-        frame.locals[local_idx] = cell_value.dup();
-        old_slot.free(ctx.runtime);
+        // This is a compatibility mirror used by direct eval lookup. Keep the
+        // frame plane raw; the authoritative global identity remains in the
+        // typed frame.var_refs/global property cell.
+        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[local_idx], global_cell.varRefValue());
         rebound = true;
     }
     return rebound;
@@ -4120,7 +4123,7 @@ pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: co
         // const guarded by cell->is_const. Shared cell => no write loss.
         if (env.asVarRefAt(index)) |cell| {
             if (cell.is_const) return error.TypeError;
-            try cell.setVarRefValue(ctx.runtime, value.dup());
+            cell.setVarRefValue(ctx.runtime, value.dup());
             return true;
         }
     }
@@ -4171,7 +4174,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
             .var_ref => {
                 const cell = env.prop_values[index].slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
-                cell.setVarRefValue(rt, value.dup()) catch return false;
+                cell.setVarRefValue(rt, value.dup());
                 return true;
             },
             .accessor, .auto_init => return false,
@@ -4218,7 +4221,7 @@ pub fn classStaticThisAtom(
         idx -= 1;
         const vd = function.vardefs[idx];
         if (vd.var_kind != .class_static_this) continue;
-        if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
+        if (frame.locals[idx].isUninitialized()) continue;
         return vd.var_name;
     }
     return null;
@@ -4234,7 +4237,7 @@ pub fn classStaticThisValue(
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (vd.var_name != atom_id) continue;
         const value = caller_frame.locals[idx];
-        if (slot_ops.varRefSlotIsUninitialized(value)) continue;
+        if (value.isUninitialized()) continue;
         return value;
     }
     return null;
@@ -4439,8 +4442,8 @@ pub fn evalSimpleCallerExpression(
         // derived constructor that reads `this` before `super()` must throw
         // ReferenceError, not leak the uninitialized sentinel — then return
         // the cell's value, never the cell representation.
-        if (slot_ops.varRefSlotIsUninitialized(this_value)) return error.ReferenceError;
-        return slot_ops.slotValueDup(this_value);
+        if (slot_ops.adapterValueIsUninitialized(this_value)) return error.ReferenceError;
+        return slot_ops.adapterValueDup(this_value);
     }
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
         _ = frame;
@@ -4513,7 +4516,7 @@ pub fn functionHasFrameBinding(
     var idx: usize = 0;
     while (idx < ref_count) : (idx += 1) {
         const binding = function.varRefName(idx);
-        if (slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (slot_ops.adapterValueIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -7241,8 +7244,8 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
             continue;
         }
         const slot = slot_ops.varRefSlot(frame, idx);
-        if (slot_ops.varRefSlotIsDeletedEvalBinding(slot)) continue;
-        const value = slot_ops.slotValueDup(slot);
+        if (slot_ops.adapterIsDeletedEvalBinding(slot)) continue;
+        const value = slot_ops.adapterValueDup(slot);
         // Non-lexical bindings have no TDZ. An UNINITIALIZED cell here is a
         // parked global/eval placeholder (including an alias of a deleted eval
         // binding), so the name lookup must continue to the next environment.
@@ -7271,7 +7274,7 @@ pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Byte
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
         if (vd.scope_level != 0) continue;
-        return slot_ops.slotValueDup(frame.locals[idx]);
+        return value_slot.loadOwned(&frame.locals[idx]);
     }
     return null;
 }
@@ -7294,7 +7297,7 @@ pub fn setFrameLocalValue(
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (vd.var_name != atom_id) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
-        try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         return true;
     }
     return false;
@@ -7312,10 +7315,10 @@ pub fn setFrameVarRefValue(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.adapterValueIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
             return false;
         }
-        try slot_ops.setVarRefSlotValue(ctx, frame, idx, value);
+        slot_ops.replaceVarRefValueOwned(ctx, frame, idx, value);
         return true;
     }
     return false;
@@ -7352,9 +7355,8 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
     const refs = object.argumentsVarRefs();
     if (index >= refs.len) return null;
-    if (refs[index].isUninitialized()) return null;
+    const cell = refs[index] orelse return null;
     if (!object.hasOwnProperty(atom_id)) return null;
-    const cell = slot_ops.varRefCellFromValue(refs[index]) orelse return refs[index].dup();
     return cell.varRefValue().dup();
 }
 
@@ -7363,23 +7365,13 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
     const index = core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id) orelse return false;
     const refs = object.argumentsVarRefsMut();
     if (index >= refs.len) return false;
-    if (refs[index].isUninitialized()) return false;
+    const cell = refs[index] orelse return false;
     if (!object.hasOwnProperty(atom_id)) {
-        const old_value = refs[index];
-        refs[index] = core.JSValue.uninitialized();
-        old_value.free(ctx.runtime);
+        refs[index] = null;
+        cell.release(ctx.runtime);
         return false;
     }
-    if (slot_ops.varRefCellFromValue(refs[index])) |cell| {
-        const next_value = value.dup();
-        try cell.setVarRefValue(ctx.runtime, next_value);
-        return true;
-    }
-    const next_value = value.dup();
-    errdefer next_value.free(ctx.runtime);
-    const old_value = refs[index];
-    refs[index] = next_value;
-    old_value.free(ctx.runtime);
+    cell.setVarRefValue(ctx.runtime, value.dup());
     return true;
 }
 

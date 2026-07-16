@@ -61,7 +61,7 @@ const qjsTypedArrayConstructToIndex = array_ops.qjsTypedArrayConstructToIndex;
 const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
-const slotValueDup = slot_ops.slotValueDup;
+const adapterValueDup = slot_ops.adapterValueDup;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
@@ -189,7 +189,7 @@ pub fn constructBuiltinSuperConstructor(
 
 pub fn currentArrowLexicalSuperThis(rt: *core.JSRuntime, frame: *frame_mod.Frame) ?core.JSValue {
     const current_object = currentArrowFunctionObject(frame) orelse return null;
-    if (current_object.functionLexicalThis()) |this_value| return slotValueDup(this_value);
+    if (current_object.functionLexicalThis()) |this_value| return adapterValueDup(this_value);
     _ = rt;
     return null;
 }
@@ -208,7 +208,7 @@ pub fn setCurrentArrowLexicalThis(ctx: *core.JSContext, frame: *frame_mod.Frame,
     };
     if (current_object.functionLexicalThis()) |slot| {
         if (varRefCellFromValue(slot)) |cell| {
-            try cell.setVarRefValue(ctx.runtime, value);
+            cell.setVarRefValue(ctx.runtime, value);
             return;
         }
         try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);

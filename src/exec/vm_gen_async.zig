@@ -180,6 +180,7 @@ pub noinline fn saveGeneratorExecutionState(
     std.debug.assert(frame.ownership.storage == .owned or frame.storage_values.len == 0 or execution.frameUsesCombinedStorage());
     std.debug.assert(frame.ownership.var_refs == .owned or frame.var_refs.len == 0);
     std.debug.assert(frame.open_var_refs.len == 0 or frame.storage_values.len != 0);
+    if (frame.open_var_refs.len != @as(usize, frame.function.open_var_ref_count)) return error.InvalidBytecode;
     // Encode every fallible scalar before changing any ownership. An invalid
     // oversized target must leave the live VM state intact for normal unwind.
     const catch_target_pc = if (catch_target) |target|
@@ -308,6 +309,7 @@ noinline fn resumeExecutionStateRaw(
     frame.pc = resume_pc;
     const resident_stack = execution.stackUsesCombinedStorage();
     const resident_frame = execution.frameUsesCombinedStorage();
+    if (state.storage.frame.open_var_refs.len != @as(usize, function.open_var_ref_count)) return error.InvalidBytecode;
     installSuspendedExecutionStorage(stack, frame, state, resident_stack, resident_frame);
     // The interpreter's catch target is a control-flow cursor, not frame
     // ownership state.  A suspension can resume in a different leg of a
@@ -393,7 +395,7 @@ pub fn stopBeforePc(
         // resident arg backing and close only the parameter-environment refs.
         // Later finally-return stops belong to an already-started generator and
         // must keep every open alias parked across the suspension.
-        if (!generator_object.generatorStarted()) frame.closeParameterEnvironmentVarRefs(ctx.runtime);
+        if (!generator_object.generatorStarted()) try frame.closeParameterEnvironmentVarRefs(ctx.runtime);
         try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc, catch_target);
         generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
     }

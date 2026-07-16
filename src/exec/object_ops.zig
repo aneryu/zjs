@@ -33,6 +33,7 @@ const regexp_fastpath = @import("regexp_fastpath.zig");
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 pub const Step = enum { done, continue_loop };
 
@@ -72,13 +73,7 @@ const createStringFromByteUnits = string_ops.createStringFromByteUnits;
 const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
-const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot;
-const ensureFrameVarRefCell = slot_ops.ensureFrameVarRefCell;
-const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
-const ensureVarRefCell = slot_ops.ensureVarRefCell;
-const ensureVarRefSlotCell = slot_ops.ensureVarRefSlotCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const varRefSlot = slot_ops.varRefSlot;
 const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
@@ -116,7 +111,6 @@ const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
 const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
 const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
 const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
-const slotValueDup = slot_ops.slotValueDup;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
 const stringSliceValue = string_ops.stringSliceValue;
@@ -320,14 +314,13 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
 // that a later declaration (js_closure_define_global_var) will reuse. The shared
 // table cell carries no per-capture flags; is_lexical/is_const are stamped only
 // at definition time (add_var_ref, 17210-17223).
-fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
-    if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-    if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
+fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !*core.VarRef {
+    if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
+    if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
     const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
-    if (cv.var_kind == .function_name) {
-        if (core.VarRef.fromValue(cell_value)) |cell| cell.varRefIsFunctionNameSlot().* = true;
-    }
-    return cell_value;
+    const cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
+    if (cv.var_kind == .function_name) cell.varRefIsFunctionNameSlot().* = true;
+    return cell;
 }
 
 pub fn createBytecodeFunctionObject(
@@ -398,12 +391,22 @@ pub fn createBytecodeFunctionObject(
         if (!frame.function.flags.is_derived_class_constructor) {
             _ = try materializeFrameThisBinding(ctx, global, frame);
         }
-        const lexical_this_slot = derivedConstructorThisLocalSlot(frame) orelse &frame.this_value;
-        const lexical_this_value = if (frame.function.flags.is_derived_class_constructor or varRefCellFromValue(lexical_this_slot.*) != null)
-            try ensureVarRefCell(ctx, lexical_this_slot)
-        else
-            lexical_this_slot.*.dup();
-        try object.setOptionalValueSlot(ctx.runtime, try object.functionLexicalThisSlot(ctx.runtime), lexical_this_value);
+        // Resolve the fallible slot before taking ownership of the lexical
+        // `this` value: a slot-allocation failure must not leak the derived
+        // arm's retained binding-cell reference.
+        const lexical_this_slot = try object.functionLexicalThisSlot(ctx.runtime);
+        const lexical_this_value = if (frame.function.flags.is_derived_class_constructor) blk: {
+            var this_local_idx: ?usize = null;
+            for (frame.function.vardefs, 0..) |vd, idx| {
+                if (vd.var_name == core.atom.ids.this_ and idx < frame.locals.len) {
+                    this_local_idx = idx;
+                    break;
+                }
+            }
+            const cell = try frame.captureLocal(ctx.runtime, this_local_idx orelse return error.InvalidBytecode);
+            break :blk cell.valueRef();
+        } else frame.this_value.dup();
+        try object.setOptionalValueSlot(ctx.runtime, lexical_this_slot, lexical_this_value);
         if (property_ops.expectObject(frame.current_function)) |function_object| {
             try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
             if (function_object.functionSuperConstructor()) |super_constructor| try object.setOptionalValueSlot(ctx.runtime, try object.functionSuperConstructorSlot(ctx.runtime), super_constructor.dup());
@@ -429,12 +432,10 @@ pub fn createBytecodeFunctionObject(
         try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
     }
     if (fb.closureVar().len > 0) {
-        // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields a
-        // live JSVarRef* — the slot-typed captures array is the qjs
-        // `JSVarRef **var_refs` alloc (17277). The helper arms hand back owned
-        // cell refs in JSValue form (the boundary type of locals and global
-        // machinery); the conversion is a type assertion, not a refcount
-        // event.
+        // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields an
+        // owned, typed JSVarRef*. Frame-local/argument identity crosses only
+        // the OpenBindings Seam; JSValue cell handles remain at global/module
+        // adapters and never enter persistent capture storage.
         const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
         var captures_transferred = false;
         errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
@@ -448,35 +449,34 @@ pub fn createBytecodeFunctionObject(
             rooted_captures = &.{};
         };
         for (fb.closureVar(), 0..) |cv, idx| {
-            const captured_value: core.JSValue = switch (cv.closure_type) {
+            const cell: *core.VarRef = switch (cv.closure_type) {
                 .local => blk: {
                     if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
-                    break :blk try ensureLocalVarRefCell(ctx, frame, cv.var_idx, cv.is_lexical);
+                    break :blk try frame.captureLocal(ctx.runtime, cv.var_idx);
                 },
                 .arg => blk: {
                     if (cv.var_idx >= frame.args.len) return error.InvalidBytecode;
-                    break :blk try ensureFrameVarRefCell(ctx, frame, &frame.args[cv.var_idx]);
+                    break :blk try frame.captureArg(ctx.runtime, cv.var_idx);
                 },
                 .ref => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
                     // qjs JS_CLOSURE_REF (quickjs.c:17322-17324): pure pointer
                     // copy + rc++ of the parent slot's cell (type-guaranteed).
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
                 .global_ref => blk: {
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
                     // qjs JS_CLOSURE_GLOBAL_REF (quickjs.c:17322-17324): pure
                     // pointer copy + rc++ — the slot type guarantees the cell,
                     // the pre-typed bridge cellify is gone (phase D).
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
                 .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
                 .module_decl, .module_import => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
             };
-            const cell = varRefCellFromValue(captured_value) orelse unreachable;
             captures[idx] = cell;
             {
                 // qjs js_closure2 mutates no flags on aliased cells: the
@@ -2219,7 +2219,7 @@ pub fn createGeneratorObject(
         const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(nested);
         const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
         const var_ref_count = frame_mod.frameVarRefStorageCount(nested, input_var_refs);
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested, frame_arg_count);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested);
         const frame_slots = try frame_mod.FrameSlab.requiredStorageSlots(
             frame_arg_count,
             original_arg_count,
@@ -2456,7 +2456,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     // same effective-strictness gate the else arm uses. A force-strict frame
     // therefore downgrades to an UNMAPPED arguments object (spec-correct for
     // strict functions), which needs no open-ref window and never reaches
-    // ensureFrameVarRefCell — matching has_mapped_arguments=false in the view.
+    // captureArg — matching has_mapped_arguments=false in the view.
     const mapped = if (mapped_override) |requested|
         requested and !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list
     else
@@ -2484,7 +2484,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
                 ctx.runtime,
                 callee_index,
-                slotValueDup(frame.current_function),
+                frame.current_function.dup(),
             );
         }
         break :blk out;
@@ -2495,35 +2495,39 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         var dense_elements: []core.JSValue = &.{};
         if (args.len != 0) {
             dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
-            for (args, 0..) |arg, index| dense_elements[index] = slotValueDup(arg);
+            for (args, 0..) |_, index| dense_elements[index] = value_slot.loadOwned(&args[index]);
         }
         object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
         return object.value();
     }
 
-    var rooted_argument_refs: []core.JSValue = &.{};
-    var argument_refs_root = ValueSliceRoot{};
-    argument_refs_root.init(ctx.runtime, &rooted_argument_refs);
-    defer argument_refs_root.deinit();
-
+    var argument_root_storage: []*core.VarRef = &.{};
+    var rooted_argument_cells: []*core.VarRef = &.{};
+    var argument_cells_root = CellSliceRoot{};
+    argument_cells_root.init(ctx.runtime, &rooted_argument_cells);
+    defer argument_cells_root.deinit();
+    defer if (argument_root_storage.len != 0) ctx.runtime.memory.free(*core.VarRef, argument_root_storage);
     if (args.len > 0) {
-        const refs = try ctx.runtime.memory.alloc(core.JSValue, args.len);
-        @memset(refs, core.JSValue.uninitialized());
-        object.adoptMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, refs);
+        _ = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
+        argument_root_storage = try ctx.runtime.memory.alloc(*core.VarRef, args.len);
     }
     var initialized_argument_refs: usize = 0;
-    for (args, 0..) |arg, index| {
+    for (args, 0..) |_, index| {
         const refs = object.argumentsVarRefsMut();
-        if (index < refs.len and index < frame.args.len) {
-            refs[index] = try ensureFrameVarRefCell(ctx, frame, &frame.args[index]);
-        } else {
-            // qjs creates a closed var-ref carrying each extra actual argument.
-            // The payload accepts the equivalent owned value directly and its
-            // existing read/write helpers preserve the same alias boundary.
-            refs[index] = slotValueDup(arg);
-        }
+        const cell = if (index < frame.function.arg_count) blk: {
+            break :blk try frame.captureArg(ctx.runtime, index);
+        } else blk: {
+            // qjs creates a closed var-ref for each extra actual argument: it
+            // remains mutable through the Arguments object but has no formal
+            // parameter binding in the frame.
+            const initial = value_slot.loadOwned(&args[index]);
+            errdefer initial.free(ctx.runtime);
+            break :blk try core.VarRef.createClosed(ctx.runtime, initial);
+        };
+        refs[index] = cell;
+        argument_root_storage[index] = cell;
         initialized_argument_refs = index + 1;
-        rooted_argument_refs = refs[0..initialized_argument_refs];
+        rooted_argument_cells = argument_root_storage[0..initialized_argument_refs];
     }
     return object.value();
 }
@@ -4190,7 +4194,7 @@ pub noinline fn getSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+    if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
@@ -4243,7 +4247,7 @@ pub noinline fn putSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+    if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }

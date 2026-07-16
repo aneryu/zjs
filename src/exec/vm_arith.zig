@@ -7,7 +7,7 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 const op = bytecode.opcode.op;
 
@@ -430,7 +430,7 @@ pub fn updateLocal(
     frame.pc += 1;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
-    const value = slot_ops.slotValueDup(frame.locals[idx]);
+    const value = value_slot.loadOwned(&frame.locals[idx]);
     defer value.free(ctx.runtime);
     if (value.asInt32()) |int_value| {
         const updated = switch (opcode_id) {
@@ -438,7 +438,7 @@ pub fn updateLocal(
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
         return;
     }
     if (value.asShortBigInt()) |bigint_value| {
@@ -448,7 +448,7 @@ pub fn updateLocal(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
             return;
         }
     }
@@ -461,7 +461,7 @@ pub fn updateLocal(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
 }
 
 pub noinline fn updateLocalVm(
@@ -495,12 +495,9 @@ pub fn updateLocalAt(
     slot: *core.JSValue,
     opcode_id: u8,
 ) !void {
-    // The int32/float64/short-bigint fast paths are non-refcounted and store through
-    // setSlotValue (which frees any old refcounted value), so they read `slot.*`
-    // WITHOUT a dup — qjs js_unary_arith_slow reads sp[-1] directly and JS_DupValue on
-    // a number is a no-op. A var-ref cell (an eval `var x` boxed by a nested closure —
-    // inc_loc is NOT non-captured in eval code) is an object, so it misses all three
-    // and falls to the slow path below, which walks it via slotValueDup.
+    // Frame locals are plain ValueSlots. The numeric fast paths read `slot.*`
+    // without a dup and replace it with store-before-free ownership ordering;
+    // qjs likewise reads sp[-1] directly and JS_DupValue on a number is a no-op.
     const cur = slot.*;
     if (cur.asInt32()) |int_value| {
         const updated = switch (opcode_id) {
@@ -508,7 +505,7 @@ pub fn updateLocalAt(
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        try slot_ops.setSlotValue(ctx, slot, updated);
+        value_slot.replaceOwned(ctx.runtime, slot, updated);
         return;
     }
     // Float64 fast path — qjs js_unary_arith_slow's `if (FLOAT64) goto handle_float64`
@@ -520,7 +517,7 @@ pub fn updateLocalAt(
             op.dec_loc => d - 1,
             else => unreachable,
         };
-        try slot_ops.setSlotValue(ctx, slot, core.JSValue.float64(updated));
+        value_slot.replaceOwned(ctx.runtime, slot, core.JSValue.float64(updated));
         return;
     }
     if (cur.asShortBigInt()) |bigint_value| {
@@ -530,14 +527,14 @@ pub fn updateLocalAt(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            try slot_ops.setSlotValue(ctx, slot, updated);
+            value_slot.replaceOwned(ctx.runtime, slot, updated);
             return;
         }
     }
-    // Object / heap-bigint / var-ref-cell slow path: slotValueDup walks a cell (eval
-    // boxed var) to its value and dups, so user coercion (valueOf) cannot free the
-    // accumulator underneath us (qjs OP_inc_loc's `op1 = JS_DupValue(op1)`).
-    const value = slot_ops.slotValueDup(slot.*);
+    // Object / heap-bigint slow path: take an owned copy so user coercion
+    // (valueOf) cannot free the accumulator underneath us (qjs OP_inc_loc's
+    // `op1 = JS_DupValue(op1)`).
+    const value = value_slot.loadOwned(slot);
     defer value.free(ctx.runtime);
     const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
@@ -548,7 +545,7 @@ pub fn updateLocalAt(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    try slot_ops.setSlotValue(ctx, slot, updated);
+    value_slot.replaceOwned(ctx.runtime, slot, updated);
 }
 
 pub fn addLocal(
@@ -570,8 +567,7 @@ pub fn addLocal(
     // fast paths only ever see non-refcounted operands, so their early returns
     // leave nothing to free.
 
-    const cell_opt = slot_ops.varRefCellFromValue(frame.locals[idx]);
-    const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else frame.locals[idx];
+    const lhs_borrowed = frame.locals[idx];
     if (lhs_borrowed.isString()) {
         // Outlined: the string-append path carries its own JSValue temporaries
         // (dup'd accumulator + coerced rhs). Keeping them in a separate frame
@@ -583,18 +579,18 @@ pub fn addLocal(
 
     // Dup the local so user coercion (Symbol.toPrimitive/valueOf) cannot free it
     // underneath us. lhs is owned and is CONSUMED by the slow path below.
-    const lhs = slot_ops.slotValueDup(frame.locals[idx]);
+    const lhs = value_slot.loadOwned(&frame.locals[idx]);
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
             return; // both int32 — non-refcounted, nothing to free
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
                 return; // both short big ints — non-refcounted, nothing to free
             }
         }
@@ -625,15 +621,15 @@ pub fn addLocal(
             // then copies temp→slot, a SIMD round-trip every iteration. Two direct
             // stores keep the result in registers to the slot.
             if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
-                try slot_ops.setSlotValue(ctx, &frame.locals[idx], value_ops.numberToValue(sum));
+                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value_ops.numberToValue(sum));
             } else {
-                try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.float64(sum));
+                value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], core.JSValue.float64(sum));
             }
             return;
         }
     }
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
 }
 
 /// String-accumulator branch of `addLocal`, outlined so its JSValue temporaries
@@ -648,7 +644,7 @@ noinline fn addLocalString(
     idx: u16,
     rhs: core.JSValue,
 ) !void {
-    const lhs = slot_ops.slotValueDup(frame.locals[idx]);
+    const lhs = value_slot.loadOwned(&frame.locals[idx]);
     defer lhs.free(ctx.runtime);
 
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
@@ -664,13 +660,13 @@ noinline fn addLocalString(
             return;
         }
         if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], rope_val);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], rope_val);
             return;
         }
     }
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], updated);
 }
 
 pub noinline fn addLocalVm(
@@ -713,23 +709,22 @@ pub fn addLocalAt(
     slot: *core.JSValue,
     rhs: core.JSValue,
 ) !void {
-    const cell_opt = slot_ops.varRefCellFromValue(slot.*);
-    const lhs_borrowed = if (cell_opt) |cell| cell.varRefValue() else slot.*;
+    const lhs_borrowed = slot.*;
     if (lhs_borrowed.isString()) {
         return addLocalStringAt(ctx, output, global, slot, rhs);
     }
 
-    const lhs = slot_ops.slotValueDup(slot.*);
+    const lhs = value_slot.loadOwned(slot);
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
-            try slot_ops.setSlotValue(ctx, slot, fastInt32Add(lhs_int, rhs_int));
+            value_slot.replaceOwned(ctx.runtime, slot, fastInt32Add(lhs_int, rhs_int));
             return; // both int32 — non-refcounted, nothing to free
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                try slot_ops.setSlotValue(ctx, slot, updated);
+                value_slot.replaceOwned(ctx.runtime, slot, updated);
                 return; // both short big ints — non-refcounted, nothing to free
             }
         }
@@ -747,15 +742,15 @@ pub fn addLocalAt(
         if (value_ops.numberValue(rhs_primitive)) |d2| {
             const sum = d1 + d2;
             if (lhs_primitive.isInt() and rhs_primitive.isInt()) {
-                try slot_ops.setSlotValue(ctx, slot, value_ops.numberToValue(sum));
+                value_slot.replaceOwned(ctx.runtime, slot, value_ops.numberToValue(sum));
             } else {
-                try slot_ops.setSlotValue(ctx, slot, core.JSValue.float64(sum));
+                value_slot.replaceOwned(ctx.runtime, slot, core.JSValue.float64(sum));
             }
             return;
         }
     }
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    try slot_ops.setSlotValue(ctx, slot, updated);
+    value_slot.replaceOwned(ctx.runtime, slot, updated);
 }
 
 /// `addLocalString`'s slot-pointer analog (see `addLocalAt`).
@@ -766,7 +761,7 @@ noinline fn addLocalStringAt(
     slot: *core.JSValue,
     rhs: core.JSValue,
 ) !void {
-    const lhs = slot_ops.slotValueDup(slot.*);
+    const lhs = value_slot.loadOwned(slot);
     defer lhs.free(ctx.runtime);
 
     const rhs_primitive = try coercion_ops.toPrimitiveForAdditionFree(ctx, output, global, rhs);
@@ -777,13 +772,13 @@ noinline fn addLocalStringAt(
             return;
         }
         if (try value_ops.startAccumulatorRope(ctx.runtime, lhs, rhs_primitive)) |rope_val| {
-            try slot_ops.setSlotValue(ctx, slot, rope_val);
+            value_slot.replaceOwned(ctx.runtime, slot, rope_val);
             return;
         }
     }
 
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
-    try slot_ops.setSlotValue(ctx, slot, updated);
+    value_slot.replaceOwned(ctx.runtime, slot, updated);
 }
 
 const ImmediateInt32 = struct {
@@ -879,7 +874,7 @@ fn parseCheckedLocalInt32LessThanLocalLengthCondition(code: []const u8, target_p
 
 fn localArrayLengthI32(frame: *const frame_mod.Frame, array_idx: u16) ?i32 {
     if (array_idx >= frame.locals.len) return null;
-    if (slot_ops.varRefSlotIsUninitialized(frame.locals[array_idx])) return null;
+    if (frame.locals[array_idx].isUninitialized()) return null;
     const object = objectFromValue(frame.locals[array_idx]) orelse return null;
     if (object.proxyTarget() != null or object.hasExoticMethods() or !object.isArray()) return null;
     if (object.arrayLength() > @as(u32, @intCast(std.math.maxInt(i32)))) return null;

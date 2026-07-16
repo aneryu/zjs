@@ -1,5 +1,43 @@
 # AGENTS.md
 
+## Code Discovery (codebase-memory-mcp)
+
+Use codebase-memory-mcp as a discovery accelerator, not as a source of truth.
+The checked-out source, compiler, and tests remain authoritative. The indexed
+project name for this repository is `home-aneryu-zjs`.
+
+Choose tools by task:
+
+1. `search_graph` — find uniquely named functions, types, and definitions.
+2. `search_code` — find current textual usages and group them by containing
+   symbol. Prefer this over `trace_path` for exhaustive usage searches.
+3. `get_code_snippet` — inspect a stable indexed symbol after finding its exact
+   qualified name. Before editing, open the real file at the reported location.
+4. `trace_path` — generate caller/callee and impact-analysis candidates only.
+   Verify material results with `search_code`, `rg`, or direct source inspection.
+5. `query_graph` and `get_architecture` — use for broad structural questions.
+   Scope architecture queries to `src/` unless the task explicitly concerns
+   tests or fixtures.
+
+Reliability boundaries:
+
+- If the project is not indexed, run `index_repository` before graph discovery.
+- Treat stored line ranges and snippets as potentially stale when the worktree
+  is dirty or the target file has changed. A plausible-looking snippet is not
+  proof that the index is current; read the actual file before changing code.
+- Zig calls through common method names such as `free`, `create`, `destroy`,
+  `eval`, and `expect` may be conflated. Do not trust fan-in, hotspot,
+  transitive-complexity, or impact conclusions based on those names without
+  source verification.
+- `trace_path` may miss callers or return file-level pseudo-callers. Never use it
+  alone to claim an exhaustive caller set.
+- The `test262/` corpus dominates a repository-wide index and JavaScript regular
+  expressions may be misclassified as routes. Exclude or scope away `test262/`
+  when reasoning about the Zig engine architecture.
+- Fall back to `rg` for string literals, error messages, configuration,
+  non-code files, stale-index conflicts, and exact verification. Direct file
+  reads are preferred when the graph and working tree disagree.
+
 ## No shortcuts / No cheating
 
 Do real work. Do not make the code only look correct.

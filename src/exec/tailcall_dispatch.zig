@@ -42,6 +42,7 @@ const regexp_vm = @import("vm_regexp.zig");
 const eval_module_vm = @import("vm_eval_module.zig");
 const gen_async_vm = @import("vm_gen_async.zig");
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const property_vm = @import("vm_property.zig");
@@ -1046,8 +1047,8 @@ const h_await = coldGen(struct {
 // Hot fast-path handlers — the op's work inlined on the register-resident
 // sp/var_buf/arg_buf, advancing pc + tail-dispatching via `next` with NO
 // publish/helper/coldNext. Mirrors dispatchLoop's `if (comptime thread_dispatch)`
-// threaded arms (zjs_vm.zig). On a guard miss (var-ref cell / non-int operand /
-// generator stop boundary) the handler tail-calls its COLD counterpart with the
+// threaded arms (zjs_vm.zig). On a guard miss (TDZ / non-int operand / generator
+// stop boundary) the handler tail-calls its COLD counterpart with the
 // ORIGINAL pc/sp so the cold `publish` syncs stack.values/frame.pc from the live
 // sp — exactly dispatchLoop's reg_sp/reg_ip-with-lazy-syncDown model.
 // ===========================================================================
@@ -1264,27 +1265,19 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
                 .byte => 2,
                 .half => 3,
             };
-            const old_v = var_buf[idx];
-            const may_box = vm.function.localMayBeBoxed(idx);
-            if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             switch (kind) {
                 .get => {
-                    sp[0] = old_v.dup();
+                    sp[0] = value_slot.loadOwned(&var_buf[idx]);
                     return cont(pc + advance, sp + 1, var_buf, vm);
                 },
                 .put => {
                     const value = (sp - 1)[0];
-                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    var_buf[idx] = value;
-                    old_v.free(vm.ctx.runtime);
+                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
                     return cont(pc + advance, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    const assigned = value.dup();
-                    var_buf[idx] = assigned;
-                    old_v.free(vm.ctx.runtime);
+                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
                     return cont(pc + advance, sp, var_buf, vm);
                 },
             }
@@ -1299,9 +1292,9 @@ pub fn opLoc(comptime kind: LocKind, comptime idx_src: LocIdx) Handler {
 /// there is no downgrade to plain OP_get_loc), so these are the per-iteration hot
 /// loc ops in every counting loop; without this handler they route to the 192-byte-
 /// frame `checkedLocVm` cold path (the four-benchmark self%-#1). Same shape as
-/// `opLoc` plus qjs's `JS_IsUninitialized(var_buf[idx])` TDZ guard:
-///   - a var-ref cell slot (captured binding) → cold: checkedLocVm unwraps the cell,
-///   - an uninitialized plain slot → cold: checkedLocVm throws the TDZ ReferenceError,
+/// `opLoc` plus qjs's `JS_IsUninitialized(var_buf[idx])` TDZ guard. An
+/// uninitialized slot routes cold so checkedLocVm can throw the TDZ
+/// ReferenceError; captured bindings remain plain ValueSlots here.
 /// Const writes never reach this handler: resolve_variables emits throw_error
 /// directly, matching qjs resolve_scope_var.
 /// The checked encodings only exist in the u16 operand form (no short variants —
@@ -1312,38 +1305,20 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
             if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             const idx: u16 = readInt(u16, pc + 1);
             const old_v = var_buf[idx];
-            // A `var_buf` local can hold a var-ref cell only in a function whose
-            // locals may be boxed (closure capture / make_loc_ref / derived-ctor
-            // `this` / direct-eval). `locals_never_boxed` is precomputed at
-            // finalize (bytecode.computeLocalsNeverBoxed); when set, no cell can
-            // reach either the slot or the operand stack, so both per-op
-            // `varRefCellFromValue` guards are dropped — qjs reads `var_buf[idx]`
-            // as a plain value with no cell test at all (quickjs.c:18704). When
-            // clear, the guards run exactly as before (captured binding → cold).
-            // Cell slot OR plain-uninitialized (TDZ) slot both fall to the cold
-            // checkedLocVm: `varRefCellFromValue` catches the captured-binding case
-            // and `isUninitialized` the plain-TDZ case (qjs 18709 tag test).
-            const may_box = vm.function.localMayBeBoxed(idx);
-            if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             if (old_v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             switch (kind) {
                 .get => {
-                    sp[0] = old_v.dup();
+                    sp[0] = value_slot.loadOwned(&var_buf[idx]);
                     return cont(pc + 3, sp + 1, var_buf, vm);
                 },
                 .put => {
                     const value = (sp - 1)[0];
-                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    var_buf[idx] = value;
-                    old_v.free(vm.ctx.runtime);
+                    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
                     return cont(pc + 3, sp - 1, var_buf, vm);
                 },
                 .set => {
                     const value = (sp - 1)[0];
-                    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-                    const assigned = value.dup();
-                    var_buf[idx] = assigned;
-                    old_v.free(vm.ctx.runtime);
+                    value_slot.replaceBorrowed(vm.ctx.runtime, &var_buf[idx], value);
                     return cont(pc + 3, sp, var_buf, vm);
                 },
             }
@@ -1358,33 +1333,19 @@ pub fn opLocCheck(comptime kind: LocKind) Handler {
 pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    const old_v = var_buf[idx];
-    if (vm.function.localMayBeBoxed(idx) and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Store before freeing: a collection during old_v.free must not trace the dying
-    // value through the local slot (the same order as checkedLocVm and qjs).
-    var_buf[idx] = JSValue.uninitialized();
-    old_v.free(vm.ctx.runtime);
+    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], JSValue.uninitialized());
     return cont(pc + 3, sp, var_buf, vm);
 }
 
 /// Initializing plain lexical locals (qjs CASE(OP_put_loc_check_init),
 /// quickjs.c:18755-18766). Derived constructors keep the cold path because its
-/// derived-`this` double-init check and this_value mirror are observable; cell slots
-/// (and the defensive cell operand case) keep setSlotValue's cell-write semantics.
+/// derived-`this` double-init check and explicit this_value Adapter are observable.
 pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm.function.flags.is_derived_class_constructor) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    const old_v = var_buf[idx];
-    const may_box = vm.function.localMayBeBoxed(idx);
-    if (may_box and slot_ops.varRefCellFromValue(old_v) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const value = (sp - 1)[0];
-    if (may_box and slot_ops.varRefCellFromValue(value) != null) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Mirror setSlotValue's plain-slot arm and opLoc(.put): move the popped value,
-    // then release the overwritten slot value. The inline free intentionally keeps
-    // the rc==1/destroy case here rather than paying a cold-table round trip.
-    var_buf[idx] = value;
-    old_v.free(vm.ctx.runtime);
+    value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
     return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
@@ -1524,7 +1485,6 @@ pub fn op_push_small(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 
 pub fn op_get_arg_short(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = vm.arg_buf[pc[0] - op.get_arg0];
-    if (comptime builtin.mode == .Debug) std.debug.assert(slot_ops.varRefCellFromValue(v) == null);
     sp[0] = v.dup();
     return cont(pc + 1, sp + 1, var_buf, vm);
 }
@@ -2271,16 +2231,13 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 
 // Fused local-update ops (1-byte local index). qjs OP_inc_loc/OP_add_loc — the
 // hottest loop ops (`i++`, `s += i`), so a cold miss here dominates loop regression.
-// int32-only; var-ref cell / non-int / generator-boundary fall back to the cold op.
+// int32-only; non-int / generator-boundary cases fall back to the cold op.
 pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
-    // No explicit var-ref cell check: a cell is an object, so `asInt32` below fails on
-    // it and routes to the cold op (op_update_loc_cold → updateLocalAt, which walks the
-    // cell) — the check is redundant. (Cells DO occur here: an eval `var x` boxed by a
-    // nested closure is reached by inc_loc; only normal-function locals are guaranteed
-    // non-captured.)
+    // Frame locals are always plain ValueSlots, including captured bindings;
+    // `asInt32` guards only the numeric specialization.
     const iv = old_v.asInt32() orelse return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // qjs OP_inc_loc/OP_dec_loc: branch on the single overflow value (INT32_MAX/MIN),
     // then a plain int add — NOT the int64-widen + range-check that fastInt32Add (=
@@ -2304,8 +2261,8 @@ pub fn op_update_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
 /// indirect `cold_table[pc[0]]` dispatch (a direct tail-call would perturb the int32
 /// fast-path codegen, like op_compare_cold). `updateLocalAt` runs register-resident
 /// (no publish round-trip); inc/dec is stack-neutral so sp is unchanged. At a
-/// generator/eval stop boundary (local_fast_blocked — op_update_loc routes blocked
-/// AND cell here) it uses the publishing path so coldNext's maybeStop still fires.
+/// generator/eval stop boundary (`local_fast_blocked`) it uses the publishing
+/// path so coldNext's maybeStop still fires.
 pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) {
         vm.publish(pc, sp);
@@ -2326,10 +2283,8 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx: u16 = pc[1];
     const old_v = var_buf[idx];
-    // No explicit var-ref cell check: a cell is an object, so it misses both asInt32
-    // and asFloat64 below and falls to op_add_loc_cold (== cold_table[add_loc], whose
-    // addLocalAt walks the cell) — the check is redundant. (Cells DO occur here: an
-    // eval `var x` boxed by a nested closure is reached by add_loc.)
+    // Frame locals are always plain ValueSlots; these checks select only qjs's
+    // two numeric specializations before the generic addLocalAt path.
     const rhs_v = (sp - 1)[0];
     // qjs OP_add_loc inlines exactly JS_VALUE_IS_BOTH_INT and JS_VALUE_IS_BOTH_FLOAT
     // (and both-string) before falling to js_add_slow. Match the two numeric ones:

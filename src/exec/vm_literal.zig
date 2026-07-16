@@ -588,7 +588,7 @@ pub noinline fn rest(
     }
     var source_index: usize = first_arg_idx;
     while (source_index < frame.actual_arg_count and source_index < frame.args.len) : (source_index += 1) {
-        const value = slotValueDup(frame.args[source_index]);
+        const value = frame.args[source_index].dup();
         element_value = value;
         var value_owned = true;
         errdefer if (value_owned) {
@@ -601,24 +601,6 @@ pub noinline fn rest(
         value_owned = false;
     }
     try stack.pushOwned(array_value);
-}
-
-fn slotValueDup(slot: core.JSValue) core.JSValue {
-    return slotValueBorrow(slot).dup();
-}
-
-fn slotValueBorrow(slot: core.JSValue) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
-    }
-    return current;
-}
-
-fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
-    return core.VarRef.fromValue(value);
 }
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {

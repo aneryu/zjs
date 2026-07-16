@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -130,8 +131,8 @@ pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !
 }
 
 pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
-    if (varRefSlotIsUninitialized(this_value)) return error.ReferenceError;
-    try pushSlotValue(stack, this_value);
+    if (adapterValueIsUninitialized(this_value)) return error.ReferenceError;
+    pushAdapterValue(stack, this_value);
 }
 
 pub noinline fn pushThisVm(
@@ -558,18 +559,17 @@ test "primitiveObject roots direct symbol while creating ToObject wrapper" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
-    stack.pushAssumeCapacity(slotValueBorrow(slot));
+fn pushAdapterValue(stack: *stack_mod.Stack, slot: core.JSValue) void {
+    stack.pushAssumeCapacity(adapterValueBorrow(slot));
 }
 
-fn slotValueBorrow(slot: core.JSValue) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
+fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
+    const cell = varRefCellFromValue(slot) orelse return slot;
+    const value = cell.varRefValue();
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(value) == null);
     }
-    return current;
+    return value;
 }
 
 fn requireStackLen(stack: *const stack_mod.Stack, required: usize) !void {
@@ -583,8 +583,8 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
     }
 }
 
-fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).isUninitialized();
+fn adapterValueIsUninitialized(slot: core.JSValue) bool {
+    return adapterValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {

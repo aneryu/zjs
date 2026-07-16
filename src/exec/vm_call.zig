@@ -13,6 +13,7 @@ const class_init_ops = @import("class_init_ops.zig");
 const inline_calls = @import("inline_calls.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -122,10 +123,9 @@ pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const by
     const count = @min(function.vardefs.len, frame.locals.len);
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (!value_ops.atomNameEql(ctx.runtime, vd.var_name, "this")) continue;
-        const this_cell = try slot_ops.ensureVarRefCell(ctx, &frame.this_value);
-        const old_value = frame.locals[idx];
-        frame.locals[idx] = this_cell;
-        old_value.free(ctx.runtime);
+        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], slot_ops.adapterValueBorrow(frame.this_value));
+        const this_cell = try frame.captureLocal(ctx.runtime, idx);
+        value_slot.replaceOwned(ctx.runtime, &frame.this_value, this_cell.valueRef());
         return;
     }
 }
@@ -154,9 +154,6 @@ pub inline fn initFrameLocals(
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    if (function.flags.is_derived_class_constructor) {
-        try linkDerivedConstructorThisLocal(ctx, function, frame);
-    }
     storage_transferred = true;
 }
 
@@ -677,9 +674,9 @@ pub noinline fn apply(
     }
     defer result.free(ctx.runtime);
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
-        if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
+        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
+            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -688,7 +685,7 @@ pub noinline fn apply(
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
-        try collection_vm.pushSlotValue(stack, frame.this_value);
+        try collection_vm.pushAdapterValue(stack, frame.this_value);
         return .done;
     } else if (is_arrow_super_constructor) {
         if (arrow_super_this) |this_value_for_arrow| {

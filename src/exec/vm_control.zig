@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -66,8 +67,8 @@ pub inline fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame
     if (value.isObject()) return value;
     defer value.free(ctx.runtime);
     if (!value.isUndefined()) return error.TypeError;
-    if (varRefSlotIsUninitialized(frame.this_value)) return error.ReferenceError;
-    return slotValueDup(frame.this_value);
+    if (adapterValueIsUninitialized(frame.this_value)) return error.ReferenceError;
+    return adapterValueDup(frame.this_value);
 }
 
 pub fn jump32(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
@@ -263,22 +264,21 @@ fn catchTargetFromMarker(marker: core.JSValue) ?usize {
     return @intCast(previous);
 }
 
-fn slotValueDup(slot: core.JSValue) core.JSValue {
-    return slotValueBorrow(slot).dup();
+fn adapterValueDup(slot: core.JSValue) core.JSValue {
+    return adapterValueBorrow(slot).dup();
 }
 
-fn slotValueBorrow(slot: core.JSValue) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
+fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
+    const cell = varRefCellFromValue(slot) orelse return slot;
+    const value = cell.varRefValue();
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(value) == null);
     }
-    return current;
+    return value;
 }
 
-fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).isUninitialized();
+fn adapterValueIsUninitialized(slot: core.JSValue) bool {
+    return adapterValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {

@@ -106,7 +106,7 @@ fn setValuePropertyOrThrow(
     const result = try object_ops.setValuePropertyWithThrow(ctx, output, global, object_value, atom_id, value, caller_function, caller_frame, true);
     result.free(ctx.runtime);
 }
-const slotValueBorrow = slot_ops.slotValueBorrow;
+const adapterValueBorrow = slot_ops.adapterValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
@@ -165,20 +165,9 @@ pub fn isArrayMethodReceiver(value: core.JSValue) bool {
     return object.isArray();
 }
 
-pub fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
+pub fn pushAdapterValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
     if (!slot.requiresRefCount()) return stack.pushOwned(slot);
-    try stack.push(slotValueBorrow(slot));
-}
-
-/// `pushSlotValue` for callers that run inside the bytecode dispatch loop,
-/// where the operand stack is pre-sized to `stack_size + 1`
-/// (`reserveEntryFrameCapacity` / `reserveFrameCapacity`) and the verified
-/// `stack_size` bounds the depth — so the push can skip the `reserveAdditional`
-/// bounds math, mirroring QuickJS's bare `*sp++`. Soundness is identical to the
-/// landed stack-presize win.
-pub fn pushSlotValueAssumeCapacity(stack: *stack_mod.Stack, slot: core.JSValue) void {
-    if (!slot.requiresRefCount()) return stack.pushOwnedAssumeCapacity(slot);
-    stack.pushAssumeCapacity(slotValueBorrow(slot));
+    try stack.push(adapterValueBorrow(slot));
 }
 
 pub fn pushFunctionClosure(

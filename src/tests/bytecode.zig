@@ -3311,11 +3311,51 @@ test "implicit arguments get_var rescue reserves mapped arg aliases" {
         const view = bytecode.asBytecodeView(fb, rt);
 
         try std.testing.expect(view.flags.has_mapped_arguments);
-        try std.testing.expectEqual(
-            @as(usize, view.open_var_ref_count) + 1,
-            frame_mod.frameOpenVarRefStorageCount(&view, 1),
-        );
+        try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
+        try std.testing.expectEqual(@as(?u16, 0), view.argOpenBindingIndex(0));
+        try std.testing.expectEqual(@as(usize, view.open_var_ref_count), frame_mod.frameOpenVarRefStorageCount(&view));
     }
+}
+
+test "direct eval reserves identity for visible function-scope locals and arguments" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("direct-eval-open-bindings");
+    const local_name = try rt.internAtom("local");
+    const arg_name = try rt.internAtom("arg");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(local_name);
+    defer rt.atoms.free(arg_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+    _ = try fd.appendArg(.{
+        .var_name = arg_name,
+        .scope_level = 0,
+        .is_lexical = false,
+    });
+
+    var code = [_]u8{ bytecode.opcode.op.undefined, bytecode.opcode.op.eval, 0, 0, 0, 0, bytecode.opcode.op.drop, bytecode.opcode.op.return_undef };
+    std.mem.writeInt(u16, code[2..4], 0, .little);
+    std.mem.writeInt(u16, code[4..6], 0, .little);
+    try fd.appendByteCode(&code);
+    // The parser sets this whenever it emits eval/apply_eval (markDirectEvalCall);
+    // finalize gates the direct-eval binding walk on it.
+    fd.has_eval_call = true;
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    try std.testing.expectEqual(@as(u16, 2), fb.open_var_ref_count);
+    try std.testing.expect(fb.varDefs()[0].is_captured);
+    try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].open_binding_idx);
+    try std.testing.expect(fd.args[0].is_captured);
+    try std.testing.expectEqual(@as(u16, 1), fd.args[0].open_binding_idx);
+    try std.testing.expectEqual(@as(u16, 1), fb.argOpenBindingIndices()[0]);
 }
 
 test "surviving local references reserve compact open VarRef storage" {
@@ -3349,11 +3389,11 @@ test "surviving local references reserve compact open VarRef storage" {
 
     try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
     try std.testing.expect(fb.varDefs()[0].is_captured);
+    try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].open_binding_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, fb.byteCode()[0]);
     const view = bytecode.asBytecodeView(fb, rt);
     try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
-    try std.testing.expect(view.locals_never_boxed);
-    try std.testing.expect(!view.localMayBeBoxed(0));
+    try std.testing.expectEqual(@as(?u16, 0), view.localOpenBindingIndex(0));
 }
 
 test "surviving argument references lower to make_arg_ref and reserve storage" {
@@ -3391,9 +3431,13 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
 
     try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
     try std.testing.expect(fd.args[0].is_captured);
+    try std.testing.expectEqual(@as(u16, 0), fd.args[0].open_binding_idx);
+    try std.testing.expectEqual(@as(u16, 0), fb.argOpenBindingIndices()[0]);
     try std.testing.expectEqual(bytecode.opcode.op.make_arg_ref, fb.byteCode()[0]);
     try std.testing.expectEqual(arg_name, std.mem.readInt(u32, fb.byteCode()[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[5..7], .little));
+    const view = bytecode.asBytecodeView(fb, rt);
+    try std.testing.expectEqual(@as(?u16, 0), view.argOpenBindingIndex(0));
 }
 
 test "direct Bytecode retains compact open VarRef frame sizing" {
@@ -3430,7 +3474,7 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, function.code[0]);
 }
 
-test "mapped frames reserve runtime arg aliases for every frame kind" {
+test "mapped frames use the exact compile-time open-binding count for every frame kind" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3441,17 +3485,17 @@ test "mapped frames reserve runtime arg aliases for every frame kind" {
     function.open_var_ref_count = 2;
     function.flags.has_mapped_arguments = true;
 
-    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
     function.flags.is_generator = true;
-    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
     function.flags.is_generator = false;
     function.flags.is_async = true;
-    try std.testing.expectEqual(@as(usize, 7), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
     function.flags.is_async = false;
     function.flags.has_mapped_arguments = false;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function, 5));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
 
-    const open_count: usize = 7;
+    const open_count: usize = 2;
     const storage_len = try frame_mod.FrameSlab.requiredStorageSlots(5, 0, 2, 3, 3, open_count);
     const storage = try rt.memory.alloc(core.JSValue, storage_len);
     defer rt.memory.free(core.JSValue, storage);

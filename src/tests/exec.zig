@@ -110,6 +110,11 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
     var function = bytecode.Bytecode.init(&js.runtime.memory, &js.runtime.atoms, name);
     defer function.deinit(js.runtime);
     function.flags.has_simple_parameter_list = true;
+    function.flags.has_mapped_arguments = true;
+    function.arg_count = 1;
+    function.open_var_ref_count = 1;
+    function.arg_open_binding_indices = try js.runtime.memory.alloc(u16, 1);
+    @constCast(function.arg_open_binding_indices)[0] = 0;
 
     var args = [_]core.JSValue{core.JSValue.int32(41)};
     var no_open_refs = [_]?*core.VarRef{};
@@ -165,7 +170,7 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
     args[0] = core.JSValue.int32(41);
 }
 
-test "local growth rebases open var-ref cells" {
+test "local growth rejects moving storage after an open binding is published" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -183,7 +188,9 @@ test "local growth rebases open var-ref cells" {
     exec_frame.open_var_refs = &open_refs;
     exec_frame.ownership.storage = .borrowed;
 
-    try exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8));
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8)));
+    rt.setMemoryLimit(null);
     try exec_frame.setLocal(&rt.memory, rt, 0, core.JSValue.int32(9));
     try std.testing.expectEqual(@as(?i32, 9), open_ref.varRefValue().asInt32());
 }
@@ -1051,7 +1058,13 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.var_count = 1;
     function.stack_size = 1;
     function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
-    function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
+    function.vardefs[0] = .{
+        .var_name = rt.atoms.dup(this_name),
+        .scope_level = 0,
+        .is_captured = true,
+        .open_binding_idx = 0,
+    };
+    function.open_var_ref_count = 1;
     try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
@@ -1812,7 +1825,7 @@ test "Math cproto dispatch preserves observable ToNumber semantics" {
     try std.testing.expectEqualStrings("3\ntrue\nllr\ntrue\n", stream.buffered());
 }
 
-test "cell-backed add_loc retains string snapshots while using a rope tail" {
+test "local add_loc retains string snapshots while using a rope tail" {
     engine.builtins.registry.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -2682,8 +2695,9 @@ test "direct eval captures only bindings visible at its call scope" {
     try std.testing.expect(function.varDefs()[visible_idx].is_captured);
     try std.testing.expect(function.varDefs()[active_idx].is_captured);
     const view = bytecode.asBytecodeView(function, js.runtime);
-    try std.testing.expect(!view.localMayBeBoxed(visible_idx));
-    try std.testing.expect(view.localMayBeBoxed(active_idx));
+    try std.testing.expect(view.localOpenBindingIndex(sibling_idx) == null);
+    try std.testing.expect(view.localOpenBindingIndex(visible_idx) != null);
+    try std.testing.expect(view.localOpenBindingIndex(active_idx) != null);
 }
 
 test "suspended generators retain one resident execution owner across resumes" {
@@ -6717,7 +6731,7 @@ test "resident mapped arguments share one open bare arg slot" {
     const arguments = try property_ops.expectObject(arguments_value);
     const argument_refs = arguments.argumentsVarRefs();
     try std.testing.expectEqual(@as(usize, 1), argument_refs.len);
-    const cell = core.VarRef.fromValue(argument_refs[0]) orelse return error.TypeError;
+    const cell = argument_refs[0] orelse return error.TypeError;
 
     try std.testing.expectEqual(@as(?i32, 41), arg_slot.asInt32());
     try std.testing.expect(core.VarRef.fromValue(arg_slot.*) == null);
@@ -6880,7 +6894,7 @@ test "cycle collection closes escaped generator arg aliases before releasing res
     const arguments = try property_ops.expectObject(arguments_value);
     const refs = arguments.argumentsVarRefs();
     try std.testing.expectEqual(@as(usize, 1), refs.len);
-    const cell = core.VarRef.fromValue(refs[0]) orelse return error.TypeError;
+    const cell = refs[0] orelse return error.TypeError;
     try std.testing.expect(cell.is_open);
     try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
 
@@ -6929,7 +6943,7 @@ test "generator completion closes escaped arg aliases before releasing resident 
     const arguments_value = global.getProperty(arguments_key);
     defer arguments_value.free(js.runtime);
     const arguments = try property_ops.expectObject(arguments_value);
-    const cell = core.VarRef.fromValue(arguments.argumentsVarRefs()[0]) orelse return error.TypeError;
+    const cell = arguments.argumentsVarRefs()[0] orelse return error.TypeError;
     try std.testing.expect(cell.is_open);
 
     const completion = try js.eval(
@@ -8370,6 +8384,19 @@ test "generator parameter eval cells close before body resume" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
+}
+
+test "generator default argument stores release refcounted stack values" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var f = function*(x = arguments[2], y = arguments[3], z) {};
+        \\f(undefined, undefined, 'third', 'fourth').next();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "started generator resumes preserve unmapped arguments from parked locals" {

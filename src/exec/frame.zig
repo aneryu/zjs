@@ -8,7 +8,9 @@ const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
+const open_bindings_mod = @import("open_bindings.zig");
 const stack_mod = @import("stack.zig");
+const value_slot = @import("value_slot.zig");
 
 pub const FrameSlab = struct {
     storage: []JSValue = &.{},
@@ -241,14 +243,8 @@ pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var
     return function.varRefNamesLen();
 }
 
-pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode, frame_arg_count: usize) usize {
-    const static_count: usize = function.open_var_ref_count;
-    if (!function.flags.has_mapped_arguments) return static_count;
-    // Mapped Arguments aliases are created for the supplied-argument window at
-    // runtime. zjs-side adaptation: generator/async args share their resident
-    // frame backing with locals, so they use the same open-alias capacity rule
-    // as ordinary frames; explicitly-captured args may leave spare null entries.
-    return std.math.add(usize, static_count, frame_arg_count) catch std.math.maxInt(usize);
+pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode) usize {
+    return function.open_var_ref_count;
 }
 
 pub const FrameStorageWindows = struct {
@@ -674,64 +670,51 @@ pub const Frame = struct {
         if (storage_ownership == .owned and storage_values.len != 0) account.free(JSValue, storage_values);
     }
 
-    pub fn findOpenVarRef(self: *Frame, slot: *JSValue) ?*core.VarRef {
-        for (self.open_var_refs) |maybe_ref| {
-            const ref = maybe_ref orelse continue;
-            if (ref.pvalue == slot) return ref;
-        }
-        return null;
-    }
-
-    pub fn addOpenVarRef(self: *Frame, ref: *core.VarRef) bool {
-        std.debug.assert(ref.is_open);
-        for (self.open_var_refs) |*slot| {
-            if (slot.* != null) continue;
-            slot.* = ref;
-            return true;
-        }
-        return false;
-    }
-
-    pub fn closeOpenVarRefForSlot(self: *Frame, rt: anytype, slot: *JSValue) void {
-        for (self.open_var_refs) |*entry| {
-            const ref = entry.* orelse continue;
-            if (ref.pvalue != slot) continue;
-            entry.* = null;
-            ref.close(rt);
-            ref.valueRef().free(rt);
-            return;
-        }
-    }
-
     pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
-        for (self.open_var_refs) |*slot| {
-            const ref = slot.* orelse continue;
-            slot.* = null;
-            ref.close(rt);
-            ref.valueRef().free(rt);
-        }
+        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        table.closeAll(rt);
+    }
+
+    pub fn captureLocal(self: *Frame, rt: anytype, local_idx: usize) !*core.VarRef {
+        if (local_idx >= self.locals.len or local_idx >= self.function.vardefs.len) return error.InvalidBytecode;
+        if (core.VarRef.fromValue(self.locals[local_idx]) != null) return error.InvalidBytecode;
+        const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return error.InvalidBytecode;
+        const vd = self.function.vardefs[local_idx];
+        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        return table.acquire(rt, binding_idx, &self.locals[local_idx], .{
+            .is_const = vd.is_const,
+            .is_lexical = vd.is_lexical,
+            .is_function_name = vd.var_kind == .function_name,
+        });
+    }
+
+    pub fn captureArg(self: *Frame, rt: anytype, arg_idx: usize) !*core.VarRef {
+        if (arg_idx >= self.args.len) return error.InvalidBytecode;
+        if (core.VarRef.fromValue(self.args[arg_idx]) != null) return error.InvalidBytecode;
+        const binding_idx = self.function.argOpenBindingIndex(arg_idx) orelse return error.InvalidBytecode;
+        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        return table.acquire(rt, binding_idx, &self.args[arg_idx], .{});
+    }
+
+    pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void {
+        if (local_idx >= self.locals.len or local_idx >= self.function.vardefs.len) return error.InvalidBytecode;
+        const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return;
+        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        try table.close(rt, binding_idx);
     }
 
     /// Close parameter-environment aliases at the generator body boundary
     /// while retaining aliases into the resident argument backing.
-    pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) void {
-        for (self.open_var_refs) |*slot| {
-            const ref = slot.* orelse continue;
-            if (self.argSlotContains(ref.pvalue)) continue;
-            slot.* = null;
-            ref.close(rt);
-            ref.valueRef().free(rt);
+    pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) !void {
+        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        for (self.function.vardefs) |vd| {
+            if (vd.open_binding_idx == bytecode.function_bytecode.no_open_binding) continue;
+            try table.close(rt, vd.open_binding_idx);
         }
     }
 
-    fn argSlotContains(self: *const Frame, slot: *const JSValue) bool {
-        // A live `self.args` slice occupies mapped memory, so its byte length
-        // and end address cannot overflow; the shared slotIndexInSlice predicate
-        // (byte-range + stride, end-exclusive) has identical membership semantics.
-        return slotIndexInSlice(slot, self.args) != null;
-    }
-
-    pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) void {
+    pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) !void {
+        if (slots.len != self.function.open_var_ref_count) return error.InvalidBytecode;
         self.open_var_refs = slots;
         @memset(self.open_var_refs, null);
     }
@@ -743,7 +726,11 @@ pub const Frame = struct {
         use_inline_storage: bool,
     ) !void {
         const count = self.function.open_var_ref_count;
-        if (count == 0 or self.open_var_refs.len >= count) return;
+        if (self.open_var_refs.len != 0) {
+            if (self.open_var_refs.len != count) return error.InvalidBytecode;
+            return;
+        }
+        if (count == 0) return;
         _ = use_inline_storage;
         const slots = blk: {
             if (arena) |stack_arena| {
@@ -760,10 +747,7 @@ pub const Frame = struct {
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
         try growLocalsCapacity(account, self, index);
-        const next_value = value.dup();
-        const old_value = self.locals[index];
-        self.locals[index] = next_value;
-        old_value.free(rt);
+        value_slot.replaceBorrowed(rt, &self.locals[index], value);
     }
 
     fn releaseValueSlice(rt: anytype, values: []JSValue) void {
@@ -787,18 +771,6 @@ pub const Frame = struct {
         for (cells) |cell| {
             cell.freeCell(rt);
         }
-    }
-
-    fn slotIndexInSlice(slot: *const JSValue, values: []const JSValue) ?usize {
-        if (values.len == 0) return null;
-        const slot_addr = @intFromPtr(slot);
-        const start = @intFromPtr(values.ptr);
-        const byte_len = values.len * @sizeOf(JSValue);
-        const end = start + byte_len;
-        if (slot_addr < start or slot_addr >= end) return null;
-        const byte_offset = slot_addr - start;
-        if (byte_offset % @sizeOf(JSValue) != 0) return null;
-        return byte_offset / @sizeOf(JSValue);
     }
 };
 
@@ -897,21 +869,18 @@ fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize)
         return error.InvalidBytecode;
     }
 
+    // Published local addresses are stable for the lifetime of an open cell.
+    // Production frames are pre-sized; synthetic builders may grow only before
+    // the first capture. Check before allocating so malformed bytecode cannot
+    // turn this invariant failure into an allocation-dependent error.
+    var open_table = open_bindings_mod.Table{ .cells = frame.open_var_refs };
+    if (open_table.hasOpen()) return error.InvalidBytecode;
+
     const old_locals = frame.locals;
     const next = try account.alloc(JSValue, next_len);
     errdefer account.free(JSValue, next);
     if (old_locals.len != 0) @memcpy(next[0..old_locals.len], old_locals);
     @memset(next[old_locals.len..], JSValue.undefinedValue());
-
-    // Open cells alias local slots directly. Moving the local window must
-    // rebase those aliases before the old backing can disappear.
-    for (frame.open_var_refs) |maybe_ref| {
-        const ref = maybe_ref orelse continue;
-        const local_idx = Frame.slotIndexInSlice(ref.pvalue, old_locals) orelse continue;
-        std.debug.assert(ref.is_open);
-        std.debug.assert(ref.pvalue == &old_locals[local_idx]);
-        ref.pvalue = &next[local_idx];
-    }
 
     frame.locals = next;
     frame.storage_values = next;

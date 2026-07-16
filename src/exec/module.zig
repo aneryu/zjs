@@ -336,7 +336,7 @@ pub fn initializeModuleFunctionDeclarations(
         const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
         const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true);
-        try slot_ops.setVarRefSlotValue(ctx, &frame, ref_idx, function_value);
+        slot_ops.replaceVarRefValueOwned(ctx, &frame, ref_idx, function_value);
     }
     record.function_declarations_initialized = true;
 }
@@ -723,7 +723,7 @@ fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
 }
 
 fn moduleBindingCellValue(cell_value: core.JSValue) core.JSValue {
-    return slot_ops.slotValueDup(cell_value);
+    return slot_ops.adapterValueDup(cell_value);
 }
 
 fn moduleExplicitNamespaceExportCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, export_name: core.Atom) ModuleNamespaceError!core.JSValue {
@@ -976,7 +976,7 @@ fn setModuleBinding(ctx: *core.JSContext, record: *core.module.ModuleRecord, nam
     try record.ensureLocalBinding(name);
     const index = record.findLocalBindingIndex(name) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell)) |cell| {
-        try cell.setVarRefValue(ctx.runtime, value);
+        cell.setVarRefValue(ctx.runtime, value);
         record.local_bindings[index].initialized = true;
         return;
     }

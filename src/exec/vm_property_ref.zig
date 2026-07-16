@@ -153,23 +153,23 @@ pub noinline fn makeSlotRef(
     const idx = readInt(u16, function.code[frame.pc + 4 ..][0..2]);
     frame.pc += 6;
 
-    const ref_value = switch (opc) {
+    const cell: *core.VarRef = switch (opc) {
         op.make_loc_ref => blk: {
             if (idx >= frame.locals.len) return error.InvalidBytecode;
-            const is_lexical = idx < function.vardefs.len and function.vardefs[idx].is_lexical;
-            break :blk try slot_ops.ensureLocalVarRefCell(ctx, frame, idx, is_lexical);
+            break :blk try frame.captureLocal(ctx.runtime, idx);
         },
         op.make_arg_ref => blk: {
             if (idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try slot_ops.ensureFrameVarRefCell(ctx, frame, &frame.args[idx]);
+            break :blk try frame.captureArg(ctx.runtime, idx);
         },
         op.make_var_ref_ref => blk: {
             try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);
-            break :blk try slot_ops.ensureVarRefSlotCell(ctx, frame, idx);
+            break :blk frame.var_refs[idx].retain();
         },
         else => unreachable,
     };
-    defer ref_value.free(ctx.runtime);
+    defer cell.release(ctx.runtime);
+    const ref_value = cell.valueRef();
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     errdefer key_value.free(ctx.runtime);
     try stack.push(ref_value);
@@ -236,7 +236,7 @@ pub fn getRefValue(
     defer key.free(ctx.runtime);
     if (obj.isUndefined()) return error.ReferenceError;
     if (varRefCellFromValue(obj) != null) {
-        const value = slot_ops.slotValueDup(obj);
+        const value = slot_ops.adapterValueDup(obj);
         errdefer value.free(ctx.runtime);
         if (value.isUninitialized()) return error.ReferenceError;
         try stack.pushOwned(value);
@@ -302,7 +302,7 @@ pub fn putRefValue(
         }
         var ref_slot = obj.dup();
         defer ref_slot.free(ctx.runtime);
-        try slot_ops.setSlotValue(ctx, &ref_slot, value);
+        slot_ops.replaceAdapterOwned(ctx, &ref_slot, value);
         return;
     }
     defer value.free(ctx.runtime);

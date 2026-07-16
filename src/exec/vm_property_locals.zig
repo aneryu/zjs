@@ -16,9 +16,9 @@ const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 const objectFromValue = object_ops.objectFromValue;
 const readInt = call_runtime.readInt;
-const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const property_vm = @import("vm_property.zig");
@@ -69,7 +69,6 @@ const ownPrototypeEntryIsNativeBuiltinDefault = property_vm.ownPrototypeEntryIsN
 const periodicNonNegativeDelta = property_vm.periodicNonNegativeDelta;
 const safeIntegerI128 = property_vm.safeIntegerI128;
 const sameBinding = property_vm.sameBinding;
-const slotValueBorrowed = property_vm.slotValueBorrowed;
 const storeBindingOwnedValue = property_vm.storeBindingOwnedValue;
 const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrowedValue;
 const storeStringSliceConstLocal = property_vm.storeStringSliceConstLocal;
@@ -181,29 +180,21 @@ pub noinline fn checkedLocVm(
 
     switch (opc) {
         op.set_loc_uninitialized => {
-            // Mirror the slot's TDZ state in its value tag (lets the dispatch
-            // fast paths test the tag instead of the side bitmap). Free the old
-            // binding first: on block re-entry (loop) the slot may hold the
-            // previous iteration's value/var-ref cell, which a captured closure
-            // still references via its own dup — we only drop the slot's share.
-            const cur_binding = frame.locals[idx];
-            if (slot_ops.varRefCellFromValue(cur_binding)) |cell| {
-                try cell.setVarRefValue(ctx.runtime, core.JSValue.uninitialized());
-            } else {
-                frame.locals[idx] = core.JSValue.uninitialized();
-                cur_binding.free(ctx.runtime);
-            }
+            // A lexical reset starts a new binding instance. Detach any cell
+            // from the previous instance before publishing the TDZ sentinel.
+            try frame.closeLocalBinding(ctx.runtime, idx);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], core.JSValue.uninitialized());
         },
         op.get_loc_check, op.get_loc_checkthis => {
-            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+            if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
-            try array_ops.pushSlotValue(stack, frame.locals[idx]);
+            try stack.push(frame.locals[idx]);
         },
         op.put_loc_check => {
-            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+            if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -214,22 +205,22 @@ pub noinline fn checkedLocVm(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         },
         op.set_loc_check => {
-            if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+            if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = stack.peek() orelse return error.StackUnderflow;
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         },
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
                 idx < function.vardefs.len and
                 function.vardefs[idx].var_name == core.atom.ids.this_;
-            if (is_derived_this and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+            if (is_derived_this and !frame.locals[idx].isUninitialized()) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
@@ -239,9 +230,9 @@ pub noinline fn checkedLocVm(
             else
                 core.JSValue.undefinedValue();
             defer constructor_this.free(ctx.runtime);
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
             if (!constructor_this.isUndefined()) {
-                try slot_ops.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
+                slot_ops.replaceAdapterOwned(ctx, &frame.this_value, constructor_this.dup());
             }
         },
         else => unreachable,
@@ -475,9 +466,9 @@ fn storeBindingInt32(
     _ = function;
     _ = global;
     if (binding.is_var_ref) {
-        try slot_ops.setVarRefSlotValue(ctx, frame, binding.idx, core.JSValue.int32(value));
+        slot_ops.replaceVarRefValueOwned(ctx, frame, binding.idx, core.JSValue.int32(value));
     } else {
-        try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[binding.idx], core.JSValue.int32(value));
     }
 }
 
@@ -530,10 +521,10 @@ fn storeLocalInt32WithCompletion(
 ) !void {
     _ = function;
     _ = global;
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], core.JSValue.int32(value));
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[completion.idx], core.JSValue.int32(value));
         }
     }
 }
@@ -551,12 +542,12 @@ fn storeLocalOwnedValueWithCompletion(
     _ = global;
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value.dup());
-            try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value);
+            value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], value);
+            value_slot.replaceOwned(ctx.runtime, &frame.locals[completion.idx], value);
             return;
         }
     }
-    try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
 }
 
 fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
@@ -704,7 +695,8 @@ fn skipOptionalCloseLocForLocal(frame: *const frame_mod.Frame, code: []const u8,
     if (pc + 3 > code.len) return null;
     const close_idx = readInt(u16, code[pc + 1 ..][0..2]);
     if (close_idx != local_idx) return pc;
-    if (local_idx >= frame.locals.len or varRefCellFromValue(frame.locals[local_idx]) != null) return null;
+    if (local_idx >= frame.locals.len) return null;
+    if (frame.function.localOpenBindingIndex(local_idx) != null) return null;
     return pc + 3;
 }
 
@@ -822,8 +814,8 @@ fn denseArrayAppendValueFromBytecode(
     first_value_next_pc: usize,
 ) ?DenseArrayAppendValue {
     if (first_value_idx >= frame.locals.len) return null;
-    if (slot_ops.varRefSlotIsUninitialized(frame.locals[first_value_idx])) return null;
-    const value = slotValueBorrowed(frame.locals[first_value_idx]);
+    if (frame.locals[first_value_idx].isUninitialized()) return null;
+    const value = frame.locals[first_value_idx];
     if (value.isUninitialized()) return null;
 
     const code = function.code;
@@ -962,5 +954,5 @@ pub noinline fn closeLoc(
 ) !void {
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    try slot_ops.closeLocalVarRef(ctx, frame, idx);
+    try frame.closeLocalBinding(ctx.runtime, idx);
 }

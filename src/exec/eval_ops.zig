@@ -17,7 +17,6 @@ const array_ops = @import("array_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
-const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic utilities outside the eval
@@ -42,7 +41,6 @@ const normalizeEvalRuntimeError = exception_ops.normalizeEvalRuntimeError;
 const objectFromValue = object_ops.objectFromValue;
 const simpleEvalRegExpLiteral = call_runtime.simpleEvalRegExpLiteral;
 const validateGlobalEvalFunctionDeclarationsFromBytecode = call_runtime.validateGlobalEvalFunctionDeclarationsFromBytecode;
-const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 fn isDirectEvalVarObjectAtom(atom_id: core.Atom) bool {
     return atom_id == core.atom.ids.var_object or atom_id == core.atom.ids.arg_var_object;
@@ -297,54 +295,18 @@ pub fn functionBytecodeUsesImportMeta(fb: *const bytecode.FunctionBytecode) bool
 /// carries no const flag — a module import slot directly aliases the
 /// EXPORTING module's live cell (qjs js_inner_module_linking form,
 /// quickjs.c:30765-30777) and must not have importer-side const-ness stamped
-/// onto it — the eval frame gets a const VIEW cell instead, so an indexed
-/// `eval("imported = v")` write still rejects with TypeError. The view is
-/// pvalue-ALIASING, not
-/// nesting: `value` retains the target cell (ownership + GC tracing) while
-/// `pvalue` aliases the target's live `pvalue` — the same aliasing mechanism
-/// qjs itself uses for cells that share a binding (module import cells alias
-/// the exporter's live cell, js_inner_module_linking quickjs.c:30765-30777),
-/// so a cell's VALUE is never itself a cell and every reader reaches the
-/// plain value with a bare `*pvalue` deref (qjs OP_get_var_ref,
-/// quickjs.c:18627). qjs needs no runtime analog of the view: its direct
-/// eval compiles against the enclosing closure vars, so such writes are
-/// rejected at eval-compile time (resolve_scope_var has_idx,
-/// quickjs.c:33301-33306).
+/// Direct eval shares the exact outer cell. Read-only semantics belong to the
+/// eval bytecode's ClosureVar descriptor (checked by execPutVarRef), not to a
+/// wrapper cell that would give one binding two runtime identities.
 fn directEvalOuterVarRefView(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     idx: usize,
-) !core.JSValue {
-    const slot = slot_ops.varRefSlot(frame, idx);
-    const needs_const_view = blk: {
-        if (idx >= function.closure_var.len) break :blk false;
-        const cv = function.closure_var[idx];
-        if (!cv.is_const or cv.var_kind == .function_name) break :blk false;
-        switch (cv.closure_type) {
-            // Global-family const-ness lives on the global lexical cell
-            // itself (qjs js_closure_define_global_var quickjs.c:17215).
-            .global, .global_decl, .global_ref => break :blk false,
-            .local, .arg, .ref, .module_decl, .module_import => {},
-        }
-        const cell = varRefCellFromValue(slot) orelse break :blk false;
-        break :blk !cell.varRefIsConstSlot().*;
-    };
-    if (!needs_const_view) return slot.dup();
-    const target = slot.dup();
-    errdefer target.free(ctx.runtime);
-    const inner = varRefCellFromValue(target) orelse unreachable; // needs_const_view proved the slot is a cell
-    // A const cv is lexical by construction (parser: const => is_lexical),
-    // and lexical captures always materialize CLOSED cells
-    // (ensureLocalVarRefCell is_lexical arm) — so `inner.pvalue` is stable
-    // for the cell's lifetime (never re-pointed by VarRef.close) and the
-    // alias below cannot dangle. The wrapper's `value` ref keeps `inner`
-    // (and thus the aliased storage) alive.
-    std.debug.assert(!inner.is_open);
-    const wrapper = try core.VarRef.createClosed(ctx.runtime, target);
-    wrapper.pvalue = inner.pvalue;
-    wrapper.varRefIsConstSlot().* = true;
-    return wrapper.valueRef();
+) !*core.VarRef {
+    _ = ctx;
+    if (idx >= function.closure_var.len or idx >= frame.var_refs.len) return error.InvalidBytecode;
+    return frame.var_refs[idx].retain();
 }
 
 fn initialDirectEvalFrameVarRef(
@@ -352,14 +314,14 @@ fn initialDirectEvalFrameVarRef(
     global: *core.Object,
     function: *const bytecode.Bytecode,
     idx: usize,
-) !core.JSValue {
+) !*core.VarRef {
     if (idx < function.closure_var.len) {
         const cv = function.closure_var[idx];
         switch (cv.closure_type) {
             .global, .global_ref, .global_decl => {
-                if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-                if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
-                return call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
+                if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return ownedCellFromValue(ctx.runtime, cell_value);
+                if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return ownedCellFromValue(ctx.runtime, cell_value);
+                return ownedCellFromValue(ctx.runtime, try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name));
             },
             .local, .arg, .ref, .module_decl, .module_import => {},
         }
@@ -374,13 +336,20 @@ fn initialDirectEvalFrameVarRef(
         initial_owned = core.JSValue.undefinedValue();
         cell.varRefIsConstSlot().* = cv.is_const;
         cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
-        return cell.valueRef();
+        return cell;
     }
 
     const atom_id = function.varRefName(idx);
-    if (call_runtime.globalLexicalCell(ctx, atom_id)) |cell_value| return cell_value;
-    if (call_runtime.globalObjectVarRefCell(global, atom_id)) |cell_value| return cell_value;
-    return call_runtime.globalObjectGetUninitializedVar(ctx, global, atom_id);
+    if (call_runtime.globalLexicalCell(ctx, atom_id)) |cell_value| return ownedCellFromValue(ctx.runtime, cell_value);
+    if (call_runtime.globalObjectVarRefCell(global, atom_id)) |cell_value| return ownedCellFromValue(ctx.runtime, cell_value);
+    return ownedCellFromValue(ctx.runtime, try call_runtime.globalObjectGetUninitializedVar(ctx, global, atom_id));
+}
+
+fn ownedCellFromValue(rt: *core.JSRuntime, owned: core.JSValue) !*core.VarRef {
+    return core.VarRef.fromValue(owned) orelse {
+        owned.free(rt);
+        return error.InvalidBytecode;
+    };
 }
 
 fn directEvalSeedFrameVarRef(
@@ -390,7 +359,7 @@ fn directEvalSeedFrameVarRef(
     caller_frame: ?*frame_mod.Frame,
     eval_global_var_bindings: bool,
     cv: bytecode.function_bytecode.ClosureVar,
-) !?core.JSValue {
+) !?*core.VarRef {
     const outer_function = caller_function orelse return null;
     const outer_frame = caller_frame orelse return null;
     return switch (cv.closure_type) {
@@ -405,22 +374,12 @@ fn directEvalSeedFrameVarRef(
             {
                 break :blk null;
             }
-            const cell_value = try slot_ops.ensureLocalVarRefCell(ctx, outer_frame, local_idx, cv.is_lexical);
-            if (varRefCellFromValue(cell_value)) |cell| {
-                cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or cv.is_const;
-                cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.var_kind == .function_name;
-            }
-            break :blk cell_value;
+            break :blk try outer_frame.captureLocal(ctx.runtime, local_idx);
         },
         .arg => blk: {
             const arg_idx: usize = cv.var_idx;
             if (arg_idx >= outer_frame.args.len) return error.InvalidBytecode;
-            const cell_value = try slot_ops.ensureFrameVarRefCell(ctx, outer_frame, &outer_frame.args[arg_idx]);
-            if (varRefCellFromValue(cell_value)) |cell| {
-                cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or cv.is_const;
-                cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.var_kind == .function_name;
-            }
-            break :blk cell_value;
+            break :blk try outer_frame.captureArg(ctx.runtime, arg_idx);
         },
         .ref => blk: {
             if (cv.var_idx >= outer_function.varRefNamesLen() or cv.var_idx >= outer_frame.var_refs.len) return error.InvalidBytecode;
@@ -463,10 +422,9 @@ fn createDirectEvalFrameVarRefs(
             try directEvalSeedFrameVarRef(ctx, global, caller_function, caller_frame, eval_global_var_bindings, closure_var)
         else
             null;
-        const cell_value = indexed_cell orelse
+        const cell = indexed_cell orelse
             try initialDirectEvalFrameVarRef(ctx, global, function, initialized);
-        defer cell_value.free(ctx.runtime);
-        refs[initialized] = (core.VarRef.fromValue(cell_value) orelse unreachable).dupCell();
+        refs[initialized] = cell;
         rooted_refs = refs[0 .. initialized + 1];
     }
     return refs;

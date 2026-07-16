@@ -130,7 +130,7 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// array-iterator-protocol core and likewise stays.) The
 /// fast-array `[[Get]]/[[Set]]` element semantics, the array iterator protocol
 /// core, the `new_array` / `array_join` construction opcodes, and the VM
-/// stack/frame primitives (`popCatchMarker`, `pushSlotValue`,
+/// stack/frame primitives (`popCatchMarker`, `pushAdapterValue`,
 /// `pushFunctionClosure`) are NOT here — they are driven by opcode handlers,
 /// never by function-object record dispatch. Property installation still
 /// resolves names/lengths through the registry's own `array_static` /

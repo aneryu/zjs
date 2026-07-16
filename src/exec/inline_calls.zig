@@ -818,7 +818,7 @@ pub const Machine = struct {
         // 17848-17857). var_refs remain borrowed from the closure (17844).
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function, frame_arg_count);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
         const open_slots = if (open_var_ref_count == 0)
             0
         else
@@ -1024,7 +1024,7 @@ pub const Machine = struct {
         const borrow_var_refs = function.global_vars.len == 0 and
             frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(function, frame_var_refs);
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function, frame_arg_count);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
         const slab = frame_mod.FrameSlab.carve(
             &rt.memory,
             &rt.vm_stack,
@@ -1081,10 +1081,11 @@ pub const Machine = struct {
         cleanup_source = .none;
 
         if (frame_windows.open_var_refs) |open_refs| {
-            entry.frame.installOpenVarRefSlots(open_refs);
+            try entry.frame.installOpenVarRefSlots(open_refs);
         } else if (open_var_ref_count != 0) {
             try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
         }
+        try vm_call.linkDerivedConstructorThisLocal(ctx, function, &entry.frame);
         if (borrow_var_refs) {
             // Alias the closure's captures (mutable slice; no merge replaced it).
             // The function object stays alive via
@@ -1127,7 +1128,7 @@ pub const Machine = struct {
         const frame_arg_count: usize = @intCast(function.arg_count);
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function, frame_arg_count);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
         const open_slots = if (open_var_ref_count == 0)
             0
         else

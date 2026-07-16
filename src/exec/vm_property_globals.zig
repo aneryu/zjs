@@ -643,7 +643,7 @@ pub noinline fn putVar(
                 !cell.varRefIsFunctionNameSlot().*)
             {
                 errdefer value.free(ctx.runtime);
-                try cell.setVarRefValue(ctx.runtime, value);
+                cell.setVarRefValue(ctx.runtime, value);
                 return .done;
             }
         }
@@ -941,7 +941,7 @@ fn defineGlobalVarDeclaration(
         switch (gv.eval_target) {
             .closure => |target_idx| {
                 if (target_idx >= frame.var_refs.len) return error.InvalidBytecode;
-                try slot_ops.setVarRefSlotValue(ctx, frame, target_idx, func_val.dup());
+                slot_ops.replaceVarRefValueOwned(ctx, frame, target_idx, func_val.dup());
                 return;
             },
             .var_object => |target_idx| {

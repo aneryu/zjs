@@ -4171,27 +4171,44 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn adoptMappedArgumentsVarRefsAssumingEmpty(self: *Object, rt: *JSRuntime, refs: []JSValue) void {
+    /// Allocate the mapped-arguments pointer table behind a typed Interface.
+    ///
+    /// The shared array union still owns a JSValue-sized backing allocation so
+    /// destruction and memory accounting stay correct for both supported value
+    /// representations. Callers never construct or reinterpret that backing;
+    /// they only receive the logical `?*VarRef` entries.
+    pub fn allocateMappedArgumentsVarRefsAssumingEmpty(self: *Object, rt: *JSRuntime, count: usize) ![]?*var_ref_mod.VarRef {
         std.debug.assert(self.class_id == class.ids.mapped_arguments);
         std.debug.assert(self.flags.class_payload_kind == .none);
         std.debug.assert(self.u.array.count == 0 and self.u.array.capacity == 0);
-        if (refs.len != 0) self.u.array.values = refs.ptr;
-        self.u.array.count = @intCast(refs.len);
-        self.u.array.capacity = @intCast(refs.len);
-        self.u.array.length = @intCast(refs.len);
-        if (refs.len != 0) self.markIndexedProperties(rt);
+        if (count == 0) return &.{};
+
+        const backing = try rt.memory.alloc(JSValue, count);
+        self.u.array.values = backing.ptr;
+        self.u.array.count = @intCast(count);
+        self.u.array.capacity = @intCast(count);
+        self.u.array.length = @intCast(count);
+        self.markIndexedProperties(rt);
+
+        const refs = self.argumentsVarRefsMut();
+        @memset(refs, null);
+        return refs;
     }
 
-    pub fn argumentsVarRefs(self: *const Object) []JSValue {
+    pub fn argumentsVarRefs(self: *const Object) []const ?*var_ref_mod.VarRef {
         if (self.class_id != class.ids.mapped_arguments or self.u.array.count == 0) return &.{};
         std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        const backing = self.u.array.values[0..@as(usize, @intCast(self.u.array.capacity))];
+        const cells = std.mem.bytesAsSlice(?*var_ref_mod.VarRef, std.mem.sliceAsBytes(backing));
+        return cells[0..@as(usize, @intCast(self.u.array.count))];
     }
 
-    pub fn argumentsVarRefsMut(self: *Object) []JSValue {
+    pub fn argumentsVarRefsMut(self: *Object) []?*var_ref_mod.VarRef {
         if (self.class_id != class.ids.mapped_arguments or self.u.array.count == 0) return &.{};
         std.debug.assert(self.u.array.capacity >= self.u.array.count);
-        return self.u.array.values[0..@as(usize, @intCast(self.u.array.count))];
+        const backing = self.u.array.values[0..@as(usize, @intCast(self.u.array.capacity))];
+        const cells = std.mem.bytesAsSlice(?*var_ref_mod.VarRef, std.mem.sliceAsBytes(backing));
+        return cells[0..@as(usize, @intCast(self.u.array.count))];
     }
 
     pub fn objectDataSlot(self: *Object) *?JSValue {
@@ -4398,7 +4415,10 @@ pub const Object = extern struct {
             return;
         }
         if (self.class_id == class.ids.mapped_arguments) {
-            for (self.argumentsVarRefs()) |stored| stored.free(rt);
+            for (self.argumentsVarRefs()) |maybe_cell| {
+                const cell = maybe_cell orelse continue;
+                cell.release(rt);
+            }
             const allocated = self.allocatedArrayElements();
             self.u.array.count = 0;
             self.u.array.capacity = 0;
@@ -7601,7 +7621,11 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.value);
         }
         if (self.class_id == class.ids.mapped_arguments) {
-            for (self.argumentsVarRefsMut()) |*stored| try Helper.callVisitValue(visitor, stored);
+            for (self.argumentsVarRefs()) |maybe_cell| {
+                const cell = maybe_cell orelse continue;
+                var cell_value = cell.valueRef();
+                try Helper.callVisitValue(visitor, &cell_value);
+            }
         }
         if (self.proxyPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.target);
@@ -8113,7 +8137,10 @@ pub const Object = extern struct {
         if (self.varRefPayloadConst()) |payload| {
             if (payload.value) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         }
-        for (self.argumentsVarRefs()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+        for (self.argumentsVarRefs()) |maybe_cell| {
+            const cell = maybe_cell orelse continue;
+            count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+        }
         count += countOptionalFunctionBytecodeRef(self.proxyTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.proxyHandler(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.promiseResult(), function_bytecode);
@@ -10147,7 +10174,7 @@ pub const Object = extern struct {
                 const cell = entry.slot.var_ref;
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                 errdefer next_value.free(rt);
-                try cell.setVarRefValue(rt, next_value);
+                cell.setVarRefValue(rt, next_value);
                 return;
             }
             // Data or data-destined auto_init placeholder: overwrite with the
@@ -10215,7 +10242,7 @@ pub const Object = extern struct {
                         const cell = entry.slot.var_ref;
                         const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                         errdefer next_value.free(rt);
-                        try cell.setVarRefValue(rt, next_value);
+                        cell.setVarRefValue(rt, next_value);
                         return true;
                     },
                     // Data-destined auto_init placeholder: overwrite with the new
@@ -10490,7 +10517,7 @@ pub const Object = extern struct {
             defer index_keys.deinit(rt.memory.allocator);
             if (self.class_id == class.ids.mapped_arguments) {
                 for (self.argumentsVarRefs(), 0..) |mapped, mapped_index| {
-                    if (mapped.isUninitialized()) continue;
+                    if (mapped == null) continue;
                     try index_keys.append(rt.memory.allocator, .{
                         .index = @intCast(mapped_index),
                         .atom_id = atom.atomFromUInt32(@intCast(mapped_index)),
@@ -10970,7 +10997,7 @@ pub const Object = extern struct {
             const next_value = dupPropertyDataValue(&rt.atoms, atom_id, merged.value);
             errdefer next_value.free(rt);
             try self.ensureUniqueShapeForMutation(rt);
-            try cell.setVarRefValue(rt, next_value);
+            cell.setVarRefValue(rt, next_value);
             rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.withKind(.var_ref).bits());
             return;
         }
@@ -11199,7 +11226,7 @@ pub const Object = extern struct {
         const index = array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return;
         const refs = self.argumentsVarRefs();
         if (index >= refs.len) return;
-        if (refs[index].isUninitialized()) return;
+        if (refs[index] == null) return;
 
         if (desc.kind == .accessor) {
             self.deleteMappedArgumentsBinding(rt, index);
@@ -11229,38 +11256,24 @@ pub const Object = extern struct {
     fn setMappedArgumentsBindingValue(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefsMut();
-        if (varRefCellFromValue(refs[slot_index])) |cell| {
-            const next_value = new_value.dup();
-            errdefer next_value.free(rt);
-            try cell.setVarRefValue(rt, next_value);
-            return;
-        }
-        const next_value = new_value.dup();
-        errdefer next_value.free(rt);
-        const value_slot = &refs[slot_index];
-        const old_value = value_slot.*;
-        value_slot.* = next_value;
-        old_value.free(rt);
+        const cell = refs[slot_index] orelse return;
+        cell.setVarRefValue(rt, new_value.dup());
     }
 
     fn deleteMappedArgumentsBinding(self: *Object, rt: *JSRuntime, index: u32) void {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefsMut();
-        const old_value = refs[slot_index];
-        refs[slot_index] = JSValue.uninitialized();
-        old_value.free(rt);
+        const cell = refs[slot_index] orelse return;
+        refs[slot_index] = null;
+        cell.release(rt);
     }
 
     fn mappedArgumentsBindingValue(self: *const Object, index: u32) ?JSValue {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefs();
         if (slot_index >= refs.len) return null;
-        const mapped = refs[slot_index];
-        if (mapped.isUninitialized()) return null;
-        if (varRefCellFromValue(mapped)) |cell| {
-            return cell.varRefValue().dup();
-        }
-        return mapped.dup();
+        const cell = refs[slot_index] orelse return null;
+        return cell.varRefValue().dup();
     }
 
     fn mappedArgumentsBindingIndexFromAtom(self: *const Object, rt: *const JSRuntime, atom_id: atom.Atom) ?u32 {
@@ -11278,7 +11291,7 @@ pub const Object = extern struct {
     fn hasMappedArgumentsBinding(self: *const Object, index: u32) bool {
         const slot_index: usize = @intCast(index);
         const refs = self.argumentsVarRefs();
-        return slot_index < refs.len and !refs[slot_index].isUninitialized();
+        return slot_index < refs.len and refs[slot_index] != null;
     }
 
     fn materializeMappedArgumentsProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom) !void {
@@ -11292,7 +11305,7 @@ pub const Object = extern struct {
     fn materializeAllMappedArgumentsProperties(self: *Object, rt: *JSRuntime) !void {
         if (self.class_id != class.ids.mapped_arguments) return;
         for (self.argumentsVarRefs(), 0..) |mapped, index| {
-            if (mapped.isUninitialized()) continue;
+            if (mapped == null) continue;
             try self.materializeMappedArgumentsProperty(rt, atom.atomFromUInt32(@intCast(index)));
         }
     }
@@ -11300,7 +11313,7 @@ pub const Object = extern struct {
     fn detachAllMappedArgumentsBindings(self: *Object, rt: *JSRuntime) void {
         if (self.class_id != class.ids.mapped_arguments) return;
         for (self.argumentsVarRefs(), 0..) |mapped, index| {
-            if (mapped.isUninitialized()) continue;
+            if (mapped == null) continue;
             self.deleteMappedArgumentsBinding(rt, @intCast(index));
         }
     }

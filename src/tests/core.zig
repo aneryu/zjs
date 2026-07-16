@@ -1536,9 +1536,9 @@ test "mapped arguments binding update defers value finalizer reentry" {
     defer arguments.value().free(rt);
     const key = core.atom.atomFromUInt32(0);
     const value = try core.Object.create(rt, reentrant_id, null);
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = value.value().dup();
-    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
+    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
+    const cell = try core.VarRef.createClosed(rt, value.value().dup());
+    refs[0] = cell;
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1556,11 +1556,11 @@ test "mapped arguments binding update defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), arguments.argumentsVarRefs()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 7), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
-    try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
 }
 
 test "mapped arguments var-ref binding update defers value finalizer reentry" {
@@ -1578,9 +1578,8 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const key = core.atom.atomFromUInt32(0);
     const value = try core.Object.create(rt, reentrant_id, null);
     const cell = try core.VarRef.createClosed(rt, value.value().dup());
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = cell.valueRef();
-    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
+    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
+    refs[0] = cell;
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1618,13 +1617,12 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     defer arguments.value().free(rt);
     const key = core.atom.atomFromUInt32(0);
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = core.JSValue.uninitialized();
-    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
+    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
     const value = try core.Object.create(rt, reentrant_id, null);
-    refs[0] = value.value().dup();
+    const cell = try core.VarRef.createClosed(rt, value.value().dup());
+    refs[0] = cell;
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1642,14 +1640,14 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(arguments.argumentsVarRefs()[0].isUninitialized());
+    try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
     var before_cleanup = arguments.getProperty(key);
     defer before_cleanup.free(rt);
     try std.testing.expect(before_cleanup.isUndefined());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
-    try std.testing.expect(arguments.argumentsVarRefs()[0].isUninitialized());
+    try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
     const after = arguments.getProperty(key);
     defer after.free(rt);
     try std.testing.expectEqual(@as(?i32, 99), after.asInt32());
@@ -2239,16 +2237,15 @@ test "mapped arguments state uses inline var-ref storage" {
     defer arguments.value().free(rt);
 
     try std.testing.expectEqual(core.class.PayloadKind.none, arguments.flags.class_payload_kind);
-    const refs = try rt.memory.alloc(core.JSValue, 2);
-    refs[0] = core.JSValue.int32(77);
-    refs[1] = core.JSValue.int32(88);
-    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
+    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 2);
+    refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(77));
+    refs[1] = try core.VarRef.createClosed(rt, core.JSValue.int32(88));
 
-    try std.testing.expectEqual(refs.ptr, arguments.u.array.values);
+    try std.testing.expectEqual(@intFromPtr(refs.ptr), @intFromPtr(arguments.u.array.values));
     try std.testing.expect(arguments.externalClassPayload() == null);
     try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
-    try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].asInt32());
-    try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].asInt32());
+    try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
+    try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].?.varRefValue().asInt32());
 }
 
 test "unmapped arguments share a prepared shape and use dense element storage" {
@@ -5831,14 +5828,14 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
     const key = try rt.internAtom("arguments");
     defer rt.atoms.free(key);
 
-    const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = target.value().dup();
-    arguments.adoptMappedArgumentsVarRefsAssumingEmpty(rt, refs);
+    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
+    refs[0] = try core.VarRef.createClosed(rt, target.value().dup());
     try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
 
     arguments.value().free(rt);
     target.value().free(rt);
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    // arguments -> VarRef -> target -> arguments, plus the two object shapes.
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "array element self-cycle is released by runtime cycle removal" {
