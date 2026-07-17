@@ -454,6 +454,12 @@ pub const JSContext = struct {
     backtrace_frames: []BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
     current_backtrace_frame: ?*ActiveBacktraceFrame = null,
+    /// Exec-owned, stack-local state for the currently running typed native
+    /// function. Core deliberately keeps this opaque: native cproto handlers
+    /// receive their public ABI arguments directly, while exec can recover
+    /// realm/VM state without putting an exec-specific argument pack in the
+    /// runtime record table. Nested native calls save and restore this link.
+    active_native_call: ?*const anyopaque = null,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
     /// Global object, populated lazily by the eval entry path.

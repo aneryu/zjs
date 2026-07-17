@@ -115,11 +115,21 @@ pub const VarRef = struct {
         return self;
     }
 
+    /// Typed retain Interface used by binding-identity owners.
+    pub inline fn retain(self: *VarRef) *VarRef {
+        return self.dupCell();
+    }
+
     /// Slot-typed release — qjs `free_var_ref` (quickjs.c:16199): rc--,
     /// destroy at 0. Routed through `valueRef().free(rt)` so the deinit-phase
     /// and cycle-removal gates of the JSValue path apply unchanged.
     pub inline fn freeCell(self: *VarRef, rt: anytype) void {
         self.valueRef().free(rt);
+    }
+
+    /// Typed release Interface used by binding-identity owners.
+    pub inline fn release(self: *VarRef, rt: anytype) void {
+        self.freeCell(rt);
     }
 
     pub fn close(self: *VarRef, rt: anytype) void {
@@ -131,10 +141,10 @@ pub const VarRef = struct {
         _ = rt;
     }
 
-    pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) !void {
+    pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) void {
         // Terminal-state invariant (VARREFS-SLOT-TYPING-BLUEPRINT risk 3): a
         // cell's VALUE is NEVER itself a cell — every write path unwraps an
-        // incoming cell value first (setSlotValueRefCounted / execPutVarRef),
+        // incoming cell value first (replaceAdapterOwned / execPutVarRef),
         // and the direct-eval const view pvalue-ALIASES its target cell instead
         // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
         // `*var_ref->pvalue` (quickjs.c:18627) with no chase. Debug-resident
@@ -142,7 +152,6 @@ pub const VarRef = struct {
         if (comptime builtin.mode == .Debug) {
             std.debug.assert(fromValue(next_value) == null);
         }
-        errdefer next_value.free(rt);
         const old_value = self.pvalue.*;
         self.pvalue.* = next_value;
         old_value.free(rt);

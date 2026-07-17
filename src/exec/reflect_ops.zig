@@ -62,7 +62,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
     // through `qjsReflectConstructCall` -> the VM construct dispatcher), so the
     // raw argument-list values are forwarded without VM-context coercion, as
     // before.
-    if (core.function.decodeNativeBuiltinId(target.nativeFunctionIdSlot().*)) |native_ref| {
+    if (core.function.decodeNativeBuiltinId(target.nativeFunctionId())) |native_ref| {
         if (reflectConstructTargetName(native_ref)) |proto_name| {
             var construct_args = ReflectConstructArguments{};
             try construct_args.init(rt, args[1]);
@@ -198,7 +198,7 @@ const ReflectConstructArguments = struct {
 
 fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]core.JSValue {
     const object = try expectObjectArg(value);
-    if (!object.flags.is_array) return error.TypeError;
+    if (!object.isArray()) return error.TypeError;
     const out = try rt.memory.alloc(core.JSValue, object.arrayLength());
     errdefer rt.memory.free(core.JSValue, out);
     var rooted_out: []core.JSValue = out[0..0];
@@ -229,7 +229,7 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (object.proxyTarget()) |target| return isConstructorValue(rt, target);
     return switch (object.class_id) {
         core.class.ids.c_function => {
-            if (object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+            if (object.hostFunctionKind() == core.host_function.ids.external_host) {
                 return object.hasOwnProperty(core.atom.ids.prototype);
             }
             // A construct-capable builtin native id (Date/RegExp/String) marks a
@@ -307,10 +307,9 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
-    const proxy = try core.Object.create(rt, core.class.ids.object, null);
+    const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
     var proxy_raw_owned = true;
     errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, &proxy.header);
-    proxy.flags.is_proxy = true;
     try proxy.ensureProxyPayload(rt);
     try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
     try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());

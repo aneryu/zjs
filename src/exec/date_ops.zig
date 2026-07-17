@@ -13,7 +13,6 @@ const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 const vm_exception_ops = exception_ops;
 
 // The Date constructor body runs through the record table keyed on this ref
@@ -349,14 +348,14 @@ pub const StaticMethod = core.host_function.builtin_method_ids.date.StaticMethod
 
 // Relocated to engine core (`core/host_function.zig`, next to
 // `builtin_method_ids.date.StaticMethod`) in Phase 6b-3e so the VM construct
-// dispatchers can gate on the construct id without importing builtins;
+// dispatchers can gate on the construct id without importing this operation Module;
 // re-exported here so the install/dispatch side keeps the original name.
 pub const ConstructorMethod = core.host_function.builtin_method_ids.date.ConstructorMethod;
 
 // Relocated to engine core (`core/host_function.zig`,
 // `builtin_method_ids.date.PrototypeMethod`) in Phase 6b-3 STEP 5 so the exec
 // date glue can build the record `NativeBuiltinRef` for table dispatch without
-// importing builtins; re-exported here so the dispatch/install side keeps the
+// importing this operation Module; re-exported here so the dispatch/install side keeps the
 // original name.
 pub const PrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
 
@@ -387,7 +386,7 @@ pub const ExtendedPrototypeMethod = enum(u32) {
 /// route through it. `id` doubles as `magic`, so the record carries no extra
 /// selector. Property installation still resolves names through the registry's
 /// Date method tables (canonical name/length) and date.zig's id helpers; this
-/// table is consumed by the slow record-dispatch path (`rt.internal_builtins`).
+/// table is consumed by the record-dispatch path (`rt.internal_builtins`).
 /// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
 /// (`nativeBuiltinSupportedWithoutFunctionObject`): only `Date.now` is callable
 /// without a materialized function object today.
@@ -456,13 +455,29 @@ pub const internal_entries = dateEntries: {
 };
 
 fn dateEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &dateCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = prepared,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&dateCall),
+    };
 }
 
 /// The Date constructor record: construct-capable so `new Date(...)` routes
 /// through the construct dispatch path into `dateCall`'s construct branch.
 fn dateConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &dateCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&dateCall),
+    };
 }
 
 /// Shared record handler for the `.date` domain. Mirrors the retired
@@ -470,7 +485,13 @@ fn dateConstructorEntry(comptime name: []const u8, comptime length: u8, comptime
 /// the pure builtin helpers below, while the `Symbol.toPrimitive` and
 /// prototype methods delegate to the exec VM ops (which stay in exec because
 /// the date opcode handlers and the prepared-call fast path also call them).
-fn dateCall(host_call: InternalCall) HostError!core.JSValue {
+fn dateCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
     const id: u32 = host_call.magic;
@@ -480,11 +501,11 @@ fn dateCall(host_call: InternalCall) HostError!core.JSValue {
 
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new Date(...)` arrives through the construct record path
-        // (`exec/construct.zig`) with `flags.constructor` set and the resolved
+        // (`exec/construct.zig`) with `is_constructor` set and the resolved
         // instance prototype in `new_target`; `Date(...)` called as a function
         // returns the current time string (QuickJS js_date_constructor with
         // `new_target == undefined`).
-        if (host_call.flags.constructor) return constructWithPrototype(ctx.runtime, args, host_call.new_target);
+        if (host_call.is_constructor) return constructWithPrototype(ctx.runtime, args, host_call.new_target);
         return call(ctx.runtime, args);
     }
 
@@ -501,7 +522,7 @@ fn dateCall(host_call: InternalCall) HostError!core.JSValue {
     // re-enter this record (the dispatcher's own body call is one of the
     // converted sites) and recurse, and the glue already performed the
     // dispatcher's coercion/capture work.
-    if (host_call.func_obj == null and host_call.global == null and !host_call.flags.constructor) {
+    if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
         return dateInternalBodyCall(ctx.runtime, id, host_call.this_value, args);
     }
 

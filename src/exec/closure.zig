@@ -768,7 +768,7 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    if (!array.flags.is_array) return error.TypeError;
+    if (!array.isArray()) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.arrayLength()), core.Descriptor.data(rooted_value, true, true, true));
 }
 

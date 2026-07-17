@@ -20,6 +20,8 @@ pub fn legacyStaticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
     if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
     if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
+    if (std.mem.eql(u8, name, "allKeyed")) return @intFromEnum(LegacyStaticMethod.all_keyed);
+    if (std.mem.eql(u8, name, "allSettledKeyed")) return @intFromEnum(LegacyStaticMethod.all_settled_keyed);
     return null;
 }
 
@@ -1766,7 +1768,6 @@ pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *c
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_value = result.value();
     errdefer result_value.free(rt);
-    result.flags.null_prototype = true;
 
     var index: u32 = 0;
     while (index < keys.arrayLength()) : (index += 1) {
@@ -2014,33 +2015,6 @@ pub fn qjsPromiseRejectCapabilityForError(
     const reason = try qjsPromiseErrorValue(ctx, global, err);
     defer reason.free(ctx.runtime);
     try qjsPromiseRejectCapability(ctx, output, global, reject_value, reason, caller_function, caller_frame);
-}
-
-pub fn qjsPromiseStaticMode(name: []const u8) ?PromiseStaticMode {
-    if (std.mem.eql(u8, name, "resolve")) return .resolve;
-    if (std.mem.eql(u8, name, "all")) return .all;
-    if (std.mem.eql(u8, name, "allKeyed")) return .all_keyed;
-    if (std.mem.eql(u8, name, "race")) return .race;
-    if (std.mem.eql(u8, name, "reject")) return .reject;
-    if (std.mem.eql(u8, name, "allSettled")) return .all_settled;
-    if (std.mem.eql(u8, name, "allSettledKeyed")) return .all_settled_keyed;
-    if (std.mem.eql(u8, name, "any")) return .any;
-    if (std.mem.eql(u8, name, "try")) return .try_;
-    if (std.mem.eql(u8, name, "withResolvers")) return .with_resolvers;
-    return null;
-}
-
-pub fn qjsPromiseStaticBuiltinCallee(rt: *core.JSRuntime, global: *core.Object, function_object: *core.Object, name: []const u8) !bool {
-    const ctor_key = try rt.internAtom("Promise");
-    defer rt.atoms.free(ctor_key);
-    const ctor_value = global.getProperty(ctor_key);
-    defer ctor_value.free(rt);
-    const ctor_object = objectFromValue(ctor_value) orelse return false;
-    const method_key = try rt.internAtom(name);
-    defer rt.atoms.free(method_key);
-    const method_value = ctor_object.getProperty(method_key);
-    defer method_value.free(rt);
-    return method_value.sameValue(function_object.value());
 }
 
 pub fn qjsPromiseResolveIdentity(
@@ -2886,11 +2860,12 @@ pub fn qjsAsyncFunctionRunState(
     resume_rejected: bool,
 ) HostError!core.JSValue {
     if (continuation.generatorExecuting()) return error.TypeError;
-    const function_value = continuation.functionBytecode() orelse return error.TypeError;
+    const function_value = continuation.generatorFunctionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
     var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
     const nested = &nested_view;
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    defer continuation.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
 
     try setGeneratorResumeCompletionType(ctx.runtime, continuation, if (resume_rejected) 2 else 0);
@@ -2906,7 +2881,7 @@ pub fn qjsAsyncFunctionRunState(
         .function = nested,
         .initial_this_value = continuation.generatorThis() orelse core.JSValue.undefinedValue(),
         .args = continuation.generatorArgs(),
-        .var_refs = continuation.functionCapturesSlot().*,
+        .var_refs = continuation.generatorCaptures(),
         .output = output,
         .global = async_global,
         .strict_unresolved_get_var = fb_runtime_strict,
@@ -2927,7 +2902,7 @@ pub fn qjsAsyncFunctionRunAndSettle(
 ) HostError!void {
     const async_global = objectRealmGlobal(continuation) orelse global;
     const result = qjsAsyncFunctionRunState(ctx, output, async_global, continuation, resume_value, resume_rejected) catch |err| {
-        continuation.generatorDoneSlot().* = true;
+        continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try qjsPromiseErrorValue(ctx, async_global, err);
         defer reason.free(ctx.runtime);
         try qjsAsyncFunctionSettle(ctx, output, async_global, continuation, reason, true, null, null);
@@ -2942,7 +2917,7 @@ pub fn qjsAsyncFunctionRunAndSettle(
         return;
     }
 
-    continuation.generatorDoneSlot().* = true;
+    continuation.completeGeneratorExecution(ctx.runtime);
     try qjsAsyncFunctionSettle(ctx, output, async_global, continuation, result, false, null, null);
     qjsAsyncFunctionClearPromise(ctx.runtime, continuation);
 }
@@ -2957,7 +2932,7 @@ pub fn qjsAsyncFunctionAwaitOrReject(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     qjsAsyncFunctionAwait(ctx, output, global, continuation, awaited_value, caller_function, caller_frame) catch |err| {
-        continuation.generatorDoneSlot().* = true;
+        continuation.completeGeneratorExecution(ctx.runtime);
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
         try qjsAsyncFunctionSettle(ctx, output, global, continuation, reason, true, caller_function, caller_frame);
@@ -3857,6 +3832,8 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
 
     const result = promise.promiseResult() orelse return error.TypeError;
     const generator = objectFromValue(result) orelse return error.TypeError;
+    try std.testing.expect(generator.generatorExecutionState().has_frame);
+    try std.testing.expectEqual(@as(usize, 0), generator.generatorPc());
     try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
     try std.testing.expectEqual(arg_symbol, generator.generatorArgs()[0].asSymbolAtom().?);
 

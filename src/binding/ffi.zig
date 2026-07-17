@@ -808,6 +808,10 @@ fn jsValueLayoutHash() u64 {
     var hasher = std.hash.Fnv1a_64.init();
     hashInt(&hasher, @sizeOf(core.JSValue));
     hashInt(&hasher, @alignOf(core.JSValue));
+    if (comptime core.JSValue.abi_encoding_revision != 0) {
+        hasher.update("encoding");
+        hashInt(&hasher, core.JSValue.abi_encoding_revision);
+    }
     inline for (@typeInfo(core.JSValue.Repr).@"struct".fields) |field| {
         hasher.update(field.name);
         hashInt(&hasher, @offsetOf(core.JSValue.Repr, field.name));

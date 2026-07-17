@@ -482,7 +482,7 @@ fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.Bytec
 
 fn isStringConstructorValue(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
+    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .string and native_ref.id == @intFromEnum(method_ids.string.ConstructorMethod.call);
 }
 
@@ -643,7 +643,7 @@ pub noinline fn putVar(
                 !cell.varRefIsFunctionNameSlot().*)
             {
                 errdefer value.free(ctx.runtime);
-                try cell.setVarRefValue(ctx.runtime, value);
+                cell.setVarRefValue(ctx.runtime, value);
                 return .done;
             }
         }
@@ -941,7 +941,7 @@ fn defineGlobalVarDeclaration(
         switch (gv.eval_target) {
             .closure => |target_idx| {
                 if (target_idx >= frame.var_refs.len) return error.InvalidBytecode;
-                try slot_ops.setVarRefSlotValue(ctx, frame, target_idx, func_val.dup());
+                slot_ops.replaceVarRefValueOwned(ctx, frame, target_idx, func_val.dup());
                 return;
             },
             .var_object => |target_idx| {
@@ -1006,7 +1006,7 @@ fn defineGlobalVarDeclaration(
     }
     if (!global.hasOwnProperty(atom_id)) {
         const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, gv.is_configurable);
-        const define_result = if (!global.hasExoticMethods() and !global.flags.is_array and global.isExtensible())
+        const define_result = if (!global.hasExoticMethods() and !global.isArray() and global.isExtensible())
             global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
         else
             global.defineOwnProperty(ctx.runtime, atom_id, desc);
@@ -1066,7 +1066,7 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     }
     const object = objectFromValue(value) orelse return error.TypeError;
     if (object.proxyTarget() != null) return error.TypeError;
-    if (object.flags.is_array) {
+    if (object.isArray()) {
         if (object.arrayLength() <= @as(u32, @intCast(std.math.maxInt(i32)))) {
             return core.JSValue.int32(@intCast(object.arrayLength()));
         }

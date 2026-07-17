@@ -80,7 +80,10 @@ pub const ids = struct {
     pub const init_count: ClassId = 68;
 };
 
-pub const PayloadKind = enum {
+/// Object-resident payload discriminator. Keep the tag within five bits so it
+/// can share the compact JSObject metadata word with the hot object flags,
+/// matching QuickJS's 8-byte flags/class/weakref prefix.
+pub const PayloadKind = enum(u5) {
     none,
     ordinary,
     arguments,
@@ -101,9 +104,24 @@ pub const PayloadKind = enum {
     std_file,
     disposable_stack,
     realm,
+    weak_ref,
 };
 
 pub const Payload = ?*anyopaque;
+
+/// Function classes whose `.function` payload uses the bytecode arm. Mirrors
+/// QuickJS's `JSObject.u.func` discriminator: every other `.function` payload
+/// class uses the mutually-exclusive native/c-function arm.
+pub inline fn isBytecodeFunctionClass(id: ClassId) bool {
+    return switch (id) {
+        ids.bytecode_function,
+        ids.generator_function,
+        ids.async_function,
+        ids.async_generator_function,
+        => true,
+        else => false,
+    };
+}
 
 pub const PayloadVisitor = struct {
     context: *anyopaque,
@@ -495,7 +513,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.generator, ids.async_generator => .generator,
         ids.proxy => .proxy,
         ids.promise, ids.promise_resolve_function, ids.promise_reject_function => .promise,
-        ids.weak_ref => .object_data,
+        ids.weak_ref => .weak_ref,
         ids.finalization_registry => .finalization_registry,
         else => .none,
     };

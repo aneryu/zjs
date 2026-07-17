@@ -214,8 +214,7 @@ pub const SpaceAccount = struct {
     // delegates all page management to the system allocator). The committed/free
     // page geometry that used to be maintained on every alloc/free is now derived
     // from live_bytes on demand in refreshPageState (statsSnapshot / Debug verify
-    // only). This also tracks the slab's real behaviour more faithfully: the
-    // SmallObjectSlab eagerly rawFrees an arena the moment it empties (memory.zig),
+    // only). SmallObjectSlab returns an arena as soon as its last block is freed,
     // so there is no retained-empty-page hysteresis to carry on the hot path.
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
         if (bytes == 0) return;
@@ -322,7 +321,10 @@ pub const BlockFlags = packed struct(u8) {
     /// The allocation has been added to the live-byte accounts. Kept separate
     /// from size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
-    _reserved: u1 = 0,
+    /// Object-only weak-identity membership bit. Keeping this lifecycle bit in
+    /// the already-resident GC metadata avoids widening JSObject's semantic
+    /// flag word; non-object GC kinds leave it false.
+    has_weak_id: bool = false,
 };
 
 /// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`
@@ -386,33 +388,100 @@ pub const BlockHeader = extern struct {
     }
 };
 
-/// Standalone refcount word for flat strings and string ropes. It is NOT
-/// embedded in the `String`/`StringRope` structs (which stay at their exact qjs
-/// sizes): each string/rope allocation reserves this 4-byte prefix immediately
-/// ahead of the struct (`objectPtr - string_rc_prefix_size`), mirroring qjs's
-/// `JSRefCountHeader` prefix. The struct reaches it through `String.header()` /
-/// `StringRope.header()`, and a `Tag.string`/`Tag.string_rope`/`Tag.symbol`
-/// JSValue's pointer payload IS this prefix.
-pub const StringHeader = extern struct {
+/// Common QuickJS-style refcount word. Every refcounted JSValue payload points
+/// at its body, with this header at the fixed `payload - 4` offset (`__js_rc`
+/// in quickjs.h). Strings allocate it as a standalone prefix; GC objects store
+/// the same i32 in the tail of their 8-byte allocator Metadata prefix.
+pub const RefCountHeader = extern struct {
     rc: i32 = 1,
 
     comptime {
-        std.debug.assert(@sizeOf(StringHeader) == 4);
+        std.debug.assert(@sizeOf(RefCountHeader) == 4);
     }
 
-    pub inline fn retain(self: *StringHeader) void {
+    pub inline fn retain(self: *RefCountHeader) void {
         std.debug.assert(self.rc > 0);
         self.rc += 1;
     }
 };
 
+/// Compatibility alias for the standalone prefix used by String/StringRope.
+pub const StringHeader = RefCountHeader;
+
 /// Byte size of the refcount prefix reserved ahead of every flat `String` and
 /// `StringRope` allocation. Equal to `@sizeOf(StringHeader)` (4).
 pub const string_rc_prefix_size: usize = @sizeOf(StringHeader);
 
+/// QuickJS `__js_rc` displacement shared by every refcounted value payload.
+pub const ref_count_offset_from_payload: usize = @sizeOf(RefCountHeader);
+
+pub inline fn refCountHeaderFromPayload(payload: *anyopaque) *RefCountHeader {
+    const address = @intFromPtr(payload);
+    std.debug.assert(address >= ref_count_offset_from_payload);
+    return @ptrFromInt(address - ref_count_offset_from_payload);
+}
+
+comptime {
+    // A GC value stores `BlockHeader *` in its payload. Metadata immediately
+    // precedes that header, and its rc tail must land at the same payload - 4
+    // address used by strings, symbols, and ropes.
+    std.debug.assert(metadata_prefix_size - @offsetOf(Metadata, "rc") == ref_count_offset_from_payload);
+}
+
 pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
+
+/// Allocation-free temporary intrusive list for cycle partitioning and
+/// Pass-B struct deferral. Headers on one of these lists are detached from the
+/// Registry GC-object list (`in_cycle_list == false`), so the same two link
+/// words can be reused exactly as QuickJS reuses `JSGCObjectHeader.link`.
+pub const HeaderList = struct {
+    head: ?*Header = null,
+    tail: ?*Header = null,
+    count: usize = 0,
+
+    pub fn append(self: *HeaderList, header: *Header) void {
+        std.debug.assert(!header.meta().flags.in_cycle_list);
+        std.debug.assert(header.prev == null and header.next == null);
+        header.prev = self.tail;
+        if (self.tail) |tail| {
+            tail.next = header;
+        } else {
+            self.head = header;
+        }
+        self.tail = header;
+        self.count += 1;
+    }
+
+    pub fn remove(self: *HeaderList, header: *Header) void {
+        const prev = header.prev;
+        const next = header.next;
+        if (prev) |node| {
+            node.next = next;
+        } else {
+            std.debug.assert(self.head == header);
+            self.head = next;
+        }
+        if (next) |node| {
+            node.prev = prev;
+        } else {
+            std.debug.assert(self.tail == header);
+            self.tail = prev;
+        }
+        header.prev = null;
+        header.next = null;
+        std.debug.assert(self.count != 0);
+        self.count -= 1;
+    }
+
+    pub fn popFront(self: *HeaderList) ?*Header {
+        const header = self.head orelse return null;
+        self.remove(header);
+        return header;
+    }
+};
+
 const large_heap_size_class = std.math.maxInt(u16);
 
 pub const FailureKind = enum(u8) {
@@ -505,21 +574,8 @@ pub const GeStats = struct {
     current_mark_stack_depth: usize = 0,
     mark_stack_peak: usize = 0,
 
-    // qjs-scalar hot-path counters: allocated_bytes mirrors rt->malloc_size,
-    // alloc_count mirrors rt->malloc_count. Everything below (peak, per-space
-    // live/allocated splits, page geometry) is a diagnostic derived lazily in
-    // statsSnapshot (JS_ComputeMemoryUsage-style recompute), NOT maintained per
-    // allocation. See recordHeapAlloc.
-    allocated_bytes: usize = 0,
-    alloc_count: usize = 0,
     collections: usize = 0,
     freed_objects: usize = 0,
-
-    // Large-space diagnostics stay inline: the large-object path is cold, so a
-    // couple of saturating adds there are free. old-space equivalents are
-    // derived as (total - large) at snapshot time.
-    large_allocated_bytes: usize = 0,
-    large_alloc_count: usize = 0,
 
     external_bytes: usize = 0,
     external_untracked_bytes: usize = 0,
@@ -623,6 +679,12 @@ pub const Registry = struct {
     gc_object_head: ?*GCObjectHeader = null,
     gc_object_tail: ?*GCObjectHeader = null,
     gc_object_count: usize = 0,
+    // QuickJS-style zero-ref queue. Once a value-bearing GC node reaches zero,
+    // its intrusive link is moved out of gc_object_* and into this queue. The
+    // outermost release drains it iteratively, so child releases performed by a
+    // destructor append work instead of recursing through the native stack.
+    zero_ref_head: ?*GCObjectHeader = null,
+    zero_ref_tail: ?*GCObjectHeader = null,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -639,17 +701,12 @@ pub const Registry = struct {
     large_space: SpaceAccount = .{},
     stats: GeStats = .{},
 
-    // Reusable structures for cycle detection
-    preserved_bytecodes: std.AutoHashMap(usize, void),
-    object_worklist: std.ArrayList(*object.Object),
-    var_ref_worklist: std.ArrayList(*var_ref.VarRef),
-    bytecode_worklist: std.ArrayList(*FunctionBytecode),
     // Pass-B struct-free deferral for cycle removal (qjs gc_zero_ref_count_list,
     // quickjs.c:6382/6797): during JS_GC_PHASE_REMOVE_CYCLES an object's
     // resources are torn down but its struct memory survives until every sibling
     // in the batch has run, so a sibling finalizer/decref never dereferences a
     // freed struct. The batch driver drains this list after the resource pass.
-    cycle_deferred_frees: std.ArrayList(*GCObjectHeader),
+    cycle_deferred_frees: HeaderList = .{},
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
@@ -657,44 +714,48 @@ pub const Registry = struct {
             .policy = policy,
             .old_space = .{},
             .large_space = .{},
-            .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
-            .object_worklist = std.ArrayList(*object.Object).empty,
-            .var_ref_worklist = std.ArrayList(*var_ref.VarRef).empty,
-            .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
-            .cycle_deferred_frees = std.ArrayList(*GCObjectHeader).empty,
         };
-    }
-
-    /// Reserve capacity so `deferCycleStructFree` cannot fail mid-batch (a failed
-    /// defer would have to choose between an unsafe immediate free or a leak).
-    pub fn reserveCycleDeferred(self: *Registry, capacity: usize) !void {
-        try self.cycle_deferred_frees.ensureTotalCapacity(self.memory.persistent_allocator, capacity);
     }
 
     /// Park a resource-stripped GC object's struct for the Pass-B drain. The
     /// header is already unlinked from the GC object list by the resource pass.
     pub fn deferCycleStructFree(self: *Registry, header: *GCObjectHeader) void {
         header.meta().flags.finalizing = true;
-        self.cycle_deferred_frees.append(self.memory.persistent_allocator, header) catch {
-            // Capacity was reserved up-front; reaching here means OOM. Leaking the
-            // struct is the only memory-safe fallback (freeing now risks the very
-            // use-after-free this deferral prevents).
-        };
+        self.cycle_deferred_frees.append(header);
+    }
+
+    pub fn popCycleDeferredFree(self: *Registry) ?*GCObjectHeader {
+        return self.cycle_deferred_frees.popFront();
     }
 
     pub fn deinit(self: *Registry, rt: anytype) void {
+        std.debug.assert(self.zero_ref_head == null);
+        std.debug.assert(self.zero_ref_tail == null);
         self.phase = .deinit;
 
-        // Phase 1: free objects and function bytecode. Shapes and VarRefs are
-        // spliced into holding stacks (reusing their now-unused `next` link).
+        // Phase 1: free object resources. Function bytecodes, Shapes, and
+        // VarRefs are spliced into holding stacks (reusing their now-unused
+        // `next` link).
         // Shapes must outlive objects that own shape_ref. VarRef structs must
         // outlive object properties and bytecode capture arrays that still own
         // cell pointers; release their owned values now, while those values'
         // GC headers are still structurally valid.
+        //
+        // FunctionBytecode metadata must also outlive every closure object:
+        // JSObject stores only the var_refs pointer and derives its allocation
+        // length from the FB, exactly as qjs `free_object` does. GC list order
+        // is not an ownership order (a prior collection may move nodes), so
+        // tearing down an FB as soon as it appears can zero var_refs_len before
+        // a later closure frees its capture-pointer allocation. Keep FB
+        // resources intact until all Object resource passes have run. Object
+        // and FB structs themselves are deferred until Shapes have released
+        // their prototype edges, so those later releases never touch freed
+        // headers.
         // (qjs avoids the ordering hazard via its mark/decref cycle collector;
         // we keep zjs's explicit teardown but defer these structs.)
         var held_shapes: ?*GCObjectHeader = null;
         var held_var_refs: ?*GCObjectHeader = null;
+        var held_function_bytecodes: ?*GCObjectHeader = null;
         while (self.gc_object_tail) |h| {
             if (h.meta().kind == .shape) {
                 self.removeGcObject(h);
@@ -713,15 +774,27 @@ pub const Registry = struct {
             self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             h.meta().flags.finalizing = true;
-            if (h.meta().kind == .object) {
-                object.Object.destroyFromHeader(rt, h);
-                rt.drainDeferredClassPayloadFinalizers();
-            } else if (h.meta().kind == .function_bytecode) {
-                function_bytecode_mod.destroyFromHeader(rt, h);
+            if (h.meta().kind == .function_bytecode) {
+                h.next = held_function_bytecodes;
+                held_function_bytecodes = h;
+                continue;
             }
+            std.debug.assert(h.meta().kind == .object);
+            object.Object.destroyFromHeader(rt, h);
+            rt.drainDeferredClassPayloadFinalizers();
         }
 
-        // Phase 2: every cell owner is gone. Their releases were suppressed by
+        // Phase 2: every closure has consumed its FB-owned capture count. FB
+        // resources may now release constant-pool object edges; Object structs
+        // remain parked in cycle_deferred_frees until after Shape teardown.
+        while (held_function_bytecodes) |h| {
+            const next = h.next;
+            h.next = null;
+            function_bytecode_mod.destroyFromHeader(rt, h);
+            held_function_bytecodes = next;
+        }
+
+        // Phase 3: every cell owner is gone. Their releases were suppressed by
         // the deinit phase/finalizing bit, so reclaim each prepared cell struct
         // exactly once regardless of its residual refcount.
         while (held_var_refs) |h| {
@@ -732,9 +805,10 @@ pub const Registry = struct {
             held_var_refs = next;
         }
 
-        // Phase 3: now every object is gone, so destroying the held shapes can no
-        // longer dangle a shape_ref. `destroyShape` self-removes from the GC list
-        // (guarded no-op here) and frees property storage + bucket links.
+        // Phase 4: every object's resources are gone, but its struct remains
+        // valid while held shapes release prototype edges. `destroyShape`
+        // self-removes from the GC list (guarded no-op here) and frees property
+        // storage + bucket links.
         while (held_shapes) |h| {
             const next = h.next;
             h.next = null;
@@ -742,17 +816,18 @@ pub const Registry = struct {
             held_shapes = next;
         }
 
+        // Phase 5: all resource destructors and late Shape releases are done;
+        // reclaim the parked Object/FunctionBytecode structs.
+        object.Object.drainCycleDeferredFrees(rt);
         rt.shapes.deinit();
 
         self.gc_object_head = null;
         self.gc_object_tail = null;
         self.gc_object_count = 0;
+        self.zero_ref_head = null;
+        self.zero_ref_tail = null;
 
-        self.preserved_bytecodes.deinit();
-        self.object_worklist.deinit(self.memory.persistent_allocator);
-        self.var_ref_worklist.deinit(self.memory.persistent_allocator);
-        self.bytecode_worklist.deinit(self.memory.persistent_allocator);
-        self.cycle_deferred_frees.deinit(self.memory.persistent_allocator);
+        std.debug.assert(self.cycle_deferred_frees.count == 0);
         if (self.external_tokens_capacity != 0) {
             self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
         } else if (self.external_tokens.len != 0) {
@@ -1015,21 +1090,31 @@ pub const Registry = struct {
         self.stats.allocation_debt = 0;
     }
 
-    pub fn statsSnapshot(self: Registry) Stats {
+    pub fn statsSnapshot(self: Registry, rt: anytype) Stats {
         var snapshot = self;
         snapshot.refreshSpacePageState();
-        // Diagnostics that used to be maintained per-alloc are recomputed here
-        // (JS_ComputeMemoryUsage-style). The space accounts are the source of
-        // truth for live bytes; the cumulative scalars give the historical
-        // totals. peak == allocated because allocated_bytes is monotonic.
+        // Diagnostics that used to be maintained per allocation are recomputed
+        // here, like qjs JS_ComputeMemoryUsage. The space accounts are the byte
+        // source of truth. Counts are split by walking the already-maintained GC
+        // object list; this cold snapshot work removes four scalar updates from
+        // the large-object allocation path and two from every ordinary one.
         const old_live = snapshot.old_space.live_bytes;
         const large_live = snapshot.large_space.live_bytes;
         const derived_heap_live = old_live +| large_live;
-        const derived_old_allocated = snapshot.stats.allocated_bytes -| snapshot.stats.large_allocated_bytes;
-        const derived_old_count = snapshot.stats.alloc_count -| snapshot.stats.large_alloc_count;
+        var derived_old_count: usize = 0;
+        var derived_large_count: usize = 0;
+        var iterator = snapshot.objectIterator();
+        while (iterator.next()) |header| {
+            const bytes = heapByteSizeFromHeader(rt, header);
+            if (snapshot.isLargeAllocation(bytes)) {
+                derived_large_count +|= 1;
+            } else {
+                derived_old_count +|= 1;
+            }
+        }
         return .{
-            .total_allocated_bytes = snapshot.stats.allocated_bytes,
-            .peak_allocated_bytes = snapshot.stats.allocated_bytes,
+            .total_allocated_bytes = derived_heap_live,
+            .peak_allocated_bytes = derived_heap_live,
             .heap_live_bytes = derived_heap_live,
             .old_live_bytes = old_live,
             .large_object_bytes = large_live,
@@ -1053,10 +1138,10 @@ pub const Registry = struct {
             .large_empty_page_count = snapshot.large_space.empty_page_count,
             .large_decommitted_page_count = snapshot.large_space.decommitted_page_count,
             .large_needs_sweep_page_count = snapshot.large_space.needs_sweep_page_count,
-            .old_allocated_bytes = derived_old_allocated,
+            .old_allocated_bytes = old_live,
             .old_alloc_count = derived_old_count,
-            .large_allocated_bytes = snapshot.stats.large_allocated_bytes,
-            .large_alloc_count = snapshot.stats.large_alloc_count,
+            .large_allocated_bytes = large_live,
+            .large_alloc_count = derived_large_count,
             .external_bytes = snapshot.stats.external_bytes,
             .external_untracked_bytes = snapshot.stats.external_untracked_bytes,
             .peak_external_bytes = snapshot.stats.peak_external_bytes,
@@ -1124,7 +1209,10 @@ pub const Registry = struct {
         const tracked = isCycleCandidate(h);
         if (!h.meta().flags.metadata_in_slab) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().flags.heap_accounted = true;
-        self.recordHeapAlloc(is_large, bytes);
+        // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
+        // keeps the selected space's live-byte scalar; all other allocation
+        // diagnostics are derived by statsSnapshot.
+        self.recordSpaceAlloc(is_large, bytes);
 
         if (tracked) self.appendGcObject(h);
     }
@@ -1183,40 +1271,11 @@ pub const Registry = struct {
         return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape;
     }
 
-    fn recordHeapAlloc(self: *Registry, is_large: bool, bytes: usize) void {
-        if (bytes == 0) return;
-        // Hot-path accounting mirrors qjs js_def_malloc, which only bumps
-        // rt->malloc_size / rt->malloc_count (quickjs.c:2160). GC pacing rides on
-        // memory.allocated_bytes vs malloc_gc_threshold (runtime.zig:2072), never
-        // on these gc.stats mirrors, so we keep two scalar counters here:
-        //   allocated_bytes (cumulative bytes) + alloc_count (cumulative count).
-        // peak_allocated_bytes == allocated_bytes invariantly (allocated_bytes is
-        // never decremented — frees don't touch it), and heap_live_bytes /
-        // old_live_bytes / large_object_bytes / old_allocated_bytes /
-        // old_alloc_count are all pure functions of the space accounts + the
-        // large_* bucket; every one is recomputed lazily in statsSnapshot
-        // (JS_ComputeMemoryUsage). recordSpaceAlloc now only bumps
-        // {old,large}_space.live_bytes; the committed/free page geometry is no
-        // longer maintained per-alloc. It is derived from live_bytes on demand in
-        // refreshPageState (statsSnapshot / incremental sweep / Debug verify),
-        // mirroring qjs which tracks a single rt->malloc_size scalar and delegates
-        // page management to the system allocator.
-        self.stats.allocated_bytes = std.math.add(usize, self.stats.allocated_bytes, bytes) catch std.math.maxInt(usize);
-        self.stats.alloc_count +|= 1;
-        self.recordSpaceAlloc(is_large, bytes);
-        if (is_large) {
-            // Cold path only: the large-object bucket is kept inline so that
-            // old-space diagnostics can be derived as (total - large).
-            self.stats.large_allocated_bytes = std.math.add(usize, self.stats.large_allocated_bytes, bytes) catch std.math.maxInt(usize);
-            self.stats.large_alloc_count +|= 1;
-        }
-    }
-
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (!header.meta().flags.heap_accounted or bytes == 0) return;
         const is_large = self.isLargeAllocation(bytes);
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
-        // recordHeapAlloc); the free path just decrements live_bytes. Page
+        // addInitializedWithSize); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
         self.recordSpaceFree(is_large, bytes);
         header.meta().flags.heap_accounted = false;
@@ -1382,6 +1441,7 @@ pub const Registry = struct {
 
     fn appendGcObject(self: *Registry, header: *GCObjectHeader) void {
         std.debug.assert(isCycleCandidate(header));
+        std.debug.assert(!header.meta().flags.in_cycle_list);
         std.debug.assert(header.prev == null);
         std.debug.assert(header.next == null);
 
@@ -1393,13 +1453,14 @@ pub const Registry = struct {
             self.gc_object_head = header;
         }
         self.gc_object_tail = header;
+        header.meta().flags.in_cycle_list = true;
         self.gc_object_count += 1;
     }
 
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
+        if (!header.meta().flags.in_cycle_list) return;
         const prev = header.prev;
         const next = header.next;
-        if (prev == null and next == null and self.gc_object_head != header and self.gc_object_tail != header) return;
 
         if (prev) |p| {
             p.next = next;
@@ -1413,8 +1474,92 @@ pub const Registry = struct {
         }
         header.prev = null;
         header.next = null;
+        header.meta().flags.in_cycle_list = false;
         std.debug.assert(self.gc_object_count != 0);
         self.gc_object_count -= 1;
+    }
+
+    pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.meta().flags.in_cycle_list);
+        self.removeGcObject(header);
+    }
+
+    pub fn restoreCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(!header.meta().flags.in_cycle_list);
+        self.appendGcObject(header);
+    }
+
+    fn appendZeroRef(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.meta().rc == 0);
+        std.debug.assert(header.prev == null);
+        std.debug.assert(header.next == null);
+
+        header.prev = self.zero_ref_tail;
+        if (self.zero_ref_tail) |tail| {
+            tail.next = header;
+        } else {
+            self.zero_ref_head = header;
+        }
+        self.zero_ref_tail = header;
+    }
+
+    fn popZeroRef(self: *Registry) ?*GCObjectHeader {
+        const header = self.zero_ref_head orelse return null;
+        const next = header.next;
+        self.zero_ref_head = next;
+        if (next) |next_header| {
+            next_header.prev = null;
+        } else {
+            self.zero_ref_tail = null;
+        }
+        header.prev = null;
+        header.next = null;
+        return header;
+    }
+
+    fn drainZeroRefs(self: *Registry, rt: anytype) void {
+        if (self.zero_ref_head == null) return;
+        self.stats.zero_ref_drains +|= 1;
+        while (self.popZeroRef()) |queued| {
+            std.debug.assert(queued.meta().rc == 0);
+            destroyZeroRefNow(rt, queued);
+        }
+    }
+
+    /// Hold zero-ref GC nodes until a batch traversal is complete. QuickJS
+    /// uses the same DECREF phase around its weakref_list walk so payload
+    /// finalizers cannot unlink the next weak holder out from under the walk.
+    pub fn beginDecrefPhase(self: *Registry) void {
+        std.debug.assert(self.phase == .none);
+        std.debug.assert(self.zero_ref_head == null);
+        std.debug.assert(self.zero_ref_tail == null);
+        self.phase = .decref;
+    }
+
+    pub fn endDecrefPhase(self: *Registry, rt: anytype) void {
+        std.debug.assert(self.phase == .decref);
+        defer self.phase = .none;
+        self.drainZeroRefs(rt);
+    }
+
+    /// Move a value-bearing GC node to the intrusive zero-ref queue and drain
+    /// it at the outermost release boundary. Mirrors QuickJS
+    /// `__JS_FreeValueRT` + `free_zero_refcount` without allocating.
+    pub fn enqueueZeroRef(self: *Registry, rt: anytype, header: *GCObjectHeader) void {
+        std.debug.assert(header.meta().rc == 0);
+        self.removeGcObject(header);
+        // Weak-reference teardown observes this bit while the object is queued,
+        // before Object.destroyFromHeader gets its turn to set it again.
+        header.meta().flags.mark = true;
+        self.appendZeroRef(header);
+
+        if (self.phase != .none) {
+            std.debug.assert(self.phase == .decref);
+            return;
+        }
+
+        self.phase = .decref;
+        self.endDecrefPhase(rt);
     }
 
     pub fn recordFailure(self: *Registry, err: CollectionError) void {
@@ -1456,6 +1601,7 @@ pub const Registry = struct {
         var count: usize = 0;
         while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
+            if (!h.meta().flags.in_cycle_list) return error.CorruptGcList;
             if (h.meta().rc < 0) return error.NegativeRefCount;
             if (h.meta().flags.mark and self.phase == .none) return error.MarkBitLeftSet;
 
@@ -1598,31 +1744,55 @@ pub inline fn release(rt: anytype, header: anytype) void {
     std.debug.assert(header.meta().rc > 0);
     header.meta().rc -= 1;
 
-    if (header.meta().rc == 0) releaseAndDestroy(rt, header);
+    if (header.meta().rc == 0) destroyZeroRef(rt, header);
 }
 
-noinline fn releaseAndDestroy(rt: anytype, header: *Header) void {
+/// Slow path after the caller has already decremented the common RC word to 0.
+/// JSValue.free uses this after its QuickJS-style payload-4 fast path; direct
+/// GC owners also arrive here through `release` above.
+pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
+    std.debug.assert(header.meta().rc == 0);
     if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
-    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .shape)) return;
+    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .shape)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
     // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
     // marked-garbage object exactly once. Freeing it here (a cascade) would
     // double-free it when the batch loop reaches it, and over-release any shape
     // it shares. Pure no-op = qjs `__JS_FreeValueRT`'s `if (gc_phase !=
-    // JS_GC_PHASE_REMOVE_CYCLES)` gate (quickjs.c:6476): the object stays linked
-    // (and in the garbage snapshot) and is reclaimed by the batch pass. This
-    // makes a reference the mark phase missed harmless (leak at worst) instead of
-    // a use-after-free.
+    // JS_GC_PHASE_REMOVE_CYCLES)` gate (quickjs.c:6476): the object remains
+    // owned by the intrusive garbage/staging batch and is reclaimed exactly
+    // once by that pass. This makes a reference the mark phase missed harmless
+    // (leak at worst) instead of a use-after-free.
     //
     // Kind-set note: qjs gates {OBJECT, FUNCTION_BYTECODE, MODULE} (quickjs.c:6476);
     // zjs gates {object, var_ref, function_bytecode} and intentionally OMITS shape.
-    // A garbage (dead-cycle) shape is freed exactly once by the `garbage_shapes`
-    // loop in destroyRuntimeCyclesWithValueRoots, and its owners skip releasing it
-    // via the `headerIsCycleGarbage` guard (object.zig destroyFromHeader shape-skip);
+    // A garbage (dead-cycle) shape is freed exactly once by the intrusive shape
+    // staging loop in destroyRuntimeCyclesWithValueRoots, and its owners skip
+    // releasing it via the `headerIsCycleGarbage` guard (object.zig
+    // destroyFromHeader shape-skip);
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate. (zjs has no `.module` GC-kind in flight, so the
     // MODULE arm of the qjs gate has no zjs analogue.)
     if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
+
+    // QJS queues the GC kinds reachable through JSValue and lets the outermost
+    // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
+    // own direct release path and can only add object work while a queued node
+    // is being destroyed. This removes unbounded Object/FB/VarRef destructor
+    // recursion without adding a fallible allocation to the zero-ref path.
+    if (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode) {
+        rt.gc.enqueueZeroRef(rt, header);
+        return;
+    }
+
+    destroyZeroRefNow(rt, header);
+}
+
+/// Destruct a zero-ref node whose queue link has already been removed. Kept
+/// separate from `destroyZeroRef` so releases performed by this teardown append
+/// to Registry.zero_ref_* instead of entering another destructor recursively.
+fn destroyZeroRefNow(rt: anytype, header: *Header) void {
+    std.debug.assert(header.meta().rc == 0);
     // GC-list unlink + free-byte accounting. `Object.destroyFromHeader`
     // (via `unregisterObjectWithBytes`) and `Registry.destroyShape` each ALREADY
     // unlink their own header and record the space-account free as the first

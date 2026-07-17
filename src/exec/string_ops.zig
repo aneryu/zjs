@@ -858,7 +858,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
 
-    const current_length: usize = if (sites.flags.is_array) @intCast(sites.arrayLength()) else 0;
+    const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
     const length = @min(current_length, site_count);
     var index: usize = 0;
     var emitted: usize = 0;
@@ -978,7 +978,7 @@ pub fn qjsStringFromCodePointArray(
     array_value: core.JSValue,
 ) !core.JSValue {
     const array = try property_ops.expectObject(array_value);
-    if (!array.flags.is_array) return error.TypeError;
+    if (!array.isArray()) return error.TypeError;
     // The dense fast path only carries `rt`, so surface its bare RangeError as
     // the qjs "invalid code point" message here (quickjs.c:45361).
     if (qjsStringFromCodePointDenseArray(ctx.runtime, array) catch |err| switch (err) {
@@ -1132,7 +1132,7 @@ pub fn qjsStringFromCharCode(
 
 pub fn qjsRegExpNativeBuiltinMatches(value: core.JSValue, expected_id: u32) bool {
     const function_object = objectFromValue(value) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return false;
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .regexp and native_ref.id == expected_id;
 }
 
@@ -2806,7 +2806,7 @@ pub fn qjsStringSplitBuiltinArray(
     const result = try callStringBody(ctx, string_value, string_id_lookup.legacy_split_method_id, args);
     errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
-        if (object.flags.is_array and object.getPrototype() == null) {
+        if (object.isArray() and object.getPrototype() == null) {
             if (arrayPrototypeFromGlobal(ctx.runtime, global)) |prototype| {
                 try object.setPrototype(ctx.runtime, prototype);
             }
@@ -3320,7 +3320,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     found: *const RegExpMatch,
     matched: core.JSValue,
 ) !void {
-    std.debug.assert(out.flags.is_array);
+    std.debug.assert(out.isArray());
     std.debug.assert(out.arrayLength() == 0);
     std.debug.assert(out.arrayElements().len == 0);
     std.debug.assert(out.arrayElementsCapacity() == 0);
@@ -3395,7 +3395,7 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
     last_capture_value: ?core.JSValue,
 ) !void {
     const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return;
-    if (regexp_ctor.class_payload_kind != .function) return;
+    if (regexp_ctor.flags.class_payload_kind != .function) return;
     const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
     legacy.lazy_no_capture_match = false;
 
@@ -3481,7 +3481,7 @@ pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.
     }
 
     const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return true;
-    if (regexp_ctor.class_payload_kind != .function) return true;
+    if (regexp_ctor.flags.class_payload_kind != .function) return true;
     const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
     const already_lazy = legacy.lazy_no_capture_match;
 
@@ -3857,7 +3857,7 @@ pub fn qjsArraySearchCall(
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.flags.is_array)
+    else if (object.isArray())
         @as(usize, @intCast(object.arrayLength()))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -4452,7 +4452,7 @@ pub fn qjsObjectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
 }
 
 pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
-    if (object.flags.is_proxy) {
+    if (object.isProxy()) {
         if (object.proxyHandler() == null) return error.TypeError;
         if (object.proxyTarget()) |target_value| {
             if (objectFromValue(target_value)) |target| {
@@ -4462,7 +4462,7 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         }
         return "Object";
     }
-    if (object.flags.is_array) return "Array";
+    if (object.isArray()) return "Array";
     return switch (object.class_id) {
         core.class.ids.arguments, core.class.ids.mapped_arguments => "Arguments",
         core.class.ids.error_ => "Error",
@@ -4485,8 +4485,8 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
 }
 
 pub fn objectIsArrayForToString(object: *core.Object) !bool {
-    if (object.flags.is_array) return true;
-    if (!object.flags.is_proxy) return false;
+    if (object.isArray()) return true;
+    if (!object.isProxy()) return false;
     if (object.proxyHandler() == null) return error.TypeError;
     const target_value = object.proxyTarget() orelse return false;
     const target = objectFromValue(target_value) orelse return false;

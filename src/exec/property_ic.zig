@@ -210,7 +210,7 @@ fn setObjectDataPropertyForSimplePutFieldOwned(rt: *core.JSRuntime, receiver: co
     if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
     if (object.class_id == core.class.ids.module_ns) return false;
     if (core.object.isTypedArrayObject(object)) return false;
-    if (object.flags.is_array) {
+    if (object.isArray()) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     }
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
@@ -220,16 +220,16 @@ fn setObjectDataPropertyForSimplePutFieldOwned(rt: *core.JSRuntime, receiver: co
 
 inline fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (object.class_id == core.class.ids.object and
-        !object.flags.is_array and
-        !object.flags.is_global and
-        !object.flags.is_proxy)
+        !object.isArray() and
+        !object.isGlobal() and
+        !object.isProxy())
     {
         return !object.hasExoticMethods();
     }
-    if (object.flags.is_proxy or object.hasExoticMethods()) return false;
-    if (object.flags.is_array) {
+    if (object.isProxy() or object.hasExoticMethods()) return false;
+    if (object.isArray()) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-    } else if (object.class_id != core.class.ids.object and !object.flags.is_global and object.class_id < core.class.ids.init_count) return false;
+    } else if (object.class_id != core.class.ids.object and !object.isGlobal() and object.class_id < core.class.ids.init_count) return false;
     return true;
 }
 
@@ -287,14 +287,14 @@ pub fn setPlainObjectInt32DataPropertyForFastPath(rt: *core.JSRuntime, object: *
 
 fn plainObjectDataPropertyFastPathReceiver(object: *core.Object) bool {
     if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
-    return object.class_id == core.class.ids.object and !object.flags.is_array and !object.flags.is_global;
+    return object.class_id == core.class.ids.object and !object.isArray() and !object.isGlobal();
 }
 
 pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
-    if (object.class_id != core.class.ids.object and !object.flags.is_global) return null;
+    if (object.class_id != core.class.ids.object and !object.isGlobal()) return null;
 
     switch (fastOwnOrdinaryDataPropertyBorrowedValue(object, atom_id)) {
         .value => |stored| return stored,
@@ -375,9 +375,9 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
     while (true) {
         if (cursor.proxyTarget() != null) return .{ .proxy = cursor };
         if (cursor.hasExoticMethods()) return .slow;
-        if (cursor.flags.is_array) {
+        if (cursor.isArray()) {
             if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
-        } else if (cursor.class_id != core.class.ids.object and !cursor.flags.is_global) return .slow;
+        } else if (cursor.class_id != core.class.ids.object and !cursor.isGlobal()) return .slow;
         if (cursor.findProperty(atom_id)) |index| {
             return switch (cursor.propKindAt(index)) {
                 .data => .{ .value = cursor.prop_values[index].slot.data },
@@ -386,7 +386,7 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
             };
         } else {
             cursor = cursor.getPrototype() orelse {
-                if (cursor.flags.is_array) return .slow;
+                if (cursor.isArray()) return .slow;
                 return .undefined;
             };
         }

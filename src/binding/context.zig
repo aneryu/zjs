@@ -1,7 +1,6 @@
 const std = @import("std");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
-const builtins = @import("../builtins/root.zig");
 
 const JSRuntime = core.JSRuntime;
 const Object = core.Object;
@@ -21,12 +20,10 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
         }.cb;
     }
     // The context-global materializer above bootstraps the standard globals
-    // through `rt.installStandardGlobals`; wire the installer here so exec
-    // never names the registry directly.
+    // through `rt.installStandardGlobals`; configure the callback and its
+    // matching capacity together before the first realm is materialized.
     if (rt.install_standard_globals_cb == null) {
-        builtins.registry.registerStandardGlobalsDefault();
-        rt.install_standard_globals_cb = builtins.registry.installStandardGlobals;
-        rt.standard_global_own_property_capacity = builtins.registry.standardGlobalOwnPropertyCapacity();
+        exec.standard_globals.configureRuntime(rt);
     }
 }
 
@@ -438,7 +435,7 @@ pub const JSContext = struct {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
         var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(&self.core, options.output, global, object, property_name, null, null) orelse {
-            if (object.flags.is_global and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
+            if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
                 return Descriptor.data(object.value().dup(), true, false, true);
             }
             return null;
@@ -616,10 +613,10 @@ fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: 
 fn arrayObjectFromValue(value: JSValue) !?*Object {
     if (!value.isObject()) return null;
     const object = Object.expect(value) catch return null;
-    if (object.flags.is_proxy) {
+    if (object.isProxy()) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         return arrayObjectFromValue(target);
     }
-    return if (object.flags.is_array) object else null;
+    return if (object.isArray()) object else null;
 }

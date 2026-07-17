@@ -4,7 +4,6 @@ const zjs_binding = @import("binding/root.zig");
 pub const runtime = @import("runtime/public.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
-const zjs_builtins = @import("builtins/root.zig");
 const CoreObject = zjs_binding.Object;
 
 pub const JSRuntime = zjs_binding.JSRuntime;
@@ -260,11 +259,11 @@ pub const object = struct {
 
     pub const Buffer = struct {
         pub fn isTypedArrayObject(obj: *Object) bool {
-            return zjs_builtins.buffer.isTypedArrayObject(toCore(obj));
+            return zjs_exec.buffer_ops.isTypedArrayObject(toCore(obj));
         }
 
         pub fn typedArrayByteLength(rt: *JSRuntime, obj: *Object) !usize {
-            return zjs_builtins.buffer.typedArrayByteLength(rt, toCore(obj));
+            return zjs_exec.buffer_ops.typedArrayByteLength(rt, toCore(obj));
         }
 
         pub fn ownedBytesFromObject(rt: *JSRuntime, obj: *Object) ![]u8 {
@@ -283,7 +282,7 @@ pub const object = struct {
 
             if (bytes.len > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
             const buffer_proto = try constructorPrototypeObject(rt, global, "ArrayBuffer");
-            const buffer_value = try zjs_builtins.buffer.arrayBufferConstructLength(rt, 0, null, optionalToCore(buffer_proto));
+            const buffer_value = try zjs_exec.buffer_ops.arrayBufferConstructLength(rt, 0, null, optionalToCore(buffer_proto));
             var buffer_owned = true;
             errdefer if (buffer_owned) buffer_value.free(rt);
 
@@ -294,7 +293,7 @@ pub const object = struct {
 
             const typed_array_proto = try constructorPrototypeObject(rt, global, "Uint8Array");
             buffer_owned = false;
-            return zjs_builtins.buffer.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer_core, optionalToCore(typed_array_proto));
+            return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer_core, optionalToCore(typed_array_proto));
         }
 
         fn bufferViewError(err: value.Bytes.Error) anyerror {
@@ -402,7 +401,7 @@ pub const object = struct {
                 core_obj.class_id == zjs_core.class.ids.shared_array_buffer)
                 return .array_buffer;
             if (core_obj.class_id == zjs_core.class.ids.dataview) return .data_view;
-            if (zjs_builtins.buffer.isTypedArrayObject(core_obj)) return .typed_array;
+            if (zjs_exec.buffer_ops.isTypedArrayObject(core_obj)) return .typed_array;
             return error.TypeError;
         }
 
@@ -574,15 +573,15 @@ pub const object = struct {
     }
 
     pub fn isTypedArrayObject(obj: *Object) bool {
-        return zjs_builtins.buffer.isTypedArrayObject(toCore(obj));
+        return zjs_exec.buffer_ops.isTypedArrayObject(toCore(obj));
     }
 
     pub fn typedArrayByteLength(rt: *JSRuntime, obj: *Object) !usize {
-        return zjs_builtins.buffer.typedArrayByteLength(rt, toCore(obj));
+        return zjs_exec.buffer_ops.typedArrayByteLength(rt, toCore(obj));
     }
 
     pub fn arrayBufferConstructLength(rt: *JSRuntime, len: usize, proto: ?*Object) !value.Value {
-        return zjs_builtins.buffer.arrayBufferConstructLength(rt, len, null, optionalToCore(proto));
+        return zjs_exec.buffer_ops.arrayBufferConstructLength(rt, len, null, optionalToCore(proto));
     }
 
     pub fn typedArrayConstructFullBufferOwned(
@@ -593,7 +592,7 @@ pub const object = struct {
         buffer: *Object,
         prototype: ?*Object,
     ) !value.Value {
-        return zjs_builtins.buffer.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), kind, buffer_value, toCore(buffer), optionalToCore(prototype));
+        return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), kind, buffer_value, toCore(buffer), optionalToCore(prototype));
     }
 
     fn atomFromUInt32(index: u32) zjs_core.Atom {
@@ -921,7 +920,7 @@ test "public Buffer borrowBytes resize invalidates the old pointer" {
     const old_ptr = before.ptr;
 
     // Resize reallocates the backing store (frees the old allocation).
-    _ = try zjs_builtins.buffer.arrayBufferResizeLength(rt, buffer_value, 8);
+    _ = try zjs_exec.buffer_ops.arrayBufferResizeLength(rt, buffer_value, 8);
 
     // The held borrow now dangles; re-deriving yields a DIFFERENT pointer/length.
     const after = try object.Buffer.checkStillValid(rt, object.fromCore(buffer));

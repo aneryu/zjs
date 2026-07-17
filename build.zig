@@ -11,11 +11,13 @@ pub fn build(b: *std.Build) void {
     const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
     b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
-    // Default: the 8-byte NaN-boxed JSValue layout. It has compute parity with
-    // the portable 16-byte representation and materially lower RSS on
-    // value-dense heaps. The 16-byte payload+tag layout remains the reference
-    // alternate representation guarded by `test-altrepr`.
-    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse true;
+    // Match QuickJS's target policy: pointer-width >= 64 uses the canonical
+    // 16-byte payload+tag JSValue; narrower targets use the 8-byte NaN-boxed
+    // representation. The explicit option remains available for parity and
+    // memory-footprint experiments, and `test-altrepr` guards the opposite of
+    // the target default.
+    const target_default_nan_boxing = target.result.ptrBitWidth() < 64;
+    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse target_default_nan_boxing;
     // OOM-injection coverage instrumentation (v1): records deduplicated
     // allocation call sites in core/memory.zig. Default off and comptime
     // gated, so the default build's allocation hot path is unchanged.
@@ -445,7 +447,7 @@ pub fn build(b: *std.Build) void {
         "--zjs",
         b.getInstallPath(.bin, "zjs"),
         "--notes",
-        "ZJS self-baseline report; qjs is intentionally not configured for this gate.",
+        "ZJS self-baseline report; qjs is intentionally not configured for this gate. This 64-bit build uses the default 16-byte JSValue representation.",
     });
     run_perf_self_env_update.step.dependOn(&run_perf_self_update.step);
     const perf_self_update_step = b.step("perf-self-update-baseline", "Refresh the checked-in zjs self performance baseline");
@@ -685,15 +687,18 @@ pub fn build(b: *std.Build) void {
     const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (phase-gate tier)");
     test_oom_step.dependOn(&run_oom_tests.step);
 
-    // Alternate JSValue representation guard: runs the unified suite in the
-    // non-default 16-byte representation (a full second build
-    // graph, so the plugin fixtures recompile with a matching ABI
-    // fingerprint). Required for any change touching core/value.zig or
-    // value-representation semantics.
+    // Alternate JSValue representation guard: runs the unified suite with the
+    // opposite of this target's default (a full second build graph, so the
+    // plugin fixtures recompile with a matching ABI fingerprint). Required for
+    // any change touching core/value.zig or value-representation semantics.
+    const altrepr_option = if (target_default_nan_boxing)
+        "-Dzjs_nan_boxing=false"
+    else
+        "-Dzjs_nan_boxing=true";
     const altrepr_tests = b.addSystemCommand(&.{
-        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=false", "--summary", "all",
+        b.graph.zig_exe, "build", "test", altrepr_option, "--summary", "all",
     });
-    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default 16-byte JSValue representation");
+    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the representation opposite the target default");
     altrepr_step.dependOn(&altrepr_tests.step);
 
     // User-facing steps to expose

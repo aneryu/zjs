@@ -1724,7 +1724,7 @@ test "Engine direct eval var preserves readonly global property" {
 }
 
 test "Engine direct eval updates top-level lexical bindings" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -2331,7 +2331,7 @@ test "Engine sloppy direct eval function hoist uses var object binding" {
 }
 
 test "Engine direct eval var refs do not shadow global callees" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -3643,6 +3643,26 @@ test "Object constructor record preserves call and construct semantics" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "native cproto distinguishes construct-only and callable constructors" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\assert.throws(TypeError, function() { Map(); });
+        \\assert.throws(TypeError, function() { Set(); });
+        \\assert.throws(TypeError, function() { WeakMap(); });
+        \\assert.throws(TypeError, function() { WeakSet(); });
+        \\assert.sameValue(Array(1).length, 1);
+        \\assert.sameValue(String(1), "1");
+        \\assert.sameValue(RegExp("x").source, "x");
+        \\assert.sameValue(typeof Date(), "string");
+        \\assert.sameValue(Object(null) instanceof Object, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3675,7 +3695,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.builtins.collection.construct(rt, 3);
+    const map_value = try engine.exec.collection_ops.construct(rt, 3);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
@@ -3710,7 +3730,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.builtins.collection.construct(rt, 3);
+    const map_value = try engine.exec.collection_ops.construct(rt, 3);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
@@ -3724,7 +3744,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
         const key = try core.Object.create(rt, core.class.ids.object, null);
         slot.* = key;
         key_count += 1;
-        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
+        const result = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.weakCollectionEntries().len);
@@ -3751,7 +3771,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     try std.testing.expectError(error.JSException, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
-    const get_result = try engine.builtins.collection.methodCall(rt, map_value, 2, &.{mutation_key.value()});
+    const get_result = try engine.exec.collection_ops.methodCall(rt, map_value, 2, &.{mutation_key.value()});
     defer get_result.free(rt);
     try helpers.expectStringValueBytes(get_result, "mutated");
 }
@@ -3787,13 +3807,13 @@ fn symmetricDifferenceMutatingKeysImpl(
     inline for (.{ "b", "c" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
         defer value.free(rt);
-        const out = try engine.builtins.collection.methodCall(rt, base_set_value, 4, &.{value});
+        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 4, &.{value});
         out.free(rt);
     }
     inline for (.{ "b", "d" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
         defer value.free(rt);
-        const out = try engine.builtins.collection.methodCall(rt, base_set_value, 6, &.{value});
+        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
         out.free(rt);
     }
 
@@ -3813,14 +3833,14 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const base_set_value = try engine.builtins.collection.construct(rt, 2);
+    const base_set_value = try engine.exec.collection_ops.construct(rt, 2);
     defer base_set_value.free(rt);
     const base_set = objectFromValue(base_set_value);
 
     inline for (.{ "a", "b", "c", "d", "e", "q" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
         defer value.free(rt);
-        const out = try engine.builtins.collection.methodCall(rt, base_set_value, 6, &.{value});
+        const out = try engine.exec.collection_ops.methodCall(rt, base_set_value, 6, &.{value});
         out.free(rt);
     }
 
@@ -3854,7 +3874,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
         .globals = globals[0..],
         .call = &symmetricDifferenceMutatingKeysHost,
     };
-    const result_value = try engine.builtins.collection.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, host);
+    const result_value = try engine.exec.collection_ops.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, host);
     defer result_value.free(rt);
     const result_set = objectFromValue(result_value);
 
@@ -3866,12 +3886,12 @@ test "host map closure releases appended value when entry allocation fails" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.builtins.collection.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.construct(rt, 1);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
     inline for (.{ 10, 11, 12, 13, 14, 15, 16, 17 }) |key| {
-        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
+        const result = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
@@ -3903,11 +3923,11 @@ test "host map closure rolls back appended entry when size update fails" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.builtins.collection.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.construct(rt, 1);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
-    const first_set = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
+    const first_set = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
     first_set.free(rt);
 
     try fillOwnPropertyStorageForFailure(rt, map_object);

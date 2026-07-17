@@ -33,6 +33,7 @@ const regexp_fastpath = @import("regexp_fastpath.zig");
 const regexp_properties = @import("../libs/unicode.zig").regexp_properties;
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 pub const Step = enum { done, continue_loop };
 
@@ -72,13 +73,7 @@ const createStringFromByteUnits = string_ops.createStringFromByteUnits;
 const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
 const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
-const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot;
-const ensureFrameVarRefCell = slot_ops.ensureFrameVarRefCell;
-const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
-const ensureVarRefCell = slot_ops.ensureVarRefCell;
-const ensureVarRefSlotCell = slot_ops.ensureVarRefSlotCell;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
-const varRefSlot = slot_ops.varRefSlot;
 const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
@@ -116,7 +111,6 @@ const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
 const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
 const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
 const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
-const slotValueDup = slot_ops.slotValueDup;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
 const stringSliceValue = string_ops.stringSliceValue;
@@ -240,7 +234,7 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
     const current = frame.this_value;
     if (current.isObject()) return current;
     if (current.isUndefined() or current.isNull()) {
-        if (frame.this_value_owned) {
+        if (frame.ownership.this_value == .owned) {
             current.free(ctx.runtime);
             frame.this_value = global.value().dup();
         } else {
@@ -250,9 +244,9 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
     }
 
     const boxed = try primitiveObjectForAccess(ctx.runtime, global, current);
-    if (frame.this_value_owned) current.free(ctx.runtime);
+    if (frame.ownership.this_value == .owned) current.free(ctx.runtime);
     frame.this_value = boxed;
-    frame.this_value_owned = true;
+    frame.ownership.this_value = .owned;
     return boxed;
 }
 
@@ -270,11 +264,17 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
 }
 
 pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Object) !void {
-    try defineNativeDataMethod(rt, object, "next", 1);
-    try defineNativeDataMethod(rt, object, "return", 1);
-    try defineNativeDataMethod(rt, object, "throw", 1);
-    // NOTE: the for-of fast-path marker lives on each generator instance's OWN `next`
-    // (createGeneratorObject), which shadows this prototype `next`, so no flag is set here.
+    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    const next_atom = try rt.internAtom("next");
+    defer rt.atoms.free(next_atom);
+    const next = try core.function.nativeFunction(rt, "next", 1);
+    defer next.free(rt);
+    const next_object = property_ops.expectObject(next) catch return error.TypeError;
+    next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
+    if (!next_object.addGeneratorNextFunction(rt)) return error.TypeError;
+    try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
@@ -314,14 +314,13 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
 // that a later declaration (js_closure_define_global_var) will reuse. The shared
 // table cell carries no per-capture flags; is_lexical/is_const are stamped only
 // at definition time (add_var_ref, 17210-17223).
-fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !core.JSValue {
-    if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return cell_value;
-    if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return cell_value;
+fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !*core.VarRef {
+    if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
+    if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
     const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
-    if (cv.var_kind == .function_name) {
-        if (core.VarRef.fromValue(cell_value)) |cell| cell.varRefIsFunctionNameSlot().* = true;
-    }
-    return cell_value;
+    const cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
+    if (cv.var_kind == .function_name) cell.varRefIsFunctionNameSlot().* = true;
+    return cell;
 }
 
 pub fn createBytecodeFunctionObject(
@@ -358,10 +357,17 @@ pub fn createBytecodeFunctionObject(
     else
         functionPrototypeFromGlobal(ctx.runtime, global);
     if (function_prototype) |prototype| {
-        try object.setPrototype(ctx.runtime, prototype);
+        // The function is still unexposed and property-empty. Rebind it to the
+        // hash-consed root for its final prototype instead of taking the
+        // general SetPrototypeOf mutation path: that path must clone a shared
+        // shape before mutation and used to leave every closure with a private
+        // 104-byte shape. qjs creates the closure directly from the class
+        // prototype's hashed root (`JS_NewObjectClass`), so later length/name/
+        // prototype transitions are shared as well.
+        try object.setFreshObjectPrototype(ctx.runtime, prototype);
     }
-    try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
     try object.setFunctionBytecodeValue(ctx.runtime, rooted_value.dup());
+    try object.bindBytecodeFunctionRealmGlobal(global);
     if (objectFromValue(frame.current_function)) |parent_function_object| {
         if (parent_function_object.functionImportMeta()) |import_meta| {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionImportMetaSlot(ctx.runtime), import_meta.dup());
@@ -378,19 +384,9 @@ pub fn createBytecodeFunctionObject(
         try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
     if (fb.flags.is_arrow_function) {
-        // Arrow creation observes the enclosing ThisBinding even when the
-        // outer bytecode never executed OP_push_this. Materialize the outer
-        // sloppy binding once so arrows, direct `this`, and direct eval share
-        // the same wrapper/global object.
-        if (!frame.function.flags.is_derived_class_constructor) {
-            _ = try materializeFrameThisBinding(ctx, global, frame);
-        }
-        const lexical_this_slot = derivedConstructorThisLocalSlot(frame) orelse &frame.this_value;
-        const lexical_this_value = if (frame.function.flags.is_derived_class_constructor or varRefCellFromValue(lexical_this_slot.*) != null)
-            try ensureVarRefCell(ctx, lexical_this_slot)
-        else
-            lexical_this_slot.*.dup();
-        try object.setOptionalValueSlot(ctx.runtime, try object.functionLexicalThisSlot(ctx.runtime), lexical_this_value);
+        // `this` and `new.target` now arrive through the ordinary closure-var
+        // capture loop below, matching qjs js_closure2. Home/super metadata is
+        // distinct method state and remains attached only when required.
         if (property_ops.expectObject(frame.current_function)) |function_object| {
             try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
             if (function_object.functionSuperConstructor()) |super_constructor| try object.setOptionalValueSlot(ctx.runtime, try object.functionSuperConstructorSlot(ctx.runtime), super_constructor.dup());
@@ -398,9 +394,6 @@ pub fn createBytecodeFunctionObject(
         } else |_| {}
         if (frame.function.flags.is_derived_class_constructor) {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), frame.constructorThisValue().dup());
-        }
-        if (!frame.new_target.isUndefined()) {
-            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowNewTargetSlot(ctx.runtime), frame.new_target.dup());
         }
     }
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
@@ -416,12 +409,10 @@ pub fn createBytecodeFunctionObject(
         try object.defineOwnProperty(ctx.runtime, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
     }
     if (fb.closureVar().len > 0) {
-        // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields a
-        // live JSVarRef* — the slot-typed captures array is the qjs
-        // `JSVarRef **var_refs` alloc (17277). The helper arms hand back owned
-        // cell refs in JSValue form (the boundary type of locals and global
-        // machinery); the conversion is a type assertion, not a refcount
-        // event.
+        // js_closure2 capture loop (quickjs.c:17297-17331): every arm yields an
+        // owned, typed JSVarRef*. Frame-local/argument identity crosses only
+        // the OpenBindings Seam; JSValue cell handles remain at global/module
+        // adapters and never enter persistent capture storage.
         const captures = try ctx.runtime.memory.alloc(*core.VarRef, fb.closureVar().len);
         var captures_transferred = false;
         errdefer if (!captures_transferred) ctx.runtime.memory.free(*core.VarRef, captures);
@@ -435,35 +426,34 @@ pub fn createBytecodeFunctionObject(
             rooted_captures = &.{};
         };
         for (fb.closureVar(), 0..) |cv, idx| {
-            const captured_value: core.JSValue = switch (cv.closure_type) {
+            const cell: *core.VarRef = switch (cv.closure_type) {
                 .local => blk: {
                     if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
-                    break :blk try ensureLocalVarRefCell(ctx, frame, cv.var_idx, cv.is_lexical);
+                    break :blk try frame.captureLocal(ctx.runtime, cv.var_idx);
                 },
                 .arg => blk: {
                     if (cv.var_idx >= frame.args.len) return error.InvalidBytecode;
-                    break :blk try ensureFrameVarRefCell(ctx, frame, &frame.args[cv.var_idx]);
+                    break :blk try frame.captureArg(ctx.runtime, cv.var_idx);
                 },
                 .ref => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
                     // qjs JS_CLOSURE_REF (quickjs.c:17322-17324): pure pointer
                     // copy + rc++ of the parent slot's cell (type-guaranteed).
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
                 .global_ref => blk: {
                     if (cv.var_idx >= frame.var_refs.len) return error.InvalidBytecode;
                     // qjs JS_CLOSURE_GLOBAL_REF (quickjs.c:17322-17324): pure
                     // pointer copy + rc++ — the slot type guarantees the cell,
                     // the pre-typed bridge cellify is gone (phase D).
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
                 .global, .global_decl => try createGlobalClosureVarRef(ctx, global, cv),
                 .module_decl, .module_import => blk: {
                     try ensureVarRefsCapacity(ctx, frame, cv.var_idx);
-                    break :blk try ensureVarRefSlotCell(ctx, frame, cv.var_idx);
+                    break :blk frame.var_refs[cv.var_idx].retain();
                 },
             };
-            const cell = varRefCellFromValue(captured_value) orelse unreachable;
             captures[idx] = cell;
             {
                 // qjs js_closure2 mutates no flags on aliased cells: the
@@ -1269,7 +1259,6 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -1310,7 +1299,6 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -1354,7 +1342,6 @@ pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Objec
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -1396,7 +1383,7 @@ pub fn qjsPrimitivePrototypeMethod(
     // Methods 3..5 do not coerce `this` through the wrapper-prototype rules:
     // 3 is the constructor-called-as-function path, 4/5 are the Symbol
     // `description` getter and `[Symbol.toPrimitive]`, which validate their
-    // receiver themselves (ids: builtins.registry primitive_*_id constants).
+    // receiver themselves (ids: standard_globals primitive_*_id constants).
     switch (method_tag) {
         3 => switch (class_tag) {
             2 => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
@@ -1422,7 +1409,7 @@ pub fn qjsPrimitivePrototypeMethod(
     defer primitive.free(rt);
     return switch (method_tag) {
         1 => if (class_tag == 1) blk: {
-            // `Number.prototype.toString` body lives in `builtins/number.zig`;
+            // `Number.prototype.toString` body lives in `number_ops.zig`;
             // route the already-coerced number primitive through the `.number`
             // record (`primitivePrototypeThisValue` is idempotent for a number,
             // so the record's receiver re-check is a no-op) instead of naming
@@ -1536,7 +1523,7 @@ pub fn qjsNumberPrototypeMethod(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // Route to the `.number` domain record (the method body lives in
-    // `builtins/number.zig`, which legally imports exec for its coercion). The
+    // `number_ops.zig`, beside its coercion boundary). The
     // record handler coerces the receiver/argument itself, so the raw
     // `this_value`/`args` are forwarded unchanged. Accept the legacy small ids
     // (1..5) used by historical fast-call sites as well as the
@@ -1681,7 +1668,7 @@ pub fn constructCollectionWithPrototypeFromVm(
 
     const source = property_ops.expectObject(args[0]) catch null;
     if (source) |source_object| {
-        if (source_object.flags.is_array) {
+        if (source_object.isArray()) {
             try addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, source_object, adder);
             return collection_value;
         }
@@ -1738,6 +1725,15 @@ pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
         const target_value = object.boundTarget() orelse return null;
         const target_object = objectFromValue(target_value) orelse return null;
         return objectRealmGlobal(target_object);
+    }
+    if (object.class_id == core.class.ids.generator or object.class_id == core.class.ids.async_generator) {
+        if (object.generatorCurrentFunction()) |current_function| {
+            if (objectFromValue(current_function)) |current_object| {
+                if (current_object != object) {
+                    if (objectRealmGlobal(current_object)) |realm_global| return realm_global;
+                }
+            }
+        }
     }
     if (object.functionRealmGlobalPtr()) |realm_global| return realm_global;
     const realm_value = object.functionRealmGlobal() orelse return null;
@@ -1813,7 +1809,7 @@ pub fn qjsObjectGetPrototypeOfStep(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?*core.Object {
-    if (!object.flags.is_proxy) {
+    if (!object.isProxy()) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
             if (object.getPrototype()) |prototype| return prototype;
             return functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global);
@@ -1847,7 +1843,7 @@ pub fn qjsObjectGetPrototypeOfValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.flags.is_proxy) {
+    if (!object.isProxy()) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
             if (object.getPrototype()) |prototype| return prototype.value().dup();
             if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value().dup();
@@ -2105,7 +2101,6 @@ pub fn importMetaObject(
     // JS_NewObjectProto(ctx, JS_NULL), quickjs.c:30900); without the flag,
     // ToPrimitive fell through to %Object.prototype%.toString and
     // import(import.meta) stringified instead of rejecting with TypeError.
-    object.flags.null_prototype = true;
     const url = try importMetaUrlValue(ctx.runtime, record);
     defer url.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "url", url);
@@ -2151,15 +2146,13 @@ pub fn createGeneratorObject(
         .{ .value = &rooted_this },
         .{ .value = &rooted_boxed_this },
     };
-    var args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
-    defer args_buffer.deinit(ctx.runtime);
-    const args = args_buffer.values;
-    var var_refs_buffer = try core.runtime.CellRootBuffer.initCopy(ctx.runtime, input_var_refs);
-    defer var_refs_buffer.deinit(ctx.runtime);
-    const var_refs = var_refs_buffer.cells;
+    if (input_args.len > array_ops.max_apply_arguments) {
+        return throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
+    }
+    const fb = functionBytecodeFromValue(rooted_func) orelse return error.TypeError;
     var root_slices = [_]core.runtime.ValueRootSlice{
-        args_buffer.slice(),
-        var_refs_buffer.slice(),
+        .{ .borrowed = input_args },
+        .{ .borrowed_cells = input_var_refs },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
@@ -2169,17 +2162,80 @@ pub fn createGeneratorObject(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const fb = functionBytecodeFromValue(rooted_func) orelse return error.TypeError;
+    // Build the borrowed bytecode view once: its finalized frame dimensions
+    // size the qjs-style execution FAM and the same view runs the parameter
+    // prologue below.
+    var nested_base: bytecode.Bytecode = undefined;
+    const nested: *const bytecode.Bytecode = bytecode.cachedBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms) orelse blk: {
+        nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
+        break :blk &nested_base;
+    };
+
     const class_id = if (is_async) core.class.ids.async_generator else core.class.ids.generator;
-    const object = try core.Object.create(ctx.runtime, class_id, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try object.setOptionalValueSlot(ctx.runtime, object.generatorBytecodeSlot(), rooted_func.dup());
-    if (property_ops.expectObject(rooted_current)) |function_object| {
-        try object.setOptionalValueSlot(ctx.runtime, object.generatorCurrentFunctionSlot(), rooted_current.dup());
-        try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
-        try object.setFunctionRealmGlobalPtr(ctx.runtime, objectRealmGlobal(function_object) orelse global);
-    } else |_| {}
-    try object.setFunctionRealmGlobalPtrIfNull(ctx.runtime, global);
+    // Normal JS generator calls keep their execution state detached while the
+    // parameter prologue runs, then create the public object directly with its
+    // final prototype. This mirrors qjs js_generator_function_call and avoids
+    // a temporary null-prototype Shape on every short-lived generator. The raw
+    // internal-bytecode path still needs a registered holder while installing
+    // its borrowed realm fallback.
+    const detached_shell = rooted_current.isObject();
+    const object = if (detached_shell)
+        try core.Object.createGeneratorShell(ctx.runtime, class_id)
+    else
+        try core.Object.create(ctx.runtime, class_id, null);
+    var object_registered = !detached_shell;
+    errdefer if (object_registered)
+        core.Object.destroyFromHeader(ctx.runtime, &object.header)
+    else
+        object.destroyGeneratorShell(ctx.runtime);
+    var prepared_frame: zjs_vm.PreparedEntryFrame = undefined;
+    var prepared_frame_ptr: ?*const zjs_vm.PreparedEntryFrame = null;
+    if (detached_shell) {
+        const stack_slots = try std.math.add(usize, @as(usize, fb.stack_size), 1);
+        const frame_arg_count = frame_mod.frameArgCount(nested, input_args.len);
+        const need_original_args = frame_mod.argumentsNeedsOriginalSnapshot(nested);
+        const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
+        const var_ref_count = frame_mod.frameVarRefStorageCount(nested, input_var_refs);
+        const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested);
+        const frame_slots = try frame_mod.FrameSlab.requiredStorageSlots(
+            frame_arg_count,
+            original_arg_count,
+            nested.var_count,
+            0,
+            var_ref_count,
+            open_var_ref_count,
+        );
+        try object.initGeneratorExecutionWithStorage(ctx.runtime, stack_slots, frame_slots);
+        prepared_frame = .{
+            .slab = frame_mod.FrameSlab.partitionStorage(
+                object.generatorCombinedFrameStorage(),
+                frame_arg_count,
+                original_arg_count,
+                nested.var_count,
+                0,
+                var_ref_count,
+                open_var_ref_count,
+            ),
+            .need_original_args = need_original_args,
+        };
+        prepared_frame_ptr = &prepared_frame;
+    }
+    object.generatorActualArgCountSlot().* = @intCast(input_args.len);
+    if (rooted_current.isObject()) {
+        object.setGeneratorCurrentFunction(ctx.runtime, rooted_current.dup());
+        // The owned current-function edge dominates this borrowed realm pointer
+        // for the execution record's lifetime, so normal generators need no
+        // separate borrowed-holder registry entry.
+        object.generatorPayloadPtr().realm_global_ptr = global;
+    } else {
+        // Internal raw-FunctionBytecode calls have no function object, but use
+        // the same qjs-like current-function owner slot. Normal JS calls store
+        // the closure object here; both paths derive bytecode from this edge.
+        const raw_current = if (rooted_current.isFunctionBytecode()) rooted_current else rooted_func;
+        object.setGeneratorCurrentFunction(ctx.runtime, raw_current.dup());
+        // Raw internal bytecode has no function object to dominate the realm.
+        try object.setFunctionRealmGlobalPtr(ctx.runtime, global);
+    }
     const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
     const effective_this = if (!fb_runtime_strict) blk: {
         if (rooted_this.isUndefined() or rooted_this.isNull()) break :blk global.value();
@@ -2189,70 +2245,27 @@ pub fn createGeneratorObject(
         }
         break :blk rooted_this;
     } else rooted_this;
-    try object.setOptionalValueSlot(ctx.runtime, object.generatorThisSlot(), effective_this.dup());
-    if (var_refs.len > 0) {
-        // Cell-typed captures: pointer copy + rc++ per slot (qjs generator
-        // creation shares the caller's JSVarRef* array). The CellRootBuffer
-        // above keeps the source cells rooted; the fresh slice's refs are its
-        // own, and dupCell cannot fail, so no mid-build rooting is needed.
-        const captures = try ctx.runtime.memory.alloc(*core.VarRef, var_refs.len);
-        for (var_refs, 0..) |cell, idx| captures[idx] = cell.dupCell();
-        object.setFunctionCaptures(ctx.runtime, captures);
+    object.setGeneratorThis(ctx.runtime, effective_this.dup());
+    // Every generator gets one resident frame at creation, including internal
+    // hand-built bytecode with no body marker (which parks at pc 0). qjs's
+    // async_func_init likewise has no separate deferred args/captures owner.
+    const init_result = try runGeneratorParameterInit(ctx, fb, nested, prepared_frame_ptr, object, rooted_current, effective_this, input_args, input_var_refs, output, global);
+    init_result.free(ctx.runtime);
+
+    const prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch null;
+    if (detached_shell) {
+        try object.finishGeneratorShell(ctx.runtime, prototype);
+        object_registered = true;
+    } else {
+        try object.setFreshObjectPrototype(ctx.runtime, prototype);
     }
-
-    if (args.len > 0) {
-        const generator_args = try ctx.runtime.memory.alloc(core.JSValue, args.len);
-        var rooted_generator_args: []core.JSValue = generator_args[0..0];
-        var generator_args_root = ValueSliceRoot{};
-        generator_args_root.init(ctx.runtime, &rooted_generator_args);
-        defer generator_args_root.deinit();
-        var initialized: usize = 0;
-        var generator_args_owned = true;
-        errdefer if (generator_args_owned) {
-            for (generator_args[0..initialized]) |*stored| {
-                stored.free(ctx.runtime);
-                stored.* = core.JSValue.undefinedValue();
-            }
-            rooted_generator_args = &.{};
-            ctx.runtime.memory.free(core.JSValue, generator_args);
-        };
-        for (args, 0..) |value, idx| {
-            generator_args[idx] = value.dup();
-            initialized += 1;
-            rooted_generator_args = generator_args[0..initialized];
-        }
-        generator_args_owned = false;
-        try object.setValueSlice(ctx.runtime, object.generatorArgsSlot(), generator_args);
-    }
-
-    if (fb.generatorBodyPc() != 0) {
-        const init_result = try runGeneratorParameterInit(ctx, fb, object, current_function_value, effective_this, args, object.functionCapturesSlot().*, output, global);
-        init_result.free(ctx.runtime);
-    }
-
-    const prototype = generatorObjectPrototype(ctx.runtime, global, current_function_value, is_async) catch null;
-    try object.setPrototype(ctx.runtime, prototype);
-
-    const next = try core.function.nativeFunction(ctx.runtime, "next", 0);
-    defer next.free(ctx.runtime);
-    // Flag this generator's own `next` so for-of can take the result-object-free fast
-    // step (fastGeneratorForOfNext). zjs gives each generator instance its OWN `next`
-    // (not %GeneratorPrototype%.next), so the marker must live here; a user `gen.next = …`
-    // override replaces this property with an unflagged function, so the fast path bails.
-    if (objectFromValue(next)) |next_object| _ = next_object.addGeneratorNextFunction(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "next", next);
-    const return_fn = try core.function.nativeFunction(ctx.runtime, "return", 1);
-    defer return_fn.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "return", return_fn);
-    const slice = try core.function.nativeFunction(ctx.runtime, "slice", 1);
-    defer slice.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "slice", slice);
     return object.value();
 }
 
 pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !?*core.Object {
     const fallback = if (is_async) try asyncGeneratorPrototypeFromGlobal(rt, global) else try generatorPrototypeFromGlobal(rt, global);
     const function_object = property_ops.expectObject(function_value) catch return fallback;
+    if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     const prototype_value = function_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     return property_ops.expectObject(prototype_value) catch fallback;
@@ -2411,8 +2424,18 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
 }
 
 pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
+    // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
+    // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
+    // `!(js_mode & JS_MODE_STRICT) && has_simple_parameter_list`). zjs's
+    // embedder `forceRuntimeStrict` (eval_entry.zig:60,252) can turn a
+    // sloppy-parsed function strict AFTER the prologue already emitted the
+    // subtype-1 (mapped) special_object, so the override arm must re-apply the
+    // same effective-strictness gate the else arm uses. A force-strict frame
+    // therefore downgrades to an UNMAPPED arguments object (spec-correct for
+    // strict functions), which needs no open-ref window and never reaches
+    // captureArg — matching has_mapped_arguments=false in the view.
     const mapped = if (mapped_override) |requested|
-        requested and frame.function.flags.has_simple_parameter_list
+        requested and !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list
     else
         !currentFrameFunctionIsStrict(frame) and frame.function.flags.has_simple_parameter_list;
     const args = if (mapped)
@@ -2438,7 +2461,7 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
             out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
                 ctx.runtime,
                 callee_index,
-                slotValueDup(frame.current_function),
+                frame.current_function.dup(),
             );
         }
         break :blk out;
@@ -2449,35 +2472,39 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
         var dense_elements: []core.JSValue = &.{};
         if (args.len != 0) {
             dense_elements = try ctx.runtime.allocRuntime(core.JSValue, args.len);
-            for (args, 0..) |arg, index| dense_elements[index] = slotValueDup(arg);
+            for (args, 0..) |_, index| dense_elements[index] = value_slot.loadOwned(&args[index]);
         }
         object.adoptDenseUnmappedArgumentsElementsAssumingEmpty(ctx.runtime, dense_elements);
         return object.value();
     }
 
-    var rooted_argument_refs: []core.JSValue = &.{};
-    var argument_refs_root = ValueSliceRoot{};
-    argument_refs_root.init(ctx.runtime, &rooted_argument_refs);
-    defer argument_refs_root.deinit();
-
+    var argument_root_storage: []*core.VarRef = &.{};
+    var rooted_argument_cells: []*core.VarRef = &.{};
+    var argument_cells_root = CellSliceRoot{};
+    argument_cells_root.init(ctx.runtime, &rooted_argument_cells);
+    defer argument_cells_root.deinit();
+    defer if (argument_root_storage.len != 0) ctx.runtime.memory.free(*core.VarRef, argument_root_storage);
     if (args.len > 0) {
-        const refs = try ctx.runtime.memory.alloc(core.JSValue, args.len);
-        @memset(refs, core.JSValue.uninitialized());
-        object.adoptMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, refs);
+        _ = try object.allocateMappedArgumentsVarRefsAssumingEmpty(ctx.runtime, args.len);
+        argument_root_storage = try ctx.runtime.memory.alloc(*core.VarRef, args.len);
     }
     var initialized_argument_refs: usize = 0;
-    for (args, 0..) |arg, index| {
+    for (args, 0..) |_, index| {
         const refs = object.argumentsVarRefsMut();
-        if (index < refs.len and index < frame.args.len) {
-            refs[index] = try ensureFrameVarRefCell(ctx, frame, &frame.args[index]);
-        } else {
-            // qjs creates a closed var-ref carrying each extra actual argument.
-            // The payload accepts the equivalent owned value directly and its
-            // existing read/write helpers preserve the same alias boundary.
-            refs[index] = slotValueDup(arg);
-        }
+        const cell = if (index < frame.function.arg_count) blk: {
+            break :blk try frame.captureArg(ctx.runtime, index);
+        } else blk: {
+            // qjs creates a closed var-ref for each extra actual argument: it
+            // remains mutable through the Arguments object but has no formal
+            // parameter binding in the frame.
+            const initial = value_slot.loadOwned(&args[index]);
+            errdefer initial.free(ctx.runtime);
+            break :blk try core.VarRef.createClosed(ctx.runtime, initial);
+        };
+        refs[index] = cell;
+        argument_root_storage[index] = cell;
         initialized_argument_refs = index + 1;
-        rooted_argument_refs = refs[0..initialized_argument_refs];
+        rooted_argument_cells = argument_root_storage[0..initialized_argument_refs];
     }
     return object.value();
 }
@@ -2648,7 +2675,7 @@ pub fn getValueProperty(
             }
         }
         if (!object.hasExoticMethods()) {
-            if (object.flags.is_array) {
+            if (object.isArray()) {
                 if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
                 if (core.atom.isTaggedInt(atom_id)) {
                     const index = core.atom.atomToUInt32(atom_id);
@@ -2699,15 +2726,15 @@ pub fn getValueProperty(
         if (!direct.isUndefined()) return direct;
         direct.free(rt);
         if (rt.atoms.kind(atom_id) == .private) return error.TypeError;
-        if (object.flags.is_array and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
+        if (object.isArray() and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
         if (object.class_id == core.class.ids.string) {
             if (object.objectData()) |string_data| {
                 if (try getStringIndexValue(rt, string_data, atom_id)) |indexed| return indexed;
             }
         }
-        if (object.flags.is_array) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
+        if (object.isArray()) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
         if (object.class_id == core.class.ids.object) {
-            if (object.flags.null_prototype) return core.JSValue.undefinedValue();
+            if (object.hasNullPrototype()) return core.JSValue.undefinedValue();
             return getPrototypeMethod(rt, global, "Object", atom_id);
         }
         if (object.class_id == core.class.ids.string) return getPrototypeMethod(rt, global, "String", atom_id);
@@ -3042,7 +3069,7 @@ pub fn setValuePropertyWithThrow(
             return core.JSValue.undefinedValue();
         }
     }
-    if (object.flags.is_array and atom_id == core.atom.ids.length) {
+    if (object.isArray() and atom_id == core.atom.ids.length) {
         const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
         defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
@@ -3067,7 +3094,7 @@ pub fn setValuePropertyWithThrow(
         };
         return core.JSValue.undefinedValue();
     }
-    if (object.flags.is_array) {
+    if (object.isArray()) {
         if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id)) |index| {
             if (try object.appendDenseArrayIndex(ctx.runtime, index, atom_id, value)) return core.JSValue.undefinedValue();
         }
@@ -3671,7 +3698,7 @@ pub fn qjsDescriptorFromObject(
         var value = data_value orelse core.JSValue.undefinedValue();
         data_value = null;
         errdefer value.free(ctx.runtime);
-        if (has_value and target.flags.is_array and atom_id == core.atom.ids.length and !value.isNumber()) {
+        if (has_value and target.isArray() and atom_id == core.atom.ids.length and !value.isNumber()) {
             const coerced = try arrayLengthDefineValue(ctx, output, global, value);
             value.free(ctx.runtime);
             value = coerced;
@@ -4097,7 +4124,12 @@ pub noinline fn getSuper(
         return;
     };
     if (function_object.functionSuperConstructor()) |super_constructor| {
-        if (function_object.functionLexicalThis() != null) {
+        const fb_value = function_object.functionBytecode();
+        const is_arrow = if (fb_value) |value|
+            if (functionBytecodeFromValue(value)) |fb| fb.flags.is_arrow_function else false
+        else
+            false;
+        if (is_arrow) {
             try stack.push(super_constructor);
         } else if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
@@ -4114,7 +4146,7 @@ pub noinline fn getSuper(
         }
         return;
     }
-    const home_object = function_object.functionHomeObjectSlot().* orelse {
+    const home_object = function_object.functionHomeObject() orelse {
         if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
         } else {
@@ -4144,7 +4176,7 @@ pub noinline fn getSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+    if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
@@ -4162,7 +4194,7 @@ pub noinline fn getSuperValue(
     if (property_ops.expectObject(frame.current_function)) |function_object| {
         if (function_object.functionSuperConstructor()) |super_constructor| {
             if (sameObjectIdentity(super_constructor, obj)) {
-                if (function_object.functionHomeObjectSlot().*) |home_object| {
+                if (function_object.functionHomeObject()) |home_object| {
                     prototype = home_object.getPrototype() orelse {
                         try stack.pushOwned(core.JSValue.undefinedValue());
                         return .done;
@@ -4197,7 +4229,7 @@ pub noinline fn putSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+    if (slot_ops.adapterValueIsUninitialized(receiver)) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
@@ -4214,7 +4246,7 @@ pub noinline fn putSuperValue(
     if (property_ops.expectObject(frame.current_function)) |function_object| {
         if (function_object.functionSuperConstructor()) |super_constructor| {
             if (sameObjectIdentity(super_constructor, obj)) {
-                if (function_object.functionHomeObjectSlot().*) |home_object| {
+                if (function_object.functionHomeObject()) |home_object| {
                     prototype = home_object.getPrototype() orelse {
                         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                         return error.TypeError;
@@ -4241,28 +4273,22 @@ pub noinline fn setHomeObject(
     if (func_value.isObject() and home_value.isObject()) {
         const func_object = try property_ops.expectObject(func_value);
         var can_set_home_object = true;
-        var is_arrow_function = false;
         if (func_object.functionBytecode()) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
                 can_set_home_object = !fb.flags.is_class_constructor;
-                is_arrow_function = fb.flags.is_arrow_function;
             }
         }
         if (can_set_home_object) {
             try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
-            if (is_arrow_function) {
-                const slot = try func_object.functionLexicalThisSlot(ctx.runtime);
-                try func_object.setOptionalValueSlot(ctx.runtime, slot, home_value.dup());
-            }
         }
     }
 }
 
 pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    if (stack.values.len < 2) return error.StackUnderflow;
-    const obj = stack.values[stack.values.len - 2].dup();
+    if (stack.len() < 2) return error.StackUnderflow;
+    const obj = stack.values[stack.len() - 2].dup();
     defer obj.free(ctx.runtime);
-    const func = stack.values[stack.values.len - 1].dup();
+    const func = stack.values[stack.len() - 1].dup();
     defer func.free(ctx.runtime);
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
@@ -4556,7 +4582,7 @@ fn defineObjectMethod(
     flags: u8,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    if (stack.values.len < 2) {
+    if (stack.len() < 2) {
         const maybe_object = stack.peek() orelse return error.StackUnderflow;
         defer maybe_object.free(rt);
         _ = property_ops.expectObject(maybe_object) catch return error.StackUnderflow;
@@ -4651,8 +4677,8 @@ fn defineObjectMethodValue(
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
-    if (index_from_top >= stack.values.len) return error.StackUnderflow;
-    return stack.values[stack.values.len - 1 - index_from_top].dup();
+    if (index_from_top >= stack.len()) return error.StackUnderflow;
+    return stack.values[stack.len() - 1 - index_from_top].dup();
 }
 
 fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
@@ -4672,7 +4698,7 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
 fn hasPrivateBrand(rt: *core.JSRuntime, obj: core.JSValue, func: core.JSValue) !bool {
     const object = try property_ops.expectObject(obj);
     const func_object = try property_ops.expectObject(func);
-    const home = func_object.functionHomeObjectSlot().* orelse return error.TypeError;
+    const home = func_object.functionHomeObject() orelse return error.TypeError;
     const desc = home.getOwnProperty(rt, core.atom.ids.Private_brand) orelse return error.TypeError;
     defer desc.destroy(rt);
     const brand_atom = desc.value.asSymbolAtom() orelse return error.TypeError;
@@ -4741,7 +4767,7 @@ pub fn proxySetTrapForErrorStackSetter(
 }
 
 pub fn isRevokedProxy(object: *core.Object) bool {
-    return object.flags.is_proxy and object.proxyHandler() == null;
+    return object.isProxy() and object.proxyHandler() == null;
 }
 
 pub fn proxyCreateDataPropertyOrThrow(
@@ -5195,7 +5221,7 @@ const ProxyGetValidation = enum { valid, invalid, slow };
 /// value, or a non-configurable accessor whose getter is absent. Other property
 /// kinds retain the authoritative descriptor path below.
 fn validatePlainProxyGetResultFast(target: *core.Object, atom_id: core.Atom, result: core.JSValue) ProxyGetValidation {
-    if (target.class_id != core.class.ids.object or target.flags.is_array or target.flags.is_global or target.flags.is_with_environment) return .slow;
+    if (target.class_id != core.class.ids.object or target.isArray() or target.isGlobal() or target.flags.is_with_environment) return .slow;
     if (target.proxyTarget() != null or target.hasExoticMethods()) return .slow;
     const index = target.findProperty(atom_id) orelse return .valid;
     const flags = target.propFlagsAt(index);
@@ -5349,7 +5375,7 @@ pub fn proxyDefineValueForReflectSet(
 
 pub fn proxyTargetIsCallableObject(object: *core.Object) bool {
     if (isFunctionLikeClass(object.class_id)) return true;
-    if (!object.flags.is_proxy) return false;
+    if (!object.isProxy()) return false;
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
 }

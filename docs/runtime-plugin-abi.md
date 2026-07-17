@@ -95,7 +95,8 @@ Plugin descriptors include a validated header. Header validation must check:
 - magic;
 - ABI version;
 - target architecture, OS, ABI, pointer width, and endian;
-- `core.JSValue` size, alignment, and layout hash;
+- `core.JSValue` size, alignment, and layout hash (including the packed-value
+  encoding revision when applicable);
 - descriptor size;
 - required feature flags.
 

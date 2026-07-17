@@ -1229,6 +1229,10 @@ pub const function_bytecode = struct {
         private_getter_setter,
     };
 
+    /// Sentinel used when a local/argument binding has no frame-open cell.
+    /// Valid binding indices are dense in `[0, open_var_ref_count)`.
+    pub const no_open_binding: u16 = std.math.maxInt(u16);
+
     /// Mirrors `JSVarDef` (`quickjs.c:724`).
     pub const VarDef = struct {
         var_name: atom.Atom,
@@ -1239,6 +1243,10 @@ pub const function_bytecode = struct {
         is_captured: bool = false,
         tdz_emitted_at_decl: bool = false,
         var_kind: VarKind = .normal,
+        /// Stable index into the owning frame's open-binding table. This is the
+        /// zjs counterpart of qjs `JSVarDef.var_ref_idx`; locals and arguments
+        /// remain plain JSValue slots regardless of capture state.
+        open_binding_idx: u16 = no_open_binding,
     };
 
     /// Mirrors `JSClosureVar` (`quickjs.c:687`).
@@ -1315,13 +1323,15 @@ pub const function_bytecode = struct {
         pc2line_buf: [*]u8 = @ptrFromInt(@alignOf(u8)),
         source_ptr: ?[*]const u8 = null,
         arg_names: [*]atom.Atom = @ptrFromInt(@alignOf(atom.Atom)),
+        /// Parallel to `arg_names`: open-binding table index for each formal,
+        /// or `no_open_binding` when that argument cannot escape.
+        arg_open_binding_indices: [*]u16 = @ptrFromInt(@alignOf(u16)),
         scope_parents: [*]i32 = @ptrFromInt(@alignOf(i32)),
-        /// Lazily-built per-FB execution view (see `cachedBytecodeView`). Stored
-        /// here in the out-of-line debug box so the 128B FunctionBytecode struct
-        /// stays unchanged while restoring the `execution_view` cache the
-        /// struct-alignment program removed. Non-owning (its slices borrow the FB
-        /// `block`); `FunctionBytecode.deinit` frees only the struct allocation.
-        cached_view: ?*function_mod.BytecodeImpl = null,
+        /// Base of the consolidated read-only storage allocation. This is cold
+        /// ownership metadata used only while finalizing/freeing an FB, so keep
+        /// it beside the other block-backed debug/source pointers rather than
+        /// on the per-call FunctionBytecode hot path.
+        block_ptr: [*]u8 = @ptrFromInt(@alignOf(u8)),
     };
 
     /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
@@ -1379,15 +1389,13 @@ pub const function_bytecode = struct {
         }
         header: gc.GCObjectHeader align(16),
 
-        /// Consolidated storage for the read-only slices below. When
-        /// `flags.from_block` is set, the bare-pointer slices all point into this
-        /// single block (the `createFunctionBytecode` path); otherwise the fields
-        /// were populated with individual allocations (fixture path) and each
-        /// slice owns its own storage. Stored as a bare `[*]u8` self-pointer with
-        /// no length — the block's total size is recomputed from the slice
-        /// lengths at free time (`computeBlockSize`), mirroring QuickJS's single
-        /// `js_malloc(function_size)` allocation held by self-pointer.
-        block_ptr: [*]u8 = noSlice(u8),
+        /// Lazily-built execution view shared by every closure instantiated from
+        /// this FB. qjs executes `JSFunctionBytecode` directly; until zjs removes
+        /// its compatibility `Bytecode` view, putting the pointer here makes the
+        /// cache hit one direct FB load instead of `fb.debug -> cached_view`.
+        /// Non-owning slices in the view borrow the consolidated block; `deinit`
+        /// frees only the view struct allocation.
+        cached_view: ?*function_mod.BytecodeImpl = null,
 
         // Flags (mirrors JSFunctionBytecode packed fields, same order as
         // quickjs.c:770-782). Packed into `Flags` to drop per-field padding.
@@ -1448,6 +1456,9 @@ pub const function_bytecode = struct {
         var_count: u16 = 0,
         defined_arg_count: u16 = 0,
         stack_size: u16 = 0,
+        /// Compile-time upper bound for simultaneously-open local/argument
+        /// VarRefs. Only bindings whose identity can escape are counted.
+        open_var_ref_count: u16 = 0,
         cpool_count: i32 = 0,
 
         // QuickJS dispatches the VM directly from the `JSFunctionBytecode *`; zjs
@@ -1455,8 +1466,12 @@ pub const function_bytecode = struct {
         // machinery rebuilds a lightweight `Bytecode` view on demand per call
         // (`makeBytecodeView`) rather than caching one here. No cache fields.
 
-        // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
-        // tracks this differently via the runtime context.
+        // Owning realm edge, mirroring qjs `JSFunctionBytecode.realm` (a
+        // duplicated raw JSContext pointer). The header is retained/released
+        // explicitly and traced by the cycle GC; keeping it pointer-typed avoids
+        // a JSValue tag decode in every call prologue. It is bound when the FB is
+        // first instantiated; deserialized/never-instantiated bytecode is null.
+        realm_global_header: ?*gc.Header = null,
 
         // Constant pool (contains child Function objects) (quickjs.c:796)
         cpool: [*]JSValue = noSlice(JSValue),
@@ -1507,6 +1522,10 @@ pub const function_bytecode = struct {
         pub inline fn argNames(self: *const FunctionBytecodeImpl) []atom.Atom {
             const dbg = self.debug orelse return &.{};
             return dbg.arg_names[0..dbg.arg_names_len];
+        }
+        pub inline fn argOpenBindingIndices(self: *const FunctionBytecodeImpl) []const u16 {
+            const dbg = self.debug orelse return &.{};
+            return dbg.arg_open_binding_indices[0..dbg.arg_names_len];
         }
         pub inline fn scopeParents(self: *const FunctionBytecodeImpl) []const i32 {
             const dbg = self.debug orelse return &.{};
@@ -1579,6 +1598,19 @@ pub const function_bytecode = struct {
                 .func_name = atoms.dup(name),
                 .filename = atoms.dup(name),
             };
+        }
+
+        /// Materialize the immutable compatibility execution view before an FB
+        /// is published through a bytecode function object. QuickJS executes
+        /// the FB directly; while zjs still has a separate Bytecode view, making
+        /// publication fallible once keeps allocation and nullable cache logic
+        /// out of every later call-target resolution.
+        pub noinline fn ensureCachedView(self: *FunctionBytecodeImpl, account: *memory.MemoryAccount, atoms: *atom.AtomTable) !*function_mod.BytecodeImpl {
+            if (self.cached_view) |view| return view;
+            const slot = try account.alloc(function_mod.BytecodeImpl, 1);
+            slot[0] = function_mod.makeBytecodeView(self, account, atoms);
+            self.cached_view = &slot[0];
+            return &slot[0];
         }
 
         /// Walk final-form bytecode `byte_code` opcode-by-opcode, dup'ing the
@@ -1676,6 +1708,7 @@ pub const function_bytecode = struct {
             _ = layout.reserve(VarDef, self.vars_len);
             _ = layout.reserve(ClosureVar, self.var_refs_len);
             _ = layout.reserve(atom.Atom, arg_names_len);
+            _ = layout.reserve(u16, arg_names_len);
             _ = layout.reserve(i32, scope_parents_len);
             _ = layout.reserve(GlobalVar, self.global_vars_len);
             _ = layout.reserve(u8, @as(usize, @intCast(self.byte_code_len)) + 1);
@@ -1698,6 +1731,7 @@ pub const function_bytecode = struct {
             const from_block = self.flags.from_block;
             const owned = !from_block;
             const block_size: usize = if (from_block) self.computeBlockSize() else 0;
+            const block_ptr = if (self.debug) |dbg| dbg.block_ptr else noSlice(u8);
 
             const func_name = self.func_name;
             const filename = self.filename;
@@ -1725,6 +1759,9 @@ pub const function_bytecode = struct {
                 for (arg_names) |atom_id| atoms.free(atom_id);
                 if (owned and arg_names.len != 0) mem.free(atom.Atom, arg_names);
                 dbg.arg_names = FunctionBytecodeImpl.noSlice(atom.Atom);
+                const arg_open_binding_indices = dbg.arg_open_binding_indices[0..dbg.arg_names_len];
+                if (owned and arg_open_binding_indices.len != 0) mem.free(u16, arg_open_binding_indices);
+                dbg.arg_open_binding_indices = FunctionBytecodeImpl.noSlice(u16);
                 dbg.arg_names_len = 0;
                 const scope_parents = dbg.scope_parents[0..dbg.scope_parents_len];
                 if (owned and scope_parents.len != 0) mem.free(i32, scope_parents);
@@ -1788,6 +1825,10 @@ pub const function_bytecode = struct {
                 mem.destroy(JSValue, boxed);
             }
 
+            const realm_global_header = self.realm_global_header;
+            self.realm_global_header = null;
+            if (realm_global_header) |header| gc.release(rt, header);
+
             const cpool = self.cpoolSlice();
             self.cpool = noSlice(JSValue);
             self.cpool_count = 0;
@@ -1804,15 +1845,10 @@ pub const function_bytecode = struct {
             // the `DebugInfo` box itself is always a side allocation freed here.
             if (self.debug) |dbg| {
                 self.debug = null;
+                dbg.block_ptr = noSlice(u8);
                 const script_or_module = dbg.script_or_module;
                 dbg.script_or_module = atom.null_atom;
                 if (script_or_module != atom.null_atom) atoms.free(script_or_module);
-                // The cached execution view is non-owning (its slices borrow the
-                // FB block), so freeing the struct allocation is all that's needed.
-                if (dbg.cached_view) |view| {
-                    dbg.cached_view = null;
-                    mem.free(function_mod.BytecodeImpl, view[0..1]);
-                }
                 const pc2line_buf = dbg.pc2line_buf[0..@intCast(dbg.pc2line_len)];
                 if (owned and pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
                 if (dbg.source_ptr) |src_ptr| {
@@ -1822,8 +1858,12 @@ pub const function_bytecode = struct {
                 mem.free(DebugInfo, dbg[0..1]);
             }
 
-            const block_ptr = self.block_ptr;
-            self.block_ptr = noSlice(u8);
+            // The cached execution view is non-owning (its slices borrow the FB
+            // block), so freeing the struct allocation is all that's needed.
+            if (self.cached_view) |view| {
+                self.cached_view = null;
+                mem.free(function_mod.BytecodeImpl, view[0..1]);
+            }
             self.flags.from_block = false;
             if (from_block and block_size != 0) mem.freeAlignedBytes(block_ptr[0..block_size], block_alignment);
         }
@@ -1838,6 +1878,7 @@ pub const function_bytecode = struct {
             if (self.flags.from_block) return addSaturating(bytes, self.computeBlockSize());
             bytes = addSliceBytes(bytes, u8, @intCast(self.byte_code_len));
             if (self.debug) |dbg| bytes = addSliceBytes(bytes, atom.Atom, dbg.arg_names_len);
+            if (self.debug) |dbg| bytes = addSliceBytes(bytes, u16, dbg.arg_names_len);
             if (self.debug) |dbg| bytes = addSliceBytes(bytes, i32, dbg.scope_parents_len);
             bytes = addSliceBytes(bytes, atom.Atom, self.var_refs_len);
             bytes = addSliceBytes(bytes, GlobalVar, self.global_vars_len);
@@ -1943,9 +1984,9 @@ pub const function_bytecode = struct {
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *FunctionBytecodeImpl = @alignCast(@fieldParentPtr("header", header));
         self.deinit(rt);
-        // Cycle removal: defer the struct-free to the Pass-B drain so a sibling
-        // still referencing this bytecode does not read freed memory.
-        if (rt.gc.phase == .remove_cycles) {
+        // Cycle removal and runtime deinit both defer the struct-free until all
+        // sibling resource destructors have released their edges.
+        if (rt.gc.phase == .remove_cycles or rt.gc.phase == .deinit) {
             rt.gc.deferCycleStructFree(header);
             return;
         }
@@ -3578,7 +3619,10 @@ pub const pipeline_resolve_variables = struct {
         if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
         for (fd.child_list) |child| {
             for (child.closure_var) |cv| {
-                if ((cv.closure_type == .local or cv.closure_type == .ref) and cv.var_idx == loc_idx) return true;
+                // `.ref` indexes the parent's closure-var table, not its local
+                // slots. Only a direct `.local` source proves this local's
+                // identity escapes into the child.
+                if (cv.closure_type == .local and cv.var_idx == loc_idx) return true;
             }
         }
         return false;
@@ -3598,12 +3642,12 @@ pub const pipeline_resolve_variables = struct {
     /// per lexical var of the scope. In addition zjs emits one `close_loc`
     /// per captured var: QuickJS detaches captured stack slots at
     /// `OP_leave_scope` (quickjs.c:34510) and at break/continue jump sites
-    /// (`close_scopes`, quickjs.c:27948); zjs's boxed-cell model instead
-    /// detaches at scope *entry*, which dominates every re-entry path
+    /// (`close_scopes`, quickjs.c:27948); zjs closes the indexed open binding
+    /// at scope *entry*, which dominates every re-entry path
     /// (normal back-edge, `continue`, jumps out of inner blocks) with a
-    /// single emission site. This is observationally equivalent because
-    /// local slots are never reused and a detached cell is only reachable
-    /// through the closures that captured it.
+    /// single emission site. This is observationally equivalent because each
+    /// re-entry keeps the plain local slot but acquires a fresh cell identity;
+    /// the detached prior cell is reachable only through its closures.
     fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) usize {
         const fd = ctx.function_def orelse return 0;
         if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return 0;
@@ -4691,6 +4735,19 @@ pub const pipeline_resolve_variables = struct {
         };
     }
 
+    fn markReferenceTakenBinding(ctx: *const JSContext, atom_id: atom.Atom, scope_level: i16) void {
+        const fd = ctx.function_def orelse return;
+        const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return;
+        switch (binding) {
+            .local => |idx| if (idx < fd.vars.len) {
+                fd.vars[idx].is_captured = true;
+            },
+            .arg => |idx| if (idx < fd.args.len) {
+                fd.args[idx].is_captured = true;
+            },
+        }
+    }
+
     fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level: i16) bool {
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return false;
         if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) return false;
@@ -5007,6 +5064,11 @@ pub const pipeline_resolve_variables = struct {
                         }
                     }
                 }
+                // The reference survived compile-time tail folding. Record its
+                // binding identity now so final frame sizing reserves one open
+                // VarRef slot instead of falling back to replacing the JSValue
+                // slot with a closed cell at runtime.
+                markReferenceTakenBinding(ctx, atom_id, scope_level);
                 if (eval_probe) |probe| {
                     output_size += probe.prefix_size;
                     output_atom_count += probe.count;
@@ -7268,6 +7330,244 @@ pub const pipeline_finalize = struct {
         // will include parent/child relationship tracking.
     };
 
+    const eval_parameter_initializer_flag: u16 = 0x4000;
+    const eval_scope_index_mask: u16 = 0x3fff;
+
+    fn directEvalBindingNameIsDynamic(atom_id: atom.Atom) bool {
+        return atom_id == atom.ids.with_object or
+            atom_id == atom.ids.var_object or
+            atom_id == atom.ids.arg_var_object;
+    }
+
+    fn directEvalVarIsInParameterScope(vd: function_def_mod.VarDef) bool {
+        return vd.var_name == atom.ids.home_object or
+            vd.var_name == atom.ids.this_active_func or
+            vd.var_name == atom.ids.new_target or
+            vd.var_name == atom.ids.this_ or
+            vd.var_name == atom.ids.arg_var_object or
+            vd.var_kind == .function_name;
+    }
+
+    fn directEvalScopeChainContains(
+        fd: *const function_def_mod.FunctionDef,
+        eval_scope_index: u16,
+        target_scope: i32,
+    ) bool {
+        if (target_scope < 0) return false;
+        if (fd.scopes.len == 0) return true;
+        var scope_level: i32 = @intCast(eval_scope_index);
+        var visited: usize = 0;
+        while (scope_level >= 0 and @as(usize, @intCast(scope_level)) < fd.scopes.len) {
+            if (scope_level == target_scope) return true;
+            if (visited >= fd.scopes.len) return false;
+            visited += 1;
+            scope_level = fd.scopes[@intCast(scope_level)].parent;
+        }
+        return false;
+    }
+
+    fn directEvalLocalVisibleAtScope(
+        fd: *const function_def_mod.FunctionDef,
+        vd: function_def_mod.VarDef,
+        eval_scope_index: u16,
+    ) bool {
+        if (vd.var_name == atom.ids.with_object) {
+            return directEvalScopeChainContains(fd, eval_scope_index, vd.scope_level);
+        }
+        if (!vd.is_lexical and vd.var_kind != .catch_) return true;
+        return directEvalScopeChainContains(fd, eval_scope_index, vd.scope_level);
+    }
+
+    const DirectEvalBindingMarker = struct {
+        fd: *function_def_mod.FunctionDef,
+        seen_names: std.ArrayList(atom.Atom) = .empty,
+
+        fn deinit(self: *DirectEvalBindingMarker) void {
+            self.seen_names.deinit(self.fd.memory.allocator);
+        }
+
+        fn reset(self: *DirectEvalBindingMarker) void {
+            self.seen_names.clearRetainingCapacity();
+        }
+
+        /// Mirrors eval_ops.appendEvalClosureSeed's name shadowing rule. Normal
+        /// names contribute only their innermost visible binding; dynamic
+        /// environment sentinels remain distinct by binding index.
+        fn selectName(self: *DirectEvalBindingMarker, atom_id: atom.Atom) FinalizeError!bool {
+            if (atom_id == atom.null_atom) return false;
+            if (directEvalBindingNameIsDynamic(atom_id)) return true;
+            for (self.seen_names.items) |seen| {
+                if (seen == atom_id) return false;
+            }
+            try self.seen_names.append(self.fd.memory.allocator, atom_id);
+            return true;
+        }
+
+        fn markLocal(self: *DirectEvalBindingMarker, local_idx: usize) FinalizeError!void {
+            if (local_idx >= self.fd.vars.len) return error.InvalidBytecode;
+            if (!try self.selectName(self.fd.vars[local_idx].var_name)) return;
+            self.fd.vars[local_idx].is_captured = true;
+        }
+
+        fn markArg(self: *DirectEvalBindingMarker, arg_idx: usize) FinalizeError!void {
+            if (arg_idx >= self.fd.args.len) return error.InvalidBytecode;
+            if (!try self.selectName(self.fd.args[arg_idx].var_name)) return;
+            self.fd.args[arg_idx].is_captured = true;
+        }
+
+        /// Mark exactly the local/argument cells that createDirectEvalClosureSeed
+        /// can request at this call site. This is a compile-time union across
+        /// eval sites: runtime capture stays a direct OpenBindingId lookup.
+        fn markSite(
+            self: *DirectEvalBindingMarker,
+            eval_scope_index: u16,
+            eval_in_parameter_initializer: bool,
+        ) FinalizeError!void {
+            self.reset();
+
+            if (self.fd.scopes.len != 0) {
+                var scope_level: i32 = @intCast(eval_scope_index);
+                var visited_scopes: usize = 0;
+                while (scope_level > 0) {
+                    if (@as(usize, @intCast(scope_level)) >= self.fd.scopes.len or
+                        visited_scopes >= self.fd.scopes.len) return error.InvalidBytecode;
+                    visited_scopes += 1;
+
+                    const first = self.fd.scopes[@intCast(scope_level)].first;
+                    var maybe_local: ?usize = if (first >= 0) @intCast(first) else null;
+                    var visited_locals: usize = 0;
+                    while (maybe_local) |local_idx| {
+                        if (local_idx >= self.fd.vars.len or visited_locals >= self.fd.vars.len) return error.InvalidBytecode;
+                        visited_locals += 1;
+                        const vd = self.fd.vars[local_idx];
+                        if (vd.scope_level != scope_level) return error.InvalidBytecode;
+                        try self.markLocal(local_idx);
+                        maybe_local = if (vd.scope_next >= 0) @intCast(vd.scope_next) else null;
+                    }
+                    scope_level = self.fd.scopes[@intCast(scope_level)].parent;
+                }
+            } else {
+                var local_idx = self.fd.vars.len;
+                while (local_idx > 0) {
+                    local_idx -= 1;
+                    const vd = self.fd.vars[local_idx];
+                    if (vd.scope_level == 0 or
+                        !directEvalLocalVisibleAtScope(self.fd, vd, eval_scope_index)) continue;
+                    try self.markLocal(local_idx);
+                }
+            }
+
+            if (!eval_in_parameter_initializer) {
+                for (self.fd.args, 0..) |_, arg_idx| try self.markArg(arg_idx);
+                for (self.fd.vars, 0..) |vd, local_idx| {
+                    if (vd.scope_level != 0 or vd.var_name == atom.ids.ret) continue;
+                    if (!directEvalLocalVisibleAtScope(self.fd, vd, eval_scope_index)) continue;
+                    try self.markLocal(local_idx);
+                }
+            } else {
+                for (self.fd.vars, 0..) |vd, local_idx| {
+                    if (vd.scope_level != 0 or !directEvalVarIsInParameterScope(vd)) continue;
+                    if (!directEvalLocalVisibleAtScope(self.fd, vd, eval_scope_index)) continue;
+                    try self.markLocal(local_idx);
+                }
+            }
+        }
+    };
+
+    fn markDirectEvalBindings(code: []const u8, fd: *function_def_mod.FunctionDef) FinalizeError!void {
+        var marker = DirectEvalBindingMarker{ .fd = fd };
+        defer marker.deinit();
+
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            if (size == 0) return error.InvalidOpcode;
+            if (pc + size > code.len) return error.InvalidBytecode;
+
+            const raw_scope_index: ?u16 = switch (op_id) {
+                opcode.op.eval => if (size >= 5)
+                    std.mem.readInt(u16, code[pc + 3 ..][0..2], .little)
+                else
+                    return error.InvalidBytecode,
+                opcode.op.apply_eval => if (size >= 3)
+                    std.mem.readInt(u16, code[pc + 1 ..][0..2], .little)
+                else
+                    return error.InvalidBytecode,
+                else => null,
+            };
+            if (raw_scope_index) |raw| {
+                try marker.markSite(
+                    raw & eval_scope_index_mask,
+                    (raw & eval_parameter_initializer_flag) != 0,
+                );
+            }
+            pc += size;
+        }
+    }
+
+    fn assignOpenBindingIndices(fd: *function_def_mod.FunctionDef) FinalizeError!u16 {
+        var next: u32 = 0;
+        for (fd.vars) |*vd| {
+            vd.open_binding_idx = function_bytecode.no_open_binding;
+            if (!vd.is_captured) continue;
+            if (next >= function_bytecode.no_open_binding) return error.BytecodeOverflow;
+            vd.open_binding_idx = @intCast(next);
+            next += 1;
+        }
+        for (fd.args) |*vd| {
+            vd.open_binding_idx = function_bytecode.no_open_binding;
+            if (!vd.is_captured) continue;
+            if (next >= function_bytecode.no_open_binding) return error.BytecodeOverflow;
+            vd.open_binding_idx = @intCast(next);
+            next += 1;
+        }
+        return @intCast(next);
+    }
+
+    /// Prove the finalized frame contract while all source metadata is still
+    /// available: captured locals followed by captured arguments occupy one
+    /// dense, unique ID space, and every uncaptured binding carries the
+    /// sentinel. Runtime consumers can therefore index directly without an
+    /// address search or a second representation test.
+    fn validateOpenBindingIndices(fd: *const function_def_mod.FunctionDef, count: u16) FinalizeError!void {
+        var expected: u16 = 0;
+        for (fd.vars) |vd| {
+            if (!vd.is_captured) {
+                if (vd.open_binding_idx != function_bytecode.no_open_binding) return error.InvalidBytecode;
+                continue;
+            }
+            if (vd.open_binding_idx != expected) return error.InvalidBytecode;
+            expected += 1;
+        }
+        for (fd.args) |arg| {
+            if (!arg.is_captured) {
+                if (arg.open_binding_idx != function_bytecode.no_open_binding) return error.InvalidBytecode;
+                continue;
+            }
+            if (arg.open_binding_idx != expected) return error.InvalidBytecode;
+            expected += 1;
+        }
+        if (expected != count) return error.InvalidBytecode;
+    }
+
+    /// Child closure tables are the final authority after forward-capture and
+    /// class/private-name retrofits. Fold them back into the source VarDefs
+    /// once, before lowering and frame-layout sizing, so every later consumer
+    /// sees the same per-binding capture fact.
+    fn reconcileCapturedBindings(fd: *function_def_mod.FunctionDef) void {
+        for (fd.vars, 0..) |*vd, idx| {
+            if (resolve_variables.localIsCaptured(fd, @intCast(idx))) vd.is_captured = true;
+        }
+        for (fd.child_list) |child| {
+            for (child.closure_var) |cv| {
+                if (cv.closure_type == .arg and cv.var_idx < fd.args.len) {
+                    fd.args[cv.var_idx].is_captured = true;
+                }
+            }
+        }
+    }
+
     /// Create a FunctionBytecode from a FunctionDef.
     ///
     /// This mirrors `js_create_function` at `quickjs.c:35401`. It:
@@ -7345,7 +7645,7 @@ pub const pipeline_finalize = struct {
 
         // Pack all read-only artifact slices into a single block allocation.
         // Segments are reserved largest-alignment-first to minimize padding;
-        // the slice fields below point into `fb.block_ptr` and `deinit` releases
+        // the slice fields below point into `fb.debug.block_ptr` and `deinit` releases
         // the whole block at once.
         const source_len: usize = if (fd.source_text) |source| source.len else 0;
         var layout = fb_mod.BlockBuilder{};
@@ -7353,6 +7653,7 @@ pub const pipeline_finalize = struct {
         const vardefs_off = layout.reserve(function_def_mod.VarDef, fd.vars.len);
         const closure_var_off = layout.reserve(function_def_mod.ClosureVar, fd.closure_var.len);
         const arg_names_off = layout.reserve(atom.Atom, fd.args.len);
+        const arg_open_binding_indices_off = layout.reserve(u16, fd.args.len);
         const scope_parents_off = layout.reserve(i32, fd.scopes.len);
         const global_vars_off = layout.reserve(function_def_mod.GlobalVar, fd.global_vars.len);
         // Class-field metadata is stored out-of-line (side `ClassMeta`), not in
@@ -7376,7 +7677,7 @@ pub const pipeline_finalize = struct {
         fb.debug = &dbg[0];
 
         const block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
-        fb.block_ptr = block.ptr;
+        dbg[0].block_ptr = block.ptr;
         fb.flags.from_block = true;
 
         // Copy lowered bytecode.
@@ -7408,6 +7709,9 @@ pub const pipeline_finalize = struct {
             for (fd.args, arg_names) |arg, *out| out.* = fd.atoms.dup(arg.var_name);
             dbg[0].arg_names = arg_names.ptr;
             dbg[0].arg_names_len = @intCast(arg_names.len);
+            const arg_open_binding_indices = fb_mod.blockSlice(block, u16, arg_open_binding_indices_off, fd.args.len);
+            for (fd.args, arg_open_binding_indices) |arg, *out| out.* = arg.open_binding_idx;
+            dbg[0].arg_open_binding_indices = arg_open_binding_indices.ptr;
         }
         if (fd.scopes.len > 0) {
             const scope_parents = fb_mod.blockSlice(block, i32, scope_parents_off, fd.scopes.len);
@@ -7457,6 +7761,7 @@ pub const pipeline_finalize = struct {
         fb.var_count = @intCast(fd.var_count);
         fb.defined_arg_count = @intCast(fd.defined_arg_count);
         fb.stack_size = lowered.stack_size;
+        fb.open_var_ref_count = lowered.open_var_ref_count;
 
         // Copy source location into the boxed cold cluster (`dbg`, allocated up
         // front above alongside the argument names).
@@ -7565,6 +7870,13 @@ pub const pipeline_finalize = struct {
         fd: ?*const function_def_mod.FunctionDef,
         fd_mut: ?*function_def_mod.FunctionDef,
     ) !void {
+        // The mutable top-level/eval Bytecode executes directly instead of
+        // being copied through createFunctionBytecodeAfterChildren. Fold the
+        // child capture tables back into its VarDefs here as well so frame
+        // sizing and the local-slot proof consume the same binding facts in
+        // both storage representations.
+        if (fd_mut) |def| reconcileCapturedBindings(def);
+
         // Phase 2: resolve_variables (with optional FunctionDef).
         var resolve_ctx = if (fd_mut) |def|
             resolve_variables.JSContext.initWithFunctionDef(function, def)
@@ -7597,6 +7909,42 @@ pub const pipeline_finalize = struct {
             resolve_labels.JSContext.init(function);
         try resolve_labels.run(&labels_ctx);
 
+        // qjs captures every formal parameter before creating a mapped
+        // arguments object. Do the same here, then assign one exact, stable
+        // table index to every captured local/argument. Runtime frame sizing
+        // and every identity consumer use this metadata; there is no
+        // address-search or "extra capacity" fallback.
+        if (fd_mut) |def| {
+            if (def.is_derived_class_constructor) {
+                for (def.vars) |*vd| {
+                    if (vd.var_name == atom.ids.this_) vd.is_captured = true;
+                }
+            }
+            // Direct eval can request identity for any binding visible at its
+            // call site. Compute the exact union now, while scope metadata is
+            // available, so runtime never scans or lazily cellifies hot slots.
+            // Gated on the parse-time fact: eval/apply_eval opcodes are emitted
+            // only via markDirectEvalCall, which sets has_eval_call (parser.zig),
+            // so eval-free functions skip the full-code walk with an identical
+            // result.
+            if (def.has_eval_call) try markDirectEvalBindings(function.code, def);
+            const mapped_arguments = !def.is_strict_mode and
+                !function.flags.runtime_strict and
+                def.has_simple_parameter_list and
+                (bytecode_function.codeMaterializesArgumentsObject(function.code) or
+                    bytecode_function.codeRescuesImplicitArgumentsViaGetVar(
+                        function.code,
+                        def.closure_var,
+                        def.func_type == .arrow,
+                    ));
+            function.flags.has_mapped_arguments = mapped_arguments;
+            if (mapped_arguments) {
+                for (def.args) |*arg| arg.is_captured = true;
+            }
+            function.open_var_ref_count = try assignOpenBindingIndices(def);
+            try validateOpenBindingIndices(def, function.open_var_ref_count);
+        }
+
         // Propagate locals count so the VM frame can size its `locals`
         // array. `createFunctionBytecode` copies the same lowered metadata
         // into the final GC-owned function artifact.
@@ -7608,6 +7956,7 @@ pub const pipeline_finalize = struct {
                 function.arg_count = @intCast(def.arg_count);
             }
             try syncBytecodeVarNames(function, def);
+            try syncBytecodeArgOpenBindingIndices(function, def);
             try syncBytecodeScopeParents(function, def);
             try syncBytecodeVarRefNames(function, def);
             try syncBytecodeGlobalVarNames(function, def);
@@ -8042,6 +8391,19 @@ pub const pipeline_finalize = struct {
         function.vardefs = vardefs;
     }
 
+    fn syncBytecodeArgOpenBindingIndices(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
+        if (function.arg_open_binding_indices.len != 0) {
+            const indices = function.arg_open_binding_indices;
+            function.arg_open_binding_indices = &.{};
+            function.memory.free(u16, @constCast(indices));
+        }
+        if (fd.args.len == 0) return;
+
+        const indices = try function.memory.alloc(u16, fd.args.len);
+        for (fd.args, indices) |arg, *out| out.* = arg.open_binding_idx;
+        function.arg_open_binding_indices = indices;
+    }
+
     fn syncBytecodeScopeParents(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
         if (function.scope_parents.len != 0) {
             const scope_parents = function.scope_parents;
@@ -8332,7 +8694,13 @@ const function_mod = struct {
         has_eval_call: bool = false,
         is_arrow_function: bool = false,
         backtrace_barrier: bool = false,
-        reserved: u2 = 0,
+        /// Runtime-created mapped Arguments objects open-alias every supplied
+        /// argument slot in addition to the statically captured bindings.
+        has_mapped_arguments: bool = false,
+        /// Exact-zero-argument sloppy leaf whose frame cannot acquire cold
+        /// state or value-bearing local/capture/open-ref windows. Published in
+        /// the previously reserved execution-view flag bit.
+        simple_inline_empty_leaf: bool = false,
     };
 
     /// Compatibility aliases for finalized runtime function bytecode.
@@ -8378,23 +8746,10 @@ const function_mod = struct {
         /// before mutable parameter slots can change them. Selected only when
         /// finalized bytecode materializes an arguments object.
         strict_simple_snapshot_inline_eligible: bool = false,
-        /// Precomputed: NO `var_buf` local slot of this function can ever hold a
-        /// var-ref cell. In qjs a captured local (`capture_var`, quickjs.c:32907)
-        /// gets `is_captured = TRUE` for BOTH closure capture and OP_make_loc_ref
-        /// (quickjs.c:33029); zjs sets `is_captured` on closure capture but the
-        /// make_loc_ref lowering (bytecode.zig ~4723) does not, so this predicate
-        /// derives the complete "locals never boxed" set at finalize instead:
-        /// no vardef `is_captured`, no `make_loc_ref` in the code, not a derived
-        /// constructor (`this`-cell, vm_call.linkDerivedConstructorThisLocal),
-        /// and not eval/module code (direct-eval / module fill can box a caller
-        /// local). When true, the checked-loc fast handlers (opLocCheck) skip the
-        /// per-op `varRefCellFromValue` cell guard on both the slot and the
-        /// stored value — mirroring qjs, whose OP_get_loc_check/put_loc_check read
-        /// `var_buf[idx]` as a plain value with no cell test (quickjs.c:18704).
-        locals_never_boxed: bool = false,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
+        open_var_ref_count: u16 = 0,
         /// `code` and `atom_operands` are mutated by the parser via geometric
         /// growth (see `appendCode` / `retainAtomOperand`). The visible slice
         /// length is the *used* count; the backing buffer is sized by
@@ -8407,6 +8762,8 @@ const function_mod = struct {
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
         arg_names: []atom.Atom = &.{},
+        /// Parallel to `arg_names`; see FunctionBytecode.DebugInfo.
+        arg_open_binding_indices: []const u16 = &.{},
         // Local-variable metadata, faithful to qjs `JSFunctionBytecode.vardefs`.
         // Each `vardefs[i]` carries var_name plus is_lexical/is_const/scope_level
         // (the former parallel arrays). `scope_level` (`JSVarDef.scope_level`):
@@ -8453,6 +8810,9 @@ const function_mod = struct {
             self.atoms.free(script_or_module);
             freeGrowableAtomSlice(self.atoms, self.memory, &self.atom_operands, &self.atom_operands_capacity);
             freeOwnedAtomSlice(self.atoms, self.memory, &self.arg_names);
+            const arg_open_binding_indices = self.arg_open_binding_indices;
+            self.arg_open_binding_indices = &.{};
+            if (arg_open_binding_indices.len != 0) self.memory.free(u16, @constCast(arg_open_binding_indices));
             freeOwnedVarDefSlice(self.atoms, self.memory, &self.vardefs);
             const scope_parents = self.scope_parents;
             self.scope_parents = &.{};
@@ -8654,6 +9014,18 @@ const function_mod = struct {
             if (capacity != 0) self.memory.free(DirectCallSite, items.ptr[0..capacity]);
         }
 
+        pub inline fn localOpenBindingIndex(self: *const BytecodeImpl, idx: usize) ?u16 {
+            if (idx >= self.vardefs.len) return null;
+            const binding_idx = self.vardefs[idx].open_binding_idx;
+            return if (binding_idx == function_bytecode_mod.no_open_binding) null else binding_idx;
+        }
+
+        pub inline fn argOpenBindingIndex(self: *const BytecodeImpl, idx: usize) ?u16 {
+            if (idx >= self.arg_open_binding_indices.len) return null;
+            const binding_idx = self.arg_open_binding_indices[idx];
+            return if (binding_idx == function_bytecode_mod.no_open_binding) null else binding_idx;
+        }
+
         pub fn ensureModule(self: *BytecodeImpl) *module.Record {
             if (self.module_record == null) self.module_record = module.Record.init(self.memory, self.atoms);
             return &self.module_record.?;
@@ -8665,39 +9037,7 @@ const function_mod = struct {
         }
     };
 
-    /// Precompute `BytecodeImpl.locals_never_boxed`: true when no `var_buf`
-    /// local of `fb` can ever hold a var-ref cell (see the field doc). A local
-    /// becomes a cell only via (a) closure capture, which marks the vardef
-    /// `is_captured`; (b) OP_make_loc_ref reference-taking; (c) the derived
-    /// constructor `this` cell (linkDerivedConstructorThisLocal); or (d) a
-    /// direct-eval that boxes a caller local (the caller then has has_eval_call).
-    /// Any of these disqualifies the function; otherwise every checked-loc slot
-    /// is a plain value, exactly as qjs reads `var_buf[idx]` (quickjs.c:18704).
-    fn computeLocalsNeverBoxed(fb: *const FunctionBytecode) bool {
-        if (fb.flags.is_derived_class_constructor) return false;
-        if (fb.flags.has_eval_call or fb.flags.is_indirect_eval) return false;
-        for (fb.varDefs()) |vd| {
-            if (vd.is_captured) return false;
-        }
-        const code = fb.byteCode();
-        var pc: usize = 0;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const size = opcode.sizeOf(op_id);
-            // A malformed/short opcode should never survive finalize; treat it
-            // conservatively as boxable rather than reading past the buffer.
-            if (size == 0 or pc + size > code.len) return false;
-            if (op_id == opcode.op.make_loc_ref) return false;
-            pc += size;
-        }
-        return true;
-    }
-
-    /// Whether finalized bytecode materializes either arguments-object form.
-    /// Strict calls need this once-per-FB fact to choose the simple-frame
-    /// specialization that preserves the pre-mutation argument values.
-    fn functionMaterializesArgumentsObject(fb: *const FunctionBytecode) bool {
-        const code = fb.byteCode();
+    pub fn codeMaterializesArgumentsObject(code: []const u8) bool {
         var pc: usize = 0;
         while (pc < code.len) {
             const op_id = code[pc];
@@ -8712,6 +9052,66 @@ const function_mod = struct {
             pc += size;
         }
         return false;
+    }
+
+    /// Whether finalized bytecode materializes either arguments-object form.
+    /// Strict calls need this once-per-FB fact to choose the simple-frame
+    /// specialization that preserves the pre-mutation argument values.
+    fn functionMaterializesArgumentsObject(fb: *const FunctionBytecode) bool {
+        return codeMaterializesArgumentsObject(fb.byteCode());
+    }
+
+    /// zjs-side adaptation (R1): qjs always resolves an in-function `arguments`
+    /// read to the arguments pseudo-var local (resolve_scope_var /
+    /// add_arguments_var, quickjs.c:32970-32974, 24220-24227) and explicitly
+    /// skips the annexB var binding for the name (create_func_var gate,
+    /// quickjs.c:36579-36586), so its prologue eagerly emits OP_special_object
+    /// mapped_arguments and there is never a get_var of the `arguments` name.
+    /// zjs's parser instead leaves a same-named NESTED binding in place (annexB
+    /// block-level `function arguments(){}`, `catch(arguments)`):
+    /// ensureImplicitArgumentsLocal (parser.zig:5413) bails on findVar/findArg,
+    /// so arguments_var_idx stays -1 and no prologue is emitted, and the body
+    /// `arguments` read is lowered to a global OP_get_var / OP_get_var_undef
+    /// whose handler materializes the mapped arguments object at runtime
+    /// (vm_property_globals.getVar rescue, vm_property_globals.zig:213-218,
+    /// 276-278). That rescue therefore needs the same compile-time formal-arg
+    /// OpenBindingId set as the explicit prologue path.
+    /// Detect the get_var(arguments) rescue shape here so has_mapped_arguments
+    /// (whose sole production reader is frameOpenVarRefStorageCount) reserves the
+    /// window; the strict-inline classification stays keyed to
+    /// functionMaterializesArgumentsObject. The operand atom is resolved through
+    /// fb.closureVar() — the same slice the runtime rescue reads as
+    /// globalVarAtom (var_ref_names is empty on the finalized view) — so this
+    /// scan sees the identical atom the rescue sees.
+    pub fn codeRescuesImplicitArgumentsViaGetVar(
+        code: []const u8,
+        closure_vars: []const function_bytecode_mod.ClosureVar,
+        is_arrow_function: bool,
+    ) bool {
+        // Arrow functions never hit the rescue: `arguments` in an arrow resolves
+        // to the enclosing function's binding, not a global get_var.
+        if (is_arrow_function) return false;
+        const arguments_atom = atom.ids.arguments;
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size = opcode.sizeOf(op_id);
+            if (size == 0 or pc + size > code.len) return false;
+            if (op_id == opcode.op.get_var or op_id == opcode.op.get_var_undef) {
+                const ref_idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                if (ref_idx < closure_vars.len and closure_vars[ref_idx].var_name == arguments_atom) return true;
+            }
+            pc += size;
+        }
+        return false;
+    }
+
+    fn functionRescuesImplicitArgumentsViaGetVar(fb: *const FunctionBytecode) bool {
+        return codeRescuesImplicitArgumentsViaGetVar(
+            fb.byteCode(),
+            fb.closureVar(),
+            fb.flags.is_arrow_function,
+        );
     }
 
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
@@ -8730,6 +9130,7 @@ const function_mod = struct {
             !fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
             fb.global_vars_len == 0;
         const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
+        const rescues_implicit_arguments = functionRescuesImplicitArgumentsViaGetVar(fb);
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -8754,20 +9155,26 @@ const function_mod = struct {
                 .has_eval_call = fb.flags.has_eval_call,
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
+                .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
+                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and
+                    fb.arg_count == 0 and fb.var_count == 0 and fb.open_var_ref_count == 0 and
+                    fb.var_refs_len == 0 and !materializes_arguments_object and
+                    !rescues_implicit_arguments and !fb.flags.has_eval_call,
             },
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
             .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,
-            .locals_never_boxed = computeLocalsNeverBoxed(fb),
             .arg_count = fb.arg_count,
             .var_count = fb.var_count,
             .stack_size = fb.stack_size,
+            .open_var_ref_count = fb.open_var_ref_count,
             .code = fb.byteCode(),
             // `atom_operands` intentionally left as the default empty slice: the
             // FB no longer keeps a standalone atom-operand array (retention moved
             // inline into the bytecode). Runtime readers that need the referenced
             // atoms walk `code` directly (see `atomOperandIterator`).
             .arg_names = fb.argNames(),
+            .arg_open_binding_indices = fb.argOpenBindingIndices(),
             .vardefs = fb.varDefs(),
             .scope_parents = fb.scopeParents(),
             // Finalized execution views derive var-ref names directly from
@@ -8787,36 +9194,26 @@ const function_mod = struct {
     /// the older `Bytecode` view API, so `resolveInlineTarget` rebuilt the
     /// ~300B view via `makeBytecodeView` on EVERY call — ~43% of the call cost
     /// on call-heavy code (fib/funcall). The view is a pure function of the
-    /// immutable FB, so build it once and cache it OUT-OF-LINE in the
-    /// `DebugInfo` box; the 128B FB struct is unchanged. The cached view is
+    /// immutable FB, so build it once and cache its pointer directly on the FB.
+    /// The cold consolidated-block owner moved to `DebugInfo`, so the FB struct
+    /// size is unchanged. The cached view is
     /// non-owning (all slices borrow the FB `block`), so `deinit` frees only the
-    /// struct allocation. Returns null when the FB carries no `DebugInfo` box
-    /// (fixture/synthetic FBs) — the caller rebuilds per-call in that rare case.
+    /// struct allocation. Synthetic FBs can use the same cache even when they
+    /// carry no `DebugInfo` box.
     ///
     /// Behaviour-identical to `makeBytecodeView`: the returned view is copied by
     /// value into the per-call `InlineTarget`/`Entry.view_storage`, while the
     /// cached slices continue to borrow immutable FunctionBytecode storage.
     ///
     /// `inline` + the out-of-line build leg keep the per-call cost at the two
-    /// cache-hit loads (`fb.debug` -> `dbg.cached_view`): the resolve path in
+    /// cache-hit load (`fb.cached_view`): the resolve path in
     /// `op_call` previously paid a `bl` call boundary here on EVERY call
     /// because the cold alloc+build leg made LLVM keep the whole function
     /// out of line. qjs's callee prologue has no per-call call boundary at
     /// all — `b` IS the execution structure (`b = p->u.func.function_bytecode`,
     /// quickjs.c:17825) — so the hit leg must ride inline.
     pub inline fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
-        const dbg = fb.debug orelse return null;
-        return dbg.cached_view orelse buildCachedBytecodeView(dbg, fb, mem, atoms);
-    }
-
-    /// Cold once-per-FB build leg of `cachedBytecodeView` (see above).
-    /// `noinline` is load-bearing: keeping the alloc/build out of the caller
-    /// is the whole point of the split.
-    noinline fn buildCachedBytecodeView(dbg: *function_bytecode_mod.DebugInfo, fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
-        const slot = mem.alloc(BytecodeImpl, 1) catch return null;
-        slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
-        dbg.cached_view = &slot[0];
-        return &slot[0];
+        return fb.cached_view orelse @constCast(fb).ensureCachedView(mem, atoms) catch null;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;

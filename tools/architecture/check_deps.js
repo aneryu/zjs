@@ -89,7 +89,6 @@ function violationReason(source, target) {
       target === 'src/runtime/public.zig' ||
       target === 'src/core/root.zig' ||
       target === 'src/exec/root.zig' ||
-      target === 'src/builtins/root.zig' ||
       target === 'src/exec/module_graph.zig'
     ) return null;
     return 'public root may only import modules used by the embedding facade adapter';
@@ -104,16 +103,6 @@ function violationReason(source, target) {
       'src/runtime/',
     ];
     return targetStarts(target, disallowed) ? 'core must not depend on parser, builtins, exec, runtime, or CLI' : null;
-  }
-
-  if (source.startsWith('src/builtins/')) {
-    const disallowed = [
-      'src/bytecode.zig',
-      'src/cli/',
-      'src/parser.zig',
-      'src/runtime/',
-    ];
-    return targetStarts(target, disallowed) ? 'transitional builtins may import core/libs/exec/builtins only while standard-global tables move into exec; runtime/parser/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
   if (source.startsWith('src/libs/')) {
@@ -159,7 +148,7 @@ function violationReason(source, target) {
       'src/cli/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'exec must not depend on transitional builtins, runtime, binding, or CLI; standard-global bootstrap is moving into exec, and the old builtins directory must not become an engine dependency. Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
+    return targetStarts(target, disallowed) ? 'exec must not depend on the retired builtins directory, runtime, binding, or CLI; standard-global bootstrap and native operation modules are owned by exec. Host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
   }
 
   if (source.startsWith('src/runtime/')) {
@@ -186,6 +175,33 @@ const matchedAllowKeys = new Set();
 
 const files = [];
 walk(path.join(repoRoot, 'src'), files);
+
+const retiredBuiltinFiles = files.filter((source) => source.startsWith('src/builtins/'));
+if (retiredBuiltinFiles.length !== 0) {
+  fail(`legacy src/builtins directory was retired; move these modules to exec or core:\n  ${retiredBuiltinFiles.join('\n  ')}`);
+}
+
+const hostFunctionSource = fs.readFileSync(path.join(repoRoot, 'src/core/host_function.zig'), 'utf8');
+for (const retiredAbiToken of ['.zjs_internal_call', 'pub const InternalCall =', 'InternalCallFn']) {
+  if (hostFunctionSource.includes(retiredAbiToken)) {
+    fail(`retired builtin ABI token reintroduced in src/core/host_function.zig: ${retiredAbiToken}`);
+  }
+}
+
+const standardGlobalsSource = fs.readFileSync(path.join(repoRoot, 'src/exec/standard_globals.zig'), 'utf8');
+for (const retiredRegistryToken of ['ConstructorSpec', 'constructor_specs']) {
+  if (standardGlobalsSource.includes(retiredRegistryToken)) {
+    fail(`generic standard-constructor registry reintroduced in src/exec/standard_globals.zig: ${retiredRegistryToken}`);
+  }
+}
+
+const internalBuiltinsSource = fs.readFileSync(path.join(repoRoot, 'src/exec/internal_builtins.zig'), 'utf8');
+for (const completedDomain of ['atomics', 'performance', 'promise']) {
+  const tableContribution = `NativeBuiltinDomain.${completedDomain})] = denseRecords`;
+  if (!internalBuiltinsSource.includes(tableContribution)) {
+    fail(`completed standard-native domain lost its typed record table: ${completedDomain}`);
+  }
+}
 
 const violations = [];
 const actualImportKeys = new Set();

@@ -324,7 +324,9 @@ comptime {
 }
 
 pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !AutoInitRef {
-    try rt.auto_init_table.append(rt.memory.allocator, info);
+    // The table is runtime-resident. Parsing may temporarily replace
+    // `memory.allocator` with an arena, whose lifetime is shorter than `rt`.
+    try rt.auto_init_table.append(rt.memory.persistent_allocator, info);
     return .{ .rt = rt, .id = @intCast(rt.auto_init_table.items.len - 1) };
 }
 

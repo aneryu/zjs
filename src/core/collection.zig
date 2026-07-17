@@ -10,7 +10,7 @@
 //! Everything here depends only on `core` (`Object` storage slots, `JSValue`
 //! sameValueZero, `string`, `bigint`, `symbol.canBeHeldWeakly`, the runtime
 //! borrowed-reference holder registry) and `libs` (`bigint`, `number_format`). There is
-//! zero exec/builtins/VM dependency: the weak-key GC interaction is entirely
+//! zero exec/VM dependency: the weak-key GC interaction is entirely
 //! core-resident (`Object.weakIdentityFromValue*`, `rt.*BorrowedReferenceHolder`).
 //! The collection native method bodies (`exec/collection_ops.zig`) call these
 //! backend entry points directly; the VM Map-fusion fast paths

@@ -33,9 +33,9 @@ pub const max_length: usize = (1 << 30) - 1;
 /// separate flat/hash payload. All borrowed slices returned to readers point
 /// into that owned flat string, so they stay valid for as long as the rope
 /// object is alive. The refcount lives in a 4-byte `gc.StringHeader`
-/// prefix at `ropePtr - 4` (see `String` below), reached through `header()`, so
-/// a `Tag.string_rope` value's payload is that prefix pointer, exactly like a
-/// flat string.
+/// prefix at `ropePtr - 4` (see `String` below), reached through `header()`.
+/// Like QuickJS, a `Tag.string_rope` value stores the rope body pointer; the
+/// common RC word is always recovered from payload - 4.
 pub const StringRope = struct {
     left: JSValue,
     right: JSValue,
@@ -63,13 +63,12 @@ pub const StringRope = struct {
     /// node holds pointers (`@alignOf(StringRope) == 8`), so the 4-byte rc word
     /// is padded up to the node's alignment to keep the struct that follows it
     /// aligned. The rc word lives in the LAST 4 bytes of the prefix, i.e. at
-    /// `nodePtr - 4`, so `header()` returns the same `nodePtr - 4` a flat string
-    /// would (the JSValue payload is that rc pointer for both tags).
+    /// `nodePtr - 4`, so `header()` returns the same fixed-offset RC word a flat
+    /// string would.
     pub const rc_prefix_size: usize = std.mem.alignForward(usize, gc.string_rc_prefix_size, @alignOf(StringRope));
 
     /// Pointer to the 4-byte refcount word sitting immediately before this rope
-    /// node (`ropePtr - 4`), mirroring `String.header()`. The rc word is the
-    /// shared identity a `Tag.string_rope` JSValue carries in its payload.
+    /// node (`ropePtr - 4`), mirroring `String.header()` and QuickJS `__js_rc`.
     pub inline fn header(self: *const StringRope) *gc.StringHeader {
         const base: [*]u8 = @ptrCast(@constCast(self));
         return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));
@@ -253,9 +252,9 @@ pub const String = struct {
     /// struct (`stringPtr - 4`, qjs `JSRefCountHeader` analogue). The rc word is
     /// allocated as a leading prefix so the flat `String` struct is exactly 12B
     /// (mirroring qjs `JSString`: two u32 bitfields + `atom_type`), with the rc
-    /// kept out of band. Both `String` and `StringRope` share this prefix model,
-    /// so a `Tag.string`/`Tag.string_rope`/`Tag.symbol` JSValue's payload is the
-    /// prefix pointer and reaches the rc uniformly through `header()`.
+    /// kept out of band. A `Tag.string`/`Tag.string_rope`/`Tag.symbol` JSValue
+    /// stores the body pointer, so its RC is at the same payload - 4 offset as
+    /// every GC-backed refcounted value.
     pub inline fn header(self: *const String) *gc.StringHeader {
         const base: [*]u8 = @ptrCast(@constCast(self));
         return @ptrCast(@alignCast(base - gc.string_rc_prefix_size));

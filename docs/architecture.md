@@ -61,14 +61,15 @@ Phase 4 余项（均已完成）：
 JSValue 表示（Phase 5）：访问器封装 pass 已完成——`core/value.zig` 之外的
 直接 `tag`/`payload` 字段访问为零（仅 `binding/ffi.zig` 的 comptime 布局
 反射保留，用于 NaN-boxing 切换时自动失配 ABI 指纹）；NaN-boxing 的 8 字节
-表示已作为 build option（`-Dzjs_nan_boxing`）双模式落地，并在测量后成为
-默认（与 16 字节布局计算持平、值密集堆 RSS 更低）。
+表示已作为 build option（`-Dzjs_nan_boxing`）双模式落地。默认策略与
+QuickJS 一致：64 位目标使用 16 字节 `payload + int64 tag`，较窄目标使用
+8 字节 NaN-boxing；显式 build option 可覆盖目标默认。
 
 双表示是永久双模式，不是迁移过渡期：QuickJS 以 `#ifdef JS_NAN_BOXING`
-永久维护双布局，双模式即参照设计本身。zjs 的 16 字节布局保留为参考表示
-（reference layout），同时是 NaN-boxing 不可用平台的后路——例如指针超出
-NaN payload 可编码范围的环境。两种模式都不许 rot 是既定政策，由
-`test-altrepr` step（以非默认的 16 字节表示跑统一测试）守护。
+永久维护双布局，双模式即参照设计本身。zjs 的 16 字节布局是 64 位规范
+表示，并保留完整 i64 short-BigInt payload；8 字节布局是显式可选的紧凑
+adapter，在值密集堆上降低 RSS，但只有 48 位 payload。两种模式都不许 rot，
+由 `test-altrepr` step 以目标默认的相反表示运行统一测试来守护。
 
 ## 2. Parser And TypeScript Erasure
 
@@ -165,7 +166,8 @@ p3-pipeline / p4-fb-compact 的对照结论（语义已由 test262 门禁 0 失�
   catch 体（rethrow marker 前置 drop）。`test262.conf` 已启用 `tail-call-optimization`。
 
 arrow target 与 `tail_call_method` 也已进入 inline-frame reuse 路径：
-arrow 使用函数对象捕获的 lexical `this` / `new.target`，method tail call
+字节码 arrow 与 QuickJS 一样在创建期把 lexical `this` / `new.target` 绑定为普通
+closure cells（函数对象 rare slots 只保留给内部/兼容路径），method tail call
 把 receiver 带入复用帧并经共享 `this` 装箱原语处理。仍走递归慢路径的 tail
 目标（深尾递归会增长 native 栈）包括：L0 帧（generator/eval 外壳）、
 class-constructor、跨 realm callee、async/generator target、native builtin，
@@ -224,28 +226,34 @@ payload (`realm`, `cproto`, `magic`, and function pointer).
 The zjs target mirrors that shape:
 
 - `core/host_function.zig` owns the neutral native-function ABI:
-  `NativeCProto`, QJS-style function-pointer variants, `InternalRecord`, and
-  the transitional `.zjs_internal_call` cproto.
-- `exec/builtin_dispatch.zig` is the native C-function dispatch bridge. Today it
-  still invokes legacy `InternalCall` records; domains migrate toward QJS-style
-  `NativeCProto` entries without adding a facade.
-- Long term, standard-global installation belongs in exec (the
-  `JS_AddIntrinsic*` equivalent). It should be a hand-written installer with
-  helpers analogous to `JS_SetPropertyFunctionList`, `JS_NewCFunction3`, and
-  `JS_NewCConstructor`, not a generic descriptor registry.
-- Domain function-list tables should live beside the implementation they point
-  at (`exec/*_ops.zig` or `libs/*` for pure algorithms). Method bodies are placed
-  by role: VM/property/call/coercion/iterator behavior stays in exec; pure
-  algorithms stay in core/libs.
-- `src/builtins/` is transitional migration debt: it currently hosts the
-  standard-global installer, per-domain tables, and many record bodies. It is
-  not a desired architecture layer, and it should disappear once the installer
-  and domain tables have moved into the engine.
+  `NativeCProto`, QJS-style function-pointer variants, and `InternalRecord`.
+  Construct capability is encoded by the cproto; records do not carry a second
+  generic call pointer or constructor flag.
+- `exec/builtin_dispatch.zig` is the typed native C-function dispatch bridge.
+  Realm/output/VM caller state is stack-local exec state; it is not part of the
+  core record ABI. Every standard native record dispatches through its
+  cproto-tagged function pointer, including the observable-coercion fallback
+  for numeric cprotos.
+- `exec/standard_globals.zig` owns the hand-written `JS_AddIntrinsic*`
+  equivalent: global constructors, prototypes, namespaces, descriptors, and
+  installation ordering. Constructor installation is an explicit ordered call
+  sequence rather than a generic `ConstructorSpec` registry. `configureRuntime`
+  is the setup interface for an existing runtime; core retains only a callback
+  Adapter so it does not depend on exec.
+- `exec/internal_builtins.zig` aggregates the compile-time record table for
+  every engine-owned standard-native domain, including Atomics, performance,
+  and every Promise static. Each domain function-list table lives beside
+  the implementation it points at (`exec/*_ops.zig`). VM/property/call/
+  coercion/iterator behavior stays in exec; pure algorithms stay in core/libs.
+  The `.host` domain remains deliberately separate: it represents embedder
+  helpers rather than standard native functions.
+- The former `src/builtins/` compatibility layer has been retired. The
+  architecture check rejects recreating it, and callers use the owning exec or
+  core Module directly.
 
-During the transition, `exec -> builtins` remains forbidden so the old directory
-cannot become an engine dependency. `builtins -> exec` is allowed because the old
-directory is acting as misplaced engine bootstrap/native-function code, not as a
-separate layer. `builtins -> bytecode/parser/runtime/cli` remains forbidden.
+The architecture check guards all three completed migration boundaries: the
+retired directory, the retired generic native-call ABI, and the retired generic
+constructor registry.
 
 `exec/call.zig`'s `HostFunction` enum is a separate mechanism: it dispatches
 embedder/runtime host helpers (`print` output, destructuring runtime helpers,

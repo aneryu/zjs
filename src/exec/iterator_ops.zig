@@ -14,6 +14,7 @@ const coercion_ops = @import("coercion_ops.zig");
 const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const property_ic = @import("property_ic.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -334,13 +335,13 @@ pub fn iteratorNext(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (stack.values.len < 4) return error.StackUnderflow;
+    if (stack.len() < 4) return error.StackUnderflow;
 
-    const iterator_value = stack.values[stack.values.len - 4].dup();
+    const iterator_value = stack.values[stack.len() - 4].dup();
     defer iterator_value.free(ctx.runtime);
-    const next_method = stack.values[stack.values.len - 3].dup();
+    const next_method = stack.values[stack.len() - 3].dup();
     defer next_method.free(ctx.runtime);
-    const arg_value = stack.values[stack.values.len - 1].dup();
+    const arg_value = stack.values[stack.len() - 1].dup();
     defer arg_value.free(ctx.runtime);
 
     const result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{arg_value}, function, frame);
@@ -399,9 +400,9 @@ pub fn forAwaitOfNext(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (stack.values.len < 3) return error.StackUnderflow;
-    const record_index = stack.values.len - 3;
-    const marker_index = stack.values.len - 1;
+    if (stack.len() < 3) return error.StackUnderflow;
+    const record_index = stack.len() - 3;
+    const marker_index = stack.len() - 1;
     const iterator_value = stack.values[record_index].dup();
     defer iterator_value.free(ctx.runtime);
     const next_method = stack.values[record_index + 1].dup();
@@ -441,7 +442,7 @@ pub fn iteratorGetValueDone(
     frame: *frame_mod.Frame,
 ) !void {
     try stack.reserveAdditional(1);
-    if (stack.values.len < 2) return error.StackUnderflow;
+    if (stack.len() < 2) return error.StackUnderflow;
     const object_value = try stack.pop();
     defer object_value.free(ctx.runtime);
     _ = try property_ops.expectObject(object_value);
@@ -455,7 +456,7 @@ pub fn iteratorGetValueDone(
     const value = try object_ops.getValueProperty(ctx, output, global, object_value, value_key, function, frame);
     errdefer value.free(ctx.runtime);
 
-    const marker_index = stack.values.len - 1;
+    const marker_index = stack.len() - 1;
     const old_marker = stack.values[marker_index];
     stack.values[marker_index] = core.JSValue.int32(for_await_record_marker);
     old_marker.free(ctx.runtime);
@@ -491,11 +492,11 @@ pub fn iteratorCall(
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const flags = function.code[frame.pc];
     frame.pc += 1;
-    if (stack.values.len < 4) return error.StackUnderflow;
+    if (stack.len() < 4) return error.StackUnderflow;
 
-    const iterator_value = stack.values[stack.values.len - 4].dup();
+    const iterator_value = stack.values[stack.len() - 4].dup();
     defer iterator_value.free(ctx.runtime);
-    const arg_value = stack.values[stack.values.len - 1].dup();
+    const arg_value = stack.values[stack.len() - 1].dup();
     defer arg_value.free(ctx.runtime);
 
     const atom_name: []const u8 = if ((flags & 1) != 0) "throw" else "return";
@@ -548,8 +549,8 @@ pub fn forOfNext(
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const depth = function.code[frame.pc];
     frame.pc += 1;
-    const iterator_index = if (stack.values.len >= @as(usize, depth) + 3)
-        stack.values.len - @as(usize, depth) - 3
+    const iterator_index = if (stack.len() >= @as(usize, depth) + 3)
+        stack.len() - @as(usize, depth) - 3
     else
         try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
@@ -563,7 +564,7 @@ pub fn forOfNext(
         value = core.JSValue.undefinedValue();
         done = true;
     } else {
-        if (iterator_index + 1 >= stack.values.len) return error.StackUnderflow;
+        if (iterator_index + 1 >= stack.len()) return error.StackUnderflow;
         const next_method = stack.values[iterator_index + 1].dup();
         defer next_method.free(ctx.runtime);
         const step = try iteratorStepWithNext(ctx, output, global, iterator_value, next_method, function, frame);
@@ -583,8 +584,106 @@ pub fn forOfNext(
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done));
 }
 
+/// Finish generic `for_of_next` after a bytecode `next()` method returned in
+/// the current Machine. The caller stack was deliberately left untouched
+/// while the moved method frame ran, so the bytecode depth operand identifies
+/// the same iterator record it identified before the call. `next_result` is
+/// owned by this function on every path.
+pub fn finishForOfNextResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    depth: u8,
+    next_result: core.JSValue,
+) !void {
+    defer next_result.free(ctx.runtime);
+    const iterator_index = if (stack.len() >= @as(usize, depth) + 3)
+        stack.len() - @as(usize, depth) - 3
+    else
+        try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
+
+    const next_object = objectFromValue(next_result) orelse return error.TypeError;
+    const done_value = try iteratorResultProperty(
+        ctx,
+        output,
+        global,
+        next_object,
+        next_result,
+        core.atom.ids.done,
+        function,
+        frame,
+    );
+    defer done_value.free(ctx.runtime);
+
+    const done = coercion_ops.valueTruthy(done_value);
+    const value = if (done)
+        core.JSValue.undefinedValue()
+    else
+        try iteratorResultProperty(
+            ctx,
+            output,
+            global,
+            next_object,
+            next_result,
+            core.atom.ids.value,
+            function,
+            frame,
+        );
+    errdefer value.free(ctx.runtime);
+
+    // Normal bytecode frames reserve `stack_size + 1` at entry, so the two
+    // for-of outputs fit without another call through the generic growth
+    // path. Keep the checked fallback for synthetic/malformed bytecode and
+    // any cold heap-backed frame whose capacity invariant is weaker.
+    if (stack.len() > stack.capacity or stack.capacity - stack.len() < 2) {
+        try stack.reserveAdditional(2);
+    }
+    if (done) {
+        const old_iterator = stack.values[iterator_index];
+        stack.values[iterator_index] = core.JSValue.undefinedValue();
+        old_iterator.free(ctx.runtime);
+    }
+    stack.pushOwnedAssumeCapacity(value);
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done));
+}
+
+/// qjs's `JS_IteratorNext2` reads `done`/`value` through the ordinary property
+/// walker before falling into observable accessor/Proxy/exotic machinery. Use
+/// the same split here: the fast probe walks ordinary shapes/prototypes and
+/// returns a borrowed data value (or undefined for a true miss); every
+/// observable action still delegates to the authoritative resolver.
+inline fn iteratorResultProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+) !core.JSValue {
+    // Iterator-result objects overwhelmingly expose own `done`/`value` data
+    // slots. Probe that exact qjs shape leg before paying the generic ordinary
+    // prototype walk; accessors, var refs, auto-init and exotic receivers all
+    // return null and retain the fallback below.
+    if (object.proxyTarget() == null and !object.hasExoticMethods()) {
+        var slow_property = false;
+        if (object.findOwnDataValueFast(atom_id, &slow_property)) |borrowed| return borrowed.dup();
+        if (slow_property) {
+            return object_ops.getValueProperty(ctx, output, global, receiver, atom_id, function, frame);
+        }
+    }
+    if (property_ic.ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |borrowed| {
+        return borrowed.dup();
+    }
+    return object_ops.getValueProperty(ctx, output, global, receiver, atom_id, function, frame);
+}
+
 fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize) !bool {
-    if (iterator_index + 1 >= stack.values.len) return false;
+    if (iterator_index + 1 >= stack.len()) return false;
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.array_iterator) return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
@@ -603,7 +702,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
         return true;
     };
     const target = objectFromValue(target_value) orelse return false;
-    if (!target.flags.is_array or target.hasExoticMethods() or target.proxyTarget() != null) return false;
+    if (!target.isArray() or target.hasExoticMethods() or target.proxyTarget() != null) return false;
 
     const index = iterator.iteratorIndexSlot().*;
     const length: usize = @intCast(target.arrayLength());
@@ -653,14 +752,14 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
 /// GC during reserveAdditional — plus the `key_value` (entries) kind, which builds
 /// a dense `[k,v]` pair array (`buildCollectionEntryPair`) right here.
 fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize) !bool {
-    if (iterator_index + 1 >= stack.values.len) return false;
+    if (iterator_index + 1 >= stack.len()) return false;
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return false;
     const kind = iterator.iteratorKindSlot().*;
     // key=1, value=2, key_value=3 (entries -> [k,v] pair). Anything else falls through.
     if (kind != 1 and kind != 2 and kind != 3) return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
-    const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return false;
+    const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionId()) orelse return false;
     if (ref.domain != .collection or ref.id != @intFromEnum(method_ids.collection.PrototypeMethod.iterator_next)) return false;
 
     const target_value = (iterator.iteratorTargetSlot().*) orelse return try finishMapSetForOfDone(ctx, stack, iterator_index, false);
@@ -708,7 +807,7 @@ fn fastGeneratorForOfNext(
     stack: *stack_mod.Stack,
     iterator_index: usize,
 ) !bool {
-    if (iterator_index + 1 >= stack.values.len) return false;
+    if (iterator_index + 1 >= stack.len()) return false;
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.generator) return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
@@ -1016,7 +1115,13 @@ pub fn arrayIteratorPrototypeFromContext(
 
     const object = try qjsIteratorPrototype(ctx.runtime, global, "Array Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try builtin_glue.defineNativeDataMethod(ctx.runtime, object, "next", 0);
+    try builtin_glue.defineNativeDataMethodWithNativeId(
+        ctx.runtime,
+        object,
+        "next",
+        0,
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(method_ids.iterator.IntrinsicMethod.array_iterator_next)),
+    );
     const next_atom = core.atom.predefinedId("next", .string) orelse return error.TypeError;
     const next_value = object.getProperty(next_atom);
     defer next_value.free(ctx.runtime);
@@ -1090,7 +1195,7 @@ pub fn arrayIteratorNext(
         if (try core.object.typedArrayDetached(target)) return error.TypeError;
         if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
         break :blk core.object.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
-    } else if (target.flags.is_array) target.arrayLength() else blk: {
+    } else if (target.isArray()) target.arrayLength() else blk: {
         const length_value = try object_ops.getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
         break :blk @min(try coercion_ops.toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
@@ -2724,7 +2829,6 @@ fn qjsIteratorZipHelperNext(
         try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global))
     else blk: {
         const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        object.flags.null_prototype = true;
         break :blk object;
     };
     const results_value = results.value();

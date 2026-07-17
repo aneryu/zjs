@@ -10,6 +10,7 @@ pub const subsystem_name = "exec";
 pub const zjs_vm = @import("zjs_vm.zig");
 pub const frame = @import("frame.zig");
 pub const stack = @import("stack.zig");
+pub const inline_calls = @import("inline_calls.zig");
 pub const call = @import("call.zig");
 pub const construct = @import("construct.zig");
 pub const property_ops = @import("property_ops.zig");
@@ -52,6 +53,7 @@ pub const promise_ops = @import("promise_ops.zig");
 pub const typed_array_construct = @import("typed_array_construct.zig");
 pub const buffer_ops = @import("buffer_ops.zig");
 pub const atomics_ops = @import("atomics_ops.zig");
+pub const standard_globals = @import("standard_globals.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);

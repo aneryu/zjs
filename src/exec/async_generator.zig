@@ -37,7 +37,6 @@ const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const vm_gen_async = @import("vm_gen_async.zig");
 
 const HostError = exceptions.HostError;
 const AsyncGeneratorRequest = core.object.AsyncGeneratorRequest;
@@ -178,34 +177,7 @@ fn resolveHead(
 fn complete(ctx: *core.JSContext, gen: *core.Object) void {
     if (state(gen) == .completed) return;
     setState(gen, .completed);
-    gen.generatorDoneSlot().* = true;
-    gen.generatorJustYieldedSlot().* = false;
-    gen.generatorResumeCompletionTypeSlot().* = 0;
-    gen.generatorYieldStarSuspendedSlot().* = false;
-    gen.clearOptionalValueSlot(ctx.runtime, gen.generatorYieldStarIteratorSlot());
-    freeSavedExecutionState(ctx.runtime, gen);
-}
-
-fn freeSavedExecutionState(rt: *core.JSRuntime, gen: *core.Object) void {
-    const stack_values = gen.generatorStack();
-    const capacity = gen.generatorStackCapacity();
-    for (stack_values) |stored| stored.free(rt);
-    if (capacity != 0) {
-        rt.memory.free(core.JSValue, stack_values.ptr[0..capacity]);
-    } else if (stack_values.len != 0) {
-        rt.memory.free(core.JSValue, stack_values);
-    }
-    gen.generatorStackSlot().* = &.{};
-    gen.generatorStackCapacitySlot().* = 0;
-    const storage = gen.generatorFrameStorage();
-    const locals = gen.generatorFrameLocals();
-    const frame_args = gen.generatorFrameArgs();
-    const var_refs = gen.generatorFrameVarRefs();
-    gen.generatorFrameStorageSlot().* = &.{};
-    gen.generatorFrameLocalsSlot().* = &.{};
-    gen.generatorFrameArgsSlot().* = &.{};
-    gen.generatorFrameVarRefsSlot().* = &.{};
-    vm_gen_async.freeGeneratorFrameStorage(rt, storage, locals, frame_args, var_refs);
+    gen.completeGeneratorExecution(ctx.runtime);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +280,7 @@ fn resumeBodyValue(
     resume_value: ?core.JSValue,
     stop_before_pc: ?usize,
 ) HostError!core.JSValue {
-    const function_value = gen.functionBytecode() orelse return error.TypeError;
+    const function_value = gen.generatorFunctionBytecode() orelse return error.TypeError;
     const stored_current = if (gen.generatorCurrentFunction()) |value| value.dup() else null;
     defer if (stored_current) |value| value.free(ctx.runtime);
     const current_function_value = stored_current orelse gen.value();
@@ -320,7 +292,7 @@ fn resumeBodyValue(
         current_function_value,
         gen.generatorThis() orelse core.JSValue.undefinedValue(),
         gen.generatorArgs(),
-        gen.functionCapturesSlot().*,
+        gen.generatorCaptures(),
         output,
         global,
         false,
@@ -475,7 +447,7 @@ fn runReturnCompletion(
     const rt = ctx.runtime;
     // A fresh return replaces any pending return completion stashed earlier.
     if (call_runtime.takeGeneratorPendingReturn(gen)) |p| p.value.free(rt);
-    const function_value = gen.functionBytecode() orelse return error.TypeError;
+    const function_value = gen.generatorFunctionBytecode() orelse return error.TypeError;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
     if (gen.generatorPc() != 0 and gen.generatorStarted()) {
         if (call_runtime.findGeneratorReturnFinallyTarget(fb, @intCast(gen.generatorPc()))) |finally_range| {

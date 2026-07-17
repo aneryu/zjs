@@ -234,7 +234,7 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
         fb.cpool[0] = captured_obj.value().dup();
         fb.cpool_count = 1;
 
-        function.functionBytecodeSlot().* = core.JSValue.functionBytecode(&fb.header);
+        try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
         function_slot.* = function;
         captured_slot.* = captured_obj;
     }

@@ -10,7 +10,6 @@ const object_ops = @import("object_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 /// Pure ASCII -> f64 parse primitives now live in `core/number.zig`; re-export
 /// them here so the existing install/dispatch path keeps a single import
@@ -52,25 +51,43 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
 /// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    .{ .name = "parseInt", .length = 2, .id = @intFromEnum(StaticMethod.parse_int), .magic = @intFromEnum(StaticMethod.parse_int), .prepared_call_ok = true, .call = &numberCall },
-    .{ .name = "parseFloat", .length = 1, .id = @intFromEnum(StaticMethod.parse_float), .magic = @intFromEnum(StaticMethod.parse_float), .prepared_call_ok = true, .call = &numberCall },
-    .{ .name = "isNaN", .length = 1, .id = @intFromEnum(StaticMethod.is_nan), .magic = @intFromEnum(StaticMethod.is_nan), .call = &numberCall },
-    .{ .name = "isFinite", .length = 1, .id = @intFromEnum(StaticMethod.is_finite), .magic = @intFromEnum(StaticMethod.is_finite), .call = &numberCall },
-    .{ .name = "isInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_integer), .magic = @intFromEnum(StaticMethod.is_integer), .call = &numberCall },
-    .{ .name = "isSafeInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_safe_integer), .magic = @intFromEnum(StaticMethod.is_safe_integer), .call = &numberCall },
-    .{ .name = "toString", .length = 1, .id = @intFromEnum(PrototypeMethod.to_string), .magic = @intFromEnum(PrototypeMethod.to_string), .call = &numberCall },
-    .{ .name = "toLocaleString", .length = 0, .id = @intFromEnum(PrototypeMethod.to_locale_string), .magic = @intFromEnum(PrototypeMethod.to_locale_string), .call = &numberCall },
-    .{ .name = "toFixed", .length = 1, .id = @intFromEnum(PrototypeMethod.to_fixed), .magic = @intFromEnum(PrototypeMethod.to_fixed), .call = &numberCall },
-    .{ .name = "toExponential", .length = 1, .id = @intFromEnum(PrototypeMethod.to_exponential), .magic = @intFromEnum(PrototypeMethod.to_exponential), .call = &numberCall },
-    .{ .name = "toPrecision", .length = 1, .id = @intFromEnum(PrototypeMethod.to_precision), .magic = @intFromEnum(PrototypeMethod.to_precision), .call = &numberCall },
+    numberEntry("parseInt", 2, @intFromEnum(StaticMethod.parse_int), true),
+    numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float), true),
+    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan), false),
+    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite), false),
+    numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer), false),
+    numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer), false),
+    numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string), false),
+    numberEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string), false),
+    numberEntry("toFixed", 1, @intFromEnum(PrototypeMethod.to_fixed), false),
+    numberEntry("toExponential", 1, @intFromEnum(PrototypeMethod.to_exponential), false),
+    numberEntry("toPrecision", 1, @intFromEnum(PrototypeMethod.to_precision), false),
 };
+
+fn numberEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = prepared,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&numberCall),
+    };
+}
 
 /// Shared record handler for the `.number` domain. Replicates the legacy
 /// `callNumberNativeFunctionRecord` dispatch verbatim: realm parse/predicate
 /// and prototype methods take the VM-coercing exec ops, the bare-runtime
 /// `parse*` fall back to the primitive-only path, and the integer predicates
 /// stay self-contained.
-fn numberCall(host_call: InternalCall) HostError!core.JSValue {
+fn numberCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const id: u32 = host_call.magic;
     const args = host_call.args;

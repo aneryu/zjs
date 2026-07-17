@@ -13,6 +13,7 @@ const class_init_ops = @import("class_init_ops.zig");
 const inline_calls = @import("inline_calls.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -122,10 +123,9 @@ pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const by
     const count = @min(function.vardefs.len, frame.locals.len);
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (!value_ops.atomNameEql(ctx.runtime, vd.var_name, "this")) continue;
-        const this_cell = try slot_ops.ensureVarRefCell(ctx, &frame.this_value);
-        const old_value = frame.locals[idx];
-        frame.locals[idx] = this_cell;
-        old_value.free(ctx.runtime);
+        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], slot_ops.adapterValueBorrow(frame.this_value));
+        const this_cell = try frame.captureLocal(ctx.runtime, idx);
+        value_slot.replaceOwned(ctx.runtime, &frame.this_value, this_cell.valueRef());
         return;
     }
 }
@@ -154,9 +154,6 @@ pub inline fn initFrameLocals(
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    if (function.flags.is_derived_class_constructor) {
-        try linkDerivedConstructorThisLocal(ctx, function, frame);
-    }
     storage_transferred = true;
 }
 
@@ -407,8 +404,8 @@ pub noinline fn callMethod(
     // `resolveInlineTarget`, so this never shadows the super-constructor path.
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
-        if (stack.values.len >= total) {
-            const region_base = stack.values.len - total;
+        if (stack.len() >= total) {
+            const region_base = stack.len() - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
@@ -423,8 +420,8 @@ pub noinline fn callMethod(
     // on the stack (rooting obj/func/args for the whole call), and is popped and
     // released only after the call completes.
     const total: usize = @as(usize, argc) + 2;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
@@ -494,8 +491,8 @@ pub noinline fn tailCallMethod(
     // through to the fast native dispatch below.
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
-        if (stack.values.len >= total) {
-            const region_base = stack.values.len - total;
+        if (stack.len() >= total) {
+            const region_base = stack.len() - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
@@ -510,8 +507,8 @@ pub noinline fn tailCallMethod(
     // on the stack (rooting obj/func/args for the whole call), and is popped and
     // released only after the call completes.
     const total: usize = @as(usize, argc) + 2;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
@@ -552,10 +549,10 @@ inline fn fastNativeMethodCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     // QuickJS uniform dispatch: the `call_method` opcode hot
-    // path routes through the same builtins-owned internal record table the slow
+    // path routes through the same exec-owned internal record table the general
     // record dispatch (`call.zig:callNativeFunctionRecord`) and the plain-call
     // VM fast path (`call_runtime.callNativeBuiltinRecordForVm`) use, so exec
-    // carries zero compile-time knowledge of the migrated builtins. The retired
+    // carries zero compile-time knowledge of individual native domains. The retired
     // per-domain hot subset (math min/max primitives, the URI string fast path,
     // Number.parse{Int,Float}, String.fromCharCode / substring primitive, the
     // Array prototype hub, the collection / regexp / JSON record glue) is gone:
@@ -579,9 +576,9 @@ inline fn fastNativeMethodCall(
     // A table MISS returns null so the caller falls through to the array
     // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
     // name-based TypedArray slice/subarray path that has no native-builtin id)
-    // and then the generic value/bytecode dispatch — the same fall-through the
-    // non-table domains (`.atomics` / `.performance` / `.host`) and the
-    // still-unmigrated Promise record ids already relied on.
+    // and then the generic value/bytecode dispatch. Among encoded native
+    // domains, only the separate host mechanism intentionally has no standard
+    // record table.
     const function_object = property_ops.expectObject(func) catch return null;
     // This is specifically the native c_function fast path. Bytecode functions
     // use the same FunctionPayload kind, but qjs discriminates their overlaid
@@ -598,7 +595,7 @@ inline fn fastNativeMethodCall(
     // identical across runtimes, never dangles, so the memo can never go stale.
     // A MISS falls through to null exactly as the pre-memo decode/probe did.
     const rec = function_object.nativeRecord() orelse blk: {
-        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+        const nref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
         const r = ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(nref.domain)), nref.id) orelse return null;
         function_object.nativeRecordSlot().* = r;
         break :blk r;
@@ -669,6 +666,26 @@ pub noinline fn apply(
         return err;
     };
     if (is_new != 0) {
+        // super(...spread) parity with op.call_constructor: brand the derived
+        // instance with the class's private methods before the class-fields
+        // init closure reads `this.#m` (mirrors vm_call.constructor's install;
+        // `allow_class_constructor_call` is exactly isCurrentSuperConstructor).
+        if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
+            if (object_ops.functionObjectFromValue(frame.current_function)) |function_object| {
+                if (function_object.functionHomeObject()) |home_object| {
+                    const instance_object = property_ops.expectObject(result) catch |err| {
+                        result.free(ctx.runtime);
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        return err;
+                    };
+                    class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
+                        result.free(ctx.runtime);
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        return err;
+                    };
+                }
+            }
+        }
         stack.pushOwned(result) catch |err| {
             result.free(ctx.runtime);
             return err;
@@ -677,9 +694,9 @@ pub noinline fn apply(
     }
     defer result.free(ctx.runtime);
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
-        if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
+        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
+            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -688,7 +705,7 @@ pub noinline fn apply(
             if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
-        try collection_vm.pushSlotValue(stack, frame.this_value);
+        try collection_vm.pushAdapterValue(stack, frame.this_value);
         return .done;
     } else if (is_arrow_super_constructor) {
         if (arrow_super_this) |this_value_for_arrow| {
@@ -753,7 +770,7 @@ pub noinline fn constructor(
     errdefer result.free(ctx.runtime);
     if (frame.function.flags.is_derived_class_constructor and class_init_ops.isCurrentSuperConstructor(ctx, frame, func)) {
         if (object_ops.functionObjectFromValue(frame.current_function)) |function_object| {
-            if (function_object.functionHomeObjectSlot().*) |home_object| {
+            if (function_object.functionHomeObject()) |home_object| {
                 const instance_object = try property_ops.expectObject(result);
                 class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
                     if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -767,7 +784,7 @@ pub noinline fn constructor(
 }
 
 pub fn checkCtor(frame: *frame_mod.Frame) !void {
-    if (frame.new_target.isUndefined()) return error.TypeError;
+    if (frame.newTargetValue().isUndefined()) return error.TypeError;
 }
 
 pub noinline fn checkCtorVm(
@@ -818,7 +835,7 @@ pub fn initCtor(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.new_target.isUndefined()) return error.TypeError;
+    if (frame.newTargetValue().isUndefined()) return error.TypeError;
     const function_object = try property_ops.expectObject(frame.current_function);
     const super = function_object.functionSuperConstructor() orelse return error.TypeError;
     const original_args = frame.originalArgs();
@@ -826,9 +843,9 @@ pub fn initCtor(
         original_args[0..@min(frame.actual_arg_count, original_args.len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
-    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.new_target);
+    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.newTargetValue());
     errdefer result.free(ctx.runtime);
-    if (function_object.functionHomeObjectSlot().*) |home_object| {
+    if (function_object.functionHomeObject()) |home_object| {
         const instance_object = try property_ops.expectObject(result);
         try class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);
     }

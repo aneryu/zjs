@@ -9,6 +9,7 @@ const call_runtime = @import("call_runtime.zig");
 const call_mod = @import("call.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -174,15 +175,15 @@ fn decodeArgGet(code: []const u8, pc: usize) ?ArgGet {
 
 pub fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool) ?core.JSValue {
     if (idx >= frame.locals.len) return null;
-    if (checked and slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) return null;
-    const value = slotValueBorrowed(frame.locals[idx]);
+    if (checked and frame.locals[idx].isUninitialized()) return null;
+    const value = frame.locals[idx];
     if (value.isUninitialized()) return null;
     return value;
 }
 
 fn argReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.args.len) return null;
-    return slotValueBorrowed(frame.args[idx]);
+    return frame.args[idx];
 }
 
 pub fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
@@ -212,7 +213,6 @@ pub fn localCompletionPutWritableForFastPath(function: *const bytecode.Bytecode,
     if (put.idx >= frame.locals.len) return false;
     if (put.checked) return false;
     if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_lexical) return false;
-    if (varRefCellFromValue(frame.locals[put.idx]) != null) return false;
     if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_const) return false;
     return true;
 }
@@ -302,7 +302,7 @@ pub fn loopLimitReadableInt32(frame: *const frame_mod.Frame, limit: LoopLimitGet
         .binding => |binding| bindingReadableBorrowed(frame, binding) orelse return null,
         .arg => |idx| blk: {
             if (idx >= frame.args.len) return null;
-            break :blk slotValueBorrowed(frame.args[idx]);
+            break :blk frame.args[idx];
         },
     };
     if (value.isUninitialized()) return null;
@@ -330,7 +330,7 @@ pub fn bindingStoreWritableForFastPath(
     }
     if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
-        if (slot_ops.varRefSlotIsUninitialized(frame.locals[binding.idx])) return false;
+        if (frame.locals[binding.idx].isUninitialized()) return false;
         if (binding.idx < function.vardefs.len and function.vardefs[binding.idx].is_const) return false;
     }
     return true;
@@ -343,9 +343,9 @@ pub fn storeBindingOwnedValue(
     value: core.JSValue,
 ) !void {
     if (binding.is_var_ref) {
-        try slot_ops.setVarRefSlotValue(ctx, frame, binding.idx, value);
+        slot_ops.replaceVarRefValueOwned(ctx, frame, binding.idx, value);
     } else {
-        try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], value);
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[binding.idx], value);
     }
 }
 
@@ -356,7 +356,7 @@ pub fn storeLocalCompletionBorrowedValue(
     value: core.JSValue,
 ) !void {
     if (completion_put) |completion| {
-        try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
+        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[completion.idx], value);
     }
 }
 
@@ -475,7 +475,7 @@ pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSV
     // its target instead of nesting).
     const cell = slot_ops.varRefSlotCell(frame, idx);
     // Deleted binding = cell parked at UNINITIALIZED; the check below covers it.
-    const value = slotValueBorrowed(cell.valueRef());
+    const value = cell.varRefValue();
     if (value.isUninitialized()) return null;
     return value;
 }
@@ -502,12 +502,6 @@ pub fn varRefStoreWritableForFastPath(
     // Deleted binding = cell parked at UNINITIALIZED; covered below.
     const stored = cell.varRefValue();
     return !stored.isUninitialized();
-}
-
-pub fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
-    // Terminal-state invariant: a cell's VALUE is never itself a cell (see
-    // slot_ops.slotValueBorrow) — one unwrap reaches the plain value.
-    return slot_ops.slotValueBorrow(slot);
 }
 
 pub const DecodedImmediateInt32 = struct {
@@ -879,7 +873,7 @@ pub fn decodeStringSliceConstLocalStore(
 
     const store = decodeLocalPut(code, call_pc + 3) orelse return null;
     if (store.idx >= frame.locals.len) return null;
-    if (slot_ops.varRefSlotIsUninitialized(frame.locals[store.idx])) return null;
+    if (frame.locals[store.idx].isUninitialized()) return null;
     if (store.idx < function.vardefs.len and function.vardefs[store.idx].is_const) return null;
 
     const input_len = string_value.len();
@@ -908,7 +902,7 @@ pub fn storeStringSliceConstLocal(
     var result_owned = true;
     errdefer if (result_owned) result.free(ctx.runtime);
 
-    try slot_ops.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
+    value_slot.replaceOwned(ctx.runtime, &frame.locals[decoded.store.idx], result);
     result_owned = false;
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
 }
@@ -951,7 +945,7 @@ pub const NumberStaticLiteralResult = struct {
 
 pub fn isHostOutputFunctionValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
-    return object.hostFunctionKindSlot().* == core.host_function.ids.output or
+    return object.hostFunctionKind() == core.host_function.ids.output or
         call_mod.isOutputExternalHostFunction(rt, object);
 }
 
@@ -1012,7 +1006,7 @@ pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const b
 fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
     if (function.varRefNamesLen() != 0 or frame.var_refs.len != 0) return true;
     const function_object = objectFromValue(frame.current_function) orelse return false;
-    if (function_object.functionCapturesSlot().*.len != 0) return true;
+    if (function_object.functionCaptures().len != 0) return true;
     return false;
 }
 
@@ -1051,7 +1045,7 @@ pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const f
 pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
     if (array_object.proxyTarget() != null or array_object.hasExoticMethods()) return null;
-    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return null;
+    if (!array_object.isArray() or array_object.arrayElementStorageMode() != .dense) return null;
     if (modulus > @as(usize, @intCast(array_object.arrayLength()))) return null;
     const elements = array_object.arrayElements();
     if (modulus > elements.len) return null;
@@ -1091,7 +1085,7 @@ fn nativeBuiltinIdMatches(native_builtin_id: i32, domain: core.function.NativeBu
 
 fn nativeBuiltinFunctionValueMatches(value: core.JSValue, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
     const function_object = objectFromValue(value) orelse return false;
-    return nativeBuiltinIdMatches(function_object.nativeFunctionIdSlot().*, domain, expected_id);
+    return nativeBuiltinIdMatches(function_object.nativeFunctionId(), domain, expected_id);
 }
 
 fn autoInitNativeBuiltinMatches(info: core.property.AutoInit, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
@@ -1100,7 +1094,7 @@ fn autoInitNativeBuiltinMatches(info: core.property.AutoInit, domain: core.funct
 
 fn nativeBuiltinFunctionValueMatchesCollectionOwner(value: core.JSValue, expected_id: u32, owner_class: core.ClassId) bool {
     const function_object = objectFromValue(value) orelse return false;
-    if (!nativeBuiltinIdMatches(function_object.nativeFunctionIdSlot().*, .collection, expected_id)) return false;
+    if (!nativeBuiltinIdMatches(function_object.nativeFunctionId(), .collection, expected_id)) return false;
     return function_object.collectionMethodOwnerClass() == owner_class;
 }
 
@@ -1157,7 +1151,7 @@ pub fn fastCollectionPrototypeMethodIsDefault(value: core.JSValue, atom_id: core
 
 pub fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     const object = objectFromValue(value) orelse return false;
-    if (!object.flags.is_array or object.hasOwnProperty(atom_id)) return false;
+    if (!object.isArray() or object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .array, expected_id);
 }
@@ -1210,10 +1204,6 @@ pub fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
-}
-
-fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
-    return core.VarRef.fromValue(value);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

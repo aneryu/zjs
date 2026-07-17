@@ -1,8 +1,8 @@
 # Call-machinery faithful frontier — current state & conclusion
 
 > **Single source of truth** for where zjs's call/dispatch alignment to QuickJS stands.
-> Updated 2026-07-04: method-A first tranche LANDED (`952592f` + `f3a517d`) — see §0. Previous
-> update 2026-06-29 after the route-2 de-risk experiment. This doc consolidates and replaces a
+> Updated 2026-07-15: the same-Machine internal for-of callback and its result/setup refinements are in §7. Method-A's
+> first tranche landed 2026-07-04 (`952592f` + `f3a517d`) — see §0. This doc consolidates and replaces a
 > cluster of now-historical plan/investigation/handover docs (DISPATCH-TAX-FINDINGS,
 > TAILCALL-DISPATCH-ONESHOT-BLUEPRINT, FRAME-MODEL-ONESHOT-BLUEPRINT, FRAME-RAW-SP-BLUEPRINT,
 > FRAME-STRUCTURAL-ALIGN, COLLAPSE-CALL-MACHINERY-BLUEPRINT, HANDOVER-call-dispatch-align,
@@ -154,7 +154,7 @@
   work already matching qjs. Future effort must go to the big handlers
   (op_call 17-24% / op_return 20% — restructuring, not micro-tightening) or
   Step-4, NOT back to these three.** Codex mechanics for the record: `codex
-  exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
+exec --dangerously-bypass-approvals-and-sandbox -C <worktree>` works
   headless under ChatGPT auth; `-o <file>` did NOT reliably capture the last
   message (read the stdout tail instead); the wrapper's independent
   build+smoke+diff-review is the source of truth (codex's self-report is
@@ -178,14 +178,14 @@
   frame ~80-150 B vs the old monolithic 3504 B. **Do not touch the dispatch mechanism.**
 - **The single-function / labeled-switch rewrite is UNNECESSARY — proven (route-2, §3).** At full
   224-arm scale a labeled-switch (116 insn/call) and tail-call (112 insn/call) fib are within 4% and
-  both ~0.30× qjs. The dispatch *mechanism* is not the lever. The old POC's 0.32× win is overwhelmingly
+  both ~0.30× qjs. The dispatch _mechanism_ is not the lever. The old POC's 0.32× win is overwhelmingly
   "the toy skips real per-call work" (refcount dup/free, frame setup, shape/GC), not architecture.
 - **The lever for the remaining fib gap (~2.66× qjs) is aggressive method-A:** collapse the call-path
   function decomposition and strip the per-call bookkeeping qjs doesn't have — **keeping tail-call
   dispatch**. Low risk, incremental, gate-able.
 - **Native recursion (the other half of "axis ②") is UNPROVEN and risky.** `Path B` (native recursion
-  + real per-call work) *regressed* to 6.04× on deep fib. Treat it as a separate, later, real-work-modeled
-  experiment — NOT bundled into a "collapse" rewrite.
+    - real per-call work) _regressed_ to 6.04× on deep fib. Treat it as a separate, later, real-work-modeled
+      experiment — NOT bundled into a "collapse" rewrite.
 
 ## 1. What has landed (current state)
 
@@ -204,7 +204,7 @@
 
 1. **Aggressive method-A — collapse the call path (low risk, keep tail-call).** Merge the ~9 incidental
    frame-setup functions (`pushCall→pushFrame→acquireSlot→{Frame.init, FrameSlab.carve, initArenaWindow,
-   initFrameLocals, initArgumentsBorrowedSlots}`) toward a straight-line sequence like qjs's
+initFrameLocals, initArgumentsBorrowedSlots}`) toward a straight-line sequence like qjs's
    `JS_CallInternal` prologue, and strip per-call bookkeeping qjs lacks (Entry pool, profile guard, eval
    checks, arena mark on the simple frame). Each step gate-able; expect single-digit-% wins (diminishing).
 2. **Native recursion** — open, unproven, correctness-bearing (see §6). Not recommended without a
@@ -214,18 +214,20 @@
 
 Question: does the 30-line POC's `0.28-0.32× qjs` (single-function labeled-switch + native recursion)
 survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Harness: `/tmp/gen_fib.py`
-+ `/tmp/run_sweep.sh` (parameterized fib interpreter, opaque-call padding arms, `taskset -c 8`, fib(30)×3
-= 8,077,611 calls). Reproduced the POC exactly (9 arms = 107.6 = the old 107.5).
 
-| dispatch | arms | insn/call | vs qjs (389) | table base (objdump) |
-|---|---|---|---|---|
-| labeled-switch | 9 (POC) | 107.6 | 0.28× | resident |
-| labeled-switch | 96 | 116.1 | 0.30× | resident (adrp=2) |
-| labeled-switch | **224** | 116.1 | **0.30×** | **resident — 2-insn dispatch** |
-| tail-call | 224 | 111.6 | 0.29× | resident |
-| current zjs (real work) | — | ~1036 | 2.66× | — |
+- `/tmp/run_sweep.sh` (parameterized fib interpreter, opaque-call padding arms, `taskset -c 8`, fib(30)×3
+  = 8,077,611 calls). Reproduced the POC exactly (9 arms = 107.6 = the old 107.5).
+
+| dispatch                | arms    | insn/call | vs qjs (389) | table base (objdump)           |
+| ----------------------- | ------- | --------- | ------------ | ------------------------------ |
+| labeled-switch          | 9 (POC) | 107.6     | 0.28×        | resident                       |
+| labeled-switch          | 96      | 116.1     | 0.30×        | resident (adrp=2)              |
+| labeled-switch          | **224** | 116.1     | **0.30×**    | **resident — 2-insn dispatch** |
+| tail-call               | 224     | 111.6     | 0.29×        | resident                       |
+| current zjs (real work) | —       | ~1036     | 2.66×        | —                              |
 
 **Conclusions:**
+
 - **Dispatch mechanism doesn't move the needle** (ls 116 ≈ tc 112 at 224 arms) → the single-function
   rewrite buys nothing the current tail-call doesn't already have. B is dominated.
 - **Corrects `DISPATCH-TAX-FINDINGS`:** that doc claimed "arm count is the determining variable" for
@@ -235,25 +237,25 @@ survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Ha
   alone does not evict** (consistent with the doc's own earlier two-condition root cause: arms-call AND
   carrier-saturation, both required).
 - **The POC's win is toy-leanness, not architecture.** The toy omits 16 B JSValue refcount dup/free, frame
-  locals/var_refs setup, stack-overflow check, shapes/GC — all of which qjs *also* does (hence qjs = 389,
-  not 115). So a real collapse can't reach 115; its honest target is *qjs's order*, by removing the
+  locals/var_refs setup, stack-overflow check, shapes/GC — all of which qjs _also_ does (hence qjs = 389,
+  not 115). So a real collapse can't reach 115; its honest target is _qjs's order_, by removing the
   function-decomposition tax + the bookkeeping qjs lacks.
 
 ## 4. Invariants that must NOT be broken (load-bearing — any call-path work preserves these)
 
 - **Ownership lockstep.** `current_function` is **KEPT OWNED** (the "borrow cur_func" facet is rejected —
-  `takeSourceSlot` is a *move*, not a dup, so refcount is already identical to qjs; nothing to remove).
+  `takeSourceSlot` is a _move_, not a dup, so refcount is already identical to qjs; nothing to remove).
   The `var_refs` borrow safety is **coupled to `current_function` being owned** — the still-live function
   object roots the borrowed cells. Flipping one ownership flag without the other → double-free or leak
   (force-GC + test262 are the oracle).
 - **Frame stays its current ~15-field shape; do NOT slim to 9.** Rejected for real reasons: the teardown
-  cost is the *necessary* value frees (not field proliferation), and most "cold" fields
+  cost is the _necessary_ value frees (not field proliferation), and most "cold" fields
   (`storage_*`, `original_args`, eval/sync state) **cross generator/async suspend**, so a `FrameCold`
   side-struct can't be freed at teardown for a suspended generator. `FrameCold` already exists and is
   correct as-is.
 - **Suspend / raw-sp bifurcation — preserve all gates.** Hot inline frames borrow a slab window; cold
   growable frames (top-level / native re-entry / generator / async) keep the full heap-backed `Stack`.
-  Generators transfer buffer ownership into the generator object and *physically cannot* use a borrowed
+  Generators transfer buffer ownership into the generator object and _physically cannot_ use a borrowed
   slab window — do not unify the two regimes.
 - **Refcount-only frame liveness.** The cycle collector never walks the frame/Entry chain
   (`traceRoots`); frame values stay alive by refcount only. Don't add the frame chain to GC roots.
@@ -269,13 +271,14 @@ survive scaling to a full ~200-opcode space, or is it a small-scale artifact? Ha
 - **"Borrow cur_func"** — a non-diff (move, not dup; same refcount as qjs).
 - **Frame slim to 9 fields** — low benefit, high complexity, cold fields cross suspend.
 - **Un-caching cold context vars to free a register for the table base** — disproven by reading the actual
-  reg-alloc: the cold vars are already in stack slots, not callee-saved; only eliminating a *hot* carrier
+  reg-alloc: the cold vars are already in stack slots, not callee-saved; only eliminating a _hot_ carrier
   frees a callee-saved register (and that's the raw-sp rewrite, whose fib payoff is a known mirage).
 
 ## 6. If native recursion is ever pursued (crossing concerns)
 
-Only as a separate experiment, *after* a real-work-modeled de-risk (the toy can't settle it; `Path B`
+Only as a separate experiment, _after_ a real-work-modeled de-risk (the toy can't settle it; `Path B`
 regressed to 6.04× with real work + the old slow path). Ground-truth these first:
+
 - **Suspend.** Generator/async yield must unwind the native stack via a Zig error/sentinel (qjs's
   `FUNC_RET_YIELD` analog); simple-normal calls recurse, generator/async/class-ctor/eval stay on the
   current path (already excluded by `resolveInlineTarget`'s `func_kind != .normal`).
@@ -284,11 +287,196 @@ regressed to 6.04× with real work + the old slow path). Ground-truth these firs
 - **Backtrace / exception.** Walk the live `Frame` chain (qjs `current_stack_frame->prev`); Zig `error`
   propagates naturally up the stack, replacing the explicit Entry-chain unwind.
 
+## 7. Internal callback re-entry — current state & corrected conclusion (2026-07-15)
+
+> The earlier version of this section incorrectly attributed zero-argument
+> callback cost to an argument-window allocation. A zero-argument frame already
+> has `frame_arg_count == 0`, so it allocates and copies no argument slots. The
+> measured gap was the second `runWithArgsState` Machine boundary. The first
+> high-frequency internal callback now stays in the caller's Machine.
+
+### 7.1 Path-by-path state
+
+| # | Path | Current contract | qjs anchor | State |
+|---|---|---|---|---|
+| A | **JS→JS inline** | Arguments alias/move from the caller operand region through `initArgumentsBorrowedSlots`; no payload copy. | `arg_buf = argv`, `JS_CallInternal` 17828–17871 | At internal parity. |
+| B | **JS→Zig builtin** | `args` borrows the still-pushed caller operand region; the owner frees it after the builtin returns. | `OP_call_method` borrows `call_argv`, then frees the call region. | At internal parity. |
+| C1 | **Public Zig→JS** (`runWithArgsState`) | `initArguments` duplicates caller-owned `const` arguments. | Public `JS_Call` sets `JS_CALL_FLAG_COPY_ARGV`. | At public-ABI parity; keep it. |
+| C2 | **Internal for-of → bytecode `next`** | Eligible same-realm normal bytecode targets borrow the suspended caller's persistent `[receiver, method]` record and attach a post-return continuation. Ineligible targets retain the owned dup/move fallback. Zero args means no argument slots. | Internal `JS_CallInternal(..., flags=0)` remains in the interpreter call chain and borrows its `JSValueConst` inputs. | Second Machine boundary and eligible call-binding copy removed. |
+| D | **Plugin FFI** | Heavyweight `CallFrame`, intentionally isolated. | No qjs equivalent. | Out of the interpreter hot path. |
+
+### 7.2 What the zero-argument profile actually measured
+
+Before this change, custom bytecode iterator `next()` called
+`runWithArgsState` from `iteratorStepWithNext`. Although `argc == 0` made every
+argument allocation/copy loop empty, re-entry still constructed and drove a
+second Machine, published/reloaded VM state, and returned through the generic
+host-call boundary. The profile accordingly put recursive `runWithArgsState`
+at 14.8% and `iteratorStepWithNext` at 10.6%. The cost was fixed re-entry, not
+an argc-scaled copy.
+
+### 7.3 Landed same-Machine for-of continuation
+
+`op_for_of_next` now performs the qjs-shaped internal path when all eligibility
+proofs hold:
+
+- Resolve a same-realm, normal, non-suspendable bytecode `next` target.
+- Borrow the iterator and method from the suspended caller's persistent record
+  and push the callee on the existing Machine. The dedicated eligible prologue
+  allocates no call-binding or argument payload; the general fallback still
+  duplicates them into an owned moved-method region.
+- Tag the callee entry with `ReturnAction.for_of_next`; its payload is the
+  bytecode depth operand. Proper-tail-call frame replacement moves this action
+  to the replacement entry.
+- On return, consume the iterator-result object in the caller Machine: read
+  `done` before `value`, skip `value` when done is true, and preserve observable
+  accessor/Proxy semantics. The overwhelmingly common own-data leg uses the
+  same trusted shape-hash probe as qjs `find_own_property`, returns the borrowed
+  slot, then duplicates it once. A missing own slot continues through the
+  ordinary prototype walk; accessor, var-ref, auto-init, Proxy, and exotic cases
+  fall back to the authoritative Get path.
+- The fallback `pushMovedCall` selects a compile-time moved-method setup
+  instance. It no longer fails the two plain-call selectors and round-trips
+  through `setupFallbackInlineEntry` before choosing the same simple frame.
+  The eligible borrowed prologue, generic `pushCall`/tail-reuse instance, and
+  the single acquire/link/ownership lifecycle remain separately proven.
+- A throw from `next()` propagates without `IteratorClose`, matching qjs and the
+  ECMAScript IteratorNext/for-of ordering. Loop-body abrupt completion still
+  closes the iterator through the existing path.
+
+Native, cross-realm, generator/async, class-constructor, malformed, and other
+non-eligible targets retain the generic helper. This is a semantic gate, not a
+best-effort optimization.
+
+### 7.4 Measured result
+
+Three fixed 2,000,000-step custom iterators progressively remove work from
+`next()`: `for-of-bytecode-next-zero-arg-2m.js` mutates and reuses its result,
+`for-of-bytecode-next-constant-result-2m.js` returns a constant result through
+`this.result`, and `for-of-bytecode-next-self-result-2m.js` makes the iterator
+itself the constant result. Cortex-X925 CPU19, ReleaseFast, 11 three-way
+interleaved rounds; table values are medians. Binary identities are frozen zjs
+`20f11d0f…`, current zjs `523c35a6…`, and qjs `b76d1542…`.
+
+| Fixed workload | Frozen zjs instructions / cycles | Current zjs instructions / cycles | qjs instructions / cycles | Current / qjs |
+|---|---:|---:|---:|---:|
+| Reused, mutating result | 6,870,837,207 / 1,173,361,316 | 3,012,183,112 / 497,804,678 | 1,703,544,660 / 280,438,613 | 1.7682x / 1.7751x |
+| Constant result via `this.result` | 6,362,477,788 / 1,118,866,663 | 2,645,610,051 / 425,869,884 | 1,735,441,613 / 327,835,490 | 1.5245x / 1.2990x |
+| Iterator is result | 6,150,387,934 / 1,026,515,970 | 2,433,434,884 / 387,106,870 | 1,615,341,743 / 265,941,614 | 1.5065x / 1.4556x |
+
+The complete bounded sequence removes 56.160% instructions / 57.574% cycles
+from the frozen zjs baseline on the mutating workload, 58.419% / 61.937% on the
+constant-result control, and 60.434% / 62.289% when the iterator is the result.
+The own-data probe and moved-method setup first removed the generic property and
+fallback path. The final large fixed saving came from replacing ReleaseFast
+runtime `predefinedId("done"/"value")` lookups with the compile-time predefined
+atom IDs; LLVM had not folded the atom-table scan, so this removes about 434
+instructions per iteration.
+
+The call target now also carries a non-null pointer to the FB-shared cached
+execution view. Cache construction failure declines the same-Machine path and
+falls back to the authoritative generic call; a successful Entry never owns a
+per-call view. Removing that obsolete owner retains the NaN-boxed adapter's
+256-byte Entry stride; the canonical 64-bit 16-byte representation omits that
+adapter-only padding and uses 280 bytes instead of the old 288. Compile-time
+assertions lock both layouts. The cleanup eliminates one nullable/ownership
+check per ordinary call and two on the moved path. The moved-method instance
+publishes its real continuation exactly once after setup; a direct binary A/B
+kept ordinary empty/strict/closure instruction counts identical and removed
+exactly two stores per for-of step.
+
+The final qjs ownership alignment removes the moved region itself for eligible
+zero-argument `next()` methods. The suspended caller's persistent
+`[iterator, next]` record roots both `this_obj` and `func_obj`, just as qjs
+borrows those `JSValueConst` inputs in internal `JS_CallInternal`. A dedicated
+zero-argument prologue therefore installs borrowed frame bindings and allocates
+only padded formals/locals/stack/open-var-ref storage. Arrow, non-simple,
+suspendable, cross-realm, and otherwise ineligible targets keep the established
+dup/move path. This removes another fixed 169 instructions per iteration. A/B
+controls for ordinary empty/strict/closure, exact/padded/strict methods, and
+Proxy continuations remain instruction-identical; the three iterator controls
+improve cycles as well as instructions.
+
+The shared return epilogue now also follows the pointer qjs has already
+published. `popFrame` writes `dying.prev` to `Machine.top`; the old return path
+then tested `depth` and reloaded that same top pointer through
+`loadCurrentLevel`. `reloadAfterPop` instead treats nullable `Machine.top`
+directly as qjs's `prev_frame` (`null` means L0). No state or Entry bytes were
+added. `op_return_undef` shrank from 3096B to 3056B and `op_return` from 3336B
+to 3316B. Across 15 paired rounds this removes about four instructions/call
+for every ordinary and iterator control. Empty/strict/closure/method/reused
+iterator paired cycles improve 3.23%/3.19%/1.58%/2.70%/0.14%; the self-result
+iterator is noise-bound (25-round paired +0.19%, independent medians −0.12%)
+while instructions improve 0.33%. Final zjs/qjs instruction ratios are
+1.525x/1.615x/1.557x/1.698x for
+constant-call/empty/strict-two-arg/closure, while the three iterator ratios are
+the table values above.
+
+Two broader pointer/layout attempts were rejected. Keeping `dying.prev` live
+across teardown consumed another callee-saved register, grew the return stack
+frame from 96B to 112B, and added about one instruction/call. A retired-Entry
+free chain removed repeated chunk arithmetic but grew `pushFrame` and both
+return handlers by roughly 48B; closure cycles regressed 2.83%, method cycles
+0.69%, and the lowest-work iterator added 0.24% instructions. Both source
+candidates were removed.
+
+After removing return's repeated caller lookup, the lowest-work control fixes
+the remaining attribution: samples now concentrate in
+`finishForOfNextResult`, common simple-frame setup, dispatch, and the isolated
+post-return handler—not recursive Machine re-entry, argument/call-binding
+copying, dynamic predefined-atom lookup, per-closure/per-call execution-view
+ownership, or a second caller-frame lookup.
+
+### 7.5 Remaining work and invariants
+
+- **Do not add an `args_mode` to solve zero-arg calls.** There are no argument
+  slots to optimize. First prove whether the cost is re-entry, setup, or result
+  processing.
+- **Public `JS_Call`-style ownership stays duplicate-in.** Caller-owned `const`
+  arguments may be overwritten by `put_arg`; borrowing would corrupt embedder
+  storage.
+- **Move/borrow only with a proven owner and lifetime.** The eligible for-of
+  path borrows `[receiver, method]` only while the suspended caller's persistent
+  iterator record remains unchanged and rooted through return/unwind. Every
+  target outside that proof duplicates into the owned moved region.
+- **Suspendable and cross-realm targets fall back.** Their lifetime/realm state
+  is not represented by this continuation.
+- **Continuation ownership follows proper tail calls and unwind.** Proxy atoms
+  and for-of depth share a tagged payload but have different destruction rules;
+  action-specific take/deinit logic is mandatory.
+- **`next()` throw is not loop-body throw.** Never run IteratorClose merely
+  because the pending continuation is for-of-next.
+- **Keep the post-return handler isolated.** A measured direct-resume experiment
+  saved 20 instructions per for-of iteration but added 5 instructions to every
+  ordinary empty call. It was reverted; narrow continuation work must not grow
+  the common return shape.
+- **Do not copy qjs's missing per-op `pc >= code_end` check in isolation.** An
+  inline removal saved only 5–11 instructions per iteration while strict and
+  closure call cycles regressed about 1.94%/1.97%. Outlining the four-instruction
+  dispatcher still regressed strict cycles 1.59%, with median branch misses up
+  about 24% and L1I misses about 12%. qjs gets this shape inside one monolithic
+  `SWITCH`; zjs's split tail-called handlers need a handler-collapse proof before
+  this check can be reconsidered. Both candidates were reverted.
+- **Do not add an isolated `OP_push_this` handler only because qjs has a direct
+  arm.** The object/raw-strict candidate saved 7.1–8.3% on functions that read
+  `this`, but the ordinary method-without-`this` control regressed a stable
+  0.507% cycles over 25 runs solely from handler placement. The candidate was
+  reverted; the two fixed `this` probes remain to validate a future shared
+  handler/frame collapse.
+- **Next P0 evidence target:** the lowest-work control now isolates the shared
+  setup/dispatch frontier after the redundant caller reload was removed. Reduce
+  `finishForOfNextResult` only where the same proof also helps ordinary calls;
+  other internal `runWithArgsState` callers still require their own storage and
+  suspension proof, so do not generalize this fast path by callable class alone.
+
 ## Pointers
 
 - **qjs mechanism reference:** `CALL-MACHINERY-QJS.md` (verbatim quickjs.c excerpts; the keystone).
 - **Live code:** `src/exec/tailcall_dispatch.zig` (dispatch + driver), `src/exec/inline_calls.zig`
   (the call path), `src/exec/frame.zig` (frame + carve), `src/exec/vm_call.zig`.
 - **route-2 harness (throwaway):** `/tmp/gen_fib.py`, `/tmp/run_sweep.sh`.
-- **Gates:** `zig build zjs` first (stale-binary hazard), then test262 0/49775 + `zig build test` 1223 +
-  force-GC; perf via targeted benchmarks (NOT the microbench-suite geomean) vs `/home/aneryu/quickjs/qjs`.
+- **Current gates:** `checkpoint-check` 32/32, Debug/ReleaseSafe/alternate-repr unified
+  1406/1406, force-GC core/exec 226/226 + 203/203, OOM 8/8, alternate-repr
+  test262 smoke 12/12, for-of 751/751, Iterator 514/514;
+  109 fixed qjs-alignment perf scripts, with comparisons made through targeted
+  interleaved benchmarks (not a suite geomean) against `/home/aneryu/quickjs/qjs`.

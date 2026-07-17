@@ -8,7 +8,6 @@ pub const core = @import("core/root.zig");
 pub const parser = @import("parser.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
-pub const builtins = @import("builtins/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("runtime/root.zig");
 pub const RuntimeError = exec.exceptions.RuntimeError;

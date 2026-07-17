@@ -1,44 +1,47 @@
-# zjs ↔ qjs 实现差异现状全景与整改结果（2026-07-11，更新至 2026-07-13）
+# zjs ↔ qjs 实现差异现状全景与整改结果（2026-07-11，更新至 2026-07-17）
 
 > 方法：分步骤对比 — ①重建双引擎并测量 20 个基准（insn+cycles）→ ②同源码双引擎字节码序列 dump 对比 → ③perf 热点归因 → ④九个子系统代码级审计 → ⑤正确性与性能前沿排序。
-> 结论先行：本文最初记录的 C1–C4 正确性缺陷已经修复；二次审计又闭合了 conditional-only 回边中断、lexical lowering 死路径和 native builtin 栈帧。本轮进一步修复了模块 DFS/TLA 调度、动态导入 arrow 的 named-evaluation 状态泄漏、隐式 `arguments` 绑定优先级、generator return 穿越 finally 时的显式抛出传播，以及 `Promise.resolve` 身份命中的构造器验证顺序。原 13 条 known-errors 中已有 11 条转绿并移除，剩余 2 条在当前 QJS 参照上也失败，不构成已证实的 zjs → QJS 差异。§5.2 的 10 个性能候选均已执行“重建证据→实现、收窄或否决”：1–6、8、10 已按证据闭环；调用前沿又让 strict exact-arity、缺参 arity-pad、对象与 primitive receiver method 共用 qjs 式同族 simple-frame，并让 bytecode callable 像 qjs 的 `JSObject.u` 一样在 payload 的互斥 call-cache 槽直接 memo execution view；primitive property read 直接从 realm intrinsic prototype 做 exotic-aware walk，普通 bytecode receiver 保留 raw `this` 并只在首次观察时 boxing；后续又让静态 primitive `get_field/get_field2` 通过独立尾调用 handler 直接走同一普通 data-property shape walk，并把 borrowed-reference holder 恢复为纯生命周期簿记；计算属性读取现也让 atom-backed string key 从 `get_array_el` 尾跳到普通 shape/prototype/index walk，data、missing 与字符串数组索引已接近或快于 qjs；getter 随后复用同一 Machine 的 method frame，静态 field miss 也直达 accessor/Proxy action，Proxy 的无 trap 转发与 post-trap plain-target invariant 改为 qjs 式直接 shape probe，bytecode trap 则用 same-Machine post-call continuation 保留返回后 invariant。getter、no-trap Proxy 与 bytecode trap 已分别回到约 1.37–1.79x、1.28–1.30x 与 1.67–1.91x；arguments 对象现也按 qjs 使用 realm 预制 shape、unmapped dense values、mapped var-ref 索引存储和函数序言的一次性绑定，`OP_get_length` 又补齐 qjs 的 ordinary shape walk 与 accessor/Proxy action，热用例由约 292–337ms 收到 102–127ms；7 已完成 Math typed-cproto 首域、通用 op_call memo、Function record 化，并让 `Function.prototype.call` 按 qjs 方式直接转发参数、复用当前 Machine；`Array.prototype.push/pop` 已进入 per-method full-context record，`Promise.resolve` 已成为 Promise 域首个 per-method record，其 identity 的普通 constructor data 命中也已从通用 resolver 收到 1.82x；Object constructor 现用 qjs 式 constructor-or-function record 合并普通调用与 active-function 直构造；String 大小写转换则直达 qjs 式 per-method body并把 ASCII 输出直接写入最终 inline String；其他 builtin 域的 typed ABI 仍是架构迁移债；9 的 delete compact 原假设被基准否决，改为收益明确的 cached-string-atom 与 property-action 分派路径。§1–§4 保留为**整改前历史快照**，当前结论以 §5 为准。
+> 结论先行：本文最初记录的 C1–C4 正确性缺陷已经修复；二次审计又闭合了 conditional-only 回边中断、lexical lowering 死路径和 native builtin 栈帧。本轮进一步修复了模块 DFS/TLA 调度、动态导入 arrow 的 named-evaluation 状态泄漏、隐式 `arguments` 绑定优先级、generator return 穿越 finally 时的显式抛出传播，以及 `Promise.resolve` 身份命中的构造器验证顺序。原 13 条 known-errors 中已有 11 条转绿并移除，剩余 2 条在当前 QJS 参照上也失败，不构成已证实的 zjs → QJS 差异。§5.2 的 10 个性能候选均已执行“重建证据→实现、收窄或否决”：1–6、8、10 已按证据闭环；调用前沿又让 strict exact-arity、缺参 arity-pad、对象与 primitive receiver method 共用 qjs 式同族 simple-frame，并最终让 bytecode callable 像 qjs 的 `JSObject.u.func` 一样把 FB/var_refs/home 状态直接放进 64B Object，兼容 execution view 则在共享 FB 上只构建一次；primitive property read 直接从 realm intrinsic prototype 做 exotic-aware walk，普通 bytecode receiver 保留 raw `this` 并只在首次观察时 boxing；后续又让静态 primitive `get_field/get_field2` 通过独立尾调用 handler 直接走同一普通 data-property shape walk，并把 borrowed-reference holder 恢复为纯生命周期簿记；计算属性读取现也让 atom-backed string key 从 `get_array_el` 尾跳到普通 shape/prototype/index walk，data、missing 与字符串数组索引已接近或快于 qjs；getter 随后复用同一 Machine 的 method frame，静态 field miss 也直达 accessor/Proxy action，Proxy 的无 trap 转发与 post-trap plain-target invariant 改为 qjs 式直接 shape probe，bytecode trap 则用 same-Machine post-call continuation 保留返回后 invariant。getter、no-trap Proxy 与 bytecode trap 已分别回到约 1.37–1.79x、1.28–1.30x 与 1.67–1.91x；arguments 对象现也按 qjs 使用 realm 预制 shape、unmapped dense values、mapped var-ref 索引存储和函数序言的一次性绑定，`OP_get_length` 又补齐 qjs 的 ordinary shape walk 与 accessor/Proxy action，热用例由约 292–337ms 收到 102–127ms；7 已完成 Math typed-cproto 首域、通用 op_call memo、Function record 化，并让 `Function.prototype.call` 按 qjs 方式直接转发参数、复用当前 Machine；`Array.prototype.push/pop` 已进入 per-method full-context record，`Promise.resolve` 已成为 Promise 域首个 per-method record，其 identity 的普通 constructor data 命中也已从通用 resolver 收到 1.82x；Object constructor 现用 qjs 式 constructor-or-function record 合并普通调用与 active-function 直构造；String 大小写转换则直达 qjs 式 per-method body并把 ASCII 输出直接写入最终 inline String；其他 builtin 域的 typed ABI 仍是架构迁移债；9 的 delete compact 原假设被基准否决，改为收益明确的 cached-string-atom 与 property-action 分派路径。§1–§4 保留为**整改前历史快照**，当前结论以 §5 为准。
 >
-> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用、函数生命周期、Array.push/Array.pop、Promise.resolve、Object constructor 与 arguments 对象的 94 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
+> **2026-07-16 架构收口**：上段历史叙述中的“其他 builtin 域 typed ABI 仍是迁移债”现已闭合；Atomics、performance 与全部 Promise statics（含 `allKeyed/allSettledKeyed`）均进入 exec-owned typed record 表，`src/builtins`、generic `InternalCall` ABI 与 constructor descriptor registry 已退役。剩余 shared-magic/per-method 差异只作为性能专用化候选。
+>
+> **证据边界**：原始 20 项 best-of-5 仍只有聚合结果，不能回推方差或严谨 IPC。本轮把字符串、属性、peephole、调用、函数生命周期、Array.push/Array.pop、Promise.resolve、Object constructor、arguments 对象与 bytecode iterator 的 109 个固定脚本补入 `tests/perf/qjs-align/`，但尚未重建原历史 20 项全集和所有 perf.data；新旧数字必须分开解释。
 
 ## 0. 初始审计环境与方法
 
 - zjs：初始审计时 commit `1a1343e`（当时的 HEAD/main），Zig `0.16.0`，`zig build zjs`（CLI target 固定 ReleaseFast）当场重建；当时实测二进制 SHA-256 `249c9f4e5b3bdee0a717f91aaab70302fd7541cd40ae4331043ba3e5b468572c`。该身份只对应 §1–§4 的历史快照，不代表整改后工作树。
 - qjs 参照：工作树 commit `04be246`，`/home/aneryu/quickjs/qjs` 报告 QuickJS version 2026-06-04；实测二进制 SHA-256 `b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d`。后续复测必须同时核对 commit 与二进制 hash，不能只依赖版本字符串。
 - 机器：Cortex-X925（20 核），测量 `taskset -c 19`，PMU 事件 `armv8_pmuv3_1/instructions/,cycles/`，best-of-5 取 min。
-- 基准：历史标准 L0–L5 分层集 + P_tdz/P_ifobj 探针 + 当时新增的 objlit_var/objlit_let churn 对照对（脚本均为包函数形态，防顶层变量污染）。原始 20 项脚本仍未从 job 临时目录恢复；本轮另补的 94 个固定脚本不能反向补足历史样本，因此表中旧数据只能用于提出假设，不能用于验收改动。
+- 基准：历史标准 L0–L5 分层集 + P_tdz/P_ifobj 探针 + 当时新增的 objlit_var/objlit_let churn 对照对（脚本均为包函数形态，防顶层变量污染）。原始 20 项脚本仍未从 job 临时目录恢复；本轮另补的 109 个固定脚本不能反向补足历史样本，因此表中旧数据只能用于提出假设，不能用于验收改动。
 - 字节码：zjs 用 `ZJS_DISASM=1` 环境变量 dump；qjs 用隔离副本树开 `DUMP_BYTECODE=1` 重编（参照树未动）。
 
 ## 1. 整改前基准测量快照（zjs/qjs 比率，越小越好）
 
-| 基准 | 形态 | insn 比 | cyc 比 | 层级判定 |
-|---|---|---|---|---|
-| L0_emptyloop | 空 for-let 循环 | **0.93** | 0.99 | ✅ 反超 |
-| L1a_accum | s=s+1 | **1.00** | 1.02 | ✅ 平 |
-| L1b_localarith | s=(s+a+b)\|0 | **0.96** | 1.01 | ✅ 平/反超 |
-| P_ifobj | if(常驻对象) 真值分支 | **0.95** | 1.02 | ✅ 反超 |
-| P_tdz | 循环体 let v=1（TDZ 对） | 1.12 | 1.16 | 🟢 近平（T3 成果保持） |
-| L5b_charcode | s.charCodeAt(i%11) | 1.06 | 1.19 | 🟢 insn 近平，cyc 有残余 |
-| L2a_propread | s+=o.a（4 属性常驻对象） | 1.13 | 1.12 | 🟢 小 gap |
-| L2b_arrayread | s+=t[0] | 1.02 | 1.07 | ✅ 平 |
-| L5a_strconcat | "a"+"b"+i 新鲜短串/iter | 1.30 | 1.46 | 🟡 |
-| floatsum | s+=1.5（浮点累加） | 1.32 | 1.41 | 🟡 |
-| objprop | o.a=s; s=o.a+o.b 写读混合 | 1.36 | 1.26 | 🟡 |
-| template | s=\`x${i}y\` | 1.37 | 1.41 | 🟡 |
-| L4a_emptyobj | let o={}; if(o)（TDZ+alloc） | 1.42 | 1.32 | 🟡（与 memory T3 后口径一致） |
-| **L3b_funcall** | s=f(s) 紧调用 | **1.67** | **1.69** | 🔴 调用前沿 |
-| **L4c_array3** | let a=[1,2,3]/iter | **1.69** | **1.54** | 🔴 数组字面量 |
-| **L3a_fib** | fib(34) 递归 | **1.79** | **1.92** | 🔴 调用前沿 |
-| strconcat（累积） | s+='ab' ×1e6 | 1.79 | **3.13** | 🔴 cyc 异常（见 §3.4） |
-| **objlit_let** | 循环体 let o={v:i}（churn） | **1.99** | **1.83** | 🔴 对象字面量前沿 |
-| **L4b_objalloc** | let o={a,b,c}/iter | **2.04** | **1.95** | 🔴 对象字面量前沿 |
-| **objlit_var** | var o={v:i}（无 churn！） | **2.48** | **2.40** | 🔴 **最大 gap** |
+| 基准              | 形态                         | insn 比  | cyc 比   | 层级判定                      |
+| ----------------- | ---------------------------- | -------- | -------- | ----------------------------- |
+| L0_emptyloop      | 空 for-let 循环              | **0.93** | 0.99     | ✅ 反超                       |
+| L1a_accum         | s=s+1                        | **1.00** | 1.02     | ✅ 平                         |
+| L1b_localarith    | s=(s+a+b)\|0                 | **0.96** | 1.01     | ✅ 平/反超                    |
+| P_ifobj           | if(常驻对象) 真值分支        | **0.95** | 1.02     | ✅ 反超                       |
+| P_tdz             | 循环体 let v=1（TDZ 对）     | 1.12     | 1.16     | 🟢 近平（T3 成果保持）        |
+| L5b_charcode      | s.charCodeAt(i%11)           | 1.06     | 1.19     | 🟢 insn 近平，cyc 有残余      |
+| L2a_propread      | s+=o.a（4 属性常驻对象）     | 1.13     | 1.12     | 🟢 小 gap                     |
+| L2b_arrayread     | s+=t[0]                      | 1.02     | 1.07     | ✅ 平                         |
+| L5a_strconcat     | "a"+"b"+i 新鲜短串/iter      | 1.30     | 1.46     | 🟡                            |
+| floatsum          | s+=1.5（浮点累加）           | 1.32     | 1.41     | 🟡                            |
+| objprop           | o.a=s; s=o.a+o.b 写读混合    | 1.36     | 1.26     | 🟡                            |
+| template          | s=\`x${i}y\`                 | 1.37     | 1.41     | 🟡                            |
+| L4a_emptyobj      | let o={}; if(o)（TDZ+alloc） | 1.42     | 1.32     | 🟡（与 memory T3 后口径一致） |
+| **L3b_funcall**   | s=f(s) 紧调用                | **1.67** | **1.69** | 🔴 调用前沿                   |
+| **L4c_array3**    | let a=[1,2,3]/iter           | **1.69** | **1.54** | 🔴 数组字面量                 |
+| **L3a_fib**       | fib(34) 递归                 | **1.79** | **1.92** | 🔴 调用前沿                   |
+| strconcat（累积） | s+='ab' ×1e6                 | 1.79     | **3.13** | 🔴 cyc 异常（见 §3.4）        |
+| **objlit_let**    | 循环体 let o={v:i}（churn）  | **1.99** | **1.83** | 🔴 对象字面量前沿             |
+| **L4b_objalloc**  | let o={a,b,c}/iter           | **2.04** | **1.95** | 🔴 对象字面量前沿             |
+| **objlit_var**    | var o={v:i}（无 churn！）    | **2.48** | **2.40** | 🔴 **最大 gap**               |
 
 本轮快照的关键观察：
+
 1. **这组脚本中的分派/算术/TDZ/真值负载已接近 qjs**（L0/L1/P 系 0.93–1.12x）——从 dispatch 逐层对齐的历史工作（tail-call threaded、T1/T3 fast handler、dup+drop 删除、opBinary float leg 等）在本轮测量中保持住了；在基准脚本和原始样本补齐前，不外推为全域结论。
 2. **对象字面量分配是最大前沿**（1.99–2.48x），且 **objlit_var（shape 不 churn 的形态）比 objlit_let（每迭代 churn）差距更大**——大头不只在 churn，还有独立的槽访问税叠加（§3.1）。qjs 侧 var 形态比 let 形态便宜 12%（churn 省掉），zjs 侧反而贵 10%（var-init 的 make_loc_ref 把 cell 装进槽、击穿裸 loc fast handler，毒化税 > churn 节省）。
 3. **调用机制 1.67–1.92x** 仍是第二前沿（历史从 4.15x 收到此处后驻留）。
@@ -52,16 +55,17 @@
 
 已留存的逐构造摘要（zjs `ZJS_DISASM=1` vs qjs `DUMP_BYTECODE=1` 最终 pass）：
 
-| 构造 | qjs ops/iter | zjs ops/iter | 差异 |
-|---|---|---|---|
-| for-let 累加循环体 | 13 | **12** | zjs `inc`（1 op）vs qjs `post_inc`+`drop`（语句语境 zjs 反而省 1 op） |
-| objlit3 `{a:1,b:2,c:3}` 体 | 25 | **24** | 序列逐条同构：`object`+3×(`push_N`+`define_field`)+`put_loc*` |
-| fib 函数体 | 18 | 18 | **逐条完全一致**（get_arg0/push/lt/if_false8/get_var/sub/call1/add/return） |
-| funcall 循环体 | 13 | 12 | 一致（get_var/get_loc_check/call1/put_loc_check） |
-| varloop `{v:i}` 体 | 15 | 15 | **逐条完全一致**，zjs 也用裸短变体 `get_loc0-2`/`put_loc0-1`/`inc_loc` |
-| arr3 `[1,2,3]` 体 | 18 | 17 | 一致（push×3+`array_from 3`+`get_array_el`） |
+| 构造                       | qjs ops/iter | zjs ops/iter | 差异                                                                        |
+| -------------------------- | ------------ | ------------ | --------------------------------------------------------------------------- |
+| for-let 累加循环体         | 13           | **12**       | zjs `inc`（1 op）vs qjs `post_inc`+`drop`（语句语境 zjs 反而省 1 op）       |
+| objlit3 `{a:1,b:2,c:3}` 体 | 25           | **24**       | 序列逐条同构：`object`+3×(`push_N`+`define_field`)+`put_loc*`               |
+| fib 函数体                 | 18           | 18           | **逐条完全一致**（get_arg0/push/lt/if_false8/get_var/sub/call1/add/return） |
+| funcall 循环体             | 13           | 12           | 一致（get_var/get_loc_check/call1/put_loc_check）                           |
+| varloop `{v:i}` 体         | 15           | 15           | **逐条完全一致**，zjs 也用裸短变体 `get_loc0-2`/`put_loc0-1`/`inc_loc`      |
+| arr3 `[1,2,3]` 体          | 18           | 17           | 一致（push×3+`array_from 3`+`get_array_el`）                                |
 
 初始审计记录的发码差异及当前处置：
+
 - **D-BC1（已对齐）** 初始 zjs 的 let 声明初始化使用 `put_loc_check_init`；当前普通 lexical 初始化与 qjs 一样使用裸 `put_loc0/1/2`，后续读取仍保持 `get_loc_check`。
 - **D-BC2（已对齐窄路径）** 初始 var 声明初始化序言会发 `make_loc_ref "name"`+`push_0`+`put_ref_value` 并毒化整个函数的裸 loc 快路；当前仅在可证明无 eval/with/closure/destructuring/const/function-name 风险的 ref-tail 上降成 loc get/put。
 - **D-BC3（旧判断被双侧 dump 否决）** QuickJS `resolve_variables` 在进入 lexical scope 时同样发 `set_loc_uninitialized`；简单函数的两侧最终序列逐条一致，不存在“zjs 独有函数序言武装”。
@@ -80,16 +84,16 @@
 
 zjs 热点（objlit_var，总 4.33e9 cyc）vs qjs（1.74e9 cyc）：
 
-| zjs 符号 | % | 对应 qjs 机制 |
-|---|---|---|
-| exec.vm_property_locals.loc | 12.24 | var_buf[idx] 裸数组索引（内联 2-3 insn） |
-| exec.tailcall_dispatch.coldStd（槽 op cold 包装） | 8.01 | 无对应（qjs 无 cold/fast 分层） |
-| exec.slot_ops.setSlotValueRefCounted | 5.89 | `set_value(ctx, &var_buf[idx], sp[-1])` |
-| exec.value_ops.unary + toNumberValue | 7.14 | OP_inc_loc 的 int 内联快路径（≈4 insn） |
-| exec.slot_ops.execPutLoc | 2.50 | 同上 var_buf 写 |
-| exec.tailcall_dispatch.op_update_loc_cold | 2.13 | —（inc_loc 落 cold） |
-| core.var_ref.VarRef.setVarRefValue | 1.94 | —（qjs 未捕获 var 不走 var_ref） |
-| **小计：槽访问语义** | **~40%** | qjs 全部内联在 JS_CallInternal 27% 内 |
+| zjs 符号                                          | %        | 对应 qjs 机制                            |
+| ------------------------------------------------- | -------- | ---------------------------------------- |
+| exec.vm_property_locals.loc                       | 12.24    | var_buf[idx] 裸数组索引（内联 2-3 insn） |
+| exec.tailcall_dispatch.coldStd（槽 op cold 包装） | 8.01     | 无对应（qjs 无 cold/fast 分层）          |
+| exec.slot_ops.setSlotValueRefCounted              | 5.89     | `set_value(ctx, &var_buf[idx], sp[-1])`  |
+| exec.value_ops.unary + toNumberValue              | 7.14     | OP_inc_loc 的 int 内联快路径（≈4 insn）  |
+| exec.slot_ops.execPutLoc                          | 2.50     | 同上 var_buf 写                          |
+| exec.tailcall_dispatch.op_update_loc_cold         | 2.13     | —（inc_loc 落 cold）                     |
+| core.var_ref.VarRef.setVarRefValue                | 1.94     | —（qjs 未捕获 var 不走 var_ref）         |
+| **小计：槽访问语义**                              | **~40%** | qjs 全部内联在 JS_CallInternal 27% 内    |
 
 根因链条（已逐环代码验证，双侧 file:line）：
 
@@ -105,12 +109,13 @@ qjs 同负载零税：var-init 优化成 `put_loc0`（varloop 的 qjs dump 实�
 
 > 整改后：`transitionProperty(**Shape, …)` 已按 cache hit / shared clone / rc==1 in-place 三臂实现，并覆盖 FAM relocation、hash 重挂、缓存共享和 OOM 门禁。
 
-objlit_let（每迭代 kill-before-create）zjs 热点：`cloneShape` 7.76% + `destroyShape` 7.14% + `Registry.link` 3.50% ≈ **18.4% 周期在 shape 建毁**；另 `adoptShapeForNewProperty` 9.74% + `addPropertyTrusted` 3.23% 在属性追加。qjs 同形态也 churn（js_new_shape2 3.04% + js_free_shape 2.91% + add_property 13.78%），但绝对量小得多。alloc/free 本体（createInternal/createWithFam/MemoryAccount.free/destroyFromHeader/gc.addWithSize 合计）与 qjs（__js_malloc/__js_free/free_gc_object 相应段）绝对 cyc 已基本打平——与 memory「{} alloc+free 本体打平」结论一致。
+objlit_let（每迭代 kill-before-create）zjs 热点：`cloneShape` 7.76% + `destroyShape` 7.14% + `Registry.link` 3.50% ≈ **18.4% 周期在 shape 建毁**；另 `adoptShapeForNewProperty` 9.74% + `addPropertyTrusted` 3.23% 在属性追加。qjs 同形态也 churn（js_new_shape2 3.04% + js_free_shape 2.91% + add_property 13.78%），但绝对量小得多。alloc/free 本体（createInternal/createWithFam/MemoryAccount.free/destroyFromHeader/gc.addWithSize 合计）与 qjs（**js_malloc/**js_free/free_gc_object 相应段）绝对 cyc 已基本打平——与 memory「{} alloc+free 本体打平」结论一致。
 
 **当时记录的 churn 隔离结果**（pin 对照：循环外 `const pin={v:0}` 钉住同形 shape 使其不死；脚本与逐次样本待重建）：
+
 - zjs：objlit_let 2485 → pin 1882 insn/iter，**churn 净成本 ≈603 insn/iter**
 - qjs：objlit_let 1251 → pin 1199 insn/iter，**churn 净成本 ≈52 insn/iter**（11.6x 差）
-整改前代码机制差异见 §4.4：qjs 在转移缓存 MISS 且 shape rc==1 时走 `add_shape_property` **原地改写**（root shape 同块内存演化为终态）；zjs 当时在 MISS 后无条件 `cloneShape` + `release` 父。`{v:i}` / `{a,b,c}` 的具体每迭代建毁次数来自当时的 profile/分配轨迹摘要，需在脚本补齐后重测确认。
+  整改前代码机制差异见 §4.4：qjs 在转移缓存 MISS 且 shape rc==1 时走 `add_shape_property` **原地改写**（root shape 同块内存演化为终态）；zjs 当时在 MISS 后无条件 `cloneShape` + `release` 父。`{v:i}` / `{a,b,c}` 的具体每迭代建毁次数来自当时的 profile/分配轨迹摘要，需在脚本补齐后重测确认。
 
 ### 3.3 调用机制（fib 1.92x cyc 的分布）
 
@@ -123,8 +128,9 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 > 整改后证据：固定 2M `var` 累积脚本定位到 cell-backed local 人为禁用 rope tail，而不是 GC pacing。解除该无效门后，代表运行由约 3.009B instructions / 995M cycles / 59,671 minor faults 降到 1.138B / 216.5M / 2,259；同脚本 qjs 约 1.847B / 324M / 1,356。fresh-string 加法仍接近（zjs/qjs 约 2.382B/2.278B instructions），因此未继续改 allocator/GC 触发策略。
 
 当时的规模扫描（2.5e5→2e6 次追加）记录为**双侧近似线性**，并报告每追加 zjs 1616 insn/525 cyc、qjs ~900 insn/160 cyc。扫描逐点数据与 perf.data 未留存，因此不能独立确认复杂度，也不再把由聚合最小值推得的 IPC 当作严谨证据。历史 perf 笔记如下：
+
 - zjs：**35%+ 周期在内核态**（页错误/mmap 族地址）——rope tail 摊还倍增的大块 realloc 走 `init.gpa` backing 直通 mmap/munmap，每次倍增触发新映射+逐页页错误；用户态 createRope 2.9%+allocAligned 2.6% 并不高。
-- qjs：全用户态（JS_CallInternal 27% + __js_malloc 24.7% + __js_free 12.7%）。qjs 超 8192B 后**同样每追加建 rope 节点**（js_new_string_rope 2.5% + rebalance 3.6%），但 24B 节点走 arena 小池、大块走 glibc malloc（brk 复用不还内核）。
+- qjs：全用户态（JS_CallInternal 27% + **js_malloc 24.7% + **js_free 12.7%）。qjs 超 8192B 后**同样每追加建 rope 节点**（js_new_string_rope 2.5% + rebalance 3.6%），但 24B 节点走 arena 小池、大块走 glibc malloc（brk 复用不还内核）。
 - 当时的归因假设：insn 1.79x 来自 §4.6 的 OP_add 字符串腿冷链分派税 + rope 逻辑差，cyc 进一步恶化主要来自 backing 分配器行为。该判断需用留存的规模脚本、major/minor faults、mmap/munmap 计数和 allocator 对照实验重建后，才能据此选择“缓存 allocator”或 tail 预留策略。
 
 ## 4. 整改前九子系统代码级差异清单
@@ -133,14 +139,22 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 ### 4.1 值表示与 dup/free（横切所有基准的乘数税）
 
-> 整改后：默认 16B 表示的 `requiresRefCount` 已改为与 qjs 同构的无符号范围比较；opcode profile 空测由 comptime 门裁掉。rc 物理偏移统一未捆绑实施，alternate representation 仍作为强制门禁。
+> 整改后：两种表示的 `requiresRefCount` 均使用连续 tag 范围；全部七种 refcounted
+> JSValue 的 payload 都指向 body，RC 与 qjs `__js_rc` 一样固定在 payload−4。
+> `dup` 直接访问共同 RC；`free` 先统一减计数，仅在归零后按 tag 进入销毁慢路。
+> opcode profile 空测仍由 comptime 门裁掉，alternate representation 保持强制门禁。
 
 **最重要横切项——dup/free 判别与 rc 布局**（A2-D1/A1-D6；反汇编量化摘要已记录，但原始反汇编未留存）：
-- [多做工+结构] zjs `requiresRefCount`（value.zig:358-370）默认 repr 是 7-tag 精确 switch（编译成 ~8 条 ALU），且 String 头 rc 在 payload+0、GC 头 rc 在 payload−4，命中后还要掩码分双腿（value.zig:576-625）。qjs `JS_VALUE_HAS_REF_COUNT` = `(unsigned)tag >= JS_TAG_FIRST` **1 条比较**（quickjs.h:287），全部 refcounted 类型统一 `JSRefCountHeader` 前缀 rc 偏移。每 dup zjs ≈3-11 insn vs qjs 2-5；每 free ≈8 vs 2。两侧 tag 数值集完全相同——qjs 故意把空洞 -5/-4 纳入宽松范围测试，zjs 花指令精确排除。**修法：默认 repr 退化为单比较 + 评估统一 rc 偏移**（nanbox altrepr 已是范围测试）。
-- [多做工] 每次 free 内联 `rt.gc.phase==.deinit` + `rt.opcode_profile` 空测探针（value.zig:606-612），≈+6 insn/3 载入 per free（A2-D8）。qjs JS_FreeValue 无探针。profile 空测可 comptime 门掉。
+
+- [对齐] zjs 与 qjs 都以连续 tag 范围识别 refcounted value；string/symbol/rope
+  payload 已从旧 RC 前缀改为 body 指针，与 big-int/module/function/object 一样通过
+  固定 payload−4 访问共同 `RefCountHeader`。`dup` 不再按 string/GC 分腿，`free`
+  的 tag 分派已移到 RC 归零慢路；布局断言与双表示测试锁定七种 tag 的同一偏移。
+- [多做工] 每次 free 仍内联 `rt.gc.phase==.deinit` 保护；qjs 普通 `JS_FreeValue` 无对应 runtime-phase 检查。旧 `rt.opcode_profile` 空测已经由 `zjs_enable_opcode_profile` comptime 门裁掉，默认构建不再承担该分支。
 - [对齐] JSValue 16B repr 逐字段对齐（payload 前 tag 后、tag i64、int/bool 低 32 位零扩展、float64 整存取不规范化 NaN）；`asInt32Pair` 融合 OR 测 ≙ `JS_VALUE_IS_BOTH_INT`。
 
 **数值算术**（A1）：
+
 - [对齐] opBinary 11 op 的 int 腿逐条同构（add/sub int64 加宽、mul -0 门、shr JS_NewUint32 语义）；add/sub/mul float 腿内联 ≙ qjs OP_add CASE float 腿；add_loc 三路（int 溢出内联装箱/float 裸装箱/字符串原地追加）≙ OP_add_loc；inc/dec 溢出门同构。
 - [多做工] **eq/strict_eq 族只有 int-int 快臂**（tailcall_dispatch.zig:1357-1373）：float×int/float×float/对象恒等/null-undef/string 相等全落冷（且冷链 valuesEqual 前置 isBigInt×2+双 isNan 冗余）。qjs OP_CMP_EQ/STRICT_EQ CASE 内全内联（quickjs.c:20273-20398）。
 - [多做工] **一元族无快 handler**：neg/plus/not(~)/lnot(!)/post_inc/post_dec 全走 coldStd 壳（colds:267-296），`!flag` 布尔操作数也付全额冷壳；qjs 各有 CASE 内联腿（19940-20111）。冷体还用浮点算 int（`@floatFromInt` 往返，vm_arith.zig:297-302）。
@@ -156,7 +170,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 - [结构] 分派本体每 op +1 次 `vm.tbl` 载入（表基驻 Vm 是对 adrp 重算的已证修复）；跳转类再 +code_end 检查。qjs 表基寄存器驻留、无越界检查。≈+1-2 insn/op 结构地板。
 - [多做工] **快 handler 残余税**（反汇编）：get_loc_check 19 insn/8 载入 vs qjs 12；put_loc_check 36 vs 13。构成：`local_fast_blocked` 门(3) + `locals_never_boxed` 门(3) + cell guard（D2 模型税）+ **运行时 is_const 测试(5 insn/3 载入——qjs 在 resolve 期对 const 写直接发 OP_throw_error**，quickjs.c:32945，zjs bytecode.zig:4980-4988 留给运行时) + dup/free 判别（§4.1）+ put 类帧 prologue(6，因内联 free 的 bl)。
 - [多做工] **if_false8/if_true8 的 int/null/undefined 真值腿缺失**：快腿只认 bool+对象，int 条件（`if (n%2)`）每迭代付全额冷壳；qjs `(uint32_t)tag <= JS_TAG_UNDEFINED` 单比较内联四类（18881-18919）。**放宽快腿测试即可，改动极小**。
-- [多做工] goto16/goto32、if_false/if_true 16/32 位无快 handler——体 >127B 的循环每回边付 ~900B 冷壳；put_arg*/get_arg(u16) 全冷（get_arg0-3 有快）。
+- [多做工] goto16/goto32、if_false/if_true 16/32 位无快 handler——体 >127B 的循环每回边付 ~900B 冷壳；put_arg\*/get_arg(u16) 全冷（get_arg0-3 有快）。
 - [结构] push_const/push_atom_value/fclosure8 等 refcounted 常量推送全冷——GC 根窗口契约（快 handler 不 publish stack.values.len，新 refcounted 值会落在追踪窗口外）。修法需"先 publish 再推"半快形态。**实测印证：floatsum（`s+=1.5`）热点 pushConst8 占 15.3% cyc——float64 常量非 refcounted，此腿可无条件 fast，floatsum 1.32x 的主要成分之一**（其余=opLocCheck 残余 39%+opBinary/分派）。
 - ~~[反超] zjs resolve 期 TDZ 降级~~ **整改前勘误，现已删除死路**：旧 `useUncheckedLexicalLocals` 在 resolve_variables 阶段永远因 `use_short_opcodes=false` 失活；当前不再保留这套伪数据流，lowering 直接表达 qjs 的 checked-read/checked-write/bare-init 规则。
 - [已修复行为缺口] `if_true/if_false/if_true8/if_false8` 四种路径在 installed-handler 下均于消费条件、更新 PC 后 poll；`do {} while (true)` 这类没有 goto 的 conditional-only 回边现在可被中断。
@@ -167,6 +181,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 > 整改后：write-only `Machine.switched` 已删除；`op_return` 已把结果移出 operand region 后再 teardown，与 qjs `ret_val = *--sp` 的 ownership 时序一致。符合资格的 `Function.prototype.call` 目标现在按 qjs 的直接转发语义进入同一 Machine，且以合成 native frame 保留可观察栈；固定负载已从 qjs 的 6.43x 收到 1.66x。strict plain exact-arity 调用也复用编译期专门化的 simple-frame setup，call0/call2 分别从 2.17x/2.67x 收到 1.62x/1.67x；含 arguments 的 strict 函数使用带 original-args snapshot 的同族 setup。缺参调用现与 qjs 一样在同一 slab 前部承载 formal slots 并补 `undefined`，sloppy/strict 代表负载为 1.59–1.62x。对象与 primitive receiver 都把 raw `this` 移入同族 frame，普通 bytecode 只在 `OP_push_this`、arrow capture 或 direct eval 首次观察时完成 sloppy boxing；primitive property read 也不再为查 prototype 分配 wrapper，静态 data read 的独立 field-dispatch 税亦已闭合。arguments 对象本体、refcounted/computed primitive property 与共同帧固定税仍是开放边界；需要跨 suspension 持久化 `this` 的 async/generator 路径暂时保留 eager coercion。
 
 调用链逐跳对照结论：qjs 单函数 JS_CallInternal 一条 C call 进入新寄存器组；zjs 7 跳（next→op_call→resolveInlineTarget→pushAndEnter/pushCall/pushFrame→setupSimpleInlineEntry→链接+9 个 vm.\* 重载→next）。
+
 - [结构·主体] 帧建立 ~30-40 存（Entry 9 字段+Frame 15 字段+Stack 5 字段）vs qjs 9 字段 sf 共 8 存 + alloca；返回路径 reloadTop ~10 存 + Machine 解链 vs qjs C return + 1 存。**loop-in-place 换 no-C-stack-growth 的架构成本主体，历史已论证否决瘦身**（cold 字段跨 generator suspend 承重）。
 - [多做工·可删] `Machine.switched` 每 push/pop 各 1 存——**write-only 死簿记**（inline_calls.zig:238 声明+3 写 0 读，grep 实证）。纯删除即赢。
 - [多做工] `frame.pc += 2` 对刚 publish 的内存 RMW（qjs pc 寄存器 +2 后单存 sf->cur_pc）仍在；旧 op_return 的 `stack.peek()` dup+teardown-free 已改成 move，不再列为开放项。
@@ -184,6 +199,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 - [整改前结构·**T4 头号刀**] **命名属性添加缺 qjs「rc==1 原地改写」路径**：qjs `add_property`（quickjs.c:9206-9236）三臂——转移缓存 HIT 共享 / MISS 且 rc!=1 才克隆 / **MISS 且 rc==1 → `add_shape_property`（5469）原地追加**。zjs `adoptShapeForNewProperty`（object.zig:9777-9799）当时无条件走转移缓存，MISS 即 `transitionProperty` 克隆 child，随后替换 `self.shape_ref` 并 release parent（shape.zig:281-295）。pin 快照显示 churn 差异很大，但原始脚本尚未留存，数值需复测。
 
 整改前已有 `appendProperty`/`rehashShape`/`relocateShape` 机件，**但不能只在旧 `transitionProperty` 中加一个“返回 parent”的分支**：调用者无条件 release old shape；不扩容时会把仍在使用的 parent 降到 rc=0，扩容时 `relocateShape` 已释放旧块，调用者再 release 会触发悬空访问。本轮最终选择了 `**Shape`/显式 ownership 方案，并覆盖缓存 HIT/MISS、同指针、FAM relocation、OOM rollback、hash 摘链重挂与重复对象 shape 收敛测试。
+
 - [多做工] cloneShape 合并了扩容语义→永远逐 prop 重建（@memset 桶+props、逐 prop 写+atoms.dup+linkPropertyHash 重建链，shape.zig:589-642）；qjs js_clone_shape（5268-5297）尺寸恒等**单次 memcpy 整个尾部**+仅逐 prop DupAtom；resize_properties 搬移时 atom 所有权转移不重 dup。
 - [结构] 转移缓存键含 prop_size（shape.zig:307，容量不等不共享）+ 预容量 root shape 进 intern 表不查重（每个 c_function/JSON.parse 对象建一次性 shape）；qjs hashed shape 容量统一故键中无容量、预容量 shape 走 nohash 不入表（5766）。**实测佐证：L4c_array3（1.69x）热点含 destroyShape 4.4%+Registry.link 3.6%——`[1,2,3]` 无命名属性也每迭代 shape 建毁**（另 createInternal 14.3%+ensureArrayBufferCapacity 10.6%+constructLiteralWithPrototype 8.6% 为数组本体）。
 - [多做工] **delete 不摘哈希链**：deleted 条目留在链中，**每次属性探测每步付 `!flags.deleted` 测试（从未 delete 的对象也付）**（object.zig:9981/10007）；qjs delete_property 物理摘链+阈值 compact_properties（9311-9369），探测循环零 deleted 测试。
@@ -197,16 +213,25 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 ### 4.5 分配与 GC（A5）
 
 > 整改后：slab-backed GC 对象已把 `Metadata` 折进既有 8B allocator header，64B payload 从旧 80-class 回到 72-class；独立前缀仍服务大块/过对齐对象。`heap_accounted` 与 `metadata_in_slab` 分位保留 `GCStats`、memory limit、`verifyHeapAccounting` 和 live=0 语义。
+>
+> 2026-07-16 再核对：普通 GC 对象的 rc==0 析构现与 qjs 一样先移入 intrusive zero-ref 队列，由最外层 decref 迭代排空；cycle trial deletion 也改为在主链表与临时链表间移动节点，不再递归扫描存活链或为候选/Pass-B 分配快照。运行时公开 allocator、persistent allocator 与保留型 BigInt limbs 统一进入同一 MemoryAccount；对象分配在限额拒绝前先执行已请求的 major GC。深链、BigInt 限额和“可回收环先于 OOM”均有回归测试。
+>
+> 2026-07-17 弱持有者复核：WeakMap/WeakSet、WeakRef 与 FinalizationRegistry 现与 qjs 一样在 payload 生命周期内挂入专用 intrusive weak-holder list；GC 的普通弱清扫和 cycle-garbage 弱集合清扫都在 `.decref` phase 单次遍历该链，不再为每个 holder 重扫整个 GC registry。弱 payload 同时缓存 borrowed-holder dense index，deferred weak-value cleanup 也不再为没有 weak-id/realm 边的普通 value 安排无关全表扫描。Debug 固定反馈环中，16k live weak holders 的手动 GC 由约 3.34s 降到 33.2ms；1k/2k/4k/8k/16k 为 2.3/4.3/8.4/16.7/33.2ms。16k reverse teardown 为 347ms，1k–16k 的 22/47/90/184/347ms 同样呈线性。
+>
+> 同轮 teardown 复核又闭合了两个由新布局稳定暴露、但根因早于 weak-holder list 的顺序隐患。第一，runtime deinit 不再把可被前序 GC 改写的 registry 链表顺序当成所有权顺序：Object 资源先消费 closure FB 的 `var_refs_len`，FunctionBytecode 与 Shape 随后释放资源，相关 Object/FB struct 最后统一回收。第二，cycle REMOVE_CYCLES 不再把仍有 weak identity 的 condemned object 提前强制写成 `rc=0`；恢复后的强引用计数保留到所有入边释放完，Pass B 再按 qjs 的 `(rc == 0 && weakref_count == 0)` 条件释放，否则留下 weak husk。对应的 captured-closure 空 iterable 与 object-key iterable 回归均已锁定；WeakMap/WeakSet/WeakRef/FinalizationRegistry 定向 test262 为 141/141、85/85、29/29、47/47。
 
 **前提勘误**（修正 memory/历史文档）：参照 qjs 树**自带 arena 分配器** `__js_malloc`（quickjs.c:1549-1594，31 size class/4KB arena/8B 块头），**GC 元数据（rc/mark/gc_obj_type）就内嵌在这个 8B malloc 块头里**（quickjs.c:270-280）；js_def_malloc 只是 backing（arena 碎取/大块时才被调）。zjs SmallObjectSlab 正是它的镜像（size class 表逐字节相同）。
 
-- [多做工·最大剩余集中税] **每-alloc/free 记账标量 zjs 4-5 个 vs qjs 0 个**：zjs 每对象更新 memory.allocated_bytes（双向）+ stats.allocated_bytes/alloc_count + space.live_bytes（双向）+ meta.size_class + gc_object_count；qjs 小块路径的 malloc_size 按 **arena 粒度**更新（稳态循环通常不动）。但 `stats.allocated_bytes/alloc_count` 不是可直接删除的内部探针：它们进入公开 `JSRuntime.gcStats()`/`GCStats` 的累计字段，现有测试也断言其语义。优化必须先选定兼容方案（例如显式可选的累计统计、冷路径事件汇总，或经 API 决策后的语义变更）；不得以性能名义静默改变公共统计契约。`live_bytes` 是否能降到 arena 粒度也要保留 `verifyHeapAccounting` 与释放后 live=0 的不变量。
-- [结构] **GC 元数据独立 8B 前缀 + 三重初始化**：zjs 对象块=8 slab 头+8 Metadata+64 对象=80-class（每 arena 50 块）vs qjs 8+64=72-class（56 块）；rc/flags/prev/next 在 initGcPrefix、addWithSize、`.header=.{}` 写 2-3 遍（qjs 各字段恰一次）。折叠 Metadata 进 slab 块头有 qjs 锚点；顺带消掉 free 侧尺寸重构税（destroyFromHeader 重算 inline_layout→alloc_size，qjs js_free 从块头自恢复）。
-- [多做工] refcount dec 的 3 项额外分支（§4.1 已列：string rc 偏移不统一/deinit 相位提前到每-dec/profile 探针）——三者均有 qjs 锚点。
-- [多做工] free 路径 side tables 现状：weak-id/borrowed/std_file **已旗标化**（~5 分支，接近 qjs 平价）；**唯一剩 iterator 缓存表每 free 无门线性扫**（object.zig:1902→1604-1628，qjs 无对应物）。历史"15% 集中税"已大幅缩水。
-- [多做工·仅 GC 周期] 环收集 ~7 次全表遍历+每周期堆分配（garbage_headers ArrayList 快照）vs qjs 3 遍零分配（intrusive list 拼接即分区）；弱清扫遍历全部 GC 对象 vs qjs 只遍历 weakref_list。
-- [多做工·小] 对象创建时 class 元数据读取（recordPtr+layout+exotic/slow 谓词 ~10-20 insn vs qjs JS_CLASS_OBJECT 臂零读取）；限额检查每 alloc vs qjs arena 粒度。
-- [对齐] slab 几何全套逐字节同（31-class 表/4KB arena/8B 块头/u16 free 链/满-空迁移时序/**一空即还 backing——修正 memory 中"背离"定性，两边同构**）；>512B 直达 backing；GC 阈值 1.5x 增长+单点触发；环收集三访问器语义 1:1；Pass-B husk 延迟；fast array 1.5x 增长。
+- [多做工·最大剩余集中税] **每-alloc/free 记账标量 zjs 4-5 个 vs qjs 0 个**：zjs 每个 GC cell 更新 memory.allocated_bytes（双向）+ stats.allocated_bytes/alloc_count + space.live_bytes（双向）+ meta.size_class + gc_object_count；经标准 allocator facade 的容器/limb 分配也更新 MemoryAccount。qjs 小块路径的 malloc_size 按 **arena backing 粒度**更新（稳态循环通常不动）。但 `stats.allocated_bytes/alloc_count` 不是可直接删除的内部探针：它们进入公开 `JSRuntime.gcStats()`/`GCStats` 的累计字段，现有测试也断言其语义。优化必须先选定兼容方案（例如显式可选的累计统计、冷路径事件汇总，或经 API 决策后的语义变更）；不得以性能名义静默改变公共统计契约。`live_bytes` 是否能降到 arena 粒度也要保留 `verifyHeapAccounting` 与释放后 live=0 的不变量。
+- [已修复] **GC 元数据独立前缀/三重初始化**：slab block header 已直接承载 Metadata，64B Object 与 qjs 一样落在 72-class；大块/过对齐路径才保留独立前缀，free 侧由块头恢复分配信息。
+- [多做工] refcount dec 的旧三项差异已收敛为默认构建中的 `.deinit` phase guard：string/symbol/rope 与其他 refcounted payload 现统一从 payload−4 取 RC，opcode-profile 探针由 comptime 门完全裁掉。qjs 的普通 `JS_FreeValue` 没有 zjs 这条 runtime-deinit 保护。
+- [多做工] free 路径 side tables 现状：weak-id/std_file 已旗标化；function/generator 与 weak payload 的 borrowed-holder 注销有缓存索引，反向弱 holder teardown 不再线性查表。其他可能登记 borrowed realm pointer 的 payload 仍保留防御性 fallback；iterator 缓存表仍是每 free 无门线性扫（qjs 无对应物）。
+- [对齐·本轮修复] 普通 Object/FunctionBytecode/VarRef 的 zero-ref 释放使用 intrusive FIFO 并在 `.decref` phase 迭代排空；子对象 rc 归零只入队，不再递归展开深对象链。这与 qjs `gc_zero_ref_count_list`/`free_zero_refcount` 的栈安全时序一致。
+- [对齐·本轮修复] cycle trial deletion 直接复用 header 的 intrusive link：decref 后零引用节点移入临时 garbage 链，scan-incref 复活节点时移回主链尾，garbage refcount 恢复与 Pass-B 延迟队列也不分配。保留 Object → FunctionBytecode → VarRef → Shape 的 zjs 分型资源析构顺序；它是现有所有权布局所需，并非把 qjs 的对象种类表逐项照搬。
+- [对齐·本轮修复] 弱持有者使用 payload-resident intrusive link 和 runtime 专用链，空 WeakMap/FinalizationRegistry 也按 qjs 在整个 payload 生命周期内保留节点。两处弱清扫均以 `.decref` 延迟零引用析构后单次遍历，清除了 mark-and-rescan 的 O(holder×GC-registry) 路径；单 holder 中批量死亡的 weak entries 也改为读写游标压缩，不再逐项 memmove。
+- [正确性闭合·实现粒度仍不同] 所有 runtime allocator/persistent_allocator 分配和保留型 BigInt limbs 现都计入 MemoryAccount 与同一 memory limit；不再存在 raw allocator 绕过。zjs 按逻辑申请字节逐笔检查，qjs 的 malloc_state 按 arena/large backing usable size 检查，故相同数值限额下的精确边界仍不承诺逐字节一致。
+- [多做工·小] 对象创建时 class 元数据读取（recordPtr+layout+exotic/slow 谓词 ~10-20 insn vs qjs JS_CLASS_OBJECT 臂零读取）；zjs 的 allocator facade 每次申请都检查逻辑限额，qjs 小块稳态申请不进入 backing-limit 检查。
+- [对齐] slab 几何全套逐字节同（31-class 表/4KB arena/8B 块头/u16 free 链/满-空迁移时序/**一空即还 backing**）；>512B 直达 backing。普通对象创建在 backing allocation 前按当前 heap+requested size 判断阈值、先收环并以收集前 heap 重设 1.5x 阈值，与 qjs `js_trigger_gc → JS_RunGC → 1.5x` 时序一致；zjs 额外保留 RSS/external/force-GC 请求源。环收集三访问器语义、Pass-B husk 延迟与 fast array 1.5x 增长保持对齐。
 - [反超·勿动] `{}` 与数组 1 笔分配 vs qjs 2 笔（qjs 恒分配 prop[2]=32B；zjs capacity=0 不建+array_length 内联字段）——抵消记账税的另一半，"本体打平"的原因。
 
 ### 4.6 字符串与 atom（A6）
@@ -219,15 +244,16 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 - [多做工] template `concat` 体前多 3 层+qjsStringPrototypeMethod 7 个顺序 id 比较（qjs 函数指针直达）；但 zjs concat 体本身分配侧更优（32-part 测长单分配 vs qjs 左折叠逐步 concat）。template 1.37x 的主体在分派塔。
 - [结构] atom 表：qjs「字符串即 atom」（JSString 第三 u32 是 hash_next 内嵌链，新串就地变 atom 零拷贝）；zjs 独立 AtomTable+bytes 副本+双向缓存（第三 u32 是 atom_id 回指）。稳态被缓存抹平，差在首次 intern 与内存形态。
 - [对齐] 通用 rope 几何：512/8192 阈值、depth>60 Fibonacci buckets、无分配叶迭代、单码元递归读取、比较/哈希不强制 flatten，以及线性化结果缓存均已有对应实现。
-- [对齐] JSString 12B 布局/短串创建/字面量 atom 复用（push_atom_value 稳态 dup）/fresh 拼接单分配双 memcpy/add_loc 窥孔/template 发码/charCodeAt 体语义/s.length rope 感知 O(1)/内容哈希 h*263/子串立即拷贝。
+- [对齐] JSString 12B 布局/短串创建/字面量 atom 复用（push_atom_value 稳态 dup）/fresh 拼接单分配双 memcpy/add_loc 窥孔/template 发码/charCodeAt 体语义/s.length rope 感知 O(1)/内容哈希 h\*263/子串立即拷贝。
 - [反超·勿动] 累积 rope-tail 累加器（机制在位）；int→string 0-255 缓存+免 digits；单字符/recent-atom 缓存群；charCodeAt 直达。
 
 ### 4.7 builtins 与原生调用边界（A7）
 
-> 整改后（部分完成）：Math 一元方法迁到 `.f_f`，`atan2/pow` 迁到 `.f_f_f`，非 primitive 参数仍走完整可观察 ToNumber fallback；普通调用优先使用对象 memo 的 `nativeRecord`。Math.abs 方法代表运行约 3.372B→3.101B instructions、665M→566M cycles；plain-call 代表运行约 1.821B→1.456B、369M→259M；generic `Math.min` 未见 instructions 回退。二次审计把 `Function.prototype.call/apply` 也绑定到 `.function` record，并为所有 internal-record 调用链接 native backtrace frame；`call` 现有独立 record，按 qjs `argv + 1` 直接转发，并为同 realm 普通 bytecode 目标复用当前 Machine。`Array.prototype.push` 现为 Array 域首个 per-method full-context record，且 fast array 在 ToObject/receiver dup 前处理；Array 其余方法和 string 等大域仍使用共享 full-context handler，不宣称全仓 typed-cproto 迁移完成。
+> 整改后（ABI 与分层迁移完成）：Math 一元方法使用 `.f_f`，`atan2/pow` 使用 `.f_f_f`，非 primitive 参数走 typed generic+magic 的完整可观察 ToNumber fallback；其余标准 native record 也全部由 `NativeCProto + tagged function pointer` 驱动。Atomics、performance 和全部 Promise statics 已补入同一 record 表，只有明确属于 embedder 的 `.host` 域保留独立机制。核心层的 `InternalCall/.zjs_internal_call` 参数包、独立 constructor 位和 secondary `call` 指针已删除，构造能力由 cproto 表达；exec 只用栈上 native-call 环境补充 realm/output/VM caller 状态。普通调用继续优先使用对象 memo 的 `nativeRecord`，所有 record 调用继续链接 native backtrace frame。共享 magic handler 与按方法进一步专用化仍是性能工作，不再是 ABI 或 builtin 分层迁移债。
 
 层数结论（nm 实证动态调用边界）：qjs 恒 3 层（JS_CallInternal→js_call_c_function→body 指针）。zjs 分化：charCodeAt/at/codePointAt **2 层（反超）**；Math.floor 2 层+每参数 3 个协转出线调用≈5；Array.push 4 层；**普通位置原生调用（parseInt 等走 op.call）5+ 层**。
-- [整改前结构·迁移未开始] **record.call 指向 per-domain magic-switch 共享 handler 而非 per-method body**：QJS 式 `NativeCProto`/`native_function` 字段当时已声明但**全仓 0 个 entry 使用**（1eacd18 文档明示的未完成迁移）。Math 37 臂 switch、array 40+ 臂。qjs JSCFunctionListEntry 指针直达 body，magic 只做 selector。
+
+- [已完成·ABI；仍可专用化] **native record 已全部改为 cproto-tagged function pointer**：QJS 式 `NativeCProto`/`native_function` 是唯一载荷；Math 数值 cproto 直达数值 body，其余 entry 使用 typed generic+magic 指针。部分域仍让多个 entry 共享 magic-switch implementation，属于后续 per-method 专用化/性能差异，不再经过 generic `InternalCall` ABI。
 - [整改前多做工] Math 参数协转塔：`toMathNumber→toPrimitiveForNumber→toNumberValue` 每参数 3 个真实调用+2 次 free；qjs f_f cproto 在 js_call_c_function 内联 `JS_ToFloat64`+libm（17647-17656）。当时的 `tryFastMathCall` 是零调用死代码，当前已删除。
 - [已完成] 普通位置（op_call）原生调用已使用函数对象的 `nativeRecord` memo，并从 payload 直接读取 native realm；不再每次 decode id+查表。
 - [已完成·Array 首域] `Array.prototype.push` 的 record 指针直接进入 152B 专用 wrapper，绕过 4620B Array 共享分派体和 444B `qjsArrayPushCall` 再验证；语义体在 receiver dup/ToObject 前尝试真实 Array fast arm，包含 qjs 的零参数路径。
@@ -243,6 +269,7 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 > 整改后：primitive/string-wrapper for-of 快路已删除并统一 GetMethod；`in` 的 `toString` 名字拐杖和 `instanceof Array` 的 `flags.is_array` 特判已删除。C2–C4 现与 qjs 输出一致。
 
 前置勘误：参照 qjs 树已是**新版 var_ref 化全局机制**（JS_CLOSURE_GLOBAL cell），旧版"JS_GetGlobalVar 两级查找"叙事作废；zjs 全局模型（global cell/ctx.lexicals/uninitialized_vars 侧表）与新版结构一致。
+
 - [多做工] **put_var 无 fast handler**（get_var 有——读写不对称）：每全局写付 publish+noinline putVar+coldNext；qjs OP_put_var 热臂 ~10 insn 内联（18490-18525）。zjs 热臂本体对齐但多 3 项载荷（无条件 globalVarAtom/嵌套 cell 检查/function-name 位独立检查）。⚠️补 handler 前须实测（memory 有 T2 时间中性否决先例）。
 - [多做工] **put_var_ref 家族恒冷** + `publishTopLevelFunctionVarRef` 检查链被泛化到所有 var_ref 写（qjs 该语义只在 put_var）；qjs put_var_ref0 = `set_value` 4-5 insn（18617）。读侧已对齐。
 - [多做工] try 块进/出各付一次 cold hop（op.catch 恒冷+catch_target 侧寄存器模型）；qjs OP_catch 内联 3 insn 推 tagged 值、抛时扫栈（18922-18930）。
@@ -252,17 +279,18 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 - [对齐] 全局 VARREF cell 模型全套/闭包 var_refs 借用/direct eval 编译期绑定（80da8e4 后 get_var 热路径零 eval 残留）/for-in 全套/a[i] 读/数组 append 门。
 - [整改前结构·正确性缺口] for-of 的 iterator-result 主体与 result-obj-free 已对齐，但 primitive string/string-wrapper 入口提前构造内建 iterator，绕过可观察的 `Symbol.iterator` 读取；当时不能概括为“for-of 全套对齐”。
 - 🐛 **已确认的忠实性缺陷 3 项（非性能）**：
-  1. `instanceof` 的 Array 特判可达，但原先猜测的“用户 `function Array(){}` 命中”不成立——`constructorNameEqlLocal` 只识别 native dispatch name。真实最小用例是先给原生 `Array` 定义 own `Symbol.hasInstance = undefined`，再把数组实例 prototype 改为 null；qjs 按 OrdinaryHasInstance 返回 false，zjs 用 `flags.is_array` 返回 true。
-  2. for-of 对 primitive string 直接构造内建 string iterator，跳过 `GetMethod(value, Symbol.iterator)`；patch `String.prototype[Symbol.iterator]` 后，qjs 迭代 patch 结果 `X`，zjs 仍输出原串 `ab`。
-  3. in 运算符的 `atomNameEql(key,"toString")` 兜底造成直接错误：`"toString" in Object.create(null)` 在 qjs 为 false、zjs 为 true。无需再以“根因未定位的风险”降级描述；应删除语义拐杖并补齐真实 Object.prototype 链/存在性探测。
+    1. `instanceof` 的 Array 特判可达，但原先猜测的“用户 `function Array(){}` 命中”不成立——`constructorNameEqlLocal` 只识别 native dispatch name。真实最小用例是先给原生 `Array` 定义 own `Symbol.hasInstance = undefined`，再把数组实例 prototype 改为 null；qjs 按 OrdinaryHasInstance 返回 false，zjs 用 `flags.is_array` 返回 true。
+    2. for-of 对 primitive string 直接构造内建 string iterator，跳过 `GetMethod(value, Symbol.iterator)`；patch `String.prototype[Symbol.iterator]` 后，qjs 迭代 patch 结果 `X`，zjs 仍输出原串 `ab`。
+    3. in 运算符的 `atomNameEql(key,"toString")` 兜底造成直接错误：`"toString" in Object.create(null)` 在 qjs 为 false、zjs 为 true。无需再以“根因未定位的风险”降级描述；应删除语义拐杖并补齐真实 Object.prototype 链/存在性探测。
 
 ### 4.9 发码形态与 peephole（A9——补充 §2 的系统化全集）
 
 > 整改后：C1 的 for-head lexical 在声明点无条件武装 TDZ。resolve_labels 已实现 dup+put→set、同向逻辑链、null/undefined/typeof 比较、undefined+return 和终止后死代码删除；删除 atom-bearing 指令时同步重建 atom ownership。generator finally 的隐式 rethrow marker、外部 jump target、IsHTMLDDA 和 callable native/Proxy 均有专门回归。
 
 管线级事实：zjs 三 pass = resolve_variables → fuseIncLoc → resolve_labels（bz:7254-7307）；opcode 表与 quickjs-opcode.h **逐项同构**（id/尺寸/格式全同），差异全在发射层。
+
 - 🐛 **整改前真语义 bug（本轮已修复）**：C-style for-头 let 绑定从不被 `set_loc_uninitialized` 武装——decl 点发射在死门后（pz:13568-13572 依赖恒 false 的 use_short_opcodes）+ 序言武装被 `tdz_emitted_at_decl=true` 跳过（bz:5150）+ for 路径无 enter_scope。整改前实测 `for (let i = i; …)` qjs 抛 ReferenceError、zjs 静默通过（test262 未覆盖此形状）；本轮去掉了声明点发射对 use_short_opcodes 的错误依赖。
-- [整改前多做工·peephole 缺口]（qjs resolve_labels 有、zjs 当时无，每处 +1~2 op）：①**dup+put→set 族规则缺失**（qc:35368-35400/35475-35492）——值被使用的赋值（`y=(x=v)`、`while((c=…))`）zjs 发 `dup;put_loc` 2 条 vs qjs `set_loc0-3` 1 条，set_loc 族短 op zjs 几乎不产生；②**`&&` 链坍缩缺失**（qc:34478-34515 dup/if_false/drop→单 if_false）——每 `&&` +2 op；③**is_null/is_undefined/typeof_is_* 折叠缺失**（qc:35143-35168/35326-35345/35533-35570）——`x===null`/`typeof x==="undefined"` 每处 +1 op；④undefined+return→return_undef 折叠缺失；⑤块中 return 后死语句保留（qjs skip_dead_code）。
+- [整改前多做工·peephole 缺口]（qjs resolve*labels 有、zjs 当时无，每处 +1~2 op）：①**dup+put→set 族规则缺失**（qc:35368-35400/35475-35492）——值被使用的赋值（`y=(x=v)`、`while((c=…))`）zjs 发 `dup;put_loc` 2 条 vs qjs `set_loc0-3` 1 条，set_loc 族短 op zjs 几乎不产生；②**`&&` 链坍缩缺失**（qc:34478-34515 dup/if_false/drop→单 if_false）——每 `&&` +2 op；③\*\*is_null/is_undefined/typeof_is*\* 折叠缺失\*\*（qc:35143-35168/35326-35345/35533-35570）——`x===null`/`typeof x==="undefined"` 每处 +1 op；④undefined+return→return_undef 折叠缺失；⑤块中 return 后死语句保留（qjs skip_dead_code）。
 - [对齐] 短 int 推送/push_const8/fclosure8/loc 短形/call0-3/if8-goto8 松弛/inc_loc-add_loc 融合（fuseIncLoc 窗是 qjs 超集）/goto 链穿透/tail_call（zjs parse 期改写 vs qjs resolve 融合，结果等价）/丢值赋值无 dup+drop（parse 期 result_needed vs qjs peephole 坍缩，殊途同归——即 30c292d 历史修复的延续确认）。
 - [反超·勿动] 全局赋值语句 4 op vs qjs 6（qjs 的 dup+put_var+drop 无坍缩规则）；for-let 丢值 i++ 少 1 op（inc vs post_inc+drop）；array_from 无 32 元素上限（qjs 超 32 转 define_field）。
 - 结构备忘：zjs 的 TDZ 武装时序=函数序言一次性+enter_scope 入口 close+re-arm（boxed-cell 模型）vs qjs 每 enter_scope 展开+leave_scope 出口 close（捕获者）；zjs 方法调用额外记 direct_call_sites side-table 元数据（非 op）；局部 const 写=运行时 vardefs 查询 vs qjs 编译期 throw_error 替换（§4.2 is_const 刀的发码侧确认）。
@@ -273,47 +301,47 @@ zjs：op_return 17.92% + op_get_arg_short 16.03% + op_call 13.04% + setupSimpleI
 
 十一项均先加入失败回归或双引擎可执行证据，再修根因；没有扩大 test262 exclude；C7–C10 只删除已经转绿的 known-errors。
 
-| # | 整改 | 当前结果 |
-|---|---|---|
-| C1 | for-head lexical 在声明点发 `set_loc_uninitialized`，不再依赖 phase-2 尚未开启的 short-opcode 标志 | 自引用、空 test/update、closure capture 回归通过；zjs/qjs 均抛 `ReferenceError` |
-| C2 | 删除 primitive/string-wrapper 和 iterator-class 的协议前置短路，统一读取 iterator method | patched `String.prototype[Symbol.iterator]` 两端均得到 `X`；sync/async iterator 切片通过 |
-| C3 | 删除 `toString` 名字兜底，ordinary/proxy 路径走真实存在性探测 | `"toString" in Object.create(null)` 两端均为 `false` |
-| C4 | 删除 native-name Array 特判，`@@hasInstance` 缺省时走 prototype chain | prototype=null 数组两端均为 `false` |
-| C5 | conditional-only 回边在四种条件跳转形态上统一 poll installed interrupt handler | `do {} while (true)` 修复前超时，修复后返回 `error.Interrupted` |
-| C6 | internal builtin 调用链接 native frame；`Function.prototype.call/apply` 进入 `.function` record | `map.call/apply` 两端均为 `map (native) → call/apply (native) → <eval>`；CallSite file/line/column 为 null，`isNative()` 为 true |
-| C7 | 模块声明先实例化且只执行一次；TLA 恢复占据真实 Promise reaction 位置；等待中动态导入共享求值结算；拒绝按叶到根传播 | 原失败 7/7 转绿；整个 `top-level-await` 目录 251/251；4 条新增 Zig 回归并入 unified 1329/1329；同一 awaited Promise 的顺序与 qjs 均为 `before,module,after` |
-| C8 | DynamicImportCall 发码后清除匿名函数 named-evaluation 候选，避免参数 arrow 把外层声明错误标记为匿名函数命名目标 | 原失败 1/1 转绿；整个 dynamic-import assignment-expression 目录 28/28；直接 arrow 声明的正对照仍保留 `set_name` |
-| C9 | 当前非箭头函数的隐式 `arguments` 在父作用域捕获前物化；显式参数绑定优先于 pseudo-variable，嵌套 arrow 捕获同一函数绑定 | 原失败 2/2 转绿；整个 `for-await-of` 目录 1234/1234；显式同名参数与 destructuring 对照均与当前 qjs 一致 |
-| C10 | generator return-through-finally 用正常出口定位真正的合成重抛，并让该出口标记跨 dead-code peephole 保留 | 原 AsyncGenerator 失败转绿；`AsyncGeneratorPrototype/return` 19/19；同步/异步显式 finally throw 与关闭后 `.next()` 均有 Zig 回归 |
+| #   | 整改                                                                                                                           | 当前结果                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1  | for-head lexical 在声明点发 `set_loc_uninitialized`，不再依赖 phase-2 尚未开启的 short-opcode 标志                             | 自引用、空 test/update、closure capture 回归通过；zjs/qjs 均抛 `ReferenceError`                                                                                                     |
+| C2  | 删除 primitive/string-wrapper 和 iterator-class 的协议前置短路，统一读取 iterator method                                       | patched `String.prototype[Symbol.iterator]` 两端均得到 `X`；sync/async iterator 切片通过                                                                                            |
+| C3  | 删除 `toString` 名字兜底，ordinary/proxy 路径走真实存在性探测                                                                  | `"toString" in Object.create(null)` 两端均为 `false`                                                                                                                                |
+| C4  | 删除 native-name Array 特判，`@@hasInstance` 缺省时走 prototype chain                                                          | prototype=null 数组两端均为 `false`                                                                                                                                                 |
+| C5  | conditional-only 回边在四种条件跳转形态上统一 poll installed interrupt handler                                                 | `do {} while (true)` 修复前超时，修复后返回 `error.Interrupted`                                                                                                                     |
+| C6  | internal builtin 调用链接 native frame；`Function.prototype.call/apply` 进入 `.function` record                                | `map.call/apply` 两端均为 `map (native) → call/apply (native) → <eval>`；CallSite file/line/column 为 null，`isNative()` 为 true                                                    |
+| C7  | 模块声明先实例化且只执行一次；TLA 恢复占据真实 Promise reaction 位置；等待中动态导入共享求值结算；拒绝按叶到根传播             | 原失败 7/7 转绿；整个 `top-level-await` 目录 251/251；4 条新增 Zig 回归并入 unified 1329/1329；同一 awaited Promise 的顺序与 qjs 均为 `before,module,after`                         |
+| C8  | DynamicImportCall 发码后清除匿名函数 named-evaluation 候选，避免参数 arrow 把外层声明错误标记为匿名函数命名目标                | 原失败 1/1 转绿；整个 dynamic-import assignment-expression 目录 28/28；直接 arrow 声明的正对照仍保留 `set_name`                                                                     |
+| C9  | 当前非箭头函数的隐式 `arguments` 在父作用域捕获前物化；显式参数绑定优先于 pseudo-variable，嵌套 arrow 捕获同一函数绑定         | 原失败 2/2 转绿；整个 `for-await-of` 目录 1234/1234；显式同名参数与 destructuring 对照均与当前 qjs 一致                                                                             |
+| C10 | generator return-through-finally 用正常出口定位真正的合成重抛，并让该出口标记跨 dead-code peephole 保留                        | 原 AsyncGenerator 失败转绿；`AsyncGeneratorPrototype/return` 19/19；同步/异步显式 finally throw 与关闭后 `.next()` 均有 Zig 回归                                                    |
 | C11 | `Promise.resolve` 对 native Promise 先读取 observable `constructor` 并完成身份命中，再由 capability 慢路验证 `this` 是否可构造 | ordinary receiver 与自定义 `promise.constructor` 相同的最小用例由 `TypeError` 转为身份返回；getter 次数/抛出顺序、subclass、`.call`/`Reflect.apply` 与 qjs 一致；resolve 目录 30/30 |
 
 原先列为开放的 if-only 中断 poll 与 `useUncheckedLexicalLocals` 死码均已闭合。仍存在的正确性与机制差异单列在 §5.4，不再与 §5.2 的性能架构迁移或附录 A 的历史证据缺失混写。
 
 ### 5.2 性能前沿逐项处置
 
-| # | 状态 | 本轮处置与证据 |
-|---|---|---|
-| 1 | 完成 | shape transition 改为 `**Shape` ownership API，cache/shared/rc==1 三臂；FAM relocation、hash、共享与 OOM 回归通过 |
-| 2 | 完成 | safe local ref-tail 改写为 loc get/put；eval/with/closure/destructuring/const/function-name 均保守退出 |
-| 3 | 完成（窄刀） | 默认 repr 使用无符号 tag 范围比较，profile 探针 comptime 裁剪；未捆绑 rc 物理布局重写 |
-| 4 | 完成 | slab header 与 GC Metadata 复用，64B payload 使用 72-class；公开累计统计和 heap-accounting 不变量保留 |
-| 5 | 完成（窄刀） | const local write resolve 期发 message-carrying `throw_error`；运行时 handler 删除 is_const 分支 |
-| 6 | 完成（边界扩大） | 删除 `Machine.switched` 3 写 0 读；strict plain exact-arity 不再绕行通用 FrameSlab/init 路径，而与 qjs 一样复用同构帧布局，并以独立 comptime setup 保持 sloppy 热路无 strict 分支；物化 strict arguments 时由同族 snapshot setup 保存 original args；缺参的 sloppy/strict/snapshot 三形态按 qjs `arg_allocated_size` 方式在同一 slab 前部移动实参并补 `undefined`；对象与 primitive receiver 又复用 exact/padded × snapshot/no-snapshot method setup 和 owned-this simple teardown，普通 bytecode 的 sloppy ToObject 按 qjs 延迟到 `OP_push_this`，arrow/direct-eval 两个非 opcode 观察点共享同一一次性 materialization；arguments 对象改用 realm 预制属性 shape、unmapped dense values 与 mapped var-ref 索引存储，隐式绑定也改回 qjs 的函数序言一次创建；对象创建/读取固定税与共同帧固定税仍独立留置 |
-| 7 | 部分完成（边界扩大） | Math `.f_f/.f_f_f` + observable-coercion fallback + plain-call nativeRecord memo；Function `toString/bind/apply` 已 record 化，`call` 使用独立 record、直接 `argv + 1` 转发和符合资格的 same-Machine bytecode forwarding，synthetic native frame 保持栈可见；borrowed-reference holder 的生命周期登记不再错误阻断普通 shape/prototype data lookup；Array.push/pop 使用 per-method full-context record，push 在 ToObject/receiver dup 前走 qjs 式 fast-array arm，pop 直接处理真实 Array 的 length 槽并为 observable 慢路保留完整 Get/Delete/Set 顺序；Promise.resolve 使用 Promise 域首个 per-method record 并在 capability 验证前完成身份命中；Object constructor 使用 qjs 式 constructor-or-function record，让普通调用和 active-function 直构造共享 nullish/ToObject body、custom new.target 保留独立建对象分支；String 大小写方法使用 qjs 式共享 per-method body，ASCII 映射直接写最终 inline String；其他共享 full-context builtin 域未伪装成 typed-cproto 已迁移 |
-| 8 | 完成（证据改刀） | 原 GC-pacing 假设未采纳；真正瓶颈是 cell local 禁用 rope tail，2M 代表运行约 −62.2% instructions / −78.2% cycles / −96.2% minor faults |
-| 9 | 原刀否决，替代刀完成（边界扩大） | 64 tombstones 无可测 instructions 惩罚，未做 risky compact；cached-string-atom 先消除反复 intern/free，随后 atom-backed string/static field tail handlers 直接完成普通 data/missing、prototype walk、字符串化数组索引与 accessor/Proxy action。own/inherited/primitive computed data 相对阶段起点约 −23%/−61%/−40%；getter 与 no-trap Proxy 又回到约 1.37–1.79x/1.40–1.49x，bytecode trap 的 post-call continuation 单列为下一前沿 |
-| 10 | 完成 | 五族 peephole、atom ownership 与隐式控制流保护均有 snapshot/语义回归；相关 test262 867/867 |
+| #   | 状态                             | 本轮处置与证据                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 完成                             | shape transition 改为 `**Shape` ownership API，cache/shared/rc==1 三臂；FAM relocation、hash、共享与 OOM 回归通过                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 2   | 完成                             | safe local ref-tail 改写为 loc get/put；eval/with/closure/destructuring/const/function-name 均保守退出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 3   | 完成（窄刀）                     | 默认 repr 使用无符号 tag 范围比较，profile 探针 comptime 裁剪；未捆绑 rc 物理布局重写                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 4   | 完成                             | slab header 与 GC Metadata 复用，64B payload 使用 72-class；公开累计统计和 heap-accounting 不变量保留                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 5   | 完成（窄刀）                     | const local write resolve 期发 message-carrying `throw_error`；运行时 handler 删除 is_const 分支                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 6   | 完成（边界扩大）                 | 删除 `Machine.switched` 3 写 0 读；strict plain exact-arity 不再绕行通用 FrameSlab/init 路径，而与 qjs 一样复用同构帧布局，并以独立 comptime setup 保持 sloppy 热路无 strict 分支；物化 strict arguments 时由同族 snapshot setup 保存 original args；缺参的 sloppy/strict/snapshot 三形态按 qjs `arg_allocated_size` 方式在同一 slab 前部移动实参并补 `undefined`；对象与 primitive receiver 又复用 exact/padded × snapshot/no-snapshot method setup 和 owned-this simple teardown，普通 bytecode 的 sloppy ToObject 按 qjs 延迟到 `OP_push_this`，arrow/direct-eval 两个非 opcode 观察点共享同一一次性 materialization；arguments 对象改用 realm 预制属性 shape、unmapped dense values 与 mapped var-ref 索引存储，隐式绑定也改回 qjs 的函数序言一次创建；对象创建/读取固定税与共同帧固定税仍独立留置                                                                                                                                                                 |
+| 7   | 部分完成（边界扩大）             | Math `.f_f/.f_f_f` + observable-coercion fallback + plain-call nativeRecord memo；Function `toString/bind/apply` 已 record 化，`call` 使用独立 record、直接 `argv + 1` 转发和符合资格的 same-Machine bytecode forwarding，synthetic native frame 保持栈可见；borrowed-reference holder 的生命周期登记不再错误阻断普通 shape/prototype data lookup；Array.push/pop 使用 per-method full-context record，push 在 ToObject/receiver dup 前走 qjs 式 fast-array arm，pop 直接处理真实 Array 的 length 槽并为 observable 慢路保留完整 Get/Delete/Set 顺序；Promise.resolve 使用 Promise 域首个 per-method record 并在 capability 验证前完成身份命中；Object constructor 使用 qjs 式 constructor-or-function record，让普通调用和 active-function 直构造共享 nullish/ToObject body、custom new.target 保留独立建对象分支；String 大小写方法使用 qjs 式共享 per-method body，ASCII 映射直接写最终 inline String；其他共享 full-context builtin 域未伪装成 typed-cproto 已迁移 |
+| 8   | 完成（证据改刀）                 | 原 GC-pacing 假设未采纳；真正瓶颈是 cell local 禁用 rope tail，2M 代表运行约 −62.2% instructions / −78.2% cycles / −96.2% minor faults                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 9   | 原刀否决，替代刀完成（边界扩大） | 64 tombstones 无可测 instructions 惩罚，未做 risky compact；cached-string-atom 先消除反复 intern/free，随后 atom-backed string/static field tail handlers 直接完成普通 data/missing、prototype walk、字符串化数组索引与 accessor/Proxy action。own/inherited/primitive computed data 相对阶段起点约 −23%/−61%/−40%；getter 与 no-trap Proxy 又回到约 1.37–1.79x/1.40–1.49x，bytecode trap 的 post-call continuation 单列为下一前沿                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 10  | 完成                             | 五族 peephole、atom ownership 与隐式控制流保护均有 snapshot/语义回归；相关 test262 867/867                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 第 10 项固定脚本 `peephole-mixed-2m.js` 的 5 次 CPU5 计数：zjs 4.24004–4.24066B instructions、725.0–733.2M cycles；qjs 2.13953–2.13971B、350.0–353.3M。该总差距还包含 checked locals、调用与其他残余，不能全部归因给 peephole。
 
 调用/闭包前沿的追加测量（CPU19，ReleaseFast；7 轮配对、每轮各运行 5 次，表中为每次运行的归一化代表值）如下；冻结的本轮工作树起点二进制只用于同机 A/B，不替代 qjs 参照：
 
-| 固定脚本 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
-|---|---:|---:|---:|---:|
-| `call-const-zero-arg-10m.js` | 0.47s | 0.316s | 0.196s | 1.61x |
-| `call-add-two-arg-10m.js` | 0.37s | 0.338s | 0.212s | 1.59x |
-| `call-named-function-expression-two-arg-10m.js` | 0.43s | 0.370s | 0.214s | 1.73x |
-| `call-closure-two-arg-10m.js` | 0.49s | 0.400s | 0.239s | 1.67x |
+| 固定脚本                                        | 起点 zjs | 当前 zjs |    qjs | 当前 zjs/qjs |
+| ----------------------------------------------- | -------: | -------: | -----: | -----------: |
+| `call-const-zero-arg-10m.js`                    |    0.47s |   0.316s | 0.196s |        1.61x |
+| `call-add-two-arg-10m.js`                       |    0.37s |   0.338s | 0.212s |        1.59x |
+| `call-named-function-expression-two-arg-10m.js` |    0.43s |   0.370s | 0.214s |        1.73x |
+| `call-closure-two-arg-10m.js`                   |    0.49s |   0.400s | 0.239s |        1.67x |
 
 strict-call 隔离又补入 `call-control-inline-add-10m.js`、`call-strict-zero-arg-10m.js` 和 `call-strict-add-two-arg-10m.js`。无调用但同循环的最终控制为 zjs 89.298ms、qjs 93.686ms，排除了循环/加法本体；CPU19、ReleaseFast、9 轮三方轮换冻结二进制 A/B 中，strict call0 为 430.416→322.314ms、qjs 198.574ms（2.17x→1.62x，−25.1%），strict call2 为 560.224→351.329ms、qjs 210.012ms（2.67x→1.67x，−37.3%）。qjs 不为 strict 另走帧构造器，只在同一 `JS_CallInternal` 帧中保留原始 `this_obj`；zjs 原先却因 `simple_inline_eligible` 排除 strict，完整执行通用 Frame 初始化、this coercion 和 storage-window 组装。当前 bytecode view 预计算 sloppy、strict 无 snapshot、strict 有 snapshot 三种资格，`setupSimpleInlineEntry` 以 comptime 参数生成无运行时 strict 分支的实现：既有 sloppy 体反汇编尺寸保持 0x374，strict 无 snapshot 为 0x36c，arguments snapshot 体为 0x49c；snapshot 的资格/分派被 0x58 的 fallback helper 移出后，公共 `pushFrame` 保持 0x210。完整 test262 首跑发现两个 strict-arguments 红项，证明形参写会污染借用槽；最终 snapshot 体在同一 arena slab 保存 original args，两个原红项与扩大的 arguments/function/call 切片均转绿。四个既有调用控制未回退（call0 +0.2%，其余约 −2.1% 至 −4.1%）；缺一参数的 call0 仍约为 zjs 446.617ms、qjs 211.331ms（2.11x），作为下一条 arity-pad 边界保留，未混入本刀。
 
@@ -341,14 +369,14 @@ primitive field 分派跟进补入 5 个固定脚本，把普通对象继承读�
 
 冻结 `4a38b247` 起点、最终工作树与 qjs 的二进制 SHA 分别为 `be66b838…`、`2ef7be4d…`、`b76d1542…`。CPU19、ReleaseFast、9 轮三方轮换墙钟中位数如下；宿主 `perf_event_paranoid=4` 禁止 PMU，因此本组不冒充 instructions/cycles 证据。
 
-| 固定脚本/路径 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
-|---|---:|---:|---:|---:|
-| primitive 自定义 data | 156.968ms | 68.513ms | 66.411ms | 1.03x |
-| primitive 自定义 function | 273.827ms | 189.011ms | 113.407ms | 1.67x |
-| primitive builtin function | 271.066ms | 190.327ms | 113.901ms | 1.67x |
-| primitive computed data | 170.005ms | 166.220ms | 105.399ms | 1.58x |
-| plain-property primitive call | 301.865ms | 223.006ms | 132.719ms | 1.68x |
-| strict/sloppy primitive method | 316.402/317.646ms | 218.075/217.303ms | 130.329/131.057ms | 1.67x/1.66x |
+| 固定脚本/路径                  |          起点 zjs |          当前 zjs |               qjs | 当前 zjs/qjs |
+| ------------------------------ | ----------------: | ----------------: | ----------------: | -----------: |
+| primitive 自定义 data          |         156.968ms |          68.513ms |          66.411ms |        1.03x |
+| primitive 自定义 function      |         273.827ms |         189.011ms |         113.407ms |        1.67x |
+| primitive builtin function     |         271.066ms |         190.327ms |         113.901ms |        1.67x |
+| primitive computed data        |         170.005ms |         166.220ms |         105.399ms |        1.58x |
+| plain-property primitive call  |         301.865ms |         223.006ms |         132.719ms |        1.68x |
+| strict/sloppy primitive method | 316.402/317.646ms | 218.075/217.303ms | 130.329/131.057ms |  1.67x/1.66x |
 
 普通 object own/inherited 控制为 65.949/73.187ms，qjs 为 64.715/71.069ms；`Number.prototype` 对象控制由 399.919ms 降到 65.586ms，qjs 65.644ms；Number wrapper 保持 65.897ms，qjs 65.342ms。primitive 分支经 `Vm` 中的常驻函数表间接尾跳，最终 object `op_get_field` 为 0x208，未超过冻结起点的约 0x20c；因此没有用 object handler 膨胀换取专项数字。静态 primitive data 的专有 dispatch 税至此闭合；该冻结阶段的 1.58–1.68x 残差分别指向 refcounted `dup/free`、computed-key 通路和普通调用，computed-key 随即由下段独立反馈环继续拆分。async/generator suspended receiver 的 eager coercion 仍未对齐。
 
@@ -356,17 +384,17 @@ computed-property 分派跟进新增 8 个固定脚本，把 own/inherited/missi
 
 冻结 `093bf036` 起点、当前工作树与 qjs 的二进制 SHA 分别为 `2ef7be4d…`、`d1659d9c…`、`b76d1542…`。CPU19、ReleaseFast、9 轮三方轮换墙钟中位数如下；宿主 `perf_event_paranoid=4` 仍禁止 PMU，因此不把本组墙钟冒充 instructions/cycles 证据。
 
-| 固定脚本/路径 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
-|---|---:|---:|---:|---:|
-| object own computed data | 145.630ms | 111.718ms | 103.306ms | 1.08x |
-| object inherited computed data | 313.954ms | 121.807ms | 106.182ms | 1.15x |
-| primitive computed data | 166.310ms | 99.818ms | 105.370ms | 0.95x |
-| Array string index | 120.305ms | 82.098ms | 96.361ms | 0.85x |
-| object computed missing | 386.768ms | 102.959ms | 99.103ms | 1.04x |
-| object computed accessor | 125.522ms | 93.591ms | 33.871ms | 2.76x |
-| object computed Proxy | 225.144ms | 210.948ms | 77.808ms | 2.71x |
-| primitive computed accessor | 113.938ms | 89.280ms | 34.719ms | 2.57x |
-| primitive computed Proxy | 156.671ms | 144.742ms | 54.243ms | 2.67x |
+| 固定脚本/路径                  |  起点 zjs |  当前 zjs |       qjs | 当前 zjs/qjs |
+| ------------------------------ | --------: | --------: | --------: | -----------: |
+| object own computed data       | 145.630ms | 111.718ms | 103.306ms |        1.08x |
+| object inherited computed data | 313.954ms | 121.807ms | 106.182ms |        1.15x |
+| primitive computed data        | 166.310ms |  99.818ms | 105.370ms |        0.95x |
+| Array string index             | 120.305ms |  82.098ms |  96.361ms |        0.85x |
+| object computed missing        | 386.768ms | 102.959ms |  99.103ms |        1.04x |
+| object computed accessor       | 125.522ms |  93.591ms |  33.871ms |        2.76x |
+| object computed Proxy          | 225.144ms | 210.948ms |  77.808ms |        2.71x |
+| primitive computed accessor    | 113.938ms |  89.280ms |  34.719ms |        2.57x |
+| primitive computed Proxy       | 156.671ms | 144.742ms |  54.243ms |        2.67x |
 
 静态 object own/inherited 与 primitive data 控制相对起点分别为 +0.5%/−0.1%/−0.5%。int dense-array 的 9 轮值为 60.130→62.180ms、qjs 61.774ms；追加 21 轮四方轮换为 59.997→61.934ms、qjs 61.846ms，说明当前仍与 qjs 平齐，但相对原本快于 qjs 的 zjs 起点存在约 3.2% 的布局敏感漂移，未把它隐藏为“完全中性”。反汇编确认 dense hit 的指令序列未新增 string-path 工作，`op_get_array_el` 从 0x144 增至 0x178 的代码位于 miss 分支；静态 object handlers 仍为 0x208/0x18c。data/missing 的专有 computed-key 税至此基本闭合；2.57–2.76x 的 accessor/Proxy 残差已经收敛到 observable getter call、Proxy trap 与共同调用帧，不再归因于重复 prototype walk。
 
@@ -374,20 +402,20 @@ getter/Proxy action 跟进新增 10 个固定脚本。空 getter 5M 控制先证
 
 冻结 `ab0a99b5` 起点、最终候选与 qjs 的二进制 SHA 分别为 `99d7f218…`、`315ff310…`、`b76d1542…`。CPU19、ReleaseFast、9 轮三方轮换墙钟中位数如下；宿主仍禁止 PMU。
 
-| 固定脚本/路径 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
-|---|---:|---:|---:|---:|
-| object static accessor | 165.102ms | 49.555ms | 28.899ms | 1.71x |
-| primitive static accessor | 116.692ms | 46.934ms | 26.171ms | 1.79x |
-| object computed accessor | 94.343ms | 49.473ms | 33.942ms | 1.46x |
-| primitive computed accessor | 89.710ms | 46.589ms | 33.956ms | 1.37x |
-| static Proxy, no trap | 131.428ms | 37.047ms | 25.071ms | 1.48x |
-| computed Proxy, no trap | 107.064ms | 42.869ms | 30.536ms | 1.40x |
-| static Proxy, constant trap | 145.676ms | 104.901ms | 36.369ms | 2.88x |
-| computed Proxy, constant trap | 122.662ms | 113.332ms | 42.051ms | 2.70x |
-| computed Proxy, configurable target data | 137.946ms | 116.913ms | 43.627ms | 2.68x |
-| computed Proxy, frozen target data | 138.925ms | 119.417ms | 45.226ms | 2.64x |
-| computed Proxy + `Reflect.get` | 207.678ms | 184.766ms | 78.043ms | 2.37x |
-| primitive computed Proxy | 143.689ms | 137.277ms | 54.045ms | 2.54x |
+| 固定脚本/路径                            |  起点 zjs |  当前 zjs |      qjs | 当前 zjs/qjs |
+| ---------------------------------------- | --------: | --------: | -------: | -----------: |
+| object static accessor                   | 165.102ms |  49.555ms | 28.899ms |        1.71x |
+| primitive static accessor                | 116.692ms |  46.934ms | 26.171ms |        1.79x |
+| object computed accessor                 |  94.343ms |  49.473ms | 33.942ms |        1.46x |
+| primitive computed accessor              |  89.710ms |  46.589ms | 33.956ms |        1.37x |
+| static Proxy, no trap                    | 131.428ms |  37.047ms | 25.071ms |        1.48x |
+| computed Proxy, no trap                  | 107.064ms |  42.869ms | 30.536ms |        1.40x |
+| static Proxy, constant trap              | 145.676ms | 104.901ms | 36.369ms |        2.88x |
+| computed Proxy, constant trap            | 122.662ms | 113.332ms | 42.051ms |        2.70x |
+| computed Proxy, configurable target data | 137.946ms | 116.913ms | 43.627ms |        2.68x |
+| computed Proxy, frozen target data       | 138.925ms | 119.417ms | 45.226ms |        2.64x |
+| computed Proxy + `Reflect.get`           | 207.678ms | 184.766ms | 78.043ms |        2.37x |
+| primitive computed Proxy                 | 143.689ms | 137.277ms | 54.045ms |        2.54x |
 
 object own/inherited static、primitive static、computed data 与 empty-getter controls 相对起点分别为 +0.7%/+0.1%/−0.8%/+0.1%/−0.3%；`op_get_field` 为 0x200（起点 0x208），`op_get_array_el` 保持 0x178，primitive field handler 为 0x37c（起点 0x384）。三参数 direct method control 为 54.288→55.533ms、qjs 34.614ms（当前 1.60x，+2.3% 的布局漂移），因此没有把 trap 残差误归为普通三参数调用本体。no-trap 已回到普通调用尺度；有 bytecode trap 时仍需在 trap 返回后执行 target invariant，现有递归调用无法像 getter 一样直接恢复到下一 opcode。下一刀需要为 same-Machine trap 增加显式 post-call continuation，而不是跳过或提前校验 invariant。
 
@@ -395,16 +423,16 @@ Proxy `get` post-call continuation 跟进把上一段保留的边界落成 `Mach
 
 冻结 `02cf911c` 起点、最终候选与 qjs 的二进制 SHA 分别为 `315ff310…`、`e2867a39…`、`b76d1542…`。CPU19、ReleaseFast、9 轮三方轮换墙钟中位数如下；宿主 `perf_event_paranoid=4`，本组仍只报告同机墙钟 A/B。
 
-| 固定脚本/路径 | 起点 zjs | 当前 zjs | qjs | 当前 zjs/qjs |
-|---|---:|---:|---:|---:|
-| static Proxy, constant trap | 109.487ms | 69.289ms | 36.212ms | 1.91x |
-| static Proxy, no trap | 37.115ms | 32.652ms | 25.031ms | 1.30x |
-| computed Proxy, constant trap | 112.755ms | 70.883ms | 41.467ms | 1.71x |
-| computed Proxy, frozen target data | 118.143ms | 74.902ms | 44.817ms | 1.67x |
-| computed Proxy, configurable target data | 114.200ms | 73.171ms | 43.565ms | 1.68x |
-| computed Proxy, no trap | 43.044ms | 38.473ms | 30.165ms | 1.28x |
-| computed Proxy + `Reflect.get` | 184.819ms | 142.952ms | 77.576ms | 1.84x |
-| primitive computed Proxy | 137.305ms | 91.302ms | 54.365ms | 1.68x |
+| 固定脚本/路径                            |  起点 zjs |  当前 zjs |      qjs | 当前 zjs/qjs |
+| ---------------------------------------- | --------: | --------: | -------: | -----------: |
+| static Proxy, constant trap              | 109.487ms |  69.289ms | 36.212ms |        1.91x |
+| static Proxy, no trap                    |  37.115ms |  32.652ms | 25.031ms |        1.30x |
+| computed Proxy, constant trap            | 112.755ms |  70.883ms | 41.467ms |        1.71x |
+| computed Proxy, frozen target data       | 118.143ms |  74.902ms | 44.817ms |        1.67x |
+| computed Proxy, configurable target data | 114.200ms |  73.171ms | 43.565ms |        1.68x |
+| computed Proxy, no trap                  |  43.044ms |  38.473ms | 30.165ms |        1.28x |
+| computed Proxy + `Reflect.get`           | 184.819ms | 142.952ms | 77.576ms |        1.84x |
+| primitive computed Proxy                 | 137.305ms |  91.302ms | 54.365ms |        1.68x |
 
 三参数 direct method 为 55.508→55.308ms，static/computed accessor 为 50.144→50.573ms / 49.878→50.590ms，普通 computed data 为 111.323→110.641ms，未见与收益同方向的控制变化。由此 bytecode trap 的专有递归 VM 税已闭合：普通 constant/frozen/primitive 形态回到约 1.67–1.91x 的共同 method-call + refcount/invariant 前沿；`Reflect.get` 形态还叠加 trap 内 reflective lookup。专门 Zig 回归覆盖 nested continuation、trap throw、falloff、proper-tail-call、trap 后冻结、target/receiver/key 返回别名、handler accessor、exotic descriptor target、moved padded 与 strict arguments snapshot；Proxy/get test262 为 19/19，弱 atom 复用回归继续通过。
 
@@ -428,16 +456,69 @@ Object constructor 跟进冻结 `8fab730e` 起点、最终候选与 qjs 二进�
 
 String case-conversion 使用固定脚本 `string-upper-ascii-5m.js` 做 CPU19、ReleaseFast、7 轮交错配对：冻结起点 zjs 中位数 1717.672ms，当前 308.435ms，qjs 487.991ms，故 zjs/qjs 由 3.52x 降到 0.63x（当前相对起点 −82.0%）。起点路径为 `stringCall → qjsStringPrototypeMethod → callStringBody → stringCall → methodCall → unicodeCaseReceiver`，且 `unicodeCaseReceiver` 先逐字符写临时 `ArrayList`、再分配并复制最终 String；qjs 的 `js_string_toLowerCase` 是独立 function-list body，`string_buffer_init(p->len)` 分配的缓冲本身就是最终 `JSString`。当前 `toUpperCase`/`toLowerCase` 两条 record 直达 264B 的共享 handler，ToString owned value 按 qjs 顺序被转换体消费，ASCII 源经一次证明后直接写最终 inline narrow String。单做 record 化约 −11.3%；只预留临时 ArrayList 为 +0.5%、ASCII 专用映射但仍保留临时缓冲为 +4.3%，两项均撤回。未改的普通 call0 控制为 316.143→317.146ms（+0.3%）；非 ASCII `é` 探针为 105.941→81.100ms、qjs 46.880ms，说明 per-method 分派收益覆盖全域，但通用 Unicode 临时缓冲仍留下约 1.73x 残差。
 
-函数生命周期另发现一个独立的二次复杂度缺陷：嵌套函数的 realm 借用引用都登记在 runtime holder 数组，FIFO 析构原先逐项线性查找并 `copyForwards`，20 万函数需要 2.26s。当前函数 payload 用既有 3 字节尾隙缓存 `index+1`，holder 删除改为 swap-remove 并修复被移动项的缓存；`function-create-nested-hold-200k.js` 降到 0.11s，复杂度扫描 50k/100k/200k 为 0.02/0.06/0.10s。qjs 同一 200k 脚本为 0.04s，因此算法级差异已闭合，固定成本和内存差距仍在。DWARF 实测默认 `FunctionPayload` 保持 80B；该脚本 max RSS 当前约 79.4MiB、qjs 约 30.8MiB。
+调用共同前沿的 return epilogue 跟进冻结 `969c1c59` 起点、当前 ReleaseFast 工作树与 qjs 二进制 SHA 为 `44f558f9…`、`82b86493…`、`b76d1542…`，并新增 `call-empty-zero-arg-10m.js` 覆盖 `return_undef`。qjs 的 `OP_return` 是无条件 `ret_val = *--sp`，且 derived constructor 不会进入普通 same-frame return；zjs 原先仍为不合法的空栈 `return` 保留 fallback，使 LLVM 复制整套 teardown，同时每次 inline return 重查 derived flag。当前 ReleaseFast 与 qjs 一样 check-free move 结果，Debug assert 固化栈契约；Machine frame 依赖 `resolveInlineTarget` 排除 derived constructor 的既有不变量，只把 depth-0 合法性留给 cold helper。retired Entry 的 continuation 槽也不再在析构前清零，因为下一次 push 会先初始化该槽、返回的 continuation 才是 atom 的唯一 owner。`op_return` 由 3700B 收到 3340B，`op_return_undef` 由 3132B 收到 3104B。CPU19、ReleaseFast、`perf stat -r 9` 的平均计数如下：
+
+| 固定脚本 | 起点 zjs instructions | 当前 zjs instructions | qjs instructions | 每次调用减少 | 当前 cycles 相对起点 |
+|---|---:|---:|---:|---:|---:|
+| `call-const-zero-arg-10m.js` | 7.42666B | 7.25663B | 4.72436B | 17.00 | −1.87% |
+| `call-strict-add-two-arg-10m.js` | 8.28705B | 8.09684B | 5.15444B | 19.02 | −5.99% |
+| `call-closure-two-arg-10m.js` | 10.09651B | 9.90635B | 5.80424B | 20.02 | −3.78% |
+| `call-empty-zero-arg-10m.js` | 6.64641B | 6.59644B | 4.05396B | 5.00 | −0.69% |
+
+无调用控制 `call-control-inline-add-10m.js` 为 2.46457→2.46462B instructions（约 +0.002%），没有随收益变化。该刀只闭合 return move/retire 的额外判别与写入；表中的剩余值仍属于 Machine/Frame 建帧、切换与 refcount 共同固定税，不能外推为调用架构已经同构。
+
+函数生命周期另发现一个独立的二次复杂度缺陷：嵌套函数的 realm 借用引用都登记在 runtime holder 数组，FIFO 析构原先逐项线性查找并 `copyForwards`，20 万函数需要 2.26s。当前函数 payload 用 3 字节缓存 `index+1`，holder 删除改为 swap-remove 并修复被移动项的缓存；`function-create-nested-hold-200k.js` 降到约 0.10–0.11s，复杂度扫描 50k/100k/200k 为 0.02/0.06/0.10s。qjs 同一 200k 脚本约 0.04s，因此算法级差异已闭合，固定成本和内存差距仍在。
+
+后续按 qjs `JSObject.u.cfunc/u.func` 的互斥关系分两阶段收缩。第一阶段只在旧独立 payload 内做 union：只把 Object 与旧 80B payload 合并为一次分配几乎不改变 RSS（约 76,796→76,792KiB），真正缩字段后也只到 73,604KiB；这个数现在仅保留为中间历史，不再代表终态。第二阶段把 Object flags、dense-array 状态和 class data 重新排成 qjs 的 16B GC header + 24B 元数据/shape/property + 24B `u`，默认与 alternate repr 的 `Object` 都固定为 64B。bytecode function 不再分配 `FunctionPayload`：`u.func` 三个机器字直接保存共享 FB、`JSVarRef **` 与 home/rare tagged pointer；native-only `FunctionPayload` 则固定为 56B，两种 JSValue 表示不再分叉。realm 强边也从每 closure holder 移到共享 FB，函数 prototype shape 复用同一 hash-consed root。
+
+这一步同时暴露了两个所有权边界。环收集的混合析构顺序一度先清空 FB 的 `var_refs_len`，使随后销毁的 closure 丢失 capture-array 长度并泄漏 8B；现在资源 pass 固定为 Object → FunctionBytecode → VarRef，结构体仍统一留到第二 pass 释放，与 qjs bytecode-function finalizer 先消费 `closure_var_count` 的顺序一致。另一个回归来自删掉冗余 `is_proxy` flag 后仍以普通 class 创建 Proxy，令 `Array.isArray(new Proxy([], {}))` 失真；构造器现以真实 proxy class id 建对象，class identity 再次成为唯一判别源。
+
+最终 ReleaseFast SHA-256 为 `20f11d0f…`，冻结的增量基线与 qjs 分别为 `6112b5da…`、`b76d1542…`。CPU19、15 轮三方轮换的 `function-create-nested-hold-200k.js` max RSS 中位数为 48,316→35,360KiB（−12,956KiB，−26.8%），qjs 为 30,788KiB；相对文档上一阶段的 73,604KiB，完整下沉累计又减少 38,244KiB（−52.0%）。当前绝对剩余为 4,572KiB（约 4.46MiB），所以“主体仍是独立 bytecode payload/holder”的旧判断已闭合；余量需重新 profile，不能沿用旧归因。
+
+第一次完整下沉候选曾让 call scripts instructions 回退 1.1–1.5%、cycles 最坏回退 13%。反汇编把它收窄到每次 setup 重走 `Object.u.func → FB → DebugInfo cached_view`、以及零 captures 仍做两次判空。最终把兼容 execution view 的热指针直接放在共享 FB（冷的 consolidated-block owner 换入 DebugInfo，FB 尺寸不增），并用不分配、count==0 时绝不解引用的 var_refs 哨兵表示空数组；构造/回滚 accessor 仍显式识别“FB 已装、captures 尚未发布”的中间状态。11 轮三方交错 PMU 中位数如下；控制组 cycles 自身漂移 +1.24%，因此所有 call cycles 差值都处在同一噪声边界：
+
+| 固定脚本 | candidate/base instructions | candidate/base cycles | candidate/qjs instructions | candidate/qjs cycles |
+|---|---:|---:|---:|---:|
+| `call-control-inline-add-10m.js` | −0.026% | +1.239% | 1.052x | 0.959x |
+| `call-const-zero-arg-10m.js` | +0.268% | −0.889% | 1.540x | 1.563x |
+| `call-empty-zero-arg-10m.js` | +0.295% | +0.216% | 1.632x | 1.773x |
+| `call-strict-add-two-arg-10m.js` | +0.114% | +0.623% | 1.573x | 1.599x |
+| `call-closure-two-arg-10m.js` | +0.196% | +0.767% | 1.710x | 1.625x |
+
+for-of 的零参数 bytecode `next()` 随后提供了一个比普通 call0 更大的内部边界样本。旧文档把它归因于“零参 args-window carve”，但源码复核证明 `frame_arg_count == 0` 时本来就没有参数槽分配或复制；真正的固定税是 `iteratorStepWithNext` 从当前解释器递归进入第二个 `runWithArgsState` Machine。当前 `op_for_of_next` 对同 realm、普通、不可 suspension 的 bytecode `next` 在当前 Machine 借用暂停 caller 持久 `[receiver, method]` 记录，并在 callee Entry 上保存 `for_of_next` 返回动作；不满足证明的目标才复制到 owned moved region。proper tail call 会继承动作，正常返回按 `done → value` 顺序完成 iterator-result，`next()` 自身抛出则不执行 IteratorClose。own data 现在与 qjs 一样用可信 shape-hash probe 取借用槽后单次 dup；miss 才继续 prototype walk，accessor/var-ref/auto-init/Proxy/exotic 仍回到可观察的权威 Get。fallback `pushMovedCall` 另用编译期 moved-method setup 实例，跳过两个必败的 plain selector 与通用 fallback 往返；eligible borrowed prologue、普通 push/tail-reuse 实例及统一 acquire/link/ownership 生命周期各自保持原证明。
+
+三个 2,000,000 步固定脚本依次剥离 `next()` 内的工作：`for-of-bytecode-next-zero-arg-2m.js` 复用并修改 result，`for-of-bytecode-next-constant-result-2m.js` 通过 `this.result` 返回常量 result，`for-of-bytecode-next-self-result-2m.js` 则让 iterator 自身就是 result。CPU19、ReleaseFast、11 轮三方交错 PMU 的中位数如下。冻结起点、当前候选与 qjs 的 SHA 分别为 `20f11d0f…`、`523c35a6…`、`b76d1542…`：
+
+| 固定负载 | 冻结 zjs instructions / cycles | 当前 zjs instructions / cycles | qjs instructions / cycles | 当前/qjs |
+|---|---:|---:|---:|---:|
+| 复用、修改 result | 6,870,837,207 / 1,173,361,316 | 3,012,183,112 / 497,804,678 | 1,703,544,660 / 280,438,613 | 1.7682x / 1.7751x |
+| 通过 `this.result` 返回常量 | 6,362,477,788 / 1,118,866,663 | 2,645,610,051 / 425,869,884 | 1,735,441,613 / 327,835,490 | 1.5245x / 1.2990x |
+| iterator 自身就是 result | 6,150,387,934 / 1,026,515,970 | 2,433,434,884 / 387,106,870 | 1,615,341,743 / 265,941,614 | 1.5065x / 1.4556x |
+
+完整 bounded sequence 相对冻结起点依次减少 56.160%/57.574%、58.419%/61.937% 与 60.434%/62.289% 的 instructions/cycles。own-probe + moved-setup 先让 `findProperty`、`getOwnDataPropertyLookup` 与 `setupFallbackInlineEntry` 消失；随后发现 `finishForOfNextResult` 每轮用 `predefinedId("done"/"value")` 扫 atom 表，ReleaseFast 没有把该查找折叠为常量，改用编译期预定义 atom id 后每轮约少 434 instructions。
+
+调用目标现在只携带 FB 共享、非空的 cached execution-view 指针；cache 构建失败就放弃 same-Machine 优化并退回权威通用调用，成功的 Entry 不再拥有 per-call view。删除旧 owner 后，默认 NaN-box Entry 以无状态 padding 保持 256B 和 shift-only slot addressing；16B 参考表示不保留这块默认专用 padding，Entry 由旧 288B 收到 280B，两种尺寸都有编译期断言。该清理也去掉普通调用的一次 nullable/ownership 判别和 moved path 的两次。moved-method setup 成功后直接发布真实 continuation，不再先写 `.next/0` 再覆盖；二进制 A/B 中普通 empty/strict/closure instructions 逐条相同，三个 for-of 控制均恰好少 2 stores/iteration。
+
+最后按 qjs internal `JS_CallInternal` 的所有权合同，eligible 的零参 `next()` 不再复制 `[iterator, next]`：暂停的 caller operand stack 持续拥有并根住这两个 `JSValueConst`，专用零参 prologue 直接把 `this_obj/func_obj` 记为 borrowed，只分配缺参 formals、locals、operand stack 与 open-var-ref 槽。arrow、非 simple、suspendable、cross-realm 等目标仍保留既有 dup/move 权威路径。该刀再固定减少 169 instructions/iteration；普通 empty/strict/closure、exact/padded/strict method 与 Proxy continuation 控制的 instructions 全部逐条一致，三个 iterator 控制的 cycles 也同步下降。
+
+最低工作量控制把剩余值定位到 result finishing、普通 return、共同 simple-frame setup、`pushMovedCall`、dispatch 与隔离 post-return handler。直接把 continuation 局部值送入完成器的实验虽让 for-of 再少 20 instructions/iteration，却使普通 empty call 固定增加 5 instructions/call，故已撤回。另一个照搬 qjs、删除每个 handler 的 `pc >= code_end` 判定的实验虽少 5–11 instructions/iteration，却令 strict/closure cycles 分别回退约 1.94%/1.97%；把四指令 dispatcher outline 后 strict cycles 仍回退 1.59%，branch miss 中位数约 +24%、L1I miss 约 +12%。qjs 的收益依赖单体 `SWITCH` 布局，不能在 zjs 的 split tail-called handlers 上单独复制；两版均已撤回，只有先证明 handler collapse 才应重开。
+
+共同 return 随后闭合了其中一层重复定位：`popFrame` 已把 `dying.prev` 写入 `Machine.top`，旧 `reloadTop` 却再读取 `depth`、分支并重新加载刚写入的 top。当前专用 `reloadAfterPop` 直接把 nullable `Machine.top` 当作 qjs `prev_frame`（null 即 L0），不增加 Entry/Machine 持久状态。`op_return_undef` 由 3096B 收到 3056B，`op_return` 由 3336B 收到 3316B。相对 `fe138897…` 的 15 轮交错 A/B 中，所有普通调用与 iterator 控制均固定少约 4 instructions/call；empty/strict/closure/method/reused-iterator 配对 cycles 分别改善 3.23%/3.19%/1.58%/2.70%/0.14%，self-result iterator 在 25 轮中为配对 +0.19%、独立中位数 −0.12%，而 instructions 改善 0.33%，属于噪声边界而非稳定回退。11 轮对 qjs 复测后 constant-call/empty/strict-two-arg/closure 的 instructions 比率为 1.525/1.615/1.557/1.698x，三个 iterator 比率更新为上表的 1.768/1.524/1.506x。
+
+两条更宽的 qjs 指针实验未落地。把 `dying.prev` 跨 teardown 保存在寄存器会多占一个 callee-saved register，使 return 的 C 栈帧 96B→112B并固定增加约 1 instruction/call；retired Entry 空闲链虽省去重复 chunk 算术，却让 `pushFrame` 与 return handler 各增长约 48B，closure/method cycles 回退 2.83%/0.69%，最低工作量 iterator 还增加 0.24% instructions。另一个 qjs `OP_push_this` 直达候选在真正读取 `this` 的对象/严格 primitive 脚本上减少 7.1–8.3%，但“不读取 this 的普通 method”25 次平均稳定回退 0.507% cycles，纯属新增 handler 的布局代价，因此也已撤回；两个 `this` 固定脚本保留给未来共同 handler/frame collapse 验收。
+
+目标 Iterator gate 还暴露了一个早于本刀存在的 teardown 所有权 bug：动态 Symbol body 的 string-header rc 本身就是 atom 强引用计数，旧 `releaseCachedStrings` 却在 GC phase 3 销毁 shape 之前强制归零；含唯一 Symbol 属性键的存活 shape 随后再 free 同一 atom 就下溢。现在普通 atom string cache 在 GC 前释放，动态 value-symbol body 则等 object/bytecode/VarRef/shape 全部销毁后再清理，与 qjs 的 shape 持有 `JSAtom` 到 shape finalizer 的生命周期一致；新增最小 runtime-teardown 回归锁定该顺序。
 
 ### 5.3 验证状态
 
 2026-07-13 的回归审计又闭合了四组问题：`Function.prototype.call` 的 same-Machine forwarding 现在只接收布局契约成立的非箭头目标，零参数箭头不再越界读，忽略的 `thisArg` 也由通用调用路径正常释放；Proxy bytecode `get` continuation 用显式 runtime root 保存 trap 结果，并只收缩既有 `[target, key]` 两槽，不再假设 operand stack 还有第三个可写槽。parser 把递归函数声明移出大 statement dispatcher、把参数解析拆成独立帧，并以迭代后序方式安装子函数 bytecode；ReleaseFast 与 Debug 均在默认 runtime 配置下解析 250 层嵌套函数。语义侧补齐 typed-array intrinsic `length` 对原 receiver 的 brand check、`with` 解构写 const 的正确 fallback 指令宽度，以及箭头体 direct-eval 前的 lvalue-reference 预扫描；后者还覆盖“参数 eval 创建 `arguments`、体内另有 `var arguments`”的双环境时序。property tail table 改用具名槽并合并重复 handler，重复 helper、零调用函数与 Math scalar 分叉也一并收敛。
 
-- Debug unified：最新工作树 1372/1372；`checkpoint-check` 32/32 steps（含 Debug 与 ReleaseFast CLI smoke）。
-- architecture/API snapshot、OOM-cap 2/2：通过；OOM injection 最新工作树 7/7。
-- alternate representation：上一阶段 1368/1368；本轮未触及 `JSValue` 表示语义，未重复执行该阶段门禁。
-- `test262-smoke`：12/12；arguments-object 与 Function prototype arguments/caller-arguments、class arguments 联合 267/267；Array/prototype/push 24/24、Array/prototype/pop 23/23；Promise/resolve 30/30；Object 全目录 3411/3411；String 四个 case-conversion 目录 110/110；Function 全目录 509/509（其中 call/apply 97/97）；strict/simple-frame/arity-pad 相关 statements/function、expressions/function、expressions/call、Function/prototype/call、arguments-object、staging Function 联合准备 1167/1172、排除 5、通过 1167/1167，另补 function-code 217/217；method receiver 相关 arguments-object、call、object method-definition、expression/class super、Function.call、staging Function 联合准备 857/862、排除 5、通过 857/857；此前联合 changed-area：TLA 251、dynamic-import assignment-expression 28、for-await-of 1234、AsyncGeneratorPrototype return 19、Function call/apply 97，合计 1629/1629。staging `Function/arguments-parameter-shadowing.js` 当前 zjs 1/1，当前 qjs 0/1。
+- Debug unified：2026-07-15 当前工作树 1406/1406；`checkpoint-check` 32/32 steps（含 Debug 与 ReleaseFast CLI smoke），独立 `test-core` 226/226、`test-exec` 203/203，force-GC 两者同为 226/226、203/203。
+- architecture/API snapshot、OOM-cap：通过；当前工作树 OOM injection 8/8，覆盖 corpus、同 runtime 恢复金丝雀及 generator pending-return 恢复。
+- alternate representation：最终 16B repr 1406/1406；编译期尺寸断言锁定两种表示的 `Object` 为 64B、native-only `FunctionPayload` 为 56B，bytecode function 不再有独立 payload。
+- `test262-smoke`：默认与 alternate repr 均为 12/12；本刀 `language/statements/for-of` 751/751、`built-ins/Iterator` 514/514，原崩溃文件单独 1/1；arguments-object 与 Function prototype arguments/caller-arguments、class arguments 联合 267/267；Array/prototype/push 24/24、Array/prototype/pop 23/23；Promise/resolve 30/30；Object 全目录 3411/3411；String 四个 case-conversion 目录 110/110；Function 全目录 509/509（其中 call/apply 97/97）；strict/simple-frame/arity-pad 相关 statements/function、expressions/function、expressions/call、Function/prototype/call、arguments-object、staging Function 联合准备 1167/1172、排除 5、通过 1167/1167，另补 function-code 217/217；method receiver 相关 arguments-object、call、object method-definition、expression/class super、Function.call、staging Function 联合准备 857/862、排除 5、通过 857/857；此前联合 changed-area：TLA 251、dynamic-import assignment-expression 28、for-await-of 1234、AsyncGeneratorPrototype return 19、Function call/apply 97，合计 1629/1629。staging `Function/arguments-parameter-shadowing.js` 当前 zjs 1/1，当前 qjs 0/1。
+- return caller reload 收口：`test-exec` 与 force-GC 均为 203/203，`checkpoint-check` 32/32、16B alternate unified 1406/1406、OOM injection 8/8；ReleaseFast 的 call、Function.prototype.call、for-of 与 arrow-function 四个 test262 目录合计 1235/1235。
+- 提交前所有权 review 另发现首次属性追加的 OOM 回滚会把 `prop_values` 恢复成任意空切片指针，而不是对象布局要求的 no-storage 哨兵；现按旧容量显式恢复哨兵，并以“value buffer 分配成功、共享空 shape transition 分配失败、同对象重试成功”的回归锁定。
 - 本轮安全/语义 changed-area：TypedArray prototype length、Function.prototype.call、Proxy/get、arrow-function、assignment destructuring、direct eval 与 with 联合 1264/1264；另有 Proxy continuation、零参/箭头 `.call()`、ignored-thisArg live-object、250 层 parser、const fallback 与 Math edge-semantics Zig 回归。
 - primitive lookup/lazy-this/field-dispatch changed-area：expressions/this、call、arrow-function、object method-definition、Function.prototype.call，以及 Number/Boolean/BigInt/Symbol/String prototype 联合 2121/2121；另有 accessor/Proxy 原始 receiver 与 borrowed-holder slow-flag Zig 回归。
 - get_length action/typed named-property changed-area：arguments-object、Proxy/get、Reflect/get、TypedArray 与 TypedArrayConstructors 的 length/byteLength/byteOffset、internal Get 联合 379/379；Zig 回归另覆盖 receiver/throw/alias、undefined getter、no-trap/invariant/revoked 与 static/computed/Reflect typed shadow/custom/null prototype。
@@ -445,14 +526,16 @@ String case-conversion 使用固定脚本 `string-upper-ascii-5m.js` 做 CPU19�
 - getter/Proxy action changed-area：property access、expressions/this/call/object method、Proxy/get、Reflect/get、Object/defineProperty/create 与五类 primitive prototype 联合 3231/3231；Zig 回归另覆盖 static/computed 与 primitive getter、handler accessor fallback、no-trap target getter receiver、frozen data SameValue，以及 trap 后 mutation 的 invariant 顺序。
 - 函数序言 changed-area：function expression/statement、new.target、method-definition、arrow-function、Function builtins 联合 1884/1884。
 - C1–C4/相关 changed-area test262：1215/1215；peephole 相关切片：867/867；二次审计 `let` 145/145；C7 的 module-code 595、dynamic-import 597。
-- full test262：最新默认 8B repr 准备 49,775/53,293，排除 3,518，按 feature 跳过 5,174；通过 44,599，known 2，unexpected 0，`test262-gate` 5/5 steps；最新 alternate 16B repr 完整 gate 口径相同、unexpected 0。
-- ReleaseSafe unified：1372/1372，9/9 steps。
+- full test262：Object.u.func 完整下沉工作树的 64-bit 默认 16B payload+tag repr 准备 49,775/53,293，排除 3,518，按 feature 跳过 5,174；通过 44,599，known 2，unexpected 0，`test262-gate` 5/5 steps；alternate 8B NaN-box repr smoke 12/12、unified 1403/1403。
+- ReleaseSafe unified：最终提交工作树按仓库纪律执行一次，1406/1406，9/9 steps。
 
 full test262 的阶段首跑曾暴露 IsHTMLDDA callable 判定与 generator finally rethrow marker；C8–C10 的收口首跑又暴露普通 catch 误判 finally、参数环境 `arguments` 同名声明回填两条回归。strict simple-frame 首跑同样暴露两个 original-args snapshot 红项，最终全量已在 snapshot setup 后恢复 unexpected 0；arity-pad、method receiver、primitive lookup/lazy-this、field/computed-property、getter/Proxy action 与 Object constructor 阶段都以完整 test262 49,775 个 prepared tests、known 2、unexpected 0 重新确认，getter/Proxy action 阶段另以 16B alternate runner 完整复跑。上面的最终结果均不以逐文件复测替代全量门禁。
 
 仍不主动改动的候选：`{}`/数组单笔分配、int→string 缓存、charCodeAt 直达、真 PTC、全局赋值语句短序列。它们没有新的可复现证据支持扩大本轮范围。
 
 ### 5.4 当前仍未与 qjs 对齐的边界
+
+> **交叉引用注记（2026-07-13 补充）：** `DIVERGENCE-CATALOG.md` 表中曾列为 BACKLOG/DEEP_DEFER 的 B1（`parent_has_eval` 编译期 flag）与 L2-regex（`SAVE_CAPTURE` undo-log）已分别于 `00b9988`（2026-07-07）和 `9da14da`（2026-07-08）闭合，早于本文档撰写日期，因此不在下表开放项中。`DIVERGENCE-CATALOG.md` 表中仍列为 BACKLOG 的 L1（String wrapper exotic `[[OwnPropertyKeys]]`）仍未闭合：`object.zig:9591` `ownKeys` 的 exotic `own_keys` hook 对 `class.ids.string` 返回 null，`hasPropertyIndexKeys`（:10791）不检查 string class。
 
 同一 test262 checkout 上逐条用本地 qjs 复跑原 13 条 known-errors：qjs 通过 11 条、失败 2 条。C7–C10 已让 qjs 通过的 11 条全部转绿并从账本移除；当前账本只剩下 qjs 自身也失败的 2 条，因此这份账本中已没有仍可确认的 zjs → qjs 语义差异。
 
@@ -472,13 +555,13 @@ direct-eval lvalue 快照也是必须单列的反向差异：仓库既有普通�
 
 | 优先级 | 未对齐边界 | 当前证据/影响 |
 |---|---|---|
-| P0 | 调用帧、arguments 读取与闭包访问 | qjs 的 `JS_CallInternal` 单体路径与寄存器驻留仍未被 zjs 的 Machine/Frame、tail-dispatch 分段路径同构替代；payload-resident execution-view memo 已闭合每次调用的 DebugInfo 两跳，当前普通/strict/closure/缺参固定脚本仍为 1.60–1.73x，对象 method exact/missing 为 1.49–1.50x。Function.call 已从 6.43x 收到 1.66x。arguments 的 shape/dense/var-ref/序言绑定结构和 `OP_get_length` ordinary shape walk 已经对齐，热用例由约 4.27–5.22x 收到 1.59–1.73x，现与 cold 创建的 1.69–1.76x 重合；arguments 读取专有税已闭合，剩余值指向对象创建与 Machine/Frame 共同固定税。 |
+| P0 | 调用帧、arguments 读取与闭包访问 | qjs 的 `JS_CallInternal` 单体路径与寄存器驻留仍未被 zjs 的 Machine/Frame、tail-dispatch 分段路径同构替代；execution view 已移到共享 FB，Object.u.func 也直接提供 FB/var_refs/home，same-Machine Entry 不再承担 per-call view ownership。当前 call0/empty/strict/closure 固定脚本为 qjs 的 1.525/1.615/1.557/1.698x instructions，缺参仍约 1.60x，对象 method exact/missing 为 1.49–1.50x，Function.call 已从 6.43x 收到 1.66x。自定义 bytecode iterator `next` 已从递归第二 Machine 的 4.038x/4.212x instructions/cycles 收到 same-Machine continuation；复用修改、常量 result 与 iterator-as-result 三个控制现分别为 1.768x/1.775x、1.524x/1.299x、1.506x/1.456x。own result probe、moved setup、动态预定义 atom 查找、per-call view owner、零参 call-binding dup/free 与 return 后重复 caller 定位已闭合，最低工作量控制把剩余定位到 result finishing、共同 simple-frame setup、dispatch 与隔离 post-return handler；零参本来没有 args-window，不能再归因于参数复制。单独删除 handler 末端边界判定、retired Entry 空闲链或孤立 `push_this` handler 都因 front-end/layout 回退被否决，说明 qjs 的单体 SWITCH/栈帧形态不能拆项复制，下一步必须以共同 frame/handler collapse 证据推进。arguments 的 shape/dense/var-ref/序言绑定结构和 `OP_get_length` ordinary shape walk 已经对齐，热用例由约 4.27–5.22x 收到 1.59–1.73x，现与 cold 创建的 1.69–1.76x 重合；arguments 读取专有税已闭合，普通调用剩余值仍集中在 Machine/Frame 建帧、状态发布与切换的共同固定税。 |
 | P0 | refcounted property 与 suspended receiver | per-read wrapper、普通 normal-call eager ToObject、静态 data field 冷分派、computed data/missing/index、getter 的递归调用、`get_length` action、no-trap Proxy resolver 与 bytecode trap post-call continuation 均已闭合；getter 当前为 qjs 的 1.37–1.79x，no-trap Proxy 为 1.28–1.30x，普通 constant/frozen/primitive bytecode trap 为 1.67–1.91x。仍开放的是 refcounted custom/builtin function read 约 1.67x，以及 plain/strict/sloppy primitive call 1.68x/1.67x/1.66x。async/generator 的 `this` 仍由 frame 外的 suspension state 持久化并 eager coercion，尚未按 qjs 把 raw receiver 与持久 wrapper 状态统一。 |
-| P0 | 函数对象与 runtime holder 内存 | FIFO 析构已从 O(n²) 修成 O(n)，但 qjs 没有对应 borrowed-holder side table；20 万嵌套函数 max RSS 仍约 79.4MiB vs 30.8MiB。 |
-| P1 | builtin typed ABI | Math `.f_f/.f_f_f` 已迁移；Function 方法均有 record，且 call 有独立 forwarding record；Array.push/pop、Promise.resolve、Object constructor 与 String 大小写方法已用 full-context function pointer 直达，但尚非 typed ABI。Object 已具有 qjs 式 constructor-or-function 双态 record，提取 plain-call 为共同前沿 1.73x，null/number 分配约 1.99x，提取 direct construct 仍为 2.06x；Array 其余方法、String 其余方法、Promise 其余方法等仍经过共享 full-context/magic-switch handler。空 Array.pop 仍为 qjs 的 1.65x，Promise identity 已收至共同调用前沿 1.82x，非 ASCII case conversion 约 1.73x。 |
+| P1 | 函数对象残余内存 | FIFO 析构已从 O(n²) 修成 O(n)，两种 repr 的 Object 均为 64B，bytecode `u.func` 三字直接内联且不再登记 per-closure realm holder，native-only payload 为 56B。20 万嵌套函数的增量基线 48,316→35,360KiB（−26.8%），qjs 30,788KiB，只余 4,572KiB（约 4.46MiB）。旧 42.8MiB 主体归因已闭合；剩余需重新按 FB/DebugInfo、shape/property 与 side table 分项 profile，不能继续假定来自已删除的 bytecode payload。 |
+| P2 | builtin per-method specialization | typed ABI 与分层迁移已完成：所有 internal record 仅保存 `NativeCProto + native_function`，constructor 能力由 cproto 表达，数值 fallback 也是 typed generic+magic；Atomics/performance/全部 Promise statics 也已 table-backed，`InternalCall/.zjs_internal_call`、集中式 constructor descriptor registry 与 `src/builtins` 已删除。Object plain-call/direct-construct、空 Array.pop、Promise identity、非 ASCII case conversion 的既有倍率仍说明共享 magic handler 可继续拆成 per-method body，但这是 dispatch 专用化/共同调用前沿问题，不再是 builtin ABI 或分层迁移债。 |
 | P1 | 异步模块 SCC 状态机 | 目标 test262 切片已对齐，但 ModuleRecord 字段、cycle-root capability、parent/pending 关系以及 host-hook dynamic import 路径仍非 qjs 同构。 |
-| P1 | 分配、RC 与 cycle GC | slab-backed GC metadata/refcount 前缀已与 qjs allocator header 同构；默认 8B NaN-box JSValue 仍是有意偏离本机 qjs 的 16B repr，每对象公开统计记账、borrowed/iterator/weak-id side table 与需要堆分配候选快照的多阶段 cycle collector 仍有额外工作。 |
-| P2 | atom、shape 与属性删除 | zjs 仍是独立 AtomTable/字符串回指、deleted tombstone；qjs 是 JSString 即 atom，并物理摘链/阈值 compact。弱回指与 computed-property tail dispatch 已闭合当前读侧性能证据，tombstone 专项没有测出收益，所以剩余结构差异只记录机制边界，不凭结构相似性强改。 |
+| P1 | 分配、RC 与 cycle GC | slab-backed GC metadata/refcount 前缀、空 arena 立即归还、普通 zero-ref 迭代排空、intrusive trial deletion/Pass-B、weak-husk 保留条件、对象分配前 GC 时序和专用 weak-holder list 均已按 qjs 锚点闭合；runtime allocator 与 BigInt limbs 也统一进入限额。64-bit 默认已是与本机 qjs 一致的 16B payload+tag JSValue，8B NaN-box 是窄目标默认或显式 alternate。仍开放的是逐 allocation 的公开统计/逻辑限额记账、非 weak payload 的 borrowed fallback、iterator/weak-id side table，以及 zjs 所有权布局要求的分型资源析构顺序；runtime deinit 已显式保证 Object → FunctionBytecode → Shape 资源顺序与最终 struct 回收边界。 |
+| P2 | atom、shape 与属性删除 | zjs 仍是独立 AtomTable/字符串回指、deleted tombstone；qjs 是 JSString 即 atom，并物理摘链/阈值 compact。动态 Symbol 属性键的 teardown 顺序已按 shape 所有权修正：shape 销毁前不再清空其 body/atom 强引用。弱回指与 computed-property tail dispatch 已闭合当前读侧性能证据，tombstone 专项没有测出收益，所以剩余结构差异只记录机制边界，不凭结构相似性强改。 |
 | P2 | 若干 opcode 热腿与 zjs 专用扩展 | 通用 rope 的阈值、Fibonacci rebalance、叶迭代和非 flatten 索引已对齐；zjs 仍保留 fused-local accumulator tail 这一有证据的扩展。`put_var`、写侧 `put_var_ref` 等仍在 cold handler，qjs 在解释器主体内联。是否改动继续以固定负载证据为准。 |
 
 因此，“当前已测语义面没有已知 zjs→qjs 红项”与“实现已经对齐”是两件事；后者仍然不成立。
@@ -514,28 +597,28 @@ ZJS_DISASM=1 zig-out/bin/zjs file.js
 
 下表是当时保存的聚合最小值。五次逐次结果未留存，因此无法检查方差、异常值或确认 instructions/cycles 最小值是否来自同一次运行；不得据此计算严谨 IPC 或设置自动回归阈值。
 
-| bench | zjs insn | zjs cyc | qjs insn | qjs cyc |
-|---|---|---|---|---|
-| L0_emptyloop | 7157729330 | 1204197845 | 7705621169 | 1216493303 |
-| L1a_accum | 11709185853 | 1809883590 | 11706990677 | 1777242761 |
+| bench          | zjs insn    | zjs cyc    | qjs insn    | qjs cyc    |
+| -------------- | ----------- | ---------- | ----------- | ---------- |
+| L0_emptyloop   | 7157729330  | 1204197845 | 7705621169  | 1216493303 |
+| L1a_accum      | 11709185853 | 1809883590 | 11706990677 | 1777242761 |
 | L1b_localarith | 15060794162 | 2408862599 | 15758349825 | 2392033386 |
-| L2a_propread | 10929422186 | 1841902053 | 9696683563 | 1647978835 |
-| L2b_arrayread | 9999013274 | 1636703839 | 9756335385 | 1523972125 |
-| L3a_fib | 12855530846 | 2469565293 | 7184664154 | 1286194858 |
-| L3b_funcall | 16732169659 | 2989624576 | 10006836070 | 1767263460 |
-| L4a_emptyobj | 13239481835 | 1882950447 | 9326065677 | 1422214428 |
-| L4b_objalloc | 47391746002 | 7050722620 | 23201260017 | 3610735983 |
-| L4c_array3 | 17430848523 | 2480399252 | 10286548197 | 1612933544 |
-| L5a_strconcat | 10178123621 | 1742184459 | 7844318148 | 1193689961 |
-| L5b_charcode | 16731870560 | 2880190063 | 15808422345 | 2423315684 |
-| P_tdz | 10689014524 | 1647465210 | 9516050426 | 1416185944 |
-| P_ifobj | 9608577000 | 1511363583 | 10116304854 | 1479779884 |
-| objlit_var | 27284391213 | 4175444510 | 10996530032 | 1738257388 |
-| objlit_let | 24852960857 | 3588035640 | 12507107011 | 1957049957 |
-| objprop | 11909444857 | 1877775180 | 8786208992 | 1491992341 |
-| template | 4185503776 | 705840420 | 3052658116 | 499400918 |
-| floatsum | 15811027208 | 2554669513 | 12007002588 | 1815457089 |
-| strconcat | 1616116856 | 496650041 | 900614296 | 158711359 |
+| L2a_propread   | 10929422186 | 1841902053 | 9696683563  | 1647978835 |
+| L2b_arrayread  | 9999013274  | 1636703839 | 9756335385  | 1523972125 |
+| L3a_fib        | 12855530846 | 2469565293 | 7184664154  | 1286194858 |
+| L3b_funcall    | 16732169659 | 2989624576 | 10006836070 | 1767263460 |
+| L4a_emptyobj   | 13239481835 | 1882950447 | 9326065677  | 1422214428 |
+| L4b_objalloc   | 47391746002 | 7050722620 | 23201260017 | 3610735983 |
+| L4c_array3     | 17430848523 | 2480399252 | 10286548197 | 1612933544 |
+| L5a_strconcat  | 10178123621 | 1742184459 | 7844318148  | 1193689961 |
+| L5b_charcode   | 16731870560 | 2880190063 | 15808422345 | 2423315684 |
+| P_tdz          | 10689014524 | 1647465210 | 9516050426  | 1416185944 |
+| P_ifobj        | 9608577000  | 1511363583 | 10116304854 | 1479779884 |
+| objlit_var     | 27284391213 | 4175444510 | 10996530032 | 1738257388 |
+| objlit_let     | 24852960857 | 3588035640 | 12507107011 | 1957049957 |
+| objprop        | 11909444857 | 1877775180 | 8786208992  | 1491992341 |
+| template       | 4185503776  | 705840420  | 3052658116  | 499400918  |
+| floatsum       | 15811027208 | 2554669513 | 12007002588 | 1815457089 |
+| strconcat      | 1616116856  | 496650041  | 900614296   | 158711359  |
 
 ## 附录 C：已修复语义差异的最小回归
 
@@ -554,17 +637,17 @@ for (let i = i; false; ) {}
 
 ```js
 String.prototype[Symbol.iterator] = function () {
-  let done = false;
-  return {
-    next() {
-      if (done) return { done: true };
-      done = true;
-      return { done: false, value: "X" };
-    },
-  };
+    let done = false;
+    return {
+        next() {
+            if (done) return { done: true };
+            done = true;
+            return { done: false, value: 'X' };
+        },
+    };
 };
-let out = "";
-for (const c of "ab") out += c;
+let out = '';
+for (const c of 'ab') out += c;
 console.log(out);
 ```
 
@@ -574,7 +657,7 @@ console.log(out);
 ### C3：null-prototype 对象不继承 `toString`
 
 ```js
-console.log("toString" in Object.create(null));
+console.log('toString' in Object.create(null));
 ```
 
 - 整改前 zjs：`true`。

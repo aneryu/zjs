@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -130,8 +131,8 @@ pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !
 }
 
 pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
-    if (varRefSlotIsUninitialized(this_value)) return error.ReferenceError;
-    try pushSlotValue(stack, this_value);
+    if (adapterValueIsUninitialized(this_value)) return error.ReferenceError;
+    pushAdapterValue(stack, this_value);
 }
 
 pub noinline fn pushThisVm(
@@ -257,7 +258,7 @@ pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
 pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const ret_value = try stack.pop();
 
-    while (stack.values.len != 0) {
+    while (stack.len() != 0) {
         const value = try stack.pop();
         if (value.isCatchOffset()) {
             value.free(rt);
@@ -558,33 +559,32 @@ test "primitiveObject roots direct symbol while creating ToObject wrapper" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
-    stack.pushAssumeCapacity(slotValueBorrow(slot));
+fn pushAdapterValue(stack: *stack_mod.Stack, slot: core.JSValue) void {
+    stack.pushAssumeCapacity(adapterValueBorrow(slot));
 }
 
-fn slotValueBorrow(slot: core.JSValue) core.JSValue {
-    var current = slot;
-    var depth: usize = 0;
-    while (depth < 16) : (depth += 1) {
-        const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValue();
+fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
+    const cell = varRefCellFromValue(slot) orelse return slot;
+    const value = cell.varRefValue();
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(varRefCellFromValue(value) == null);
     }
-    return current;
+    return value;
 }
 
 fn requireStackLen(stack: *const stack_mod.Stack, required: usize) !void {
-    if (stack.values.len < required) return error.StackUnderflow;
+    if (stack.len() < required) return error.StackUnderflow;
 }
 
 fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void {
-    try std.testing.expectEqual(expected.len, stack.values.len);
+    try std.testing.expectEqual(expected.len, stack.len());
     for (expected, 0..) |value, index| {
         try std.testing.expectEqual(@as(?i32, value), stack.values[index].asInt32());
     }
 }
 
-fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).isUninitialized();
+fn adapterValueIsUninitialized(slot: core.JSValue) bool {
+    return adapterValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
@@ -619,7 +619,7 @@ fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, frame: ?*frame_mod.Frame, atom
     const function_object = objectFromValue(current_frame.current_function) orelse return atom_id;
     const function_atom = remapPrivateAtomFromObject(rt, function_object, atom_id);
     if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObjectSlot().* orelse return atom_id;
+    const home_object = function_object.functionHomeObject() orelse return atom_id;
     return remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 

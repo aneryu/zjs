@@ -20,7 +20,7 @@ pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.A
 
 pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
-    if (object_value.flags.is_global and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
+    if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
     return object_value.getProperty(atom_id);
 }
 
@@ -58,7 +58,7 @@ pub fn instanceOfObject(value: core.JSValue) core.JSValue {
 pub fn instanceOfArray(value: core.JSValue) core.JSValue {
     const header = objectHeader(value) orelse return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
-    return core.JSValue.boolean(object.flags.is_array);
+    return core.JSValue.boolean(object.isArray());
 }
 
 pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: core.JSValue) !core.JSValue {

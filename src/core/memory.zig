@@ -145,6 +145,9 @@ pub const SmallObjectSlab = struct {
         }
         arena.used_blocks -= 1;
         if (arena.used_blocks == 0) {
+            // QuickJS `js_free` returns an empty 4 KiB arena immediately.
+            // Keeping a per-class reserve would leave physical backing alive
+            // after the runtime's logical/accounted bytes reached zero.
             self.removeArena(index, arena);
             self.removeFreeArena(index, arena);
             backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
@@ -311,8 +314,18 @@ pub const SmallObjectSlab = struct {
 };
 
 pub const MemoryAccount = struct {
+    /// Current operation allocator. Parser compilation temporarily redirects
+    /// this to its result-owned arena; allocations kept beyond that operation
+    /// must not use it.
     allocator: std.mem.Allocator,
+    /// Stable allocator that owns runtime-resident state for the lifetime of
+    /// this account. A live JSRuntime rebinds this to `accountedAllocator()` so
+    /// long-lived unmanaged containers cannot bypass the runtime limit.
     persistent_allocator: std.mem.Allocator,
+    /// Actual allocator supplied by the embedder. MemoryAccount internals must
+    /// use this field, never the public accounting facades above, or they would
+    /// recurse back through their own vtable.
+    backing_allocator: std.mem.Allocator,
     small_slab: SmallObjectSlab = .{},
     small_slab_enabled: bool = false,
     allocated_bytes: usize = 0,
@@ -331,11 +344,126 @@ pub const MemoryAccount = struct {
     trigger_gc_ctx: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
-        return .{ .allocator = allocator, .persistent_allocator = allocator };
+        return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
     }
 
     pub fn initWithTrace(allocator: std.mem.Allocator, writer: *std.Io.Writer) MemoryAccount {
-        return .{ .allocator = allocator, .persistent_allocator = allocator, .trace_writer = writer };
+        return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator, .trace_writer = writer };
+    }
+
+    /// Rebind the public current/persistent allocators after MemoryAccount has
+    /// reached its stable address inside JSRuntime. The facade stores `self` in
+    /// its allocator context, so doing this to the temporary value returned by
+    /// `init` would leave a dangling context after that value is copied.
+    pub fn activateRuntimeAccounting(self: *MemoryAccount) void {
+        const facade = self.accountedAllocator();
+        self.allocator = facade;
+        self.persistent_allocator = facade;
+    }
+
+    /// Standard allocator facade whose allocations participate in this
+    /// account's limit, live-byte count, tracing, and slab policy. Use this for
+    /// library value types (notably BigInt limbs) that need to retain a
+    /// `std.mem.Allocator` for later realloc/free. `backing_allocator` remains
+    /// the unwrapped allocator used internally by this facade.
+    pub fn accountedAllocator(self: *MemoryAccount) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &accounted_allocator_vtable,
+        };
+    }
+
+    const accounted_allocator_vtable: std.mem.Allocator.VTable = .{
+        .alloc = accountedAllocatorAlloc,
+        .resize = accountedAllocatorResize,
+        .remap = accountedAllocatorRemap,
+        .free = accountedAllocatorFree,
+    };
+
+    fn accountedAllocatorAlloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = return_address;
+        const self: *MemoryAccount = @ptrCast(@alignCast(context));
+        // Raw library/container allocation is accounted but is not a new GC
+        // safepoint. Object creation owns the QuickJS-aligned threshold trigger.
+        const allocation = self.allocAlignedBytesNoTrigger(len, alignment) catch return null;
+        return allocation.ptr;
+    }
+
+    fn accountedAllocatorResize(
+        context: *anyopaque,
+        bytes: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *MemoryAccount = @ptrCast(@alignCast(context));
+        if (new_len == bytes.len) return true;
+        if (self.small_slab_enabled and
+            (SmallObjectSlab.canUse(bytes.len, alignment) or SmallObjectSlab.canUse(new_len, alignment)))
+        {
+            return false;
+        }
+        if (new_len > bytes.len) {
+            const growth = new_len - bytes.len;
+            self.checkAllocation(growth) catch return false;
+        }
+        if (!self.backing_allocator.rawResize(bytes, alignment, new_len, return_address)) return false;
+        self.recordAccountedResize(bytes.len, new_len);
+        return true;
+    }
+
+    fn accountedAllocatorRemap(
+        context: *anyopaque,
+        bytes: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *MemoryAccount = @ptrCast(@alignCast(context));
+        if (new_len == bytes.len) return bytes.ptr;
+        if (self.small_slab_enabled and
+            (SmallObjectSlab.canUse(bytes.len, alignment) or SmallObjectSlab.canUse(new_len, alignment)))
+        {
+            return null;
+        }
+        if (new_len > bytes.len) {
+            const growth = new_len - bytes.len;
+            self.checkAllocation(growth) catch return null;
+        }
+        const remapped = self.backing_allocator.rawRemap(bytes, alignment, new_len, return_address) orelse return null;
+        if (comptime diagnostic_accounting_enabled) {
+            if (remapped != bytes.ptr) {
+                self.traceFree(@intFromPtr(bytes.ptr));
+                self.traceAlloc(1, new_len, @intFromPtr(remapped));
+            }
+        }
+        self.recordAccountedResize(bytes.len, new_len);
+        return remapped;
+    }
+
+    fn accountedAllocatorFree(
+        context: *anyopaque,
+        bytes: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        _ = return_address;
+        const self: *MemoryAccount = @ptrCast(@alignCast(context));
+        self.freeAlignedBytes(bytes, alignment);
+    }
+
+    fn recordAccountedResize(self: *MemoryAccount, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) {
+            self.allocated_bytes += new_len - old_len;
+        } else {
+            self.allocated_bytes -= old_len - new_len;
+        }
+        if (comptime diagnostic_accounting_enabled) self.updatePeak();
     }
 
     /// Returns owned memory. Caller must free it with `free`.
@@ -434,7 +562,7 @@ pub const MemoryAccount = struct {
             return null;
         }
         const old_raw: []u8 = @as([*]u8, @ptrCast(slice.ptr))[0..old_bytes];
-        const remapped_ptr = self.persistent_allocator.rawRemap(old_raw, alignment, new_bytes, @returnAddress()) orelse return null;
+        const remapped_ptr = self.backing_allocator.rawRemap(old_raw, alignment, new_bytes, @returnAddress()) orelse return null;
         if (new_bytes > old_bytes) {
             self.allocated_bytes += new_bytes - old_bytes;
         } else {
@@ -540,16 +668,16 @@ pub const MemoryAccount = struct {
     }
 
     inline fn rawAllocForGc(self: *MemoryAccount, bytes: usize, alignment: std.mem.Alignment, slab_index: ?usize) ![*]u8 {
-        if (slab_index) |index| return self.small_slab.allocAtIndex(self.persistent_allocator, index);
-        return self.persistent_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
+        if (slab_index) |index| return self.small_slab.allocAtIndex(self.backing_allocator, index);
+        return self.backing_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
     inline fn rawFreeForGc(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment, slab_index: ?usize) void {
         if (slab_index) |index| {
-            self.small_slab.freeAtIndex(self.persistent_allocator, bytes.ptr, index);
+            self.small_slab.freeAtIndex(self.backing_allocator, bytes.ptr, index);
             return;
         }
-        self.persistent_allocator.rawFree(bytes, alignment, @returnAddress());
+        self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
     }
 
     /// Initialize GC metadata at `meta` (= objectPtr - 8). Bytes 0..2 are the
@@ -699,7 +827,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn deinitSmallObjectSlab(self: *MemoryAccount) void {
-        self.small_slab.deinit(self.persistent_allocator);
+        self.small_slab.deinit(self.backing_allocator);
         self.small_slab_enabled = false;
     }
 
@@ -732,10 +860,10 @@ pub const MemoryAccount = struct {
     inline fn rawAlloc(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
         if (self.small_slab_enabled) {
             if (SmallObjectSlab.classIndex(byte_count, alignment)) |index| {
-                return self.small_slab.allocAtIndex(self.persistent_allocator, index);
+                return self.small_slab.allocAtIndex(self.backing_allocator, index);
             }
         }
-        return self.persistent_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse error.OutOfMemory;
+        return self.backing_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
     inline fn rawFree(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
@@ -743,11 +871,11 @@ pub const MemoryAccount = struct {
             if (SmallObjectSlab.classIndex(bytes.len, alignment)) |index| {
                 // The runtime enables the slab before managed allocations begin;
                 // while enabled, every eligible allocation comes from it.
-                self.small_slab.freeAtIndex(self.persistent_allocator, bytes.ptr, index);
+                self.small_slab.freeAtIndex(self.backing_allocator, bytes.ptr, index);
                 return;
             }
         }
-        self.persistent_allocator.rawFree(bytes, alignment, @returnAddress());
+        self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
     }
 
     fn traceAlloc(self: *MemoryAccount, comptime element_size: usize, count: usize, address: usize) void {
@@ -768,7 +896,7 @@ pub const MemoryAccount = struct {
     }
 };
 
-test "small object slab releases empty arenas" {
+test "small object slab releases an empty arena immediately" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
@@ -778,27 +906,32 @@ test "small object slab releases empty arenas" {
 
     slab.free(std.testing.allocator, alloc[0..64], .@"8");
     try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
+
+    const next = try slab.alloc(std.testing.allocator, 64, .@"8");
+    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
+    slab.free(std.testing.allocator, next[0..64], .@"8");
+    try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
 }
 
-test "small object slab keeps non-empty arenas reusable" {
+test "small object slab releases excess empty arenas" {
     var slab: SmallObjectSlab = .{};
     defer slab.deinit(std.testing.allocator);
 
-    const first = try slab.alloc(std.testing.allocator, 64, .@"8");
-    const second = try slab.alloc(std.testing.allocator, 64, .@"8");
     const index = SmallObjectSlab.classIndex(64, .@"8").?;
+    var allocations: [SmallObjectSlab.arena_size / 16][*]u8 = undefined;
+    allocations[0] = try slab.alloc(std.testing.allocator, 64, .@"8");
+    const first_arena_capacity: usize = slab.arenas[index].?.block_count;
+    for (allocations[1 .. first_arena_capacity + 1]) |*slot| {
+        slot.* = try slab.alloc(std.testing.allocator, 64, .@"8");
+    }
+    try std.testing.expectEqual(@as(usize, 2), slab.debugArenaCount(index));
+
+    for (allocations[0..first_arena_capacity]) |allocation| {
+        slab.free(std.testing.allocator, allocation[0..64], .@"8");
+    }
     try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
 
-    slab.free(std.testing.allocator, first[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
-
-    const reused = try slab.alloc(std.testing.allocator, 64, .@"8");
-    try std.testing.expectEqual(@intFromPtr(first), @intFromPtr(reused));
-
-    slab.free(std.testing.allocator, second[0..64], .@"8");
-    try std.testing.expectEqual(@as(usize, 1), slab.debugArenaCount(index));
-
-    slab.free(std.testing.allocator, reused[0..64], .@"8");
+    slab.free(std.testing.allocator, allocations[first_arena_capacity][0..64], .@"8");
     try std.testing.expectEqual(@as(usize, 0), slab.debugArenaCount(index));
 }
 

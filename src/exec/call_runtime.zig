@@ -52,6 +52,7 @@ const builtin_glue = @import("builtin_glue.zig");
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
 const slot_ops = @import("slot_ops.zig");
+const value_slot = @import("value_slot.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
 const eval_ops = @import("eval_ops.zig");
@@ -93,8 +94,8 @@ pub fn execCall(
     // The region is popped and released only after the call completes, so
     // the values stay rooted for the whole call.
     const total: usize = @as(usize, argc) + 1;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const func = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
@@ -145,9 +146,9 @@ pub fn execCall(
     popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
-        if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
+        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
+            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
                     return .continue_loop;
@@ -160,7 +161,7 @@ pub fn execCall(
             }
             return error.ReferenceError;
         }
-        try array_ops.pushSlotValue(stack, frame.this_value);
+        try array_ops.pushAdapterValue(stack, frame.this_value);
         return .done;
     }
     if (is_arrow_super_constructor) {
@@ -190,16 +191,17 @@ pub fn execCall(
 /// Remove the callable at `region_base`, leaving its arguments on the operand
 /// stack for `initArgumentsFromStack` to transfer without duplication.
 pub fn popCallFuncFromStack(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
-    std.debug.assert(stack.values.len > region_base);
+    const stack_len = stack.len();
+    std.debug.assert(stack_len > region_base);
     const func_val = stack.values[region_base];
-    const argc = stack.values.len - region_base - 1;
+    const argc = stack_len - region_base - 1;
     if (argc > 0) {
-        const src = stack.values.ptr[region_base + 1 .. region_base + 1 + argc];
-        const dest = stack.values.ptr[region_base .. region_base + argc];
+        const src = stack.values[region_base + 1 .. region_base + 1 + argc];
+        const dest = stack.values[region_base .. region_base + argc];
         @memmove(dest, src);
     }
     func_val.free(rt);
-    stack.values = stack.values.ptr[0 .. stack.values.len - 1];
+    stack.setLen(stack_len - 1);
 }
 
 /// Pop and release every owned value above `region_base` on the operand
@@ -210,19 +212,19 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     // register-held local and the loop just `JS_FreeValue(call_argv[i])` — no
     // per-slot poison-store and no re-derivation of the operand-stack base.
     // `free`/`releaseAndDestroy` runs GC-release + object destructors; none of
-    // those push to this operand stack, so `stack.values.ptr` is loop-invariant.
+    // those push to this operand stack, so `stack.values` is loop-invariant.
     // Holding it in a local lets LLVM keep the base in a register instead of
-    // reloading `stack.values.ptr` each iteration (opaque free() otherwise
+    // reloading `stack.values` each iteration (opaque free() otherwise
     // forces the reload). Slots above the shrunk length are logically dead —
     // every `push*` overwrites its target and GC scans only `values[0..len]` —
     // so the qjs form omits the undefined poison-store entirely.
-    const base = stack.values.ptr;
-    var index = stack.values.len;
+    const base = stack.values;
+    var index = stack.len();
     while (index > region_base) {
         index -= 1;
         base[index].free(rt);
     }
-    stack.values = base[0..region_base];
+    stack.setLen(region_base);
 }
 
 // noinline: this is the cold exception path shared by every `*Vm` opcode wrapper.
@@ -341,9 +343,9 @@ pub fn callNativeBuiltinRecordForVm(
     // `func` is the function value; the table dispatch only needs the function
     // object (`function_object`), so the raw value is no longer consulted here.
     _ = func;
-    // Route the VM hot path through the same builtins-owned internal record
+    // Route the VM hot path through the same exec-owned internal record
     // table the slow record dispatch uses (`call.zig:callNativeFunctionRecord`),
-    // so exec carries zero compile-time knowledge of the migrated builtins. The
+    // so this generic call Module carries zero compile-time knowledge of domains. The
     // VM call site only has the realm `global` object (no `globals` slot array),
     // so pass the non-null `global` with an empty `globals`. Every migrated
     // builtin handler prefers `host_call.global` when it is set and only
@@ -352,15 +354,9 @@ pub fn callNativeBuiltinRecordForVm(
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| {
         return value;
     }
-    // `.atomics` is the only native-builtin domain reachable here that is not
-    // (yet) in the internal record table; keep its dedicated handler after the
-    // table probe, mirroring how the slow path retains `.atomics`/`.performance`/
-    // `.host`/`.promise`. Every other domain that is neither table-dispatched
-    // nor handled here returns null so the caller falls through to the
-    // host/promise/name dispatch exactly as before.
-    if (native_ref.domain == .atomics) {
-        return try qjsAtomicsCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame);
-    }
+    // Standard-native domains are table-dispatched. A null result identifies a
+    // host-domain callable or an invalid/stale native id for the caller to
+    // classify; this generic VM call Module does not know domain bodies.
     return null;
 }
 
@@ -415,17 +411,6 @@ pub fn callValueOrBytecodeClassModePreRooted(
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
     return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
-}
-
-/// Map a global URI-family function name to its `.uri` record id: the four
-/// `encodeURI`/`decodeURI` variants via the core `methodId` mode selector
-/// (1..4), plus the legacy `escape`/`unescape` pair. Used by the string-name
-/// call fallback to route these globals through the record table.
-fn uriGlobalRecordId(name: []const u8) ?u32 {
-    if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| return mode;
-    if (std.mem.eql(u8, name, "escape")) return core.uri.escape_id;
-    if (std.mem.eql(u8, name, "unescape")) return core.uri.unescape_id;
-    return null;
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -492,10 +477,10 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (function_object.nativeRecord()) |record| {
                 break :blk .{ .resolved_record = record };
             }
-            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKindSlot().* != 0) break :blk .host_function;
+            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -568,7 +553,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
             if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             if (result.isObject()) return result;
             result.free(ctx.runtime);
             return this_value.dup();
@@ -581,15 +566,10 @@ fn callValueOrBytecodeClassModeDispatch(
             if (!fb.flags.is_derived_class_constructor) {
                 try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
-        const effective_this = function_object.functionLexicalThis() orelse this_value;
-        const effective_new_target = if (fb.flags.is_arrow_function) blk: {
-            if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target;
-            break :blk core.JSValue.undefinedValue();
-        } else core.JSValue.undefinedValue();
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
+        return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
@@ -673,15 +653,6 @@ fn callValueOrBytecodeClassModeDispatch(
         }
         if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
             return value;
-        }
-        // The realm-aware Promise static dispatch must stay ahead of the
-        // generic native-record dispatch: the record handler reproduces the
-        // host-path receiver gates, while this handler also supports custom
-        // capability receivers (`Promise.resolve.call(P, ...)`).
-        if (promise_ops.qjsPromiseStaticMode(name)) |mode| {
-            if (try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
-                return promise_ops.qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
-            }
         }
         if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
@@ -898,9 +869,6 @@ fn callValueOrBytecodeClassModeDispatch(
         if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "slice")) {
-            if (try array_ops.qjsGeneratorSlice(ctx, output, global, this_value, args)) |value| return value;
-        }
         if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
             if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
@@ -967,7 +935,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "[Symbol.split]")) {
             if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
             if (native_ref.domain == .regexp and
                 core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
             {
@@ -1024,15 +992,6 @@ fn callValueOrBytecodeClassModeDispatch(
                 error.TypeError => error.TypeError,
                 else => err,
             };
-        }
-        if (uriGlobalRecordId(name)) |id| {
-            // encodeURI/decodeURI variants (`methodId` 1..4) plus the legacy
-            // escape/unescape pair (`core.uri.escape_id`/`unescape_id`). Route
-            // the raw input through the `.uri` record; the record handler does
-            // the Annex B ToString coercion before its body.
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = id };
-            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
         }
     }
     if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
@@ -1182,7 +1141,7 @@ pub fn ordinaryHasInstance(
     // the generic getValueProperty (which materializes / traps correctly).
     const proto_value = blk: {
         if (object_ops.objectFromValue(constructor_value)) |co| {
-            if (!co.flags.is_proxy) {
+            if (!co.isProxy()) {
                 if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
             }
         }
@@ -1197,7 +1156,7 @@ pub fn ordinaryHasInstance(
     // objects.
     var current: ?*core.Object = object;
     while (current) |candidate| {
-        const next = if (candidate.flags.is_proxy or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
+        const next = if (candidate.isProxy() or object_ops.isThrowTypeErrorIntrinsicObject(candidate))
             try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame)
         else
             candidate.getPrototype();
@@ -1307,7 +1266,7 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
 }
 
 /// Function.prototype.call body shared by the native-record owner and the
-/// transitional name-dispatch fallback. Keeping the VM caller pair preserves
+/// legacy name-only callable path. Keeping the VM caller pair preserves
 /// nested callsite/property-access context while the native record contributes
 /// the surrounding `call (native)` frame.
 pub fn qjsFunctionCallCall(
@@ -1618,7 +1577,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         // `super(...)` (new_target != func) is intercepted above by
         // `constructBuiltinSuperConstructor`, exactly as for the other builtin
         // constructors.
-        const construct_native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*);
+        const construct_native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId());
         if (construct_native_ref) |native_ref| {
             // QuickJS `js_object_constructor`: when new.target is the active
             // Object function, construction shares the same nullish/ToObject
@@ -1731,7 +1690,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
         }
-        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
         }
         if (function_object.class_id == core.class.ids.c_function and !isBuiltinConstructorName(name)) return error.TypeError;
@@ -1769,12 +1728,12 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             // Derived class ctor: no eager instance / prototype lookup (qjs quickjs.c:20837); see above.
             if (fb.flags.is_derived_class_constructor) {
-                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCapturesSlot().*, output, function_global, new_target, core.JSValue.undefinedValue());
+                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
             }
             const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
             errdefer instance.free(ctx.runtime);
             try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCapturesSlot().*, output, function_global, new_target, core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
             if (result.isObject()) {
                 instance.free(ctx.runtime);
                 return result;
@@ -1792,7 +1751,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -2284,7 +2243,7 @@ pub fn constructDynamicFunctionFromSource(
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
         return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
     // outer frames hold roots this nested cycle pass cannot see, so running the
@@ -2305,12 +2264,12 @@ pub fn constructDynamicFunctionFromSource(
     // wrapper) — a refcount under-flow that dangles into a later cycle GC. Drain
     // the stack's owned copy now so the window is empty before any further
     // bytecode runs; `result` keeps the independently-owned reference.
-    for (nested_stack.values) |*slot| {
+    for (nested_stack.liveValues()) |*slot| {
         const stale = slot.*;
         slot.* = core.JSValue.undefinedValue();
         stale.free(ctx.runtime);
     }
-    nested_stack.values = nested_stack.values.ptr[0..0];
+    nested_stack.setLen(0);
     if (object_ops.functionObjectFromValue(result)) |function_object| {
         const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
         try function_object.setPrototype(ctx.runtime, prototype);
@@ -2954,7 +2913,7 @@ pub fn appendSpreadValuesEnumerate(
         if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == ArrayIteratorKind.value
         const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
         const target_obj = object_ops.objectFromValue(target_value) orelse break :fast;
-        if (!target_obj.flags.is_array or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
+        if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
         const elements = target_obj.arrayElements(); // len == array_count
         const length: usize = @intCast(target_obj.arrayLength());
         if (length != elements.len) break :fast; // qjs: len != count32 -> general_case
@@ -3221,18 +3180,9 @@ pub fn qjsAtomicsReadModifyWrite(
     if (atomic_op != .load) try atomicsRevalidateIndex(ctx.runtime, view, index);
 
     const bytes = try atomicsElementBytes(view, index);
-    const old = atomicsReadBits(view, bytes);
-    const next = switch (atomic_op) {
-        .load => old,
-        .add => old +% operand,
-        .@"and" => old & operand,
-        .@"or" => old | operand,
-        .sub => old -% operand,
-        .xor => old ^ operand,
-        .exchange => operand,
-        .compareExchange => if (old == atomicsMaskBits(view, operand)) replacement else old,
-    };
-    if (atomic_op != .load) atomicsWriteBits(view, bytes, next);
+    // One atomic instruction per op (qjs js_atomics_op, quickjs.c:60637-60697);
+    // a plain read/compute/write here loses concurrent RMW updates.
+    const old = atomicsReadModifyWriteBits(view, bytes, atomic_op, operand, replacement);
     return atomicsValueFromBits(ctx.runtime, view, old);
 }
 
@@ -3594,24 +3544,77 @@ pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
     return buffer.byteStorage()[offset..][0..object.typedArrayElementSize()];
 }
 
+/// Seq-cst atomic element load (qjs js_atomics_op ATOMICS_OP_LOAD,
+/// quickjs.c:60659-60669; js_atomics_wait's value probe is likewise an
+/// atomic_load). Element pointers are naturally aligned: a typed array's
+/// byteOffset is a multiple of the element size and the backing allocation is
+/// at least 8-aligned.
 pub fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
     return switch (object.typedArrayElementSize()) {
-        1 => bytes[0],
-        2 => std.mem.readInt(u16, bytes[0..2], .little),
-        4 => std.mem.readInt(u32, bytes[0..4], .little),
-        8 => std.mem.readInt(u64, bytes[0..8], .little),
+        1 => @atomicLoad(u8, &bytes[0], .seq_cst),
+        2 => @atomicLoad(u16, @as(*const u16, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
+        4 => @atomicLoad(u32, @as(*const u32, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
+        8 => @atomicLoad(u64, @as(*const u64, @ptrCast(@alignCast(bytes.ptr))), .seq_cst),
         else => 0,
     };
 }
 
+/// Seq-cst atomic element store (qjs js_atomics_store, quickjs.c:60778-60790
+/// atomic_store per width).
 pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
     switch (object.typedArrayElementSize()) {
-        1 => bytes[0] = @truncate(value),
-        2 => std.mem.writeInt(u16, bytes[0..2], @truncate(value), .little),
-        4 => std.mem.writeInt(u32, bytes[0..4], @truncate(value), .little),
-        8 => std.mem.writeInt(u64, bytes[0..8], value, .little),
+        1 => @atomicStore(u8, &bytes[0], @truncate(value), .seq_cst),
+        2 => @atomicStore(u16, @as(*u16, @ptrCast(@alignCast(bytes.ptr))), @truncate(value), .seq_cst),
+        4 => @atomicStore(u32, @as(*u32, @ptrCast(@alignCast(bytes.ptr))), @truncate(value), .seq_cst),
+        8 => @atomicStore(u64, @as(*u64, @ptrCast(@alignCast(bytes.ptr))), value, .seq_cst),
         else => {},
     }
+}
+
+/// Single-instruction atomic read-modify-write on one typed-array element,
+/// mirroring qjs js_atomics_op's per-width `OP(...)` atomic builtins
+/// (quickjs.c:60637-60656) plus the LOAD (60659-60669) and COMPARE_EXCHANGE
+/// (60671-60697) arms. The pre-fix read/compute/write sequence lost concurrent
+/// updates (two agents' Atomics.add could interleave), deadlocking the
+/// multi-agent test262 wait protocols.
+fn atomicsRmwTyped(
+    comptime T: type,
+    ptr: *T,
+    atomic_op: AtomicsReadModifyOp,
+    operand: u64,
+    replacement: u64,
+) u64 {
+    const op_bits: T = @truncate(operand);
+    return switch (atomic_op) {
+        .load => @atomicLoad(T, ptr, .seq_cst),
+        .add => @atomicRmw(T, ptr, .Add, op_bits, .seq_cst),
+        .@"and" => @atomicRmw(T, ptr, .And, op_bits, .seq_cst),
+        .@"or" => @atomicRmw(T, ptr, .Or, op_bits, .seq_cst),
+        .sub => @atomicRmw(T, ptr, .Sub, op_bits, .seq_cst),
+        .xor => @atomicRmw(T, ptr, .Xor, op_bits, .seq_cst),
+        .exchange => @atomicRmw(T, ptr, .Xchg, op_bits, .seq_cst),
+        // A successful cmpxchg returns null; the old value then equals the
+        // expected operand (qjs returns `v1` unchanged on success, 60675).
+        .compareExchange => @cmpxchgStrong(T, ptr, op_bits, @as(T, @truncate(replacement)), .seq_cst, .seq_cst) orelse op_bits,
+    };
+}
+
+/// Width-dispatched atomic RMW; returns the previous element value
+/// zero-extended to u64 (the same convention as `atomicsReadBits`).
+pub fn atomicsReadModifyWriteBits(
+    object: *core.Object,
+    bytes: []u8,
+    atomic_op: AtomicsReadModifyOp,
+    operand: u64,
+    replacement: u64,
+) u64 {
+    return switch (object.typedArrayElementSize()) {
+        1 => atomicsRmwTyped(u8, &bytes[0], atomic_op, operand, replacement),
+        2 => atomicsRmwTyped(u16, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        4 => atomicsRmwTyped(u32, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        8 => atomicsRmwTyped(u64, @ptrCast(@alignCast(bytes.ptr)), atomic_op, operand, replacement),
+        else => 0,
+    };
 }
 
 pub fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
@@ -3990,12 +3993,14 @@ pub fn defineGlobalDeclVarCell(
         rebound = true;
     }
     const local_count = @min(function.vardefs.len, frame.locals.len);
+    const global_cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
     for (function.vardefs[0..local_count], 0..) |vd, local_idx| {
         if (!atomIdOrNameEql(ctx.runtime, vd.var_name, atom_id)) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
-        const old_slot = frame.locals[local_idx];
-        frame.locals[local_idx] = cell_value.dup();
-        old_slot.free(ctx.runtime);
+        // This is a compatibility mirror used by direct eval lookup. Keep the
+        // frame plane raw; the authoritative global identity remains in the
+        // typed frame.var_refs/global property cell.
+        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[local_idx], global_cell.varRefValue());
         rebound = true;
     }
     return rebound;
@@ -4123,7 +4128,7 @@ pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: co
         // const guarded by cell->is_const. Shared cell => no write loss.
         if (env.asVarRefAt(index)) |cell| {
             if (cell.is_const) return error.TypeError;
-            try cell.setVarRefValue(ctx.runtime, value.dup());
+            cell.setVarRefValue(ctx.runtime, value.dup());
             return true;
         }
     }
@@ -4174,7 +4179,7 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
             .var_ref => {
                 const cell = env.prop_values[index].slot.var_ref;
                 if (!cell.varRefValue().isUninitialized()) return false;
-                cell.setVarRefValue(rt, value.dup()) catch return false;
+                cell.setVarRefValue(rt, value.dup());
                 return true;
             },
             .accessor, .auto_init => return false,
@@ -4221,7 +4226,7 @@ pub fn classStaticThisAtom(
         idx -= 1;
         const vd = function.vardefs[idx];
         if (vd.var_kind != .class_static_this) continue;
-        if (slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) continue;
+        if (frame.locals[idx].isUninitialized()) continue;
         return vd.var_name;
     }
     return null;
@@ -4237,7 +4242,7 @@ pub fn classStaticThisValue(
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (vd.var_name != atom_id) continue;
         const value = caller_frame.locals[idx];
-        if (slot_ops.varRefSlotIsUninitialized(value)) continue;
+        if (value.isUninitialized()) continue;
         return value;
     }
     return null;
@@ -4359,7 +4364,7 @@ pub fn indirectEval(
         if (!compiled.function.flags.is_strict) {
             validateGlobalEvalFunctionDeclarationsFromBytecode(ctx, eval_global, &compiled.function, true) catch |err| break :blk err;
         }
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk runWithCallEnv(.{
             .ctx = ctx,
@@ -4434,7 +4439,17 @@ pub fn evalSimpleCallerExpression(
     const frame = caller_frame orelse return null;
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
     if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
-    if (std.mem.eql(u8, trimmed, "this")) return (try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame)).dup();
+    if (std.mem.eql(u8, trimmed, "this")) {
+        const this_value = try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame);
+        // zjs-side adaptation: a derived constructor may keep its lexical
+        // `this` in an internal VarRef cell. Match the full eval `push_this`
+        // path (vm_value.pushThis) exactly: first honor the TDZ arm — a
+        // derived constructor that reads `this` before `super()` must throw
+        // ReferenceError, not leak the uninitialized sentinel — then return
+        // the cell's value, never the cell representation.
+        if (slot_ops.adapterValueIsUninitialized(this_value)) return error.ReferenceError;
+        return slot_ops.adapterValueDup(this_value);
+    }
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
         _ = frame;
         return null;
@@ -4506,7 +4521,7 @@ pub fn functionHasFrameBinding(
     var idx: usize = 0;
     while (idx < ref_count) : (idx += 1) {
         const binding = function.varRefName(idx);
-        if (slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
+        if (slot_ops.adapterValueIsUninitialized(slot_ops.varRefSlot(frame, idx)) and closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
         if (binding == atom_id or atomNamesEqual(rt, binding, atom_id)) return true;
     }
     return false;
@@ -4695,17 +4710,18 @@ pub fn callFunctionBytecodeModeState(
     // their operand stack from the contiguous per-runtime VM stack arena
     // instead of heap-allocating per call. Generator/async resumption swaps
     // heap buffers in and out of the stack, so those keep heap mode.
-    const arena_mark = ctx.runtime.vm_stack.mark();
-    defer ctx.runtime.vm_stack.restore(arena_mark);
     const arena_eligible = fb.flags.func_kind == .normal and generator_state == null;
+    const arena_mark = if (arena_eligible) ctx.runtime.vm_stack.mark() else null;
+    defer if (arena_mark) |mark| ctx.runtime.vm_stack.restore(mark);
     const operand_window: ?[]core.JSValue = if (arena_eligible)
         ctx.runtime.vm_stack.carve(&ctx.runtime.memory, @as(usize, fb.stack_size) + 1)
     else
         null;
     var nested_stack = if (operand_window) |window|
-        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, window)
+        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.vm_stack_arena_policy, window)
     else
-        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
     // the queue machine (exec/async_generator.zig execBody) — no promise
@@ -4734,6 +4750,8 @@ pub fn callFunctionBytecodeModeState(
 pub fn runGeneratorParameterInit(
     ctx: *core.JSContext,
     fb: *const bytecode.FunctionBytecode,
+    nested: *const bytecode.Bytecode,
+    prepared_entry_frame: ?*const zjs_vm.PreparedEntryFrame,
     object: *core.Object,
     current_function_value: core.JSValue,
     this_value: core.JSValue,
@@ -4742,63 +4760,13 @@ pub fn runGeneratorParameterInit(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !core.JSValue {
-    var nested = bytecode.Bytecode.init(&ctx.runtime.memory, &ctx.runtime.atoms, fb.func_name);
-    defer nested.deinit(ctx.runtime);
-    nested.atoms.replace(&nested.filename, fb.filename);
-    nested.line_num = fb.lineNum();
-    nested.col_num = fb.colNum();
-    nested.arg_count = fb.arg_count;
-    nested.var_count = fb.var_count;
-    nested.stack_size = fb.stack_size;
-    nested.flags.is_strict = fb.flags.is_strict_mode;
-    nested.flags.runtime_strict = fb.flags.runtime_strict_mode;
-    nested.flags.has_simple_parameter_list = fb.flags.has_simple_parameter_list;
-    try nested.setCode(fb.byteCode());
-    // Rebuild the nested view's atom-operand retention array by walking the
-    // FB's inline atoms (the FB no longer keeps a standalone array).
-    var atom_it = fb.atomOperandIterator();
-    while (atom_it.next()) |atom_id| {
-        try nested.retainAtomOperand(atom_id);
-    }
-    if (fb.argNames().len > 0) {
-        nested.arg_names = try ctx.runtime.memory.alloc(core.Atom, fb.argNames().len);
-        for (fb.argNames(), 0..) |atom_id, idx| {
-            nested.arg_names[idx] = ctx.runtime.atoms.dup(atom_id);
-        }
-    }
-    if (fb.varDefs().len > 0) {
-        nested.vardefs = try ctx.runtime.memory.alloc(bytecode.function_def.VarDef, fb.varDefs().len);
-        for (fb.varDefs(), 0..) |v, idx| {
-            nested.vardefs[idx] = v;
-            nested.vardefs[idx].var_name = ctx.runtime.atoms.dup(v.var_name);
-        }
-    }
-    if (fb.closureVar().len > 0) {
-        // The FB no longer keeps a standalone var-ref name array; the var-ref
-        // names are `closure_var[i].var_name`. Mirror them here so the nested
-        // compile-time Bytecode's var_ref_names matches the view accessors.
-        nested.var_ref_names = try ctx.runtime.memory.alloc(core.Atom, fb.closureVar().len);
-        for (fb.closureVar(), 0..) |cv, idx| {
-            nested.var_ref_names[idx] = ctx.runtime.atoms.dup(cv.var_name);
-        }
-    }
-    if (fb.closureVar().len > 0) {
-        nested.closure_var = try ctx.runtime.memory.alloc(bytecode.function_def.ClosureVar, fb.closureVar().len);
-        for (fb.closureVar(), 0..) |cv, idx| {
-            nested.closure_var[idx] = cv;
-            nested.closure_var[idx].var_name = ctx.runtime.atoms.dup(cv.var_name);
-        }
-    }
-    for (fb.cpoolSlice()) |value| {
-        _ = try nested.addConstant(value);
-    }
-
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    defer object.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     return runWithCallEnv(.{
         .ctx = ctx,
         .stack = &nested_stack,
-        .function = &nested,
+        .function = nested,
         .initial_this_value = this_value,
         .args = args,
         .var_refs = var_refs,
@@ -4808,6 +4776,7 @@ pub fn runGeneratorParameterInit(
         .generator_state = object,
         .stop_before_pc = fb.generatorBodyPc(),
         .current_function_value = current_function_value,
+        .prepared_entry_frame = prepared_entry_frame,
     });
 }
 
@@ -4827,9 +4796,10 @@ pub fn qjsGeneratorNext(
         // arriving while EXECUTING only appends — never a TypeError.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 0);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
-    if (object.generatorDone()) {
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    if (payload.done) {
         const done_result = try createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
         return done_result.dup();
@@ -4845,20 +4815,19 @@ pub fn qjsGeneratorNext(
         defer step.value.free(ctx.runtime);
         return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
     }
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
-    const resume_value = if (object.generatorPc() != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
+    const execution = payload.execution orelse return error.TypeError;
+    const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
+    payload.executing = true;
+    defer payload.executing = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
         current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        execution.this_value,
+        execution.suspended.storage.frame.args,
+        execution.suspended.storage.frame.var_refs,
         output,
         generator_global,
         false,
@@ -4868,16 +4837,14 @@ pub fn qjsGeneratorNext(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
-    if (object.generatorJustYielded() and
-        (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
-    {
+    if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
         return result.dup();
     }
-    return try createIteratorResult(ctx.runtime, generator_global, result, !object.generatorJustYielded());
+    return try createIteratorResult(ctx.runtime, generator_global, result, !payload.just_yielded);
 }
 
 /// A raw generator step result: the yielded/returned value + done flag, with no
@@ -4886,6 +4853,20 @@ pub const GeneratorValueDone = struct {
     value: core.JSValue,
     done: bool,
 };
+
+inline fn generatorFunctionBytecodeFromExecution(object: *core.Object, execution: *const core.object.GeneratorExecutionState) ?core.JSValue {
+    const current = execution.current_function;
+    if (current.isFunctionBytecode()) return current;
+    const current_object = object_ops.objectFromValue(current) orelse return null;
+    if (current_object == object) return null;
+    return current_object.functionBytecode();
+}
+
+inline fn generatorHasYieldStarResult(payload: *const core.object.GeneratorPayload) bool {
+    if (payload.yield_star_suspended) return true;
+    const execution = payload.execution orelse return false;
+    return !execution.yield_star_iterator.isUndefined();
+}
 
 /// Resume a SYNC generator one step and return (value, done) WITHOUT allocating the
 /// iterator-result object, so a for-of consumer can skip it (qjs JS_IteratorNext2
@@ -4906,27 +4887,27 @@ pub fn qjsSyncGeneratorStep(
     if (!receiver.isObject()) return null;
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator) return null; // sync generators only
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
-    if (object.generatorDone()) return .{ .value = core.JSValue.undefinedValue(), .done = true };
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    if (payload.done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     // Pending return completion stashed by .return(v) suspended in a finally block:
     // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
     // and threads the completion through the finally.
-    if (object.generatorResumeCompletionType() == 1) return null;
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
-    const resume_value = if (object.generatorPc() != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
+    if (payload.resume_completion_type == 1) return null;
+    const execution = payload.execution orelse return error.TypeError;
+    const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+    const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+    const resume_value = if (execution.suspended.pc != 0 and args.len > 0) args[0] else core.JSValue.undefinedValue();
+    payload.executing = true;
+    defer payload.executing = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
         current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        execution.this_value,
+        execution.suspended.storage.frame.args,
+        execution.suspended.storage.frame.var_refs,
         output,
         generator_global,
         false,
@@ -4936,12 +4917,10 @@ pub fn qjsSyncGeneratorStep(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
-    if (object.generatorJustYielded() and
-        (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)))
-    {
+    if (payload.just_yielded and generatorHasYieldStarResult(payload)) {
         // yield* passthrough: `result` is already an iterator-result object — unwrap it
         // exactly as the generic for-of step would (read .done, then .value only if !done).
         defer result.free(ctx.runtime);
@@ -4954,7 +4933,7 @@ pub fn qjsSyncGeneratorStep(
         const value = try object_ops.getValueProperty(ctx, output, global, result, value_key, null, null);
         return .{ .value = value, .done = false };
     }
-    return .{ .value = result, .done = !object.generatorJustYielded() };
+    return .{ .value = result, .done = !payload.just_yielded };
 }
 
 pub fn generatorYieldStarSuspended(rt: *core.JSRuntime, object: *core.Object) bool {
@@ -4986,17 +4965,18 @@ pub fn resumeGeneratorYieldStarCompletion(
     resume_value: core.JSValue,
     completion_type: i32,
 ) !core.JSValue {
-    const function_value = object.functionBytecode() orelse return error.TypeError;
+    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     try setGeneratorResumeCompletionType(ctx.runtime, object, completion_type);
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
-        receiver,
+        current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         global,
         false,
@@ -5006,12 +4986,12 @@ pub fn resumeGeneratorYieldStarCompletion(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
-    if (done) object.generatorDoneSlot().* = true;
+    if (done) object.completeGeneratorExecution(ctx.runtime);
     if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result.dup();
     return try createIteratorResult(ctx.runtime, global, result, done);
 }
@@ -5032,25 +5012,12 @@ pub fn stashGeneratorPendingReturn(
     pending_value: core.JSValue,
     stop_pc: usize,
 ) !void {
-    const values = generator.generatorStack();
-    const capacity = generator.generatorStackCapacity();
-    if (values.len + 2 > capacity) {
-        var next_capacity: usize = if (capacity == 0) 8 else capacity;
-        while (next_capacity < values.len + 2) next_capacity *= 2;
-        const next = try rt.memory.alloc(core.JSValue, next_capacity);
-        @memcpy(next[0..values.len], values);
-        generator.generatorStackSlot().* = next[0..values.len];
-        generator.generatorStackCapacitySlot().* = next_capacity;
-        if (capacity != 0) {
-            rt.memory.free(core.JSValue, values.ptr[0..capacity]);
-        } else if (values.len != 0) {
-            rt.memory.free(core.JSValue, values);
-        }
-    }
-    const stack = generator.generatorStack();
-    stack.ptr[stack.len] = pending_value.dup();
-    stack.ptr[stack.len + 1] = core.JSValue.int32(@intCast(stop_pc));
-    generator.generatorStackSlot().* = stack.ptr[0 .. stack.len + 2];
+    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
+    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stackSize(), 2, generator.generatorStackUsesCombinedStorage());
+    const values = saved_stack.values;
+    values.ptr[values.len] = pending_value.dup();
+    values.ptr[values.len + 1] = core.JSValue.int32(@intCast(stop_pc));
+    saved_stack.values = values.ptr[0 .. values.len + 2];
     generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
 }
 
@@ -5067,11 +5034,12 @@ pub const GeneratorPendingReturn = struct {
 pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
     if (generator.generatorResumeCompletionType() != 1) return null;
     generator.generatorResumeCompletionTypeSlot().* = 0;
-    const values = generator.generatorStack();
+    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
+    const values = saved_stack.values;
     std.debug.assert(values.len >= 2);
     const marker = values[values.len - 1];
     const value = values[values.len - 2];
-    generator.generatorStackSlot().* = values.ptr[0 .. values.len - 2];
+    saved_stack.values = values.ptr[0 .. values.len - 2];
     return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
 }
 
@@ -5091,10 +5059,8 @@ fn resumeGeneratorPendingReturnStep(
 ) !GeneratorValueDone {
     const pending_value = pending.value;
     defer pending_value.free(ctx.runtime);
-    const function_value = object.functionBytecode() orelse return error.TypeError;
-    const stored_current_function = if (object.generatorCurrentFunction()) |value| value.dup() else null;
-    defer if (stored_current_function) |value| value.free(ctx.runtime);
-    const current_function_value = stored_current_function orelse receiver;
+    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
@@ -5104,7 +5070,7 @@ fn resumeGeneratorPendingReturnStep(
         current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         generator_global,
         false,
@@ -5114,7 +5080,7 @@ fn resumeGeneratorPendingReturnStep(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return err;
     };
     defer result.free(ctx.runtime);
@@ -5125,7 +5091,7 @@ fn resumeGeneratorPendingReturnStep(
         try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
         return .{ .value = result.dup(), .done = false };
     }
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     const value = if (result.isUndefined()) pending_value.dup() else result.dup();
     return .{ .value = value, .done = true };
 }
@@ -5146,8 +5112,9 @@ pub fn qjsGeneratorReturn(
         // the queue machine before the finally range runs / the request settles.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     // A fresh .return(v) replaces any pending return completion stashed by an earlier
     // return that suspended inside a finally block (qjs: the new completion resumes at
     // the yield and the old stack slots unwind with the frame).
@@ -5174,18 +5141,19 @@ pub fn qjsGeneratorReturn(
         }
     }
     if (object.generatorPc() != 0) {
-        const function_value = object.functionBytecode() orelse return error.TypeError;
+        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findGeneratorReturnFinallyTarget(fb, @intCast(object.generatorPc()))) |finally_range| {
+            const current_function_value = object.generatorCurrentFunction() orelse receiver;
             object.generatorPcSlot().* = finally_range.start;
             object.generatorJustYieldedSlot().* = false;
             const result = callFunctionBytecodeModeState(
                 ctx,
                 function_value,
-                receiver,
+                current_function_value,
                 object.generatorThis() orelse core.JSValue.undefinedValue(),
                 object.generatorArgs(),
-                object.functionCapturesSlot().*,
+                object.generatorCaptures(),
                 output,
                 generator_global,
                 false,
@@ -5195,12 +5163,12 @@ pub fn qjsGeneratorReturn(
                 core.JSValue.undefinedValue(),
                 core.JSValue.undefinedValue(),
             ) catch |err| {
-                object.generatorDoneSlot().* = true;
+                object.completeGeneratorExecution(ctx.runtime);
                 return err;
             };
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
-            if (done) object.generatorDoneSlot().* = true;
+            if (done) object.completeGeneratorExecution(ctx.runtime);
             if (!done) {
                 // The finally block itself yielded: preserve the pending return
                 // completion across the suspension (qjs js_generator_next
@@ -5215,7 +5183,7 @@ pub fn qjsGeneratorReturn(
             return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
         }
     }
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
 }
 
@@ -5229,20 +5197,21 @@ pub fn resumeGeneratorCatchForRuntimeError(
 ) !?core.JSValue {
     if (object.class_id == core.class.ids.async_generator) return null;
     if (object.generatorPc() == 0 or !object.generatorStarted()) return null;
-    const function_value = object.functionBytecode() orelse return null;
+    const function_value = object.generatorFunctionBytecode() orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
     const catch_target = findEnclosingCatchTarget(fb, @intCast(object.generatorPc())) orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
     defer thrown.free(ctx.runtime);
+    const current_function_value = object.generatorCurrentFunction() orelse receiver;
     object.generatorPcSlot().* = catch_target;
     object.generatorJustYieldedSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
         function_value,
-        receiver,
+        current_function_value,
         object.generatorThis() orelse core.JSValue.undefinedValue(),
         object.generatorArgs(),
-        object.functionCapturesSlot().*,
+        object.generatorCaptures(),
         output,
         global,
         false,
@@ -5252,12 +5221,12 @@ pub fn resumeGeneratorCatchForRuntimeError(
         core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |resume_err| {
-        object.generatorDoneSlot().* = true;
+        object.completeGeneratorExecution(ctx.runtime);
         return resume_err;
     };
     defer result.free(ctx.runtime);
     const done = !object.generatorJustYielded();
-    if (done) object.generatorDoneSlot().* = true;
+    if (done) object.completeGeneratorExecution(ctx.runtime);
     const result_value = generatorCatchResumeResultValue(result);
     return try createIteratorResult(ctx.runtime, global, result_value, done);
 }
@@ -5287,7 +5256,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     defer return_method.free(ctx.runtime);
 
     if (return_method.isUndefined() or return_method.isNull()) {
-        generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+        generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return .{ .complete = return_arg.dup() };
     }
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -5310,7 +5279,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
-    generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+    generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
 
@@ -5330,7 +5299,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
 
     if (throw_method.isUndefined() or throw_method.isNull()) {
         try qjsGeneratorYieldStarCloseForMissingThrow(ctx, output, global, iterator_value);
-        generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+        generator.clearGeneratorYieldStarIterator(ctx.runtime);
         return error.TypeError;
     }
     if (!isCallableValue(throw_method)) return error.TypeError;
@@ -5353,7 +5322,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
-    generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
+    generator.clearGeneratorYieldStarIterator(ctx.runtime);
     return .{ .complete = value };
 }
 
@@ -5387,7 +5356,7 @@ pub fn qjsGeneratorYieldStarReturn(
         .yield_result => |result| return result,
         .complete => |value| {
             defer value.free(ctx.runtime);
-            generator.generatorDoneSlot().* = true;
+            generator.completeGeneratorExecution(ctx.runtime);
             return try createIteratorResult(ctx.runtime, global, value, true);
         },
     }
@@ -5406,8 +5375,9 @@ pub fn qjsGeneratorThrow(
         // Mirrors js_async_generator_next GEN_MAGIC_THROW (quickjs.c:21706).
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 2);
     }
-    if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
+    const payload = object.generatorPayloadPtr();
+    if (payload.executing) return error.TypeError;
+    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     // A throw injected at a yield inside a finally block discards any pending return
     // completion stashed there (qjs: the exception unwinds the frame and the stacked
@@ -5421,24 +5391,25 @@ pub fn qjsGeneratorThrow(
     if (object.generatorYieldStarIterator() != null) {
         const step = qjsGeneratorYieldStarThrowStep(ctx, output, generator_global, object, thrown) catch |err| {
             if (try resumeGeneratorCatchForRuntimeError(ctx, output, generator_global, receiver, object, err)) |handled| return handled;
-            object.generatorDoneSlot().* = true;
+            object.completeGeneratorExecution(ctx.runtime);
             return err;
         };
         switch (step) {
             .yield_result => |result| return result,
             .complete => |value| {
                 defer value.free(ctx.runtime);
-                const function_value = object.functionBytecode() orelse return error.TypeError;
+                const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
                 const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+                const current_function_value = object.generatorCurrentFunction() orelse receiver;
                 object.generatorPcSlot().* = generatorPcAfterYieldStar(fb, object.generatorPc()) orelse return error.InvalidBytecode;
                 object.generatorJustYieldedSlot().* = false;
                 const result = callFunctionBytecodeModeState(
                     ctx,
                     function_value,
-                    receiver,
+                    current_function_value,
                     object.generatorThis() orelse core.JSValue.undefinedValue(),
                     object.generatorArgs(),
-                    object.functionCapturesSlot().*,
+                    object.generatorCaptures(),
                     output,
                     generator_global,
                     false,
@@ -5448,30 +5419,31 @@ pub fn qjsGeneratorThrow(
                     core.JSValue.undefinedValue(),
                     core.JSValue.undefinedValue(),
                 ) catch |err| {
-                    object.generatorDoneSlot().* = true;
+                    object.completeGeneratorExecution(ctx.runtime);
                     return err;
                 };
                 defer result.free(ctx.runtime);
                 const done = !object.generatorJustYielded();
-                if (done) object.generatorDoneSlot().* = true;
+                if (done) object.completeGeneratorExecution(ctx.runtime);
                 return try createIteratorResult(ctx.runtime, generator_global, result, done);
             },
         }
     }
 
     if (object.generatorPc() != 0 and object.generatorStarted()) {
-        const function_value = object.functionBytecode() orelse return error.TypeError;
+        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (findEnclosingCatchTarget(fb, @intCast(object.generatorPc()))) |catch_target| {
+            const current_function_value = object.generatorCurrentFunction() orelse receiver;
             object.generatorPcSlot().* = catch_target;
             object.generatorJustYieldedSlot().* = false;
             const result = callFunctionBytecodeModeState(
                 ctx,
                 function_value,
-                receiver,
+                current_function_value,
                 object.generatorThis() orelse core.JSValue.undefinedValue(),
                 object.generatorArgs(),
-                object.functionCapturesSlot().*,
+                object.generatorCaptures(),
                 output,
                 generator_global,
                 false,
@@ -5481,18 +5453,18 @@ pub fn qjsGeneratorThrow(
                 core.JSValue.undefinedValue(),
                 core.JSValue.undefinedValue(),
             ) catch |err| {
-                object.generatorDoneSlot().* = true;
+                object.completeGeneratorExecution(ctx.runtime);
                 return err;
             };
             defer result.free(ctx.runtime);
             const done = !object.generatorJustYielded();
-            if (done) object.generatorDoneSlot().* = true;
+            if (done) object.completeGeneratorExecution(ctx.runtime);
             const result_value = generatorCatchResumeResultValue(result);
             return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
         }
     }
 
-    object.generatorDoneSlot().* = true;
+    object.completeGeneratorExecution(ctx.runtime);
     _ = ctx.throwValue(thrown.dup());
     return error.JSException;
 }
@@ -5652,9 +5624,10 @@ pub fn closeGeneratorDestructuringIterators(
     global: *core.Object,
     generator: *core.Object,
 ) !void {
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorStack());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameLocals());
-    try closeDestructuringIteratorsInValues(ctx, output, global, generator.generatorFrameArgs());
+    const suspended = generator.generatorExecutionState();
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.stack.values);
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.locals);
+    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.args);
     // frame_var_refs: every element is a VarRef cell (typed slots), never a
     // destructuring-iterator-state Object — the pre-typed scan over the slots
     // was a provable no-op (expectObject rejects the var_ref GC kind), so the
@@ -5711,7 +5684,7 @@ pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
     stack: *const stack_mod.Stack,
     frame: *const frame_mod.Frame,
 ) void {
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.values);
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.liveValues());
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
     // frame.var_refs: typed cell slots are never iterator-state Objects (the
@@ -5728,6 +5701,14 @@ pub fn qjsIteratorCallForNativeRecord(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    switch (id) {
+        @intFromEnum(IntrinsicMethod.array_iterator_next) => return try iter_vm.arrayIteratorNext(ctx, output, global, receiver),
+        @intFromEnum(IntrinsicMethod.generator_next) => return (try qjsGeneratorNext(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_return) => return (try qjsGeneratorReturn(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IntrinsicMethod.generator_throw) => return (try qjsGeneratorThrow(ctx, output, global, receiver, args)) orelse error.TypeError,
+        else => {},
+    }
     switch (id) {
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_getter),
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter),
@@ -6241,7 +6222,36 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
     try promise_ops.enqueuePendingPromiseJob(ctx, callback);
 }
 
-pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
+noinline fn initIteratorResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+    const cached = try global.cachedRealmValueSlot(rt, .iterator_result_template);
+    if (cached.*) |stored| return core.Object.expect(stored);
+
+    // qjs's realm keeps the final `{ value, done }` shape and
+    // js_create_iterator_result allocates its two-slot property array in one
+    // shot. Pin an equivalent template so every generator/iterator step skips
+    // the empty -> value -> done storage-growth sequence.
+    const template = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        object_ops.objectPrototypeFromGlobal(rt, global),
+        2,
+    );
+    defer template.value().free(rt);
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.value,
+        core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true),
+    );
+    try template.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.done,
+        core.Descriptor.data(core.JSValue.boolean(false), true, true, true),
+    );
+    try global.setOptionalValueSlot(rt, cached, template.value().dup());
+    return core.Object.expect(cached.*.?);
+}
+
+pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -6253,14 +6263,14 @@ pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: co
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
+    const template = if (global.cachedRealmValue(.iterator_result_template)) |stored|
+        try core.Object.expect(stored)
+    else
+        try initIteratorResultPropertyTemplate(rt, global);
+    const object = try core.Object.createFromPropertyTemplate(rt, template);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    // qjs js_create_iterator_result (quickjs.c:16768) keys on the predefined
-    // JS_ATOM_value / JS_ATOM_done constants; use the interned atom ids directly
-    // instead of re-interning the "value"/"done" byte strings per result (this
-    // runs once per generator/iterator step, a hot path).
-    try object.defineOwnProperty(rt, core.atom.ids.value, core.Descriptor.data(rooted_value, true, true, true));
-    try object.defineOwnProperty(rt, core.atom.ids.done, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
+    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, rooted_value.dup());
+    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 1, core.JSValue.boolean(done));
     return object.value();
 }
 
@@ -6387,7 +6397,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
             return isConstructorLike(ctx, target);
         }
         if (function_object.flags.is_html_dda) return false;
-        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+        if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }
         if (function_object.class_id == core.class.ids.c_closure) return true;
@@ -6395,7 +6405,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
         // RegExp/String) is a constructor regardless of its dispatch name
         // (Phase 6b-3e: replaces the `date.isConstructorRecord` short circuit
         // with the generic table probe, which also covers RegExp/String).
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
+        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
             if (builtin_dispatch.isConstructRecordRef(ctx.runtime, native_ref)) return true;
         }
         // The native-record name lookup allocates; an allocation failure
@@ -6550,7 +6560,7 @@ pub fn qjsReflectSetCall(
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
-    if (!object.flags.is_array or atom_id != core.atom.ids.length) {
+    if (!object.isArray() or atom_id != core.atom.ids.length) {
         const receiver_value = if (args.len >= 4) args[3] else args[0];
         if (object.proxyTarget() != null) {
             const ok = try object_ops.proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
@@ -6759,7 +6769,7 @@ pub fn qjsReflectConstructGenericCallable(
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, resolved.new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCaptures(), output, function_global, resolved.new_target, constructor_this);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -7093,7 +7103,7 @@ pub fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, caller_frame: ?*frame_mod.
     const function_object = object_ops.objectFromValue(frame.current_function) orelse return atom_id;
     const function_atom = object_ops.remapPrivateAtomFromObject(rt, function_object, atom_id);
     if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObjectSlot().* orelse return atom_id;
+    const home_object = function_object.functionHomeObject() orelse return atom_id;
     return object_ops.remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 
@@ -7239,8 +7249,8 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
             continue;
         }
         const slot = slot_ops.varRefSlot(frame, idx);
-        if (slot_ops.varRefSlotIsDeletedEvalBinding(slot)) continue;
-        const value = slot_ops.slotValueDup(slot);
+        if (slot_ops.adapterIsDeletedEvalBinding(slot)) continue;
+        const value = slot_ops.adapterValueDup(slot);
         // Non-lexical bindings have no TDZ. An UNINITIALIZED cell here is a
         // parked global/eval placeholder (including an alias of a deleted eval
         // binding), so the name lookup must continue to the next environment.
@@ -7269,7 +7279,7 @@ pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Byte
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
         if (vd.scope_level != 0) continue;
-        return slot_ops.slotValueDup(frame.locals[idx]);
+        return value_slot.loadOwned(&frame.locals[idx]);
     }
     return null;
 }
@@ -7292,7 +7302,7 @@ pub fn setFrameLocalValue(
     for (function.vardefs[0..count], 0..) |vd, idx| {
         if (vd.var_name != atom_id) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
-        try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+        value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         return true;
     }
     return false;
@@ -7310,10 +7320,10 @@ pub fn setFrameVarRefValue(
         const name = function.varRefName(idx);
         if (name != atom_id) continue;
         if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.varRefSlotIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
+        if (closureVarIsNonLexicalGlobalSentinel(function, idx) and slot_ops.adapterValueIsUninitialized(slot_ops.varRefSlot(frame, idx))) {
             return false;
         }
-        try slot_ops.setVarRefSlotValue(ctx, frame, idx, value);
+        slot_ops.replaceVarRefValueOwned(ctx, frame, idx, value);
         return true;
     }
     return false;
@@ -7350,9 +7360,8 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
     const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
     const refs = object.argumentsVarRefs();
     if (index >= refs.len) return null;
-    if (refs[index].isUninitialized()) return null;
+    const cell = refs[index] orelse return null;
     if (!object.hasOwnProperty(atom_id)) return null;
-    const cell = slot_ops.varRefCellFromValue(refs[index]) orelse return refs[index].dup();
     return cell.varRefValue().dup();
 }
 
@@ -7361,23 +7370,13 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
     const index = core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id) orelse return false;
     const refs = object.argumentsVarRefsMut();
     if (index >= refs.len) return false;
-    if (refs[index].isUninitialized()) return false;
+    const cell = refs[index] orelse return false;
     if (!object.hasOwnProperty(atom_id)) {
-        const old_value = refs[index];
-        refs[index] = core.JSValue.uninitialized();
-        old_value.free(ctx.runtime);
+        refs[index] = null;
+        cell.release(ctx.runtime);
         return false;
     }
-    if (slot_ops.varRefCellFromValue(refs[index])) |cell| {
-        const next_value = value.dup();
-        try cell.setVarRefValue(ctx.runtime, next_value);
-        return true;
-    }
-    const next_value = value.dup();
-    errdefer next_value.free(ctx.runtime);
-    const old_value = refs[index];
-    refs[index] = next_value;
-    old_value.free(ctx.runtime);
+    cell.setVarRefValue(ctx.runtime, value.dup());
     return true;
 }
 

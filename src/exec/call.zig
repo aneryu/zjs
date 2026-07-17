@@ -182,8 +182,8 @@ pub fn callValueWithThisGlobalsAndGlobal(
     if (try promiseResolvingFunctionCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCapabilityExecutorCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCombinatorElementCall(ctx, output, global, globals, object, args)) |value| return value;
-    if (object.hostFunctionKindSlot().* != 0) {
-        const record = hostFunctionRecordFromId(object.hostFunctionKindSlot().*) orelse return error.TypeError;
+    if (object.hostFunctionKind() != 0) {
+        const record = hostFunctionRecordFromId(object.hostFunctionKind()) orelse return error.TypeError;
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
     if (object.class_id == core.class.ids.bytecode_function or
@@ -254,7 +254,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
             try writer.writeAll("[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try writer.writeAll("[object Promise]");
-        } else if (object_value.flags.is_array) {
+        } else if (object_value.isArray()) {
             try printArray(rt, writer, object_value);
         } else {
             try writer.writeAll("[object Object]");
@@ -550,7 +550,7 @@ pub fn callHostFunctionObjectForVm(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const kind = object.hostFunctionKindSlot().*;
+    const kind = object.hostFunctionKind();
     if (kind == 0) return null;
     if (!hostFunctionCanDispatchFromVmWithoutGlobals(kind)) return null;
     const record = hostFunctionRecordFromId(kind) orelse return error.TypeError;
@@ -1525,20 +1525,14 @@ pub fn callNativeFunctionRecord(
             caller_frame,
         );
     }
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {
         // Migrated to the internal record table (rt.internal_builtins);
         // reaching here means the id is not installed, which only happens
         // for corrupt ids.
-        .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp => error.TypeError,
-        .performance => try callPerformanceNativeFunctionRecord(ctx, native_ref.id),
-        .atomics => {
-            if (global) |global_object| return try call_runtime.qjsAtomicsCallForNativeRecord(ctx, output, global_object, native_ref.id, args, caller_function, caller_frame);
-            return error.TypeError;
-        },
+        .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp, .performance, .atomics, .promise => error.TypeError,
         .host => try callHostGlobalNativeFunctionRecord(ctx, global, this_value, function_object, native_ref.id, args),
-        .promise => try callPromiseStaticNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args),
     };
 }
 
@@ -1579,78 +1573,9 @@ fn callHostGlobalNativeFunctionRecord(
     };
 }
 
-/// `.promise` native-builtin domain: the Promise static methods when invoked
-/// through the host record path. The VM keeps its own realm-aware static
-/// dispatch; this handler replaces the retired string-name fallback and so
-/// mirrors that branch exactly, including its receiver gates.
-fn callPromiseStaticNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    // Combinators on the realm's own Promise statics run through the
-    // capability machinery (element callbacks, custom capability support);
-    // everything else takes the prototype-directed static call below.
-    const combinator: ?PromiseCombinatorMode = switch (id) {
-        @intFromEnum(method_ids.promise.LegacyStaticMethod.all) => .all,
-        @intFromEnum(method_ids.promise.LegacyStaticMethod.race) => .race,
-        @intFromEnum(method_ids.promise.LegacyStaticMethod.all_settled) => .all_settled,
-        @intFromEnum(method_ids.promise.LegacyStaticMethod.any) => .any,
-        else => null,
-    };
-    if (combinator) |mode| {
-        const combinator_name: []const u8 = switch (mode) {
-            .all => "all",
-            .race => "race",
-            .all_settled => "allSettled",
-            .any => "any",
-        };
-        const is_static_builtin = if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object|
-            try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, combinator_name)
-        else
-            false;
-        if (is_static_builtin) {
-            const combinator_receiver = thisObject(this_value) orelse return error.TypeError;
-            if (!isCallableObjectValue(this_value)) return error.TypeError;
-            if (try constructorNameEql(ctx.runtime, combinator_receiver, "Promise")) {
-                return promiseCombinatorCall(ctx, output, global, globals, this_value, combinator_receiver, args, mode);
-            }
-        }
-    }
-    const receiver = thisObject(this_value) orelse return error.TypeError;
-    if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
-    // The Promise resolve/reject/withResolvers/try statics use `this` as the
-    // constructor C (spec NewPromiseCapability(C)); accept any constructor-like
-    // receiver, not only %Promise% by name — a subclass `this`
-    // (Promise.resolve.call(C)) must work even when Promise.resolve was
-    // reassigned (qjs js_promise_resolve etc. use this_val as the constructor).
-    if (!(try call_runtime.isConstructorLike(ctx, this_value))) return error.TypeError;
-    if (id == @intFromEnum(method_ids.promise.LegacyStaticMethod.try_)) {
-        const promise_proto = constructorPrototype(ctx.runtime, receiver);
-        const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const callback_args = if (args.len >= 1) args[1..] else args[0..0];
-        const result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), callback, callback_args) catch {
-            const reason = core.JSValue.undefinedValue();
-            return core.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
-        };
-        defer result.free(ctx.runtime);
-        return core.promise.fulfilledWithPrototype(ctx.runtime, result, promise_proto);
-    }
-    const payload: ?core.JSValue = if (args.len >= 1) args[0] else null;
-    return core.promise.staticCallWithPrototype(ctx, id, payload, constructorPrototype(ctx.runtime, receiver), global) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
-}
-
 /// `Function.prototype.bind` body. Stays in exec because `createBoundFunction`
 /// and its proxy-aware property helpers are call.zig internals (covered by the
-/// in-file tests); the `.function` builtins record handler delegates here. The
+/// in-file tests); the `.function` domain record handler delegates here. The
 /// VM's own bind fast path (call_runtime.callNativeBuiltinRecordForVm) also
 /// routes back through this via callNativeFunctionRecord (BOTH).
 pub fn qjsFunctionBindCall(
@@ -1667,13 +1592,6 @@ pub fn qjsFunctionBindCall(
     return createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args);
 }
 
-fn callPerformanceNativeFunctionRecord(ctx: *core.JSContext, id: u32) !core.JSValue {
-    return switch (id) {
-        1 => core.JSValue.float64(performanceNowMs() - ctx.runtime.performance_time_origin_ms),
-        else => error.TypeError,
-    };
-}
-
 pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
     const realm = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 1);
     errdefer realm.value().free(rt);
@@ -1685,7 +1603,7 @@ pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
     );
     var realm_global_owned = true;
     errdefer if (realm_global_owned) realm_global.value().free(rt);
-    realm_global.flags.is_global = true;
+    _ = try realm_global.ensureRealmPayload(rt);
     try rt.installStandardGlobals(realm_global);
     try defineGlobalThisProperty(rt, realm_global);
     try tagRealmEval(rt, realm_global);
@@ -1760,9 +1678,8 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 // globals ...` test in `zjs_vm.zig` were relocated to `src/tests/exec.zig`
 // during Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
 // standard globals, which now flows through `rt.installStandardGlobals` and so
-// needs the builtins installer registered first; exec source cannot name the
-// builtins registry, so the bootstrap-integration tests live in the test tree
-// (which may import builtins) instead.
+// needs the standard-global installer registered first; the bootstrap-integration
+// tests live in the test tree so they exercise the public setup seam.
 
 pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
@@ -1816,7 +1733,6 @@ pub fn callObjectStatic(
             try expectObjectArg(args[0]);
         const object = try core.Object.create(rt, core.class.ids.object, proto);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
-        object.flags.null_prototype = args[0].isNull();
         if (args.len >= 2 and !args[1].isUndefined()) {
             try definePropertiesFromObject(rt, object, args[1]);
         }
@@ -2122,7 +2038,7 @@ fn objectIsFrozen(rt: *core.JSRuntime, object: *core.Object) !bool {
 
 /// Bare-runtime (no realm global) `Object.prototype.*` fallback, dispatched by
 /// the `prototypeMethodOrdinal` mapping. Like `callObjectStatic`, this is the
-/// `global == null` branch of the `.object` builtins record handler and stays in
+/// `global == null` branch of the `.object` domain record handler and stays in
 /// call.zig alongside the shared property helpers it depends on.
 pub fn objectPrototypeMethodCall(
     ctx: *core.JSContext,
@@ -2622,7 +2538,7 @@ fn finalizationRegistryAppendCell(
 }
 
 fn defaultObjectTag(object: *core.Object) []const u8 {
-    if (object.flags.is_array) return "[object Array]";
+    if (object.isArray()) return "[object Array]";
     return switch (object.class_id) {
         core.class.ids.c_function,
         core.class.ids.bytecode_function,
@@ -2668,7 +2584,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
     }
 
     const object = thisObject(value) orelse return error.TypeError;
-    if (object.flags.is_proxy) {
+    if (object.isProxy()) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         if (!isFunctionToStringCallable(target)) return error.TypeError;
@@ -2854,7 +2770,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (value.isFunctionBytecode()) return true;
     const object = thisObject(value) orelse return false;
     if (object.class_id == core.class.ids.bytecode_function or isFunctionClass(object.class_id)) return true;
-    if (!object.flags.is_proxy or object.proxyHandler() == null) return false;
+    if (!object.isProxy() or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
 }
@@ -2924,11 +2840,6 @@ pub fn runNextOsSignalHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, glo
 
 fn hostIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
-}
-
-fn performanceNowMs() f64 {
-    const ns = std.Io.Clock.Timestamp.now(hostIo(), .awake).raw.toNanoseconds();
-    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
 }
 
 fn globalBtoa(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
@@ -3106,12 +3017,8 @@ fn materializeMappedArgumentsDescriptorValue(
     if (object.class_id != core.class.ids.mapped_arguments) return;
     const index = core.array.arrayIndexFromAtom(&rt.atoms, key) orelse return;
     if (index >= object.argumentsVarRefs().len) return;
-    const mapped = object.argumentsVarRefs()[index];
-    if (mapped.isUninitialized()) return;
-    const value = if (varRefCellFromValue(mapped)) |cell|
-        cell.varRefValue().dup()
-    else
-        mapped.dup();
+    const cell = object.argumentsVarRefs()[index] orelse return;
+    const value = cell.varRefValue().dup();
     const old_value = desc.value;
     desc.value = value;
     old_value.free(rt);
@@ -3125,10 +3032,6 @@ pub fn materializeMappedArgumentsDescriptorValueForVm(
     desc: *core.Descriptor,
 ) !void {
     materializeMappedArgumentsDescriptorValue(rt, object, key, desc);
-}
-
-fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
-    return core.VarRef.fromValue(value);
 }
 
 pub fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
@@ -3409,7 +3312,7 @@ pub fn qjsEvalGlobalScriptSource(
             _ = error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
             break :blk error.SyntaxError;
         }
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk zjs_vm.runWithCallEnv(.{
             .ctx = ctx,

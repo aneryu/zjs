@@ -6,7 +6,6 @@ const exceptions = @import("exceptions.zig");
 const object_ops = @import("object_ops.zig");
 
 const HostError = exceptions.HostError;
-const InternalCall = core.host_function.InternalCall;
 
 pub const Result = struct {
     value_index: usize,
@@ -16,6 +15,7 @@ pub const Result = struct {
 pub const AccessorMethod = core.host_function.builtin_method_ids.iterator.AccessorMethod;
 pub const StaticMethod = core.host_function.builtin_method_ids.iterator.StaticMethod;
 pub const PrototypeMethod = core.host_function.builtin_method_ids.iterator.PrototypeMethod;
+pub const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
@@ -52,10 +52,10 @@ pub fn next(index: *usize, length: usize) Result {
 /// record handler `iteratorCall` switches on the per-record `magic`
 /// (== domain-local id) and forwards to the iterator-helper VM ops, which stay
 /// in exec because they interleave with the iterator protocol (next/close) and
-/// the static helpers reach the for-of machinery. Property installation still
-/// resolves names through the registry's `iterator_static`/`iterator_prototype`
-/// method tables plus the accessor/dispose enum ids; this table is consumed by
-/// the slow record-dispatch path (`rt.internal_builtins`). None of these
+/// the static helpers reach the for-of machinery. Standard-global bootstrap
+/// resolves names through its iterator static/prototype method lists plus the
+/// accessor/dispose enum ids; this table is consumed by the record-dispatch
+/// path (`rt.internal_builtins`). None of these
 /// records are prepared-call eligible (the prepared gate in
 /// `vm_call.zig` reports `.iterator => false`).
 pub const internal_entries = iteratorEntries: {
@@ -81,11 +81,23 @@ pub const internal_entries = iteratorEntries: {
         iteratorEntry("drop", 1, @intFromEnum(PrototypeMethod.drop)),
         iteratorEntry("flatMap", 1, @intFromEnum(PrototypeMethod.flat_map)),
         iteratorEntry("[Symbol.dispose]", 0, @intFromEnum(PrototypeMethod.dispose)),
+        iteratorEntry("Array Iterator.next", 0, @intFromEnum(IntrinsicMethod.array_iterator_next)),
+        iteratorEntry("Generator.next", 1, @intFromEnum(IntrinsicMethod.generator_next)),
+        iteratorEntry("Generator.return", 1, @intFromEnum(IntrinsicMethod.generator_return)),
+        iteratorEntry("Generator.throw", 1, @intFromEnum(IntrinsicMethod.generator_throw)),
     };
 };
 
 fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
-    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .call = &iteratorCall };
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .prepared_call_ok = false,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&iteratorCall),
+    };
 }
 
 /// Shared record handler for the `.iterator` domain. Mirrors the retired
@@ -94,7 +106,13 @@ fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
 /// dispatches the accessors, static helpers, and prototype helper methods. A
 /// null result means the id resolved to no handler, which only happens for a
 /// corrupt id, so it surfaces as a TypeError.
-fn iteratorCall(host_call: InternalCall) HostError!core.JSValue {
+fn iteratorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const id: u32 = host_call.magic;
     const active_global = host_call.global orelse object_ops.objectRealmGlobal(host_call.func_obj orelse return error.TypeError) orelse ctx.global orelse return error.TypeError;
@@ -102,4 +120,24 @@ fn iteratorCall(host_call: InternalCall) HostError!core.JSValue {
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, host_call.output, active_global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
+}
+
+test "intrinsic iterator next methods have dedicated native records" {
+    const testing = std.testing;
+    const expected_ids = [_]u32{
+        @intFromEnum(IntrinsicMethod.array_iterator_next),
+        @intFromEnum(IntrinsicMethod.generator_next),
+        @intFromEnum(IntrinsicMethod.generator_return),
+        @intFromEnum(IntrinsicMethod.generator_throw),
+    };
+    for (expected_ids) |expected_id| {
+        var handler: ?core.host_function.NativeFunctionPtr = null;
+        for (internal_entries) |entry| {
+            if (entry.id == expected_id) handler = entry.native_function;
+        }
+        try testing.expect(handler != null);
+        const native = handler.?;
+        try testing.expectEqual(core.host_function.NativeCProto.generic_magic, std.meta.activeTag(native));
+        try testing.expect(native.generic_magic == &iteratorCall);
+    }
 }

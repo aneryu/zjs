@@ -56,7 +56,7 @@ node tools/perf/write_env.js \
   --iters 30 \
   --warmup 5 \
   --output reports/perf/baseline/env-zjs-self.md \
-  --notes "ZJS self-baseline report; qjs is intentionally not configured for this gate."
+  --notes "ZJS self-baseline report; qjs is intentionally not configured for this gate. This 64-bit build uses the default 16-byte JSValue representation."
 ```
 
 Runtime-profile artifacts are checked under `reports/perf/current/runtime/`,

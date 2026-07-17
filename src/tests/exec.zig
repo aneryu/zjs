@@ -10,24 +10,275 @@ const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
+const object_ops = zjs.exec.object_ops;
+const frame_mod = zjs.exec.frame;
+const inline_calls = zjs.exec.inline_calls;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
+fn localIndexNamed(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, name: []const u8) ?usize {
+    for (function.varDefs(), 0..) |vd, idx| {
+        const bytes = rt.atoms.name(vd.var_name) orelse continue;
+        if (std.mem.eql(u8, bytes, name)) return idx;
+    }
+    return null;
+}
+
+test "var-ref growth promotes borrowed captures to owned cells" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("frame-borrowed-var-ref-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const captured = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
+    defer captured.freeCell(rt);
+    var captures = [_]*core.VarRef{captured};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.var_refs = &captures;
+    exec_frame.ownership.var_refs = .borrowed;
+
+    try frame_mod.ensureVarRefsCapacity(ctx, &exec_frame, 1);
+    try std.testing.expectEqual(@as(usize, 2), exec_frame.var_refs.len);
+    try std.testing.expectEqual(captured, exec_frame.var_refs[0]);
+    try std.testing.expectEqual(frame_mod.Ownership.owned, exec_frame.ownership.var_refs);
+}
+
+test "var-ref growth rejects an owned composite frame slab" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("frame-composite-var-ref-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 0, 1, 1, 0);
+    slab.stack[0] = core.JSValue.undefinedValue();
+    slab.var_refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.installOwnedStorage(slab.storage);
+    exec_frame.var_refs = slab.var_refs;
+
+    const storage_ptr = exec_frame.storage_values.ptr;
+    const var_refs_ptr = exec_frame.var_refs.ptr;
+    try std.testing.expectError(error.InvalidBytecode, frame_mod.ensureVarRefsCapacity(ctx, &exec_frame, 1));
+    try std.testing.expectEqual(storage_ptr, exec_frame.storage_values.ptr);
+    try std.testing.expectEqual(var_refs_ptr, exec_frame.var_refs.ptr);
+}
+
+test "local growth rejects an owned composite frame slab" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-composite-local-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 1, 1, 0, 0);
+    slab.locals[0] = core.JSValue.int32(3);
+    slab.stack[0] = core.JSValue.undefinedValue();
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.installOwnedStorage(slab.storage);
+    exec_frame.locals = slab.locals;
+
+    const storage_ptr = exec_frame.storage_values.ptr;
+    const locals_ptr = exec_frame.locals.ptr;
+    try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(4)));
+    try std.testing.expectEqual(storage_ptr, exec_frame.storage_values.ptr);
+    try std.testing.expectEqual(locals_ptr, exec_frame.locals.ptr);
+}
+
+test "arg aliases reject missing open-ref storage without cellifying the slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const name = try js.runtime.internAtom("frame-arg-open-ref-capacity-test");
+    defer js.runtime.atoms.free(name);
+    var function = bytecode.Bytecode.init(&js.runtime.memory, &js.runtime.atoms, name);
+    defer function.deinit(js.runtime);
+    function.flags.has_simple_parameter_list = true;
+    function.flags.has_mapped_arguments = true;
+    function.arg_count = 1;
+    function.open_var_ref_count = 1;
+    function.arg_open_binding_indices = try js.runtime.memory.alloc(u16, 1);
+    @constCast(function.arg_open_binding_indices)[0] = 0;
+
+    var args = [_]core.JSValue{core.JSValue.int32(41)};
+    var no_open_refs = [_]?*core.VarRef{};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&js.runtime.memory, js.runtime);
+    exec_frame.args = &args;
+    exec_frame.actual_arg_count = args.len;
+    exec_frame.open_var_refs = &no_open_refs;
+    exec_frame.ownership.storage = .borrowed;
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    var rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+        args[0].free(js.runtime);
+        args[0] = core.JSValue.int32(41);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
+
+    var occupied_value = core.JSValue.int32(7);
+    const occupied_ref = try core.VarRef.createOpen(js.runtime, &occupied_value);
+    var full_open_refs = [_]?*core.VarRef{occupied_ref};
+    exec_frame.open_var_refs = &full_open_refs;
+    rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(@as(?i32, 41), args[0].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
+    try std.testing.expectEqual(occupied_ref, full_open_refs[0].?);
+
+    const malformed_cell = try core.VarRef.createClosed(js.runtime, args[0]);
+    args[0] = malformed_cell.valueRef();
+    rejected = false;
+    if (object_ops.createArgumentsObject(js.context, global, &exec_frame, true)) |unexpected| {
+        unexpected.free(js.runtime);
+    } else |err| {
+        try std.testing.expectEqual(error.InvalidBytecode, err);
+        rejected = true;
+    }
+    try std.testing.expect(rejected);
+    try std.testing.expectEqual(malformed_cell, core.VarRef.fromValue(args[0]).?);
+    args[0].free(js.runtime);
+    args[0] = core.JSValue.int32(41);
+}
+
+test "local growth rejects moving storage after an open binding is published" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-open-local-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    var locals = [_]core.JSValue{core.JSValue.int32(7)};
+    const open_ref = try core.VarRef.createOpen(rt, &locals[0]);
+    var open_refs = [_]?*core.VarRef{open_ref};
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    exec_frame.locals = &locals;
+    exec_frame.open_var_refs = &open_refs;
+    exec_frame.ownership.storage = .borrowed;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.InvalidBytecode, exec_frame.setLocal(&rt.memory, rt, 1, core.JSValue.int32(8)));
+    rt.setMemoryLimit(null);
+    try exec_frame.setLocal(&rt.memory, rt, 0, core.JSValue.int32(9));
+    try std.testing.expectEqual(@as(?i32, 9), open_ref.varRefValue().asInt32());
+}
+
+test "call-binding OOM leaves input references with the caller" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-call-binding-oom-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const held = try core.Object.create(rt, core.class.ids.object, null);
+    defer held.value().free(rt);
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    const initial_refs = held.header.meta().rc;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const result = exec_frame.initCallBindings(rt, .{
+        .initial_this_value = held.value(),
+        .current_function_value = held.value(),
+        .new_target_value = core.JSValue.undefinedValue(),
+        .constructor_this_value = held.value(),
+    });
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+}
+
+test "original-args cold-state OOM does not retain copied references" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-original-args-oom-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    const held = try core.Object.create(rt, core.class.ids.object, null);
+    defer held.value().free(rt);
+    var source_args = [_]core.JSValue{held.value().dup()};
+    defer source_args[0].free(rt);
+    var original_args = [_]core.JSValue{core.JSValue.undefinedValue()};
+    defer original_args[0].free(rt);
+    var exec_frame = frame_mod.Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+    const initial_refs = held.header.meta().rc;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const result = exec_frame.initArgumentsBorrowedSlots(
+        &rt.memory,
+        &source_args,
+        false,
+        true,
+        .{ .original_args = &original_args },
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(initial_refs, held.header.meta().rc);
+}
+
+test "strict generator resident frame supports qjs argument counts beyond u16 storage" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* manyArgs() {
+        \\    "use strict";
+        \\    return arguments.length;
+        \\}
+        \\assert.sameValue(manyArgs.apply(null, Array(40000)).next().value, 40000);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 pub const helpers = struct {
     /// Install the standard + host globals on a bare `core.JSRuntime` global for
     /// tests that build a runtime directly (bypassing the binding-layer context
-    /// create that wires the installer). Phase 6b-3 STEP 7B routed the install
-    /// through `rt.installStandardGlobals`, which needs the builtins installer
-    /// registered first; exec source cannot name the builtins registry, so the
-    /// test tree (which imports builtins) registers it here. Idempotent.
+    /// create that wires the installer). The deep setup interface keeps the
+    /// installer callback and its capacity invariant together. Idempotent.
     pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void {
-        const registry = engine.builtins.registry;
-        registry.registerStandardGlobalsDefault();
-        rt.install_standard_globals_cb = registry.installStandardGlobals;
-        rt.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+        engine.exec.standard_globals.configureRuntime(rt);
     }
 
     pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
@@ -392,7 +643,7 @@ pub const helpers = struct {
                 .call = call,
                 .finalizer = finalizer,
             });
-            const function_value = try engine.builtins.function.nativeFunction(self.runtime, name, length);
+            const function_value = try engine.core.function.nativeFunction(self.runtime, name, length);
             errdefer function_value.free(self.runtime);
 
             const function_object = try engine.exec.property_ops.expectObject(function_value);
@@ -803,7 +1054,13 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.var_count = 1;
     function.stack_size = 1;
     function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
-    function.vardefs[0] = .{ .var_name = rt.atoms.dup(this_name), .scope_level = 0 };
+    function.vardefs[0] = .{
+        .var_name = rt.atoms.dup(this_name),
+        .scope_level = 0,
+        .is_captured = true,
+        .open_binding_idx = 0,
+    };
+    function.open_var_ref_count = 1;
     try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
 
     const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
@@ -823,6 +1080,49 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
 
     try std.testing.expectEqual(this_symbol, result.asSymbolAtom().?);
     try std.testing.expect(rt.atoms.name(this_symbol) != null);
+}
+
+test "derived constructor arrow and direct eval observe the same this value" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [32]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\new class extends class {} {
+        \\  constructor() {
+        \\    super();
+        \\    print(this === (() => this)(), this === eval("this"));
+        \\  }
+        \\}();
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true true\n", output.buffered());
+}
+
+test "derived constructor direct eval this shortcut preserves TDZ" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [96]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\new class extends Object {
+        \\  constructor() {
+        \\    let shortcut = "no", full = "no";
+        \\    try { eval("this"); } catch (error) { shortcut = error.name; }
+        \\    try { eval("this;"); } catch (error) { full = error.name; }
+        \\    print(shortcut, full);
+        \\    super();
+        \\  }
+        \\}();
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError ReferenceError\n", output.buffered());
 }
 
 test "bound function call skips zero-length combined args allocation" {
@@ -952,7 +1252,7 @@ test "value ops own primitive VM semantics" {
     defer same_string.free(rt);
     try std.testing.expect(same_string.same(one_string));
 
-    const boxed_one = try engine.builtins.string.constructWithPrototype(rt, &.{one_string}, null);
+    const boxed_one = try engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{one_string}, null);
     defer boxed_one.free(rt);
     const boxed_one_object: *core.Object = @fieldParentPtr("header", boxed_one.refHeader().?);
     const boxed_one_data = boxed_one_object.objectData() orelse return error.TypeError;
@@ -960,7 +1260,7 @@ test "value ops own primitive VM semantics" {
 
     const symbol_atom = try rt.atoms.newSymbol("boxed", .symbol);
     defer rt.atoms.free(symbol_atom);
-    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
+    try std.testing.expectError(error.TypeError, engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
 
     const name = try rt.internAtom("loose-eq");
     defer rt.atoms.free(name);
@@ -1012,6 +1312,42 @@ test "M1.3: returned closure can update and return captured counter" {
     );
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
+test "checked local replacement preserves int fast moves and refcounted fallbacks" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function () {
+        \\  let value = 1;
+        \\  value = 2;
+        \\  value = "left";
+        \\  value = "right";
+        \\  value = 3;
+        \\  return value;
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 3), result.asInt32());
+}
+
+test "a bytecode call at logical end completes through function falloff" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // This script's outer bytecode ends with the ordinary call. The return from
+    // `identity` therefore resumes at code_end and must take the dispatcher's
+    // falloff path; there is no real continuation opcode to dispatch directly.
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function identity(value) { return value; })(42)
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
 test "TDZ: closure update and return of captured const throws TypeError" {
@@ -1070,7 +1406,7 @@ test "forward-ref lexical captured through nested closure still honors TDZ befor
 }
 
 test "global closure get before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1098,7 +1434,7 @@ test "global closure get before top-level lexical initialization honors TDZ" {
 }
 
 test "global closure set before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1115,7 +1451,7 @@ test "global closure set before top-level lexical initialization honors TDZ" {
 }
 
 test "global closure update before top-level lexical initialization honors TDZ" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1132,7 +1468,7 @@ test "global closure update before top-level lexical initialization honors TDZ" 
 }
 
 test "Annex B block function updates existing global function binding" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1154,7 +1490,7 @@ test "Annex B block function updates existing global function binding" {
 }
 
 test "Annex B eval block function updates global function binding mirrors" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1182,7 +1518,7 @@ test "Annex B eval block function updates global function binding mirrors" {
 }
 
 test "Annex B direct eval global function does not block later script lexical declaration" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1209,7 +1545,7 @@ test "Annex B direct eval global function does not block later script lexical de
 }
 
 test "sloppy global assignment creates deletable object property" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1357,7 +1693,7 @@ test "call subsystem installs and invokes host globals" {
     defer test262_error.free(rt);
     try std.testing.expect(test262_error.isObject());
 
-    const map_value = try engine.builtins.collection.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.construct(rt, 1);
     defer map_value.free(rt);
     const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
     const set_key = try rt.internAtom("set");
@@ -1382,7 +1718,7 @@ test "call subsystem installs and invokes host globals" {
     const get_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_get, &.{stored_key});
     defer get_result.free(rt);
     var get_text = std.ArrayList(u8).empty;
-    defer get_text.deinit(std.testing.allocator);
+    defer get_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &get_text, get_result);
     try std.testing.expectEqualStrings("value", get_text.items);
 }
@@ -1421,7 +1757,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqual(core.host_function.NativeCProto.f_f_f, atan2_record.cproto);
     try std.testing.expect(atan2_record.native_function != null);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notMathAbs", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notMathAbs", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = abs_object.nativeFunctionIdSlot().*;
@@ -1459,7 +1795,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
-test "bytecode call view memo occupies the callable-class call cache" {
+test "bytecode call view memo is shared by the function bytecode" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1480,10 +1816,10 @@ test "bytecode call view memo occupies the callable-class call cache" {
     defer function_value.free(js.runtime);
     const function_object = engine.exec.object_ops.functionObjectFromValue(function_value) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
-
-    _ = function_object.functionBytecodeSlot();
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view == null);
+    const fb = function_object.bytecodeFunctionStoragePtr().function_bytecode orelse
+        return error.InvalidFunctionBytecode;
+    const cached_view = fb.cached_view orelse
+        return error.InvalidFunctionBytecode;
     const rerun = try js.eval(
         \\assert.sameValue(memoizedBytecodeView(3), 4);
         \\Promise.resolve(4)
@@ -1497,11 +1833,11 @@ test "bytecode call view memo occupies the callable-class call cache" {
         \\undefined;
     );
     defer rerun.free(js.runtime);
-    try std.testing.expect(function_object.bytecodeFunctionPayloadPtr().call_cache.bytecode_view != null);
+    try std.testing.expectEqual(cached_view, fb.cached_view.?);
 }
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1521,8 +1857,8 @@ test "Math cproto dispatch preserves observable ToNumber semantics" {
     try std.testing.expectEqualStrings("3\ntrue\nllr\ntrue\n", stream.buffered());
 }
 
-test "cell-backed add_loc retains string snapshots while using a rope tail" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+test "local add_loc retains string snapshots while using a rope tail" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1566,7 +1902,7 @@ test "cell-backed add_loc retains string snapshots while using a rope tail" {
 }
 
 test "checked lexical string accumulation keeps rope depth bounded" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -1683,7 +2019,7 @@ test "native dispatch metadata is internal and ignores user properties" {
 }
 
 test "scope resolver skips popped lexical shadow for destructured parameter" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -2085,6 +2421,432 @@ test "async generator prototype method marker is internal" {
     try std.testing.expectEqualStrings("false\ntrue\ntrue\ntrue\nfalse\n", stream.buffered());
 }
 
+test "generator instances inherit shared prototype methods" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function* syncGenerator() { yield 1; }
+        \\var syncA = syncGenerator();
+        \\var syncB = syncGenerator();
+        \\var GeneratorPrototype = Object.getPrototypeOf(syncGenerator.prototype);
+        \\var arrayIteratorForNativeRecord = [][Symbol.iterator]();
+        \\print(Object.getOwnPropertyNames(syncA).length);
+        \\print(syncA.next === GeneratorPrototype.next);
+        \\print(syncA.return === GeneratorPrototype.return);
+        \\print(syncA.throw === GeneratorPrototype.throw);
+        \\print(syncA.next === syncB.next);
+        \\print(syncA.next.length);
+        \\print(typeof syncA.slice);
+        \\var calls = 0;
+        \\var overridden = syncGenerator();
+        \\var builtinNext = overridden.next;
+        \\overridden.next = function() {
+        \\  calls++;
+        \\  return builtinNext.call(this);
+        \\};
+        \\var values = [];
+        \\for (var value of overridden) values.push(value);
+        \\print(calls + ":" + values.join(","));
+        \\var customGeneratorPrototype = Object.create(GeneratorPrototype);
+        \\syncGenerator.prototype = customGeneratorPrototype;
+        \\var customSync = syncGenerator();
+        \\print(Object.getPrototypeOf(customSync) === customGeneratorPrototype);
+        \\print(customSync.next === GeneratorPrototype.next);
+        \\syncGenerator.prototype = 1;
+        \\print(Object.getPrototypeOf(syncGenerator()) === GeneratorPrototype);
+        \\async function* asyncGenerator() { yield 1; }
+        \\var asyncA = asyncGenerator();
+        \\var asyncB = asyncGenerator();
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(asyncGenerator.prototype);
+        \\print(Object.getOwnPropertyNames(asyncA).length);
+        \\print(asyncA.next === AsyncGeneratorPrototype.next);
+        \\print(asyncA.return === AsyncGeneratorPrototype.return);
+        \\print(asyncA.throw === AsyncGeneratorPrototype.throw);
+        \\print(asyncA.next === asyncB.next);
+        \\print(asyncA.next.length);
+        \\print(typeof asyncA.slice);
+        \\var customAsyncGeneratorPrototype = Object.create(AsyncGeneratorPrototype);
+        \\asyncGenerator.prototype = customAsyncGeneratorPrototype;
+        \\print(Object.getPrototypeOf(asyncGenerator()) === customAsyncGeneratorPrototype);
+        \\asyncGenerator.prototype = null;
+        \\print(Object.getPrototypeOf(asyncGenerator()) === AsyncGeneratorPrototype);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\n2:1\ntrue\ntrue\ntrue\n0\ntrue\ntrue\ntrue\ntrue\n1\nundefined\ntrue\ntrue\n",
+        stream.buffered(),
+    );
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const sync_key = try js.runtime.internAtom("syncA");
+    defer js.runtime.atoms.free(sync_key);
+    const sync_value = global.getProperty(sync_key);
+    defer sync_value.free(js.runtime);
+    const sync_object = try property_ops.expectObject(sync_value);
+    try std.testing.expect(!js.runtime.borrowedReferenceHolderRegistered(sync_object));
+    try std.testing.expectEqual(global, engine.exec.object_ops.objectRealmGlobal(sync_object).?);
+
+    const generator_prototype_key = try js.runtime.internAtom("GeneratorPrototype");
+    defer js.runtime.atoms.free(generator_prototype_key);
+    const generator_prototype_value = global.getProperty(generator_prototype_key);
+    defer generator_prototype_value.free(js.runtime);
+    const generator_prototype = try property_ops.expectObject(generator_prototype_value);
+    const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
+    const generator_methods = [_]struct { name: []const u8, id: u32 }{
+        .{ .name = "next", .id = @intFromEnum(IntrinsicMethod.generator_next) },
+        .{ .name = "return", .id = @intFromEnum(IntrinsicMethod.generator_return) },
+        .{ .name = "throw", .id = @intFromEnum(IntrinsicMethod.generator_throw) },
+    };
+    for (generator_methods) |method| {
+        const key = try js.runtime.internAtom(method.name);
+        defer js.runtime.atoms.free(key);
+        const value = generator_prototype.getProperty(key);
+        defer value.free(js.runtime);
+        const function_object = try property_ops.expectObject(value);
+        const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
+        try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, native_ref.domain);
+        try std.testing.expectEqual(method.id, native_ref.id);
+        try std.testing.expect(function_object.nativeRecord() != null);
+    }
+
+    const array_iterator_key = try js.runtime.internAtom("arrayIteratorForNativeRecord");
+    defer js.runtime.atoms.free(array_iterator_key);
+    const array_iterator_value = global.getProperty(array_iterator_key);
+    defer array_iterator_value.free(js.runtime);
+    const array_iterator = try property_ops.expectObject(array_iterator_value);
+    const next_key = try js.runtime.internAtom("next");
+    defer js.runtime.atoms.free(next_key);
+    const next_value = array_iterator.getProperty(next_key);
+    defer next_value.free(js.runtime);
+    const next_function = try property_ops.expectObject(next_value);
+    const next_ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
+    try std.testing.expectEqual(core.function.NativeBuiltinDomain.iterator, next_ref.domain);
+    try std.testing.expectEqual(@intFromEnum(IntrinsicMethod.array_iterator_next), next_ref.id);
+    try std.testing.expect(next_function.nativeRecord() != null);
+}
+
+test "generator object uses the prototype selected after parameter initialization" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var GeneratorPrototype = Object.getPrototypeOf(function* () {}.prototype);
+        \\var syncPrototype = Object.create(GeneratorPrototype);
+        \\function* syncGenerator(value = (syncGenerator.prototype = syncPrototype)) {}
+        \\if (Object.getPrototypeOf(syncGenerator()) !== syncPrototype) throw new Error("sync prototype order");
+        \\var AsyncGeneratorPrototype = Object.getPrototypeOf(async function* () {}.prototype);
+        \\var asyncPrototype = Object.create(AsyncGeneratorPrototype);
+        \\async function* asyncGenerator(value = (asyncGenerator.prototype = asyncPrototype)) {}
+        \\if (Object.getPrototypeOf(asyncGenerator()) !== asyncPrototype) throw new Error("async prototype order");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator completion resumes keep the original function home object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\class Base {
+        \\  get marker() { return 41; }
+        \\}
+        \\class Derived extends Base {
+        \\  *viaReturn() {
+        \\    try { yield 0; }
+        \\    finally { yield super.marker; }
+        \\  }
+        \\  *viaThrow() {
+        \\    try { yield 0; }
+        \\    catch (value) { yield super.marker + value; }
+        \\  }
+        \\  *viaYieldStar() {
+        \\    yield* [0];
+        \\    return super.marker;
+        \\  }
+        \\}
+        \\const instance = new Derived();
+        \\const returned = instance.viaReturn();
+        \\assert.sameValue(returned.next().value, 0);
+        \\let step = returned.return(99);
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, false);
+        \\step = returned.next();
+        \\assert.sameValue(step.value, 99);
+        \\assert.sameValue(step.done, true);
+        \\const thrown = instance.viaThrow();
+        \\assert.sameValue(thrown.next().value, 0);
+        \\step = thrown.throw(1);
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(thrown.next().done, true);
+        \\const delegated = instance.viaYieldStar();
+        \\assert.sameValue(delegated.next().value, 0);
+        \\step = delegated.next();
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "resident generator resumes preserve nested catch and finally targets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* afterNested() {
+        \\  try {
+        \\    yield 1;
+        \\    try { yield 2; throw 3; } catch (error) { yield error; }
+        \\    yield 4;
+        \\  } finally { yield 5; }
+        \\}
+        \\let iterator = afterNested();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.next().value, 2);
+        \\assert.sameValue(iterator.next().value, 3);
+        \\assert.sameValue(iterator.next().value, 4);
+        \\assert.sameValue(iterator.throw(6).value, 5);
+        \\let caught;
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 6);
+        \\function* beforeNested() {
+        \\  try {
+        \\    yield 1;
+        \\    try { yield 2; } catch (error) { yield error; }
+        \\  } finally { yield 3; }
+        \\}
+        \\iterator = beforeNested();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.throw(7).value, 3);
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 7);
+        \\function* plainFinally() {
+        \\  try { yield 1; } finally { yield 2; }
+        \\}
+        \\iterator = plainFinally();
+        \\assert.sameValue(iterator.next().value, 1);
+        \\assert.sameValue(iterator.throw(8).value, 2);
+        \\try { iterator.next(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 8);
+        \\function* inner() { return yield 1; }
+        \\function* delegate(iterable) { return yield* iterable; }
+        \\iterator = delegate(inner());
+        \\assert.sameValue(iterator.next().value, 1);
+        \\try { iterator.throw(9); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 9);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "surviving var references keep resident local slots bare" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* referenceStorage(scope) {
+        \\  var target;
+        \\  with (scope) { target = 41; }
+        \\  yield target;
+        \\  target += 1;
+        \\  return target;
+        \\}
+        \\globalThis.__referenceStorage = referenceStorage({});
+        \\__referenceStorage.next();
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__referenceStorage");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    const function = engine.exec.call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    const target_idx = localIndexNamed(js.runtime, function, "target") orelse return error.TypeError;
+    const state = generator.generatorExecutionState();
+
+    try std.testing.expect(function.open_var_ref_count > 0);
+    try std.testing.expect(function.varDefs()[target_idx].is_captured);
+    try std.testing.expect(!function.varDefs()[target_idx].is_lexical);
+    try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].asInt32());
+    try std.testing.expect(core.VarRef.fromValue(state.storage.frame.locals[target_idx]) == null);
+    var found_open_alias = false;
+    for (state.storage.frame.open_var_refs) |maybe_ref| {
+        const ref = maybe_ref orelse continue;
+        if (ref.is_open and ref.pvalue == &state.storage.frame.locals[target_idx]) found_open_alias = true;
+    }
+    try std.testing.expect(found_open_alias);
+
+    const completion = try js.eval(
+        \\const step = __referenceStorage.next();
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+}
+
+test "direct eval captures only bindings visible at its call scope" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* scopedEvalStorage() {
+        \\  { let sibling = 10; globalThis.__siblingValue = sibling; }
+        \\  var visible = 1;
+        \\  { let active = 2; eval("visible = active"); yield visible; }
+        \\}
+        \\globalThis.__scopedEvalStorage = scopedEvalStorage();
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__scopedEvalStorage");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    const function = engine.exec.call_runtime.functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    const sibling_idx = localIndexNamed(js.runtime, function, "sibling") orelse return error.TypeError;
+    const visible_idx = localIndexNamed(js.runtime, function, "visible") orelse return error.TypeError;
+    const active_idx = localIndexNamed(js.runtime, function, "active") orelse return error.TypeError;
+
+    try std.testing.expect(!function.varDefs()[sibling_idx].is_captured);
+    try std.testing.expect(function.varDefs()[visible_idx].is_captured);
+    try std.testing.expect(function.varDefs()[active_idx].is_captured);
+    const view = bytecode.asBytecodeView(function, js.runtime);
+    try std.testing.expect(view.localOpenBindingIndex(sibling_idx) == null);
+    try std.testing.expect(view.localOpenBindingIndex(visible_idx) != null);
+    try std.testing.expect(view.localOpenBindingIndex(active_idx) != null);
+}
+
+test "suspended generators retain one resident execution owner across resumes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* residentGenerator(argument) {
+        \\  let local = { local: true };
+        \\  try {
+        \\    yield local;
+        \\    yield argument;
+        \\  } catch (error) {
+        \\    yield error;
+        \\  }
+        \\}
+        \\globalThis.__residentGenerator = residentGenerator({ argument: true });
+        \\let first = __residentGenerator.next();
+        \\assert.sameValue(first.value.local, true);
+        \\assert.sameValue(first.done, false);
+        \\let second = __residentGenerator.next();
+        \\assert.sameValue(second.value.argument, true);
+        \\assert.sameValue(second.done, false);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__residentGenerator");
+    defer js.runtime.atoms.free(key);
+    const value = global.getProperty(key);
+    defer value.free(js.runtime);
+    const generator = try property_ops.expectObject(value);
+    const generator_function = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    try std.testing.expect(inline_calls.resolveInlineTarget(
+        js.context,
+        global,
+        core.JSValue.undefinedValue(),
+        generator_function,
+    ) == null);
+    const state = generator.generatorExecutionState();
+    try std.testing.expect(!generator.generatorDone());
+    try std.testing.expect(state.has_frame);
+    try std.testing.expect(!state.running_aliases);
+    try std.testing.expect(state.resident_storage_owner);
+    try std.testing.expect(state.catchTarget() != null);
+    try std.testing.expect(generator.generatorStackUsesCombinedStorage());
+    try std.testing.expect(generator.generatorFrameUsesCombinedStorage());
+    try std.testing.expect(state.storage.frame.args.len != 0);
+    try std.testing.expect(state.storage.frame.locals.len != 0);
+    const completion = try js.eval(
+        \\let finalStep = __residentGenerator.next();
+        \\assert.sameValue(finalStep.value, undefined);
+        \\assert.sameValue(finalStep.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+    try std.testing.expect(generator.generatorDone());
+    try std.testing.expect(!generator.generatorExecutionState().has_frame);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+}
+
+test "completed generators eagerly release their resident execution state" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function make(captured) {
+        \\  return function* generator(argument) { yield captured; return argument; };
+        \\}
+        \\const generator = make({ captured: true });
+        \\globalThis.__returnedGenerator = generator.call({ receiver: true }, { argument: true });
+        \\let step = __returnedGenerator.return(7);
+        \\assert.sameValue(step.value, 7);
+        \\assert.sameValue(step.done, true);
+        \\step = __returnedGenerator.next();
+        \\assert.sameValue(step.value, undefined);
+        \\assert.sameValue(step.done, true);
+        \\step = __returnedGenerator.return(8);
+        \\assert.sameValue(step.value, 8);
+        \\assert.sameValue(step.done, true);
+        \\let thrown;
+        \\try { __returnedGenerator.throw(9); } catch (value) { thrown = value; }
+        \\assert.sameValue(thrown, 9);
+        \\globalThis.__normallyCompletedGenerator = generator({ argument: true });
+        \\__normallyCompletedGenerator.next();
+        \\step = __normallyCompletedGenerator.next();
+        \\assert.sameValue(step.done, true);
+        \\globalThis.__thrownGenerator = generator({ argument: true });
+        \\try { __thrownGenerator.throw(10); } catch (value) { thrown = value; }
+        \\assert.sameValue(thrown, 10);
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const names = [_][]const u8{
+        "__returnedGenerator",
+        "__normallyCompletedGenerator",
+        "__thrownGenerator",
+    };
+    for (names) |name| {
+        const key = try js.runtime.internAtom(name);
+        defer js.runtime.atoms.free(key);
+        const value = global.getProperty(key);
+        defer value.free(js.runtime);
+        const generator_object = try property_ops.expectObject(value);
+        try std.testing.expect(generator_object.generatorDone());
+        try std.testing.expect(!generator_object.generatorExecutionState().has_frame);
+        try std.testing.expect(generator_object.generatorExecutionState().storage.isEmpty());
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorPc());
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorArgs().len);
+        try std.testing.expectEqual(@as(usize, 0), generator_object.generatorCaptures().len);
+        try std.testing.expect(generator_object.generatorThis() == null);
+        try std.testing.expect(generator_object.generatorCurrentFunction() == null);
+    }
+}
+
 test "iterator helper method marker is internal" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -2220,7 +2982,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const is_integer_object: *core.Object = @fieldParentPtr("header", is_integer_value.refHeader().?);
     try std.testing.expect(is_integer_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_static = try engine.builtins.function.nativeFunction(rt, "notNumberIsInteger", 1);
+    const fake_static = try engine.core.function.nativeFunction(rt, "notNumberIsInteger", 1);
     defer fake_static.free(rt);
     const fake_static_object: *core.Object = @fieldParentPtr("header", fake_static.refHeader().?);
     fake_static_object.nativeFunctionIdSlot().* = is_integer_object.nativeFunctionIdSlot().*;
@@ -2240,7 +3002,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const to_fixed_object: *core.Object = @fieldParentPtr("header", to_fixed_value.refHeader().?);
     try std.testing.expect(to_fixed_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_proto = try engine.builtins.function.nativeFunction(rt, "notNumberToFixed", 1);
+    const fake_proto = try engine.core.function.nativeFunction(rt, "notNumberToFixed", 1);
     defer fake_proto.free(rt);
     const fake_proto_object: *core.Object = @fieldParentPtr("header", fake_proto.refHeader().?);
     fake_proto_object.nativeFunctionIdSlot().* = to_fixed_object.nativeFunctionIdSlot().*;
@@ -2293,7 +3055,7 @@ test "string static native builtin records ignore dispatch names" {
     const from_code_point_object: *core.Object = @fieldParentPtr("header", from_code_point_value.refHeader().?);
     try std.testing.expect(from_code_point_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notStringFromCodePoint", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notStringFromCodePoint", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = from_code_point_object.nativeFunctionIdSlot().*;
@@ -2347,7 +3109,7 @@ test "string prototype native builtin records ignore dispatch names" {
     const index_of_object: *core.Object = @fieldParentPtr("header", index_of_value.refHeader().?);
     try std.testing.expect(index_of_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notStringIndexOf", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notStringIndexOf", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = index_of_object.nativeFunctionIdSlot().*;
@@ -2440,7 +3202,7 @@ test "date static native builtin records ignore dispatch names" {
     const utc_object: *core.Object = @fieldParentPtr("header", utc_value.refHeader().?);
     try std.testing.expect(utc_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateUTC", 7);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateUTC", 7);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = utc_object.nativeFunctionIdSlot().*;
@@ -2485,7 +3247,7 @@ test "date constructor native builtin records ignore dispatch names" {
     const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
     try std.testing.expect(date_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateConstructor", 7);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateConstructor", 7);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = date_object.nativeFunctionIdSlot().*;
@@ -2508,7 +3270,7 @@ test "date constructor native builtin records ignore dispatch names" {
 
     const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
-    const construct_ms = try engine.builtins.date.methodCall(rt, construct_result, 1);
+    const construct_ms = try engine.exec.date_ops.methodCall(rt, construct_result, 1);
     defer construct_ms.free(rt);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(construct_ms).?);
 
@@ -2584,7 +3346,7 @@ test "date prototype native builtin records ignore dispatch names" {
     const set_time_object: *core.Object = @fieldParentPtr("header", set_time_value.refHeader().?);
     try std.testing.expect(set_time_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notDateSetTime", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notDateSetTime", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = set_time_object.nativeFunctionIdSlot().*;
@@ -2592,7 +3354,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notDateSetTime", dispatch_name);
 
-    const direct_receiver = try engine.builtins.date.construct(rt, &.{core.JSValue.int32(0)});
+    const direct_receiver = try engine.exec.date_ops.construct(rt, &.{core.JSValue.int32(0)});
     defer direct_receiver.free(rt);
     const direct_args = [_]core.JSValue{core.JSValue.int32(1)};
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_receiver, fake, &direct_args);
@@ -2642,7 +3404,7 @@ test "array static native builtin records ignore dispatch names" {
     const from_object: *core.Object = @fieldParentPtr("header", from_value.refHeader().?);
     try std.testing.expect(from_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_is_array = try engine.builtins.function.nativeFunction(rt, "notArrayIsArray", 1);
+    const fake_is_array = try engine.core.function.nativeFunction(rt, "notArrayIsArray", 1);
     defer fake_is_array.free(rt);
     const fake_is_array_object: *core.Object = @fieldParentPtr("header", fake_is_array.refHeader().?);
     fake_is_array_object.nativeFunctionIdSlot().* = is_array_object.nativeFunctionIdSlot().*;
@@ -2650,14 +3412,14 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(is_array_dispatch_name);
     try std.testing.expectEqualStrings("notArrayIsArray", is_array_dispatch_name);
 
-    const direct_array = try engine.builtins.array.construct(rt, &.{core.JSValue.int32(1)});
+    const direct_array = try engine.exec.array_builtin_ops.construct(rt, &.{core.JSValue.int32(1)});
     defer direct_array.free(rt);
     const direct_is_array_args = [_]core.JSValue{direct_array};
     const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args);
     defer is_array_result.free(rt);
     try std.testing.expectEqual(true, is_array_result.asBool().?);
 
-    const fake_from = try engine.builtins.function.nativeFunction(rt, "notArrayFrom", 1);
+    const fake_from = try engine.core.function.nativeFunction(rt, "notArrayFrom", 1);
     defer fake_from.free(rt);
     const fake_from_object: *core.Object = @fieldParentPtr("header", fake_from.refHeader().?);
     fake_from_object.nativeFunctionIdSlot().* = from_object.nativeFunctionIdSlot().*;
@@ -2668,7 +3430,7 @@ test "array static native builtin records ignore dispatch names" {
     const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
     defer direct_from_result.free(rt);
     const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
-    try std.testing.expect(direct_from_array.flags.is_array);
+    try std.testing.expect(direct_from_array.isArray());
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
@@ -2735,7 +3497,7 @@ test "array prototype native builtin records ignore dispatch names" {
     const values_object: *core.Object = @fieldParentPtr("header", values_value.refHeader().?);
     try std.testing.expect(values_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_join = try engine.builtins.function.nativeFunction(rt, "notArrayJoin", 1);
+    const fake_join = try engine.core.function.nativeFunction(rt, "notArrayJoin", 1);
     defer fake_join.free(rt);
     const fake_join_object: *core.Object = @fieldParentPtr("header", fake_join.refHeader().?);
     fake_join_object.nativeFunctionIdSlot().* = join_object.nativeFunctionIdSlot().*;
@@ -2743,7 +3505,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(join_dispatch_name);
     try std.testing.expectEqualStrings("notArrayJoin", join_dispatch_name);
 
-    const direct_array = try engine.builtins.array.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
+    const direct_array = try engine.exec.array_builtin_ops.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
     defer direct_array.free(rt);
     const separator = (try core.string.String.createUtf8(rt, ":")).value();
     defer separator.free(rt);
@@ -2754,7 +3516,7 @@ test "array prototype native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &join_text, join_result);
     try std.testing.expectEqualStrings("1:2", join_text.items);
 
-    const fake_to_string = try engine.builtins.function.nativeFunction(rt, "notArrayToString", 0);
+    const fake_to_string = try engine.core.function.nativeFunction(rt, "notArrayToString", 0);
     defer fake_to_string.free(rt);
     const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
@@ -2765,11 +3527,11 @@ test "array prototype native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &to_string_text, to_string_result);
     try std.testing.expectEqualStrings("1,2", to_string_text.items);
 
-    const fake_map = try engine.builtins.function.nativeFunction(rt, "notArrayMap", 1);
+    const fake_map = try engine.core.function.nativeFunction(rt, "notArrayMap", 1);
     defer fake_map.free(rt);
     const fake_map_object: *core.Object = @fieldParentPtr("header", fake_map.refHeader().?);
     fake_map_object.nativeFunctionIdSlot().* = map_object.nativeFunctionIdSlot().*;
-    const fake_values = try engine.builtins.function.nativeFunction(rt, "notArrayValues", 0);
+    const fake_values = try engine.core.function.nativeFunction(rt, "notArrayValues", 0);
     defer fake_values.free(rt);
     const fake_values_object: *core.Object = @fieldParentPtr("header", fake_values.refHeader().?);
     fake_values_object.nativeFunctionIdSlot().* = values_object.nativeFunctionIdSlot().*;
@@ -2853,7 +3615,7 @@ test "collection native builtin records ignore dispatch names" {
     const set_values_object: *core.Object = @fieldParentPtr("header", set_values_value.refHeader().?);
     try std.testing.expect(set_values_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_map_set = try engine.builtins.function.nativeFunction(rt, "notMapSet", 2);
+    const fake_map_set = try engine.core.function.nativeFunction(rt, "notMapSet", 2);
     defer fake_map_set.free(rt);
     const fake_map_set_object: *core.Object = @fieldParentPtr("header", fake_map_set.refHeader().?);
     fake_map_set_object.nativeFunctionIdSlot().* = map_set_object.nativeFunctionIdSlot().*;
@@ -2861,7 +3623,7 @@ test "collection native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notMapSet", dispatch_name);
 
-    const direct_map = try engine.builtins.collection.constructWithPrototype(rt, 1, map_prototype_object);
+    const direct_map = try engine.exec.collection_ops.constructWithPrototype(rt, 1, map_prototype_object);
     defer direct_map.free(rt);
     const direct_key = (try core.string.String.createUtf8(rt, "direct")).value();
     defer direct_key.free(rt);
@@ -2869,23 +3631,23 @@ test "collection native builtin records ignore dispatch names" {
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_map, fake_map_set, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expect(direct_result.same(direct_map));
-    const direct_get_result = try engine.builtins.collection.methodCall(rt, direct_map, 2, &.{direct_key});
+    const direct_get_result = try engine.exec.collection_ops.methodCall(rt, direct_map, 2, &.{direct_key});
     defer direct_get_result.free(rt);
     try std.testing.expectEqual(@as(?i32, 7), direct_get_result.asInt32());
 
-    const fake_group_by = try engine.builtins.function.nativeFunction(rt, "notMapGroupBy", 2);
+    const fake_group_by = try engine.core.function.nativeFunction(rt, "notMapGroupBy", 2);
     defer fake_group_by.free(rt);
     const fake_group_by_object: *core.Object = @fieldParentPtr("header", fake_group_by.refHeader().?);
     fake_group_by_object.nativeFunctionIdSlot().* = group_by_object.nativeFunctionIdSlot().*;
-    const fake_map_for_each = try engine.builtins.function.nativeFunction(rt, "notMapForEach", 1);
+    const fake_map_for_each = try engine.core.function.nativeFunction(rt, "notMapForEach", 1);
     defer fake_map_for_each.free(rt);
     const fake_map_for_each_object: *core.Object = @fieldParentPtr("header", fake_map_for_each.refHeader().?);
     fake_map_for_each_object.nativeFunctionIdSlot().* = map_for_each_object.nativeFunctionIdSlot().*;
-    const fake_set_union = try engine.builtins.function.nativeFunction(rt, "notSetUnion", 1);
+    const fake_set_union = try engine.core.function.nativeFunction(rt, "notSetUnion", 1);
     defer fake_set_union.free(rt);
     const fake_set_union_object: *core.Object = @fieldParentPtr("header", fake_set_union.refHeader().?);
     fake_set_union_object.nativeFunctionIdSlot().* = set_union_object.nativeFunctionIdSlot().*;
-    const fake_set_values = try engine.builtins.function.nativeFunction(rt, "notSetValues", 0);
+    const fake_set_values = try engine.core.function.nativeFunction(rt, "notSetValues", 0);
     defer fake_set_values.free(rt);
     const fake_set_values_object: *core.Object = @fieldParentPtr("header", fake_set_values.refHeader().?);
     fake_set_values_object.nativeFunctionIdSlot().* = set_values_object.nativeFunctionIdSlot().*;
@@ -2995,31 +3757,31 @@ test "buffer native builtin records ignore dispatch names" {
     const data_view_byte_length_getter: *core.Object = @fieldParentPtr("header", data_view_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(data_view_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_is_view = try engine.builtins.function.nativeFunction(rt, "notArrayBufferIsView", 1);
+    const fake_is_view = try engine.core.function.nativeFunction(rt, "notArrayBufferIsView", 1);
     defer fake_is_view.free(rt);
     const fake_is_view_object: *core.Object = @fieldParentPtr("header", fake_is_view.refHeader().?);
     fake_is_view_object.nativeFunctionIdSlot().* = is_view_object.nativeFunctionIdSlot().*;
-    const fake_array_buffer_slice = try engine.builtins.function.nativeFunction(rt, "notArrayBufferSlice", 2);
+    const fake_array_buffer_slice = try engine.core.function.nativeFunction(rt, "notArrayBufferSlice", 2);
     defer fake_array_buffer_slice.free(rt);
     const fake_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_slice.refHeader().?);
     fake_array_buffer_slice_object.nativeFunctionIdSlot().* = array_buffer_slice_object.nativeFunctionIdSlot().*;
-    const fake_array_buffer_byte_length = try engine.builtins.function.nativeFunction(rt, "notArrayBufferByteLength", 0);
+    const fake_array_buffer_byte_length = try engine.core.function.nativeFunction(rt, "notArrayBufferByteLength", 0);
     defer fake_array_buffer_byte_length.free(rt);
     const fake_array_buffer_byte_length_object: *core.Object = @fieldParentPtr("header", fake_array_buffer_byte_length.refHeader().?);
     fake_array_buffer_byte_length_object.nativeFunctionIdSlot().* = array_buffer_byte_length_getter.nativeFunctionIdSlot().*;
-    const fake_shared_array_buffer_slice = try engine.builtins.function.nativeFunction(rt, "notSharedArrayBufferSlice", 2);
+    const fake_shared_array_buffer_slice = try engine.core.function.nativeFunction(rt, "notSharedArrayBufferSlice", 2);
     defer fake_shared_array_buffer_slice.free(rt);
     const fake_shared_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", fake_shared_array_buffer_slice.refHeader().?);
     fake_shared_array_buffer_slice_object.nativeFunctionIdSlot().* = shared_array_buffer_slice_object.nativeFunctionIdSlot().*;
-    const fake_data_view_get_uint8 = try engine.builtins.function.nativeFunction(rt, "notDataViewGetUint8", 1);
+    const fake_data_view_get_uint8 = try engine.core.function.nativeFunction(rt, "notDataViewGetUint8", 1);
     defer fake_data_view_get_uint8.free(rt);
     const fake_data_view_get_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_get_uint8.refHeader().?);
     fake_data_view_get_uint8_object.nativeFunctionIdSlot().* = get_uint8_object.nativeFunctionIdSlot().*;
-    const fake_data_view_set_uint8 = try engine.builtins.function.nativeFunction(rt, "notDataViewSetUint8", 2);
+    const fake_data_view_set_uint8 = try engine.core.function.nativeFunction(rt, "notDataViewSetUint8", 2);
     defer fake_data_view_set_uint8.free(rt);
     const fake_data_view_set_uint8_object: *core.Object = @fieldParentPtr("header", fake_data_view_set_uint8.refHeader().?);
     fake_data_view_set_uint8_object.nativeFunctionIdSlot().* = set_uint8_object.nativeFunctionIdSlot().*;
-    const fake_data_view_byte_length = try engine.builtins.function.nativeFunction(rt, "notDataViewByteLength", 0);
+    const fake_data_view_byte_length = try engine.core.function.nativeFunction(rt, "notDataViewByteLength", 0);
     defer fake_data_view_byte_length.free(rt);
     const fake_data_view_byte_length_object: *core.Object = @fieldParentPtr("header", fake_data_view_byte_length.refHeader().?);
     fake_data_view_byte_length_object.nativeFunctionIdSlot().* = data_view_byte_length_getter.nativeFunctionIdSlot().*;
@@ -3028,7 +3790,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notArrayBufferSlice", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
+    const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
     defer direct_buffer.free(rt);
     const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) });
     defer direct_slice_result.free(rt);
@@ -3121,15 +3883,15 @@ test "typed array accessor native builtin records ignore dispatch names" {
     const tag_getter: *core.Object = @fieldParentPtr("header", tag_desc.getter.refHeader().?);
     try std.testing.expect(tag_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_byte_length = try engine.builtins.function.nativeFunction(rt, "notTypedArrayByteLength", 0);
+    const fake_byte_length = try engine.core.function.nativeFunction(rt, "notTypedArrayByteLength", 0);
     defer fake_byte_length.free(rt);
     const fake_byte_length_object: *core.Object = @fieldParentPtr("header", fake_byte_length.refHeader().?);
     fake_byte_length_object.nativeFunctionIdSlot().* = byte_length_getter.nativeFunctionIdSlot().*;
-    const fake_length = try engine.builtins.function.nativeFunction(rt, "notTypedArrayLength", 0);
+    const fake_length = try engine.core.function.nativeFunction(rt, "notTypedArrayLength", 0);
     defer fake_length.free(rt);
     const fake_length_object: *core.Object = @fieldParentPtr("header", fake_length.refHeader().?);
     fake_length_object.nativeFunctionIdSlot().* = length_getter.nativeFunctionIdSlot().*;
-    const fake_tag = try engine.builtins.function.nativeFunction(rt, "notTypedArrayTag", 0);
+    const fake_tag = try engine.core.function.nativeFunction(rt, "notTypedArrayTag", 0);
     defer fake_tag.free(rt);
     const fake_tag_object: *core.Object = @fieldParentPtr("header", fake_tag.refHeader().?);
     fake_tag_object.nativeFunctionIdSlot().* = tag_getter.nativeFunctionIdSlot().*;
@@ -3138,9 +3900,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notTypedArrayByteLength", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
+    const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
     defer direct_buffer.free(rt);
-    const direct_typed_array = try engine.builtins.buffer.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
+    const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
     defer direct_typed_array.free(rt);
     const direct_byte_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_byte_length, &.{});
     defer direct_byte_length.free(rt);
@@ -3198,7 +3960,7 @@ test "regexp static native builtin records ignore dispatch names" {
     const escape_object: *core.Object = @fieldParentPtr("header", escape_value.refHeader().?);
     try std.testing.expect(escape_object.nativeFunctionIdSlot().* != 0);
 
-    const fake = try engine.builtins.function.nativeFunction(rt, "notRegExpEscape", 1);
+    const fake = try engine.core.function.nativeFunction(rt, "notRegExpEscape", 1);
     defer fake.free(rt);
     const fake_object: *core.Object = @fieldParentPtr("header", fake.refHeader().?);
     fake_object.nativeFunctionIdSlot().* = escape_object.nativeFunctionIdSlot().*;
@@ -3267,7 +4029,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_exec = try engine.builtins.function.nativeFunction(rt, "notRegExpExec", 1);
+    const fake_exec = try engine.core.function.nativeFunction(rt, "notRegExpExec", 1);
     defer fake_exec.free(rt);
     const fake_exec_object: *core.Object = @fieldParentPtr("header", fake_exec.refHeader().?);
     fake_exec_object.nativeFunctionIdSlot().* = exec_object.nativeFunctionIdSlot().*;
@@ -3275,7 +4037,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(exec_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpExec", exec_dispatch_name);
 
-    const fake_test = try engine.builtins.function.nativeFunction(rt, "notRegExpTest", 1);
+    const fake_test = try engine.core.function.nativeFunction(rt, "notRegExpTest", 1);
     defer fake_test.free(rt);
     const fake_test_object: *core.Object = @fieldParentPtr("header", fake_test.refHeader().?);
     fake_test_object.nativeFunctionIdSlot().* = test_object.nativeFunctionIdSlot().*;
@@ -3283,7 +4045,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(test_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpTest", test_dispatch_name);
 
-    const fake_to_string = try engine.builtins.function.nativeFunction(rt, "notRegExpToString", 0);
+    const fake_to_string = try engine.core.function.nativeFunction(rt, "notRegExpToString", 0);
     defer fake_to_string.free(rt);
     const fake_to_string_object: *core.Object = @fieldParentPtr("header", fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
@@ -3295,7 +4057,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     defer input_string.value().free(rt);
@@ -3303,7 +4065,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
-    try std.testing.expect(exec_array.flags.is_array);
+    try std.testing.expect(exec_array.isArray());
     const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
@@ -3386,7 +4148,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_object: *core.Object = @fieldParentPtr("header", split_value.refHeader().?);
     try std.testing.expect(split_object.nativeFunctionIdSlot().* != 0);
 
-    const fake_search = try engine.builtins.function.nativeFunction(rt, "notRegExpSearch", 1);
+    const fake_search = try engine.core.function.nativeFunction(rt, "notRegExpSearch", 1);
     defer fake_search.free(rt);
     const fake_search_object: *core.Object = @fieldParentPtr("header", fake_search.refHeader().?);
     fake_search_object.nativeFunctionIdSlot().* = search_object.nativeFunctionIdSlot().*;
@@ -3394,19 +4156,19 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(search_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpSearch", search_dispatch_name);
 
-    const fake_match = try engine.builtins.function.nativeFunction(rt, "notRegExpMatch", 1);
+    const fake_match = try engine.core.function.nativeFunction(rt, "notRegExpMatch", 1);
     defer fake_match.free(rt);
     const fake_match_object: *core.Object = @fieldParentPtr("header", fake_match.refHeader().?);
     fake_match_object.nativeFunctionIdSlot().* = match_object.nativeFunctionIdSlot().*;
-    const fake_match_all = try engine.builtins.function.nativeFunction(rt, "notRegExpMatchAll", 1);
+    const fake_match_all = try engine.core.function.nativeFunction(rt, "notRegExpMatchAll", 1);
     defer fake_match_all.free(rt);
     const fake_match_all_object: *core.Object = @fieldParentPtr("header", fake_match_all.refHeader().?);
     fake_match_all_object.nativeFunctionIdSlot().* = match_all_object.nativeFunctionIdSlot().*;
-    const fake_replace = try engine.builtins.function.nativeFunction(rt, "notRegExpReplace", 2);
+    const fake_replace = try engine.core.function.nativeFunction(rt, "notRegExpReplace", 2);
     defer fake_replace.free(rt);
     const fake_replace_object: *core.Object = @fieldParentPtr("header", fake_replace.refHeader().?);
     fake_replace_object.nativeFunctionIdSlot().* = replace_object.nativeFunctionIdSlot().*;
-    const fake_split = try engine.builtins.function.nativeFunction(rt, "notRegExpSplit", 2);
+    const fake_split = try engine.core.function.nativeFunction(rt, "notRegExpSplit", 2);
     defer fake_split.free(rt);
     const fake_split_object: *core.Object = @fieldParentPtr("header", fake_split.refHeader().?);
     fake_split_object.nativeFunctionIdSlot().* = split_object.nativeFunctionIdSlot().*;
@@ -3415,7 +4177,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     defer input_string.value().free(rt);
@@ -3451,7 +4213,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
     defer split_result.free(rt);
     const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
-    try std.testing.expect(split_array.flags.is_array);
+    try std.testing.expect(split_array.isArray());
     try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");
@@ -3520,7 +4282,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     const global_getter: *core.Object = @fieldParentPtr("header", global_desc.getter.refHeader().?);
     try std.testing.expect(global_getter.nativeFunctionIdSlot().* != 0);
 
-    const fake_source = try engine.builtins.function.nativeFunction(rt, "notRegExpSourceGetter", 0);
+    const fake_source = try engine.core.function.nativeFunction(rt, "notRegExpSourceGetter", 0);
     defer fake_source.free(rt);
     const fake_source_object: *core.Object = @fieldParentPtr("header", fake_source.refHeader().?);
     fake_source_object.nativeFunctionIdSlot().* = source_getter.nativeFunctionIdSlot().*;
@@ -3528,7 +4290,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(source_dispatch_name);
     try std.testing.expectEqualStrings("notRegExpSourceGetter", source_dispatch_name);
 
-    const fake_global = try engine.builtins.function.nativeFunction(rt, "notRegExpGlobalGetter", 0);
+    const fake_global = try engine.core.function.nativeFunction(rt, "notRegExpGlobalGetter", 0);
     defer fake_global.free(rt);
     const fake_global_object: *core.Object = @fieldParentPtr("header", fake_global.refHeader().?);
     fake_global_object.nativeFunctionIdSlot().* = global_getter.nativeFunctionIdSlot().*;
@@ -3537,7 +4299,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer pattern_string.value().free(rt);
     const flags_string = try core.string.String.createUtf8(rt, "g");
     defer flags_string.value().free(rt);
-    const receiver = try engine.builtins.regexp.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
+    const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     defer receiver.free(rt);
 
     const source_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_source, &.{});
@@ -4002,6 +4764,16 @@ test "native builtin errors capture a native callsite" {
         \\var forwardedFirstNewline = forwardedCallStack.indexOf("\n");
         \\assert.sameValue(forwardedCallStack.indexOf("    at forwardedCallTarget"), 0);
         \\assert.sameValue(forwardedCallStack.slice(forwardedFirstNewline + 1).indexOf("    at call (native)"), 0);
+        \\function forwardedCallCaller() {
+        \\    var stack = forwardedCallTarget.call(undefined);
+        \\    return stack + "";
+        \\}
+        \\var forwardedNestedStack = forwardedCallCaller();
+        \\var forwardedNestedFirst = forwardedNestedStack.indexOf("\n");
+        \\var forwardedNestedSecond = forwardedNestedStack.indexOf("\n", forwardedNestedFirst + 1);
+        \\assert.sameValue(forwardedNestedStack.indexOf("    at forwardedCallTarget"), 0);
+        \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedFirst + 1).indexOf("    at call (native)"), 0);
+        \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedSecond + 1).indexOf("    at forwardedCallCaller"), 0);
         \\var applyStack;
         \\try {
         \\    Array.prototype.map.apply([], [null]);
@@ -4039,6 +4811,24 @@ test "native builtin errors capture a native callsite" {
         \\var dateConstructStack;
         \\try { new Date(Symbol()); } catch (error) { dateConstructStack = error.stack; }
         \\assert.sameValue(dateConstructStack.indexOf("    at Date (native)"), 0);
+        \\Error.prepareStackTrace = function(_, sites) {
+        \\    return sites.map(function(site) {
+        \\        return [site.getFunctionName(), site.isNative()];
+        \\    });
+        \\};
+        \\function outerMapBacktrace() {
+        \\    return [1].map(function callback() {
+        \\        return new Error("cross-machine").stack;
+        \\    })[0];
+        \\}
+        \\var crossMachineSites = outerMapBacktrace();
+        \\assert.sameValue(crossMachineSites[0][0], "callback");
+        \\assert.sameValue(crossMachineSites[0][1], false);
+        \\assert.sameValue(crossMachineSites[1][0], "map");
+        \\assert.sameValue(crossMachineSites[1][1], true);
+        \\assert.sameValue(crossMachineSites[2][0], "outerMapBacktrace");
+        \\assert.sameValue(crossMachineSites[2][1], false);
+        \\Error.prepareStackTrace = undefined;
         \\Error.prepareStackTrace = function(error, sites) {
         \\    assert.sameValue(sites[0].getFunctionName(), "map");
         \\    assert.sameValue(sites[0].getFileName(), null);
@@ -4311,6 +5101,29 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true\ntrue\ntrue\ncliLocalFunction\ntrue\ntrue\n5\ntrue\ntrue\n", stream.buffered());
+}
+
+test "runtime-strict eval overrides parse-time mapped arguments subtype" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [96]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileWithOutputModeRuntimeStrict(
+        \\function forcedArguments(value) {
+        \\  const before = arguments[0];
+        \\  value = 7;
+        \\  arguments[0] = 9;
+        \\  let callee = "no-throw";
+        \\  try { arguments.callee; } catch (error) { callee = error.name; }
+        \\  print(before, value, arguments[0], callee);
+        \\}
+        \\forcedArguments(5);
+    , &output, .script, "runtime-strict-arguments.js", true);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("5 7 9 TypeError\n", output.buffered());
 }
 
 test "Engine strict script top-level this remains the global object" {
@@ -4610,7 +5423,7 @@ test "job queue symbol roots preserve weak map values" {
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
     const weak_key = try rt.symbolValue(symbol_atom);
-    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, weak_key, value.value());
+    try engine.exec.collection_ops.setWeakMapEntry(rt, weak_map, weak_key, value.value());
 
     const queued_key = weak_key.dup();
     try queue.enqueueFunc(ctx, countJob, &.{queued_key});
@@ -5218,6 +6031,52 @@ test "Engine eval preserves collection read host output semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n", stream.buffered());
+}
+
+test "runtime teardown preserves closure capture metadata until objects are destroyed" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Keeping a captured closure on a builtin prototype while constructing a
+    // lifetime-linked weak holder perturbs the intrusive GC-list order. Runtime
+    // teardown must not use that incidental order to destroy the closure's FB
+    // before the closure consumes FB.var_refs_len and frees its capture array.
+    const result = try js.eval(
+        \\function assert(value) { if (value !== true) throw 1; }
+        \\var calls = 0;
+        \\var originalSet = WeakMap.prototype.set;
+        \\WeakMap.prototype.set = function(value) {
+        \\    calls++;
+        \\    return originalSet.call(this, value);
+        \\};
+        \\var map = new WeakMap([]);
+        \\assert(map instanceof WeakMap);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "cycle teardown preserves restored strong counts for weakly referenced keys" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Each key is both strongly retained by a result record and weakly retained
+    // by the map. A cycle pass may visit the key before the map; the key must
+    // keep its restored strong refcount until those result properties release
+    // it, instead of being converted to an rc-zero weak husk prematurely.
+    const result = try js.eval(
+        \\var first = {};
+        \\var second = {};
+        \\var results = [];
+        \\var originalSet = WeakMap.prototype.set;
+        \\WeakMap.prototype.set = function(key, value) {
+        \\    results.push({ receiver: this, key: key, value: value });
+        \\    return originalSet.call(this, key, value);
+        \\};
+        \\var map = new WeakMap([[first, 42], [second, 43]]);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval preserves regexp UTF-16 test host output semantics" {
@@ -5864,6 +6723,341 @@ test "mapped arguments use var-ref indexed storage and detach on descriptor chan
     try std.testing.expect(result.isUndefined());
 }
 
+test "resident generators preserve mapped arguments parameter aliases" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* mappedGenerator(first, second, third, missing) {
+        \\    arguments[0] = 32;
+        \\    arguments[1] = 54;
+        \\    arguments[2] = 333;
+        \\    yield first;
+        \\    yield second;
+        \\    yield third;
+        \\    yield missing;
+        \\}
+        \\const iterator = mappedGenerator(23, 45, 33);
+        \\assert.sameValue(iterator.next().value, 32);
+        \\assert.sameValue(iterator.next().value, 54);
+        \\assert.sameValue(iterator.next().value, 333);
+        \\assert.sameValue(iterator.next().value, undefined);
+        \\assert.sameValue(iterator.next().done, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "implicit arguments runtime rescue preserves mapped aliases" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function annexRead(value) {
+        \\  { function arguments() {} }
+        \\  return arguments[0];
+        \\}
+        \\function annexAliasFromArguments(value) {
+        \\  { function arguments() {} }
+        \\  arguments[0] = 5;
+        \\  return value;
+        \\}
+        \\function annexAliasFromParameter(value) {
+        \\  { function arguments() {} }
+        \\  value = 7;
+        \\  return arguments[0];
+        \\}
+        \\function annexCaptured(first, second) {
+        \\  { function arguments() {} }
+        \\  const read = () => first;
+        \\  arguments[0] = 5;
+        \\  second = 7;
+        \\  return read() + ":" + arguments[1];
+        \\}
+        \\function* annexGenerator(value) {
+        \\  { function arguments() {} }
+        \\  yield arguments[0];
+        \\}
+        \\print(annexRead(42));
+        \\print(annexAliasFromArguments(42));
+        \\print(annexAliasFromParameter(42));
+        \\print(annexCaptured(1, 2));
+        \\print(annexGenerator(9).next().value);
+        \\try { print(annexRead(43)); } catch (error) { print("caught", error.name); }
+        \\print("after");
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("42\n5\n7\n5:7\n9\n43\nafter\n", output.buffered());
+}
+
+test "resident mapped arguments share one open bare arg slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* mappedArgStorage(first) {
+        \\  globalThis.__mappedArgArguments = arguments;
+        \\  yield first;
+        \\  first += 1;
+        \\  yield first;
+        \\}
+        \\globalThis.__mappedArgGenerator = mappedArgStorage(41);
+        \\__mappedArgGenerator.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__mappedArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+    const state = generator.generatorExecutionState();
+    const arg_slot = &state.storage.frame.args[0];
+
+    const arguments_key = try js.runtime.internAtom("__mappedArgArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const argument_refs = arguments.argumentsVarRefs();
+    try std.testing.expectEqual(@as(usize, 1), argument_refs.len);
+    const cell = argument_refs[0] orelse return error.TypeError;
+
+    try std.testing.expectEqual(@as(?i32, 41), arg_slot.asInt32());
+    try std.testing.expect(core.VarRef.fromValue(arg_slot.*) == null);
+    try std.testing.expect(cell.is_open);
+    try std.testing.expect(cell.pvalue == arg_slot);
+    var identity_matches: usize = 0;
+    for (state.storage.frame.open_var_refs) |maybe_ref| {
+        if (maybe_ref == cell) identity_matches += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), identity_matches);
+
+    const resumed = try js.eval(
+        \\const step = __mappedArgGenerator.next();
+        \\assert.sameValue(step.value, 42);
+        \\assert.sameValue(step.done, false);
+    );
+    defer resumed.free(js.runtime);
+    try std.testing.expect(arg_slot == &generator.generatorExecutionState().storage.frame.args[0]);
+    try std.testing.expect(cell.pvalue == arg_slot);
+    try std.testing.expectEqual(@as(?i32, 42), arg_slot.asInt32());
+}
+
+test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* genericArgStorage(a, b, c, d, fifth) {
+        \\  globalThis.__genericArgArguments = arguments;
+        \\  arguments[4] = 50;
+        \\  yield fifth;
+        \\  fifth = 51;
+        \\  yield arguments[4];
+        \\  yield (fifth = 52);
+        \\  return arguments[4];
+        \\}
+        \\globalThis.__genericArgGenerator = genericArgStorage(1, 2, 3, 4, 5);
+        \\const first = __genericArgGenerator.next();
+        \\assert.sameValue(first.value, 50);
+        \\assert.sameValue(first.done, false);
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__genericArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+    const fifth_slot = &generator.generatorExecutionState().storage.frame.args[4];
+    try std.testing.expectEqual(@as(?i32, 50), fifth_slot.asInt32());
+    try std.testing.expect(core.VarRef.fromValue(fifth_slot.*) == null);
+
+    const completion = try js.eval(
+        \\let step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 51);
+        \\assert.sameValue(step.done, false);
+        \\step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 52);
+        \\assert.sameValue(step.done, false);
+        \\step = __genericArgGenerator.next();
+        \\assert.sameValue(step.value, 52);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(completion.isUndefined());
+}
+
+test "generator mapped arguments closures and direct eval share one alias across resumes" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function* aliasedGenerator(argument) {
+        \\  globalThis.__aliasedArguments = arguments;
+        \\  globalThis.__aliasedRead = function() { return argument; };
+        \\  globalThis.__aliasedWrite = function(value) { argument = value; };
+        \\  arguments[0] = 20;
+        \\  yield __aliasedRead();
+        \\  eval('argument = 30');
+        \\  yield arguments[0];
+        \\  argument = 40;
+        \\  yield __aliasedRead();
+        \\}
+        \\globalThis.__aliasedGenerator = aliasedGenerator(10);
+        \\let step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 20);
+        \\assert.sameValue(__aliasedRead(), 20);
+        \\__aliasedArguments[0] = 25;
+        \\assert.sameValue(__aliasedRead(), 25);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 30);
+        \\assert.sameValue(__aliasedRead(), 30);
+        \\__aliasedWrite(35);
+        \\assert.sameValue(__aliasedArguments[0], 35);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.value, 40);
+        \\assert.sameValue(__aliasedArguments[0], 40);
+        \\step = __aliasedGenerator.next();
+        \\assert.sameValue(step.done, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "async mapped arguments and closures retain one alias across await" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\async function mappedAsync(argument) {
+        \\  const read = function() { return argument; };
+        \\  arguments[0] = 55;
+        \\  print('before', read());
+        \\  const awaited = await Promise.resolve(argument);
+        \\  print('after', arguments[0], read(), awaited);
+        \\  return read();
+        \\}
+        \\mappedAsync(10).then(
+        \\  function(value) { print('resolved', value); },
+        \\  function(error) { print('rejected', error.name); }
+        \\);
+    , &stream);
+    defer result.free(js.runtime);
+    try js.runJobs();
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "before 55\nafter 55 55 55\nresolved 55\n",
+        stream.buffered(),
+    );
+}
+
+test "cycle collection closes escaped generator arg aliases before releasing resident backing" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\var __argCycleHolder;
+        \\function* argCycle(argument) {
+        \\  const self = __argCycleHolder;
+        \\  globalThis.__argCycleArguments = arguments;
+        \\  globalThis.__argCycleRead = function() { return argument; };
+        \\  globalThis.__argCycleWrite = function(value) { argument = value; };
+        \\  yield 0;
+        \\  return self;
+        \\}
+        \\__argCycleHolder = argCycle(41);
+        \\__argCycleHolder.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const arguments_key = try js.runtime.internAtom("__argCycleArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const refs = arguments.argumentsVarRefs();
+    try std.testing.expectEqual(@as(usize, 1), refs.len);
+    const cell = refs[0] orelse return error.TypeError;
+    try std.testing.expect(cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+
+    const release = try js.eval("__argCycleHolder = null;");
+    release.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    try std.testing.expect(!cell.is_open);
+    try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
+
+    const escaped = try js.eval(
+        \\assert.sameValue(__argCycleRead(), 41);
+        \\__argCycleArguments[0] = 52;
+        \\assert.sameValue(__argCycleRead(), 52);
+        \\__argCycleWrite(63);
+        \\assert.sameValue(__argCycleArguments[0], 63);
+    );
+    defer escaped.free(js.runtime);
+    try std.testing.expect(escaped.isUndefined());
+}
+
+test "generator completion closes escaped arg aliases before releasing resident backing" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\function* completingArgAlias(argument) {
+        \\  globalThis.__completedArgArguments = arguments;
+        \\  globalThis.__completedArgRead = function() { return argument; };
+        \\  yield 0;
+        \\  return argument;
+        \\}
+        \\globalThis.__completedArgGenerator = completingArgAlias(41);
+        \\__completedArgGenerator.next();
+    );
+    defer setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const generator_key = try js.runtime.internAtom("__completedArgGenerator");
+    defer js.runtime.atoms.free(generator_key);
+    const generator_value = global.getProperty(generator_key);
+    defer generator_value.free(js.runtime);
+    const generator = try property_ops.expectObject(generator_value);
+
+    const arguments_key = try js.runtime.internAtom("__completedArgArguments");
+    defer js.runtime.atoms.free(arguments_key);
+    const arguments_value = global.getProperty(arguments_key);
+    defer arguments_value.free(js.runtime);
+    const arguments = try property_ops.expectObject(arguments_value);
+    const cell = arguments.argumentsVarRefs()[0] orelse return error.TypeError;
+    try std.testing.expect(cell.is_open);
+
+    const completion = try js.eval(
+        \\const step = __completedArgGenerator.next();
+        \\assert.sameValue(step.value, 41);
+        \\assert.sameValue(step.done, true);
+    );
+    defer completion.free(js.runtime);
+    try std.testing.expect(!cell.is_open);
+    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
+
+    const escaped = try js.eval(
+        \\__completedArgArguments[0] = 52;
+        \\assert.sameValue(__completedArgRead(), 52);
+    );
+    defer escaped.free(js.runtime);
+    try std.testing.expect(escaped.isUndefined());
+}
+
 test "get_length preserves qjs own-property-before-exotic ordering and actions" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -6097,6 +7291,244 @@ test "missing-argument plain calls preserve parameter and arguments ownership" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "inline calls release lazily materialized arguments state" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function readArguments(value) {
+        \\    return arguments.length + value;
+        \\}
+        \\assert.sameValue(readArguments(1), 2);
+    );
+    setup.free(js.runtime);
+    const exercise =
+        \\(function exerciseArgumentsCalls() {
+        \\    let total = 0;
+        \\    for (let i = 0; i < 256; i++) total += readArguments(i);
+        \\    assert.sameValue(total, 32896);
+        \\})();
+    ;
+    const warmup = try js.eval(exercise);
+    warmup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval(exercise);
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "inline empty leaf abrupt teardown releases pending operands" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function throwWithPendingOperand() {
+        \\    return {} + null.missing;
+        \\}
+        \\function exerciseEmptyLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { throwWithPendingOperand(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseEmptyLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseEmptyLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "inline empty leaf warm constructor preserves miss fallback and ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const setup = try js.eval("globalThis.__warmEmptyLeaf = function () { return 1; };");
+    setup.free(rt);
+    const leaf_name = try rt.internAtom("__warmEmptyLeaf");
+    defer rt.atoms.free(leaf_name);
+    const callable = global.getProperty(leaf_name);
+    defer callable.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+
+    // A fresh Machine has neither Entry nor arena backing. The speculative
+    // arm must miss without consuming the source or changing call depth.
+    try l0_stack.pushOwned(callable.dup());
+    var region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+
+    const first = try machine.pushEmptyLeafCall(global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(first.isEmptyLeaf());
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Entry and arena chunks are now warm. A second exact call must publish
+    // the same leaf shape without touching the allocator.
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isEmptyLeaf());
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // An oversized operand window cannot use the active arena chunk. The fast
+    // miss is pure and the authoritative constructor owns/frees heap backing.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const heap_entry = try machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    try std.testing.expect(!heap_entry.isEmptyLeaf());
+    var continuation = machine.popReturnedFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // The same miss under a hard memory cap must restore depth/watermark and
+    // release the source slot, leaving the warmed Machine reusable.
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const failed = machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, failed);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "inline call teardown releases every escaped storage shape" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+
+    var function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer function.deinit(rt);
+    function.simple_inline_eligible = true;
+    var fb = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer fb.deinit(rt);
+    var unused_var_refs: [1]*core.VarRef = undefined;
+    const target = inline_calls.InlineTarget{
+        .var_refs = &unused_var_refs,
+        .callable = core.JSValue.undefinedValue(),
+        .fb = &fb,
+        .view = &function,
+        .this_value = core.JSValue.undefinedValue(),
+        .new_target = core.JSValue.undefinedValue(),
+    };
+
+    // Warm the Machine's Entry chunk and the VM stack-arena chunk; neither is
+    // per-call storage, so take the balance baseline only after this call.
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    _ = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    var continuation = machine.popFrame();
+    continuation.deinit(rt);
+    const baseline_bytes = rt.memory.allocated_bytes;
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    var entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    _ = try entry.frame.ensureCold(&rt.memory);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    _ = try entry.frame.allocOwnedStorage(&rt.memory, 1);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    try entry.stack.reserveAdditional(entry.stack.capacity + 1);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    // A window larger than one arena chunk uses the setup-time heap fallback.
+    function.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    _ = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+}
+
+test "inline operand Stack keeps limit and ownership flags in one word" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(engine.exec.stack.Stack));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(inline_calls.Machine.ArgsSource));
+    if (core.value.nan_boxing) {
+        try std.testing.expectEqual(@as(usize, 136), @sizeOf(engine.exec.frame.Frame));
+        try std.testing.expectEqual(@as(usize, 248), @sizeOf(inline_calls.Entry));
+    }
+}
+
 test "method calls preserve receiver arguments eval captures and abrupt ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -6193,7 +7625,7 @@ test "method calls preserve receiver arguments eval captures and abrupt ownershi
 }
 
 test "primitive prototype lookup preserves raw receiver and exotic prototype semantics" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -6304,7 +7736,7 @@ test "primitive prototype lookup preserves raw receiver and exotic prototype sem
 }
 
 test "computed named reads preserve prototype accessors proxies and operand ownership" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -6373,7 +7805,7 @@ test "computed named reads preserve prototype accessors proxies and operand owne
 }
 
 test "static named getter and proxy fast paths preserve receivers throws and invariants" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -6494,8 +7926,138 @@ test "proxy bytecode get continuation does not require spare operand capacity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "for-of bytecode next continuation preserves result and abrupt semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let events = [];
+        \\let step = 0;
+        \\function tailStep() {
+        \\    if (step++ === 0) {
+        \\        return {
+        \\            get done() { events.push("done:false"); return false; },
+        \\            get value() { events.push("value"); return 7; },
+        \\        };
+        \\    }
+        \\    return {
+        \\        get done() { events.push("done:true"); return true; },
+        \\        get value() { throw new Error("done value was read"); },
+        \\    };
+        \\}
+        \\const tailIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { "use strict"; return tailStep(); },
+        \\};
+        \\let sum = 0;
+        \\for (const value of tailIterator) sum += value;
+        \\assert.sameValue(sum, 7);
+        \\assert.sameValue(events.join(","), "done:false,value,done:true");
+        \\
+        \\let nextCalls = 0;
+        \\let closeCalls = 0;
+        \\const throwingIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        if (nextCalls++ === 0) return { value: 3, done: false };
+        \\        throw new Error("next sentinel");
+        \\    },
+        \\    return() { closeCalls++; return { done: true }; },
+        \\};
+        \\let caught = false;
+        \\try {
+        \\    for (const value of throwingIterator) assert.sameValue(value, 3);
+        \\} catch (error) {
+        \\    caught = error.message === "next sentinel";
+        \\}
+        \\assert.sameValue(caught, true);
+        \\assert.sameValue(closeCalls, 0);
+        \\
+        \\let arrowStep = 0;
+        \\const arrowIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next: () => arrowStep++ === 0
+        \\        ? { value: 11, done: false }
+        \\        : { done: true },
+        \\};
+        \\let arrowSum = 0;
+        \\for (const value of arrowIterator) arrowSum += value;
+        \\assert.sameValue(arrowSum, 11);
+        \\
+        \\let inheritedStep = 0;
+        \\const inheritedResult = Object.create({ value: 13 });
+        \\inheritedResult.done = false;
+        \\const inheritedIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { return inheritedStep++ === 0 ? inheritedResult : { done: true }; },
+        \\};
+        \\let inheritedSum = 0;
+        \\for (const value of inheritedIterator) inheritedSum += value;
+        \\assert.sameValue(inheritedSum, 13);
+        \\
+        \\let proxyStep = 0;
+        \\let proxyReads = [];
+        \\const proxyResult = new Proxy({ value: 17, done: false }, {
+        \\    get(target, key, receiver) {
+        \\        proxyReads.push(key);
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\const proxyIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() { return proxyStep++ === 0 ? proxyResult : { done: true }; },
+        \\};
+        \\let proxySum = 0;
+        \\for (const value of proxyIterator) proxySum += value;
+        \\assert.sameValue(proxySum, 17);
+        \\assert.sameValue(proxyReads.join(","), "done,value");
+        \\
+        \\let paddedStep = 0;
+        \\const paddedIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next(unused) {
+        \\        "use strict";
+        \\        assert.sameValue(unused, undefined);
+        \\        assert.sameValue(arguments.length, 0);
+        \\        return paddedStep++ === 0 ? { value: 19, done: false } : { done: true };
+        \\    },
+        \\};
+        \\let paddedSum = 0;
+        \\for (const value of paddedIterator) paddedSum += value;
+        \\assert.sameValue(paddedSum, 19);
+        \\
+        \\let cachedStep = 0;
+        \\const cachedMethodIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        this.next = null;
+        \\        return cachedStep++ === 0 ? { value: 23, done: false } : { done: true };
+        \\    },
+        \\};
+        \\let cachedMethodSum = 0;
+        \\for (const value of cachedMethodIterator) cachedMethodSum += value;
+        \\assert.sameValue(cachedMethodSum, 23);
+        \\assert.sameValue(cachedMethodIterator.next, null);
+        \\
+        \\const falloffIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {},
+        \\};
+        \\let sawTypeError = false;
+        \\try {
+        \\    for (const value of falloffIterator) {}
+        \\} catch (error) {
+        \\    sawTypeError = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(sawTypeError, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
-    engine.builtins.registry.registerStandardGlobalsDefault();
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -6757,6 +8319,49 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("LEX\nLEX\nLEX\nouter\n", stream.buffered());
+}
+
+test "arrow direct eval reads captured this and new.target" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function Replacement() {}
+        \\function Factory() {
+        \\    const expectedThis = this;
+        \\    return () => [eval("this") === expectedThis, eval("new.target")];
+        \\}
+        \\const read = Reflect.construct(Factory, [], Replacement);
+        \\const observed = read.call({ ignored: true });
+        \\assert.sameValue(observed[0], true);
+        \\assert.sameValue(observed[1], Replacement);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "arrow super property call keeps the enclosing method receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let derivedInstance;
+        \\class Base {
+        \\    method() {
+        \\        assert.sameValue(this, derivedInstance);
+        \\        return 42;
+        \\    }
+        \\}
+        \\class Derived extends Base {
+        \\    makeArrow() { return () => super.method(); }
+        \\}
+        \\derivedInstance = new Derived();
+        \\const callSuper = derivedInstance.makeArrow();
+        \\assert.sameValue(callSuper(), 42);
+        \\assert.sameValue(callSuper.call({ ignored: true }), 42);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "forwarded call releases ignored arrow thisArg" {
@@ -7129,6 +8734,309 @@ test "Engine generator return keeps finally rethrow control marker" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "generator parameter eval cells close before body resume" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var x = 'outside';
+        \\var first, second, body;
+        \\function* g(
+        \\  _ = (eval('var x = "inside";'), first = function() { return x; }),
+        \\  __ = second = function() { return x; }
+        \\) { body = function() { return x; }; }
+        \\g().next();
+        \\var y = 'outside';
+        \\var restParam, restBody;
+        \\function* h(...[_ = (eval('var y = "inside";'), restParam = function() { return y; })]) {
+        \\  restBody = function() { return y; };
+        \\}
+        \\h().next();
+        \\print(first(), second(), body(), restParam(), restBody());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
+}
+
+test "generator default argument stores release refcounted stack values" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\var f = function*(x = arguments[2], y = arguments[3], z) {};
+        \\f(undefined, undefined, 'third', 'fourth').next();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "spread super brands derived instances before class field initializers" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Regression: super(...args) compiles to op.apply is_new=1, whose handler
+    // skipped the private-method brand install that op.call_constructor
+    // performs — `this.#m()` in a field initializer then threw TypeError.
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\  class A { constructor(a, b) { this.s = (a | 0) + (b | 0); } }
+        \\  class B extends A {
+        \\    #m() { return this.s + 7; }
+        \\    v = this.#m();
+        \\    constructor(...args) { super(...args); }
+        \\  }
+        \\  return new B(1, 2).v;
+        \\})();
+    ,
+        .{ .filename = "<repl>" },
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqual(@as(?i32, 10), result.asInt32());
+}
+
+test "started generator resumes preserve unmapped arguments from parked locals" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* strictGenerator(value) {
+        \\  "use strict";
+        \\  const first = arguments;
+        \\  value = 17;
+        \\  yield;
+        \\  const shorthand = { arguments };
+        \\  assert.sameValue(shorthand.arguments, first);
+        \\  assert.sameValue(shorthand.arguments[0], 1);
+        \\  yield;
+        \\  assert.sameValue(arguments, first);
+        \\  assert.sameValue(arguments[0], 1);
+        \\}
+        \\const strictIterator = strictGenerator(1);
+        \\strictIterator.next();
+        \\strictIterator.next();
+        \\strictIterator.next();
+        \\function* defaultGenerator(value = 3) {
+        \\  const first = eval("arguments");
+        \\  value = 19;
+        \\  yield;
+        \\  assert.sameValue(eval("arguments"), first);
+        \\  assert.sameValue(eval("arguments")[0], 2);
+        \\}
+        \\const defaultIterator = defaultGenerator(2);
+        \\defaultIterator.next();
+        \\defaultIterator.next();
+        \\function* restGenerator(...values) {
+        \\  const first = arguments;
+        \\  values[0] = 23;
+        \\  yield;
+        \\  assert.sameValue(arguments, first);
+        \\  assert.sameValue(arguments[0], 4);
+        \\}
+        \\const restIterator = restGenerator(4);
+        \\restIterator.next();
+        \\restIterator.next();
+        \\function* lateArguments(first) {
+        \\  yield;
+        \\  assert.sameValue(arguments.length, 3);
+        \\  assert.sameValue(arguments[0], 5);
+        \\  assert.sameValue(arguments[2], 7);
+        \\}
+        \\const lateIterator = lateArguments(5, 6, 7);
+        \\lateIterator.next();
+        \\lateIterator.next();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "iterator results reuse the realm shape without intermediate property growth" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const warm = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(1), false);
+    warm.free(js.runtime);
+    const alloc_calls = js.runtime.memory.alloc_calls;
+    const create_calls = js.runtime.memory.create_calls;
+    const result = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(2), true);
+    defer result.free(js.runtime);
+
+    // One GC object plus its final two-entry property array. In particular,
+    // there is no intermediate one-entry property allocation.
+    try std.testing.expectEqual(alloc_calls + 1, js.runtime.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls + 1, js.runtime.memory.create_calls);
+    const object = try core.Object.expect(result);
+    try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.asInt32());
+    try std.testing.expect(object.asDataAt(1).?.asBool().?);
+}
+
+test "bytecode closures reuse the final function-prototype shape" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        "(function () { function make() { return function () {}; } return [make(), make()]; })()",
+        .{ .filename = "<repl>" },
+    );
+    defer result.free(js.runtime);
+    const functions = try core.Object.expect(result);
+    const first_value = functions.getProperty(core.atom.atomFromUInt32(0));
+    defer first_value.free(js.runtime);
+    const second_value = functions.getProperty(core.atom.atomFromUInt32(1));
+    defer second_value.free(js.runtime);
+    const first = try core.Object.expect(first_value);
+    const second = try core.Object.expect(second_value);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    try std.testing.expectEqual(first.getPrototype(), second.getPrototype());
+    try std.testing.expectEqual(first.shape_ref, second.shape_ref);
+    try std.testing.expectEqual(global, first.bytecodeFunctionRealmGlobalPtr().?);
+    try std.testing.expectEqual(global, second.bytecodeFunctionRealmGlobalPtr().?);
+    try std.testing.expect(!first.flags.is_borrowed_reference_holder);
+    try std.testing.expect(!second.flags.is_borrowed_reference_holder);
+}
+
+test "generator creation avoids a second payload copy of rooted input slices" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const argument = (try core.Object.create(js.runtime, core.class.ids.object, null)).value();
+    defer argument.free(js.runtime);
+    const argument_setup = try js.eval("globalThis.__argumentGenerator = function* () {};");
+    argument_setup.free(js.runtime);
+    const argument_key = try js.runtime.internAtom("__argumentGenerator");
+    defer js.runtime.atoms.free(argument_key);
+    const argument_generator = global.getProperty(argument_key);
+    defer argument_generator.free(js.runtime);
+    const argument_values = [_]core.JSValue{argument};
+
+    const warm_argument = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &argument_values,
+        null,
+        null,
+    );
+    warm_argument.free(js.runtime);
+    const warm_no_argument = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    // Keep one final-prototype root Shape live. A qjs-style detached generator
+    // construction then needs two fixed creates (public Object + compact
+    // payload) and one variable allocation containing execution state + stack;
+    // it must not allocate a temporary null-prototype Shape or stack buffer.
+    defer warm_no_argument.free(js.runtime);
+
+    var alloc_calls = js.runtime.memory.alloc_calls;
+    var create_calls = js.runtime.memory.create_calls;
+    const no_argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    no_argument_result.free(js.runtime);
+    const no_argument_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const no_argument_create_count = js.runtime.memory.create_calls - create_calls;
+    try std.testing.expectEqual(@as(usize, 2), no_argument_create_count);
+    try std.testing.expectEqual(@as(usize, 1), no_argument_alloc_count);
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const argument_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &argument_values,
+        null,
+        null,
+    );
+    argument_result.free(js.runtime);
+    const argument_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const argument_create_count = js.runtime.memory.create_calls - create_calls;
+    // Args/locals/var-ref windows enlarge the same variable-sized execution
+    // allocation; the construction root borrows the caller slice until those
+    // resident windows have been initialized and parked.
+    try std.testing.expectEqual(no_argument_alloc_count, argument_alloc_count);
+    try std.testing.expectEqual(no_argument_create_count, argument_create_count);
+
+    const capture_setup = try js.eval("globalThis.__captureGenerator = (function () { var captured = {}; return function* () { yield captured; }; })();");
+    capture_setup.free(js.runtime);
+    const capture_key = try js.runtime.internAtom("__captureGenerator");
+    defer js.runtime.atoms.free(capture_key);
+    const capture_generator = global.getProperty(capture_key);
+    defer capture_generator.free(js.runtime);
+    const warm_capture = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        capture_generator,
+        &.{},
+        null,
+        null,
+    );
+    defer warm_capture.free(js.runtime);
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const no_capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        argument_generator,
+        &.{},
+        null,
+        null,
+    );
+    no_capture_result.free(js.runtime);
+    const no_capture_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const no_capture_create_count = js.runtime.memory.create_calls - create_calls;
+
+    alloc_calls = js.runtime.memory.alloc_calls;
+    create_calls = js.runtime.memory.create_calls;
+    const capture_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        capture_generator,
+        &.{},
+        null,
+        null,
+    );
+    capture_result.free(js.runtime);
+    const capture_alloc_count = js.runtime.memory.alloc_calls - alloc_calls;
+    const capture_create_count = js.runtime.memory.create_calls - create_calls;
+    try std.testing.expectEqual(no_capture_alloc_count, capture_alloc_count);
+    try std.testing.expectEqual(no_capture_create_count, capture_create_count);
+}
+
 test "Engine generator return propagates an explicit finally throw" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -7296,10 +9204,8 @@ test "host commonjs wrapper passes directory dirname" {
 test "module graph evaluates block var declarations as module bindings" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [128]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -7325,10 +9231,8 @@ test "module graph evaluates block var declarations as module bindings" {
 test "module evaluation does not skip a body-leading function expression" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -7349,10 +9253,8 @@ test "module evaluation does not skip a body-leading function expression" {
 test "module top-level await resumes in Promise reaction FIFO order" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -7390,10 +9292,8 @@ test "module top-level await resumes in Promise reaction FIFO order" {
 test "module await reaction keeps its position on the awaited Promise" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     var output_buffer: [128]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -7424,10 +9324,8 @@ test "module await reaction keeps its position on the awaited Promise" {
 test "async module dependency does not preempt an independent sibling" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    const registry = engine.builtins.registry;
-    registry.registerStandardGlobalsDefault();
-    js.runtime.install_standard_globals_cb = registry.installStandardGlobals;
-    js.runtime.standard_global_own_property_capacity = registry.standardGlobalOwnPropertyCapacity();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
 
     const dir = ".zig-cache/module-async-sibling-order-test";
     const main_path = dir ++ "/main.mjs";
@@ -7573,16 +9471,15 @@ fn loadFixtureModule(
 
 // Bootstrap-integration tests relocated from src/exec/{call,zjs_vm}.zig during
 // Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
-// standard globals through `rt.installStandardGlobals`, which needs the builtins
-// installer wired; exec source must not name the builtins registry, so they live
-// here where the test tree may import builtins (via `helpers.installHostGlobalsBare`).
+// standard globals through `rt.installStandardGlobals`; the helper wires the
+// exec-owned bootstrap seam before installation.
 
 test "host global bootstrap installs and tears down builtin plus host domains" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
+    _ = try global.ensureRealmPayload(rt);
     defer global.value().free(rt);
 
     try helpers.installHostGlobalsBare(rt, global);
@@ -7595,7 +9492,7 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.flags.is_global = true;
+    _ = try global.ensureRealmPayload(rt);
     defer global.value().free(rt);
 
     try helpers.installHostGlobalsBare(rt, global);
@@ -7648,11 +9545,9 @@ test "reflect construct roots argument list while resolving prototype" {
     // installed to wire `rt.internal_builtins` before the construct record is
     // reachable.
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
-    realm_global.flags.is_global = true;
+    _ = try realm_global.ensureRealmPayload(rt);
     defer realm_global.value().free(rt);
-    engine.builtins.registry.registerStandardGlobalsDefault();
-    rt.install_standard_globals_cb = engine.builtins.registry.installStandardGlobals;
-    rt.standard_global_own_property_capacity = engine.builtins.registry.standardGlobalOwnPropertyCapacity();
+    engine.exec.standard_globals.configureRuntime(rt);
     try rt.installStandardGlobals(realm_global);
 
     const target = try core.function.nativeFunction(rt, "Array", 1);

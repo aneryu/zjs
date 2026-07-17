@@ -66,8 +66,8 @@ pub const HostGlobalMethod = enum(u32) {
 
 // QuickJS CLI exposes navigator.userAgent as "quickjs-ng/<JS_GetVersion()>".
 // Pure version constant returned by the `navigator_user_agent_get` host getter
-// above; relocated to engine core in Phase 6b-3 STEP 2 (`builtins/registry.zig`
-// re-exports it). Kept tied to the QuickJS reference version used by the local
+// above; relocated to engine core in Phase 6b-3 STEP 2. Kept tied to the
+// QuickJS reference version used by the local
 // fixtures.
 pub const navigator_user_agent = "quickjs-ng/0.14.0";
 

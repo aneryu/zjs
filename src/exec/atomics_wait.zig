@@ -1,12 +1,11 @@
 //! Atomics engine primitives that live in `exec` because the Atomics wait
 //! mechanism is part of the VM core, not a client builtin (QuickJS keeps
 //! `js_atomics_wait` in the engine; see quickjs.c:61234 and the roadmap's
-//! "Atomics 等待机制留 exec" decision). The slow-path dispatcher
+//! "Atomics 等待机制留 exec" decision). The typed record handler
 //! (`call_runtime.qjsAtomicsCallForNativeRecord`) switches on this
 //! `StaticMethod` selector, and the wait/notify state machine lives beside it
 //! in `call_runtime.zig`. The install-time name->id mapping (`methodId`) lives
-//! in `exec/atomics_ops.zig`, so the registry binds the namespace without a
-//! builtins -> exec detour.
+//! in `exec/atomics_ops.zig`, beside the Atomics function-list entries.
 
 const std = @import("std");
 

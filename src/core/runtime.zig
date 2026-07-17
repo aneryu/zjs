@@ -44,15 +44,15 @@ pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
 /// Installs the standard ECMAScript global object (every builtin constructor,
 /// prototype, namespace, and the `rt.internal_builtins` record table) onto a
-/// freshly-created global `Object`. The implementation lives in the builtins
-/// subsystem (`builtins/registry.zig`); core only holds the function pointer so
-/// the bootstrap install can be invoked without core or exec naming builtins.
+/// freshly-created global `Object`. The implementation lives in
+/// `exec/standard_globals.zig`; core only holds the function pointer so
+/// bootstrap can run without a core -> exec dependency.
 /// This is the engine bootstrap seam: exec's context/realm initialization calls
-/// the runtime's installer rather than importing the builtins registry.
+/// the runtime's installer through this neutral interface.
 pub const StandardGlobalsInstaller = *const fn (rt: *JSRuntime, global: *Object) anyerror!void;
 
 /// Process-global default standard-globals installer, registered once by the
-/// builtins subsystem (`builtins.registry.registerStandardGlobalsDefault`). New
+/// exec bootstrap (`standard_globals.registerStandardGlobalsDefault`). New
 /// runtimes copy this into their per-runtime `install_standard_globals_cb` at
 /// `init`, so a bare `core.JSRuntime.create` (e.g. in engine unit tests) still
 /// gets the installer wired without the creator naming builtins. Mirrors the
@@ -62,7 +62,7 @@ var default_standard_global_own_property_capacity: usize = 0;
 
 /// Register (or clear, with `null`) the process-global standard-globals
 /// installer and the own-property capacity its global object reserves. Called by
-/// the builtins subsystem during engine setup; idempotent and safe to call more
+/// exec bootstrap during engine setup; idempotent and safe to call more
 /// than once with the same values.
 pub fn setDefaultStandardGlobalsInstaller(
     installer: ?StandardGlobalsInstaller,
@@ -71,6 +71,26 @@ pub fn setDefaultStandardGlobalsInstaller(
     default_standard_globals_installer = installer;
     default_standard_global_own_property_capacity = own_property_capacity;
 }
+
+/// Canonical operand-stack backing policy shared by Runtime and the execution
+/// Stack. Runtime owns the configured limit and precomputes the arena-window
+/// form when that limit changes; frame construction can then publish the one
+/// packed word instead of re-saturating the same immutable limit per call.
+pub const VmStackWindowPolicy = packed struct(u64) {
+    limit: u62,
+    arena_window: bool = false,
+    resident_window: bool = false,
+
+    pub fn forLimit(limit: usize) VmStackWindowPolicy {
+        return .{ .limit = @intCast(@min(limit, std.math.maxInt(u62))) };
+    }
+
+    pub fn arenaForLimit(limit: usize) VmStackWindowPolicy {
+        var policy = forLimit(limit);
+        policy.arena_window = true;
+        return policy;
+    }
+};
 
 /// Contiguous VM value-stack arena mirroring QuickJS's `alloca`-based
 /// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
@@ -85,6 +105,11 @@ pub const VmStackArena = struct {
     pub const Mark = struct {
         chunk: usize,
         used: usize,
+    };
+
+    pub const ActiveCarve = struct {
+        mark: Mark,
+        window: []JSValue,
     };
 
     chunks: [max_chunks][]JSValue = @splat(&.{}),
@@ -110,6 +135,26 @@ pub const VmStackArena = struct {
             }
         }
         return self.carveSlow(account, n);
+    }
+
+    /// Allocation-free carve from the current chunk only, returning both the
+    /// original watermark and the carved window from one state snapshot.
+    /// Same-Machine hot frame constructors use this after their Entry storage
+    /// is warm; a miss leaves the arena unchanged so the authoritative `carve`
+    /// path can switch or allocate a chunk and preserve heap/OOM semantics.
+    pub inline fn carveActiveMarked(self: *VmStackArena, n: usize) ?ActiveCarve {
+        if (n == 0 or self.chunk_count == 0) return null;
+        const active = self.active;
+        const used = self.used[active];
+        // This comparison also rejects n > chunk_slots, since used never
+        // exceeds chunk_slots. Keeping one authoritative capacity predicate
+        // avoids rechecking the same bound in warm frame constructors.
+        if (chunk_slots - used < n) return null;
+        self.used[active] = used + n;
+        return .{
+            .mark = .{ .chunk = active, .used = used },
+            .window = self.chunks[active][used .. used + n],
+        };
     }
 
     /// Switch to or allocate another arena chunk.  The active chunk satisfies
@@ -206,6 +251,11 @@ pub const GCPollMode = enum {
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
+    /// Borrowed values whose backing storage is stable for the root frame's
+    /// lifetime. The visitor traces copies and never mutates caller-owned
+    /// slots; useful when a resident frame will take its own copy before the
+    /// call returns.
+    borrowed: []const JSValue,
     /// A register-resident operand window. `values` supplies the stack buffer
     /// pointer (so reallocations made by delegated handlers are visible), while
     /// `live_len` points at the dispatcher's register-resident operand depth.
@@ -218,6 +268,9 @@ pub const ValueRootSlice = union(enum) {
     /// cell's JSValue view — bit-identical to the pre-typed rooting of the
     /// same cells stored as JSValues.
     cells: *const []*var_ref_mod.VarRef,
+    /// Borrowed counterpart of `cells`; keeps the referenced cell/value graph
+    /// live without taking temporary per-cell references.
+    borrowed_cells: []const *var_ref_mod.VarRef,
 };
 
 pub const ValueRootBuffer = struct {
@@ -584,7 +637,7 @@ pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
 
 pub const DeferredWeakValueFree = struct {
     value: JSValue,
-    prequeued_identity: ?usize = null,
+    prepared_identity: ?usize = null,
 };
 
 pub const NativeCleanupJob = struct {
@@ -607,7 +660,7 @@ pub const DeferredClassPayloadFinalizer = struct {
         var payload = self.payload;
         self.payload = null;
         self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &payload);
-        object_mod.destroyDetachedClassPayload(rt, self.payload_kind, &payload);
+        object_mod.destroyDetachedClassPayload(rt, self.class_id, self.payload_kind, &payload);
     }
 
     pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
@@ -663,11 +716,21 @@ pub const shared_lazy_native_function_slots = 12;
 pub const internal_destructuring_helper_slots = 14;
 const root_provider_inline_capacity = 1;
 
+/// Cold runtime bookkeeping whose ranges fit in one byte. The atom-string
+/// cache is four-way, so its cursor needs only two bits; combining it with the
+/// runtime-allocation ownership bit preserves both semantics while freeing the
+/// former usize cursor word for hot VM stack policy state.
+const RuntimeCompactState = packed struct(u8) {
+    recent_atom_string_next: u2 = 0,
+    owns_self_allocation: bool = false,
+    _padding: u5 = 0,
+};
+
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
     memory: memory.MemoryAccount,
-    owns_self_allocation: bool = false,
+    compact_state: RuntimeCompactState = .{},
     gc: gc.Registry,
     atoms: atom.AtomTable,
     classes: class.Table,
@@ -683,9 +746,8 @@ pub const JSRuntime = struct {
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
-    /// process-global default at `init`; the builtins subsystem registers that
-    /// default (`builtins.registry.registerStandardGlobalsDefault`). Exec invokes
-    /// this through `installStandardGlobals` instead of importing builtins.
+    /// process-global default at `init`; `exec/standard_globals.zig` registers
+    /// that default. Core invokes it through this callback seam.
     install_standard_globals_cb: ?StandardGlobalsInstaller = null,
     /// Own-property count to reserve on a global object before running
     /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
@@ -693,6 +755,8 @@ pub const JSRuntime = struct {
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
+    weak_reference_holder_head: ?*Object = null,
+    weak_reference_holder_tail: ?*Object = null,
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
     root_providers_inline: [root_provider_inline_capacity]RootProvider = undefined,
@@ -744,6 +808,7 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
     /// Native (machine C-stack) recursion guard, mirroring QuickJS
     /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860). Captured
     /// via `@frameAddress()` at the outermost eval entry (`updateNativeStackTop`,
@@ -785,7 +850,6 @@ pub const JSRuntime = struct {
     /// bytecode constants without retaining every atom string in the program;
     /// regexp literals in particular alternate between source and flags atoms.
     recent_atom_strings: [4]?RecentAtomString = @splat(null),
-    recent_atom_string_next: usize = 0,
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
     /// This is a general URI hot-path cache, not a fixture shortcut:
     /// ECMAScript URI helpers and decimal-to-percent harnesses both
@@ -811,8 +875,8 @@ pub const JSRuntime = struct {
     /// Static internal-builtin record table, indexed
     /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
     /// as the outer index (slot 0 unused). Built at comptime by
-    /// `builtins/internal_table.zig` and assigned by the builtins install
-    /// path (`registry.installStandardGlobals`); exec dispatches through
+    /// `exec/internal_builtins.zig` and assigned by the standard-global install
+    /// path; exec dispatches through
     /// `internalBuiltinRecord` with no compile-time knowledge of individual
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
@@ -851,7 +915,12 @@ pub const JSRuntime = struct {
 
     fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
         rt.memory = account;
-        rt.owns_self_allocation = owns_self_allocation;
+        rt.compact_state = .{ .owns_self_allocation = owns_self_allocation };
+        // MemoryAccount's std.mem.Allocator facade stores a pointer to the
+        // account, so bind it only after the account reaches this stable field
+        // address. All runtime `.allocator` / `.persistent_allocator` users now
+        // participate in the same limit and live-byte accounting.
+        rt.memory.activateRuntimeAccounting();
         rt.memory.trigger_gc_fn = null;
         rt.memory.trigger_gc_ctx = null;
         rt.memory.setLimit(options.memory_limit);
@@ -871,6 +940,8 @@ pub const JSRuntime = struct {
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
+        rt.weak_reference_holder_head = null;
+        rt.weak_reference_holder_tail = null;
         rt.root_providers_inline = undefined;
         rt.root_providers = rt.root_providers_inline[0..0];
         rt.root_providers_capacity = rt.root_providers_inline.len;
@@ -914,6 +985,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
         rt.native_stack_size = initial_native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
@@ -938,7 +1010,6 @@ pub const JSRuntime = struct {
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
         rt.recent_atom_strings = @splat(null);
-        rt.recent_atom_string_next = 0;
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.internal_destructuring_helpers = @splat(null);
@@ -978,7 +1049,7 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
-        self.recent_atom_string_next = 0;
+        self.compact_state.recent_atom_string_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
         if (empty_string) |cached| JSValue.string(cached.header()).free(self);
@@ -1026,17 +1097,27 @@ pub const JSRuntime = struct {
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
         self.clearPendingFinalizationJobs();
-        // Release the atom table's materialized strings while string
-        // destruction is still operational; `atoms.deinit` (after the GC
-        // teardown below) asserts no cached strings remain.
+        // Ordinary atom-string caches own an independent string ref and can be
+        // released now. Dynamic symbol bodies cannot: their rc also represents
+        // property-key atoms held by shapes, which intentionally outlive objects
+        // until phase 3 of gc.deinit.
         self.atoms.releaseCachedStrings(self);
         self.gc.deinit(self);
+        std.debug.assert(self.weak_reference_holder_head == null);
+        std.debug.assert(self.weak_reference_holder_tail == null);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
-        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
-        self.weak_object_ids.deinit(self.memory.allocator);
-        self.weak_id_objects.deinit(self.memory.allocator);
-        self.auto_init_table.deinit(self.memory.allocator);
+        // Shapes and every other GC-managed atom owner are now gone. Clear
+        // residual dynamic symbol bodies (notably Symbol.for's registry ref)
+        // before AtomTable.deinit asserts that no materialized bodies remain.
+        self.atoms.releaseValueSymbolBodiesAfterGc(self);
+        // These containers live for the whole runtime. `memory.allocator` may
+        // temporarily point at a parser arena, so both allocation and teardown
+        // must use the stable backing allocator that owns runtime state.
+        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
+        self.weak_object_ids.deinit(self.memory.persistent_allocator);
+        self.weak_id_objects.deinit(self.memory.persistent_allocator);
+        self.auto_init_table.deinit(self.memory.persistent_allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
@@ -1078,7 +1159,7 @@ pub const JSRuntime = struct {
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
         self.memory.deinitSmallObjectSlab();
-        if (self.owns_self_allocation) {
+        if (self.compact_state.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
             std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
         } else {
@@ -1150,13 +1231,13 @@ pub const JSRuntime = struct {
         // gc_obj_list; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
         // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
-        // by requestGCForAllocation on every sub-allocation of the object body,
-        // property array, and payload (each NoTrigger alloc is wrapped by an
-        // explicit threshold check in allocRuntime*). By the time we link, the
-        // last such sub-alloc has already observed the final allocated_bytes
-        // and set major_request.pending iff over threshold, so re-loading
-        // allocated_bytes here is pure redundant work. Keep addWithSize (the
-        // faithful add_gc_object) and only service an already-pending request.
+        // by createInternal's collectBeforeObjectAllocation immediately before
+        // the object body allocation. Property arrays and separate payloads
+        // retain their existing allocRuntime* requests. By the time we link,
+        // those sub-allocations have observed the final allocated_bytes and set
+        // major_request.pending iff over threshold, so re-loading allocated_bytes
+        // here is pure redundant work. Keep addWithSize (the faithful
+        // add_gc_object) and only service an already-pending request.
         try self.registerObjectWithBytes(object, object.allocationSize(self));
     }
 
@@ -1187,8 +1268,58 @@ pub const JSRuntime = struct {
     /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
     /// teardown either (the slab block carries it).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
+        self.unregisterWeakReferenceHolder(object);
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObjectWithBytes(&object.header, bytes);
+    }
+
+    /// Link a weak-capable payload for its full object lifetime. This is
+    /// allocation-free and mirrors QuickJS's runtime weakref_list: collection
+    /// emptiness changes do not mutate the list while a GC weak pass traverses
+    /// it.
+    pub fn registerWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
+        std.debug.assert(object.isWeakReferenceHolderClass());
+        const link = object.weakReferenceHolderLink() orelse unreachable;
+        std.debug.assert(!link.registered);
+        std.debug.assert(link.previous == null);
+        std.debug.assert(link.next == null);
+
+        link.previous = self.weak_reference_holder_tail;
+        if (self.weak_reference_holder_tail) |tail| {
+            const tail_link = tail.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(tail_link.registered);
+            tail_link.next = object;
+        } else {
+            self.weak_reference_holder_head = object;
+        }
+        self.weak_reference_holder_tail = object;
+        link.registered = true;
+    }
+
+    pub fn unregisterWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
+        if (!object.isWeakReferenceHolderClass()) return;
+        const link = object.weakReferenceHolderLink() orelse return;
+        if (!link.registered) return;
+
+        if (link.previous) |previous| {
+            const previous_link = previous.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(previous_link.registered);
+            previous_link.next = link.next;
+        } else {
+            std.debug.assert(self.weak_reference_holder_head == object);
+            self.weak_reference_holder_head = link.next;
+        }
+        if (link.next) |next| {
+            const next_link = next.weakReferenceHolderLink() orelse unreachable;
+            std.debug.assert(next_link.registered);
+            next_link.previous = link.previous;
+        } else {
+            std.debug.assert(self.weak_reference_holder_tail == object);
+            self.weak_reference_holder_tail = link.previous;
+        }
+        link.previous = null;
+        link.next = null;
+        link.registered = false;
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
@@ -1341,12 +1472,16 @@ pub const JSRuntime = struct {
             for (current.slices) |root| {
                 switch (root) {
                     .mutable => |values| try visitor.values(values.*),
+                    .borrowed => |values| try visitor.constValues(values),
                     .windowed => |w| try visitor.values(w.values.*.ptr[0..w.live_len.*]),
                     .cells => |cells| {
                         for (cells.*) |cell| {
                             var cell_value = cell.valueRef();
                             try visitor.value(&cell_value);
                         }
+                    },
+                    .borrowed_cells => |cells| {
+                        for (cells) |cell| try visitor.constValue(cell.valueRef());
                     },
                 }
             }
@@ -1593,24 +1728,24 @@ pub const JSRuntime = struct {
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.flags.has_weak_id) {
+        if (object.header.meta().flags.has_weak_id) {
             const weak_id = self.weak_object_ids.get(address) orelse unreachable;
             return weak_id << 1;
         }
         const weak_id = self.next_weak_id;
-        try self.weak_object_ids.put(self.memory.allocator, address, weak_id);
-        self.weak_id_objects.put(self.memory.allocator, weak_id, object) catch |err| {
+        try self.weak_object_ids.put(self.memory.persistent_allocator, address, weak_id);
+        self.weak_id_objects.put(self.memory.persistent_allocator, weak_id, object) catch |err| {
             _ = self.weak_object_ids.remove(address);
             return err;
         };
         self.next_weak_id += 1;
-        object.flags.has_weak_id = true;
+        object.header.meta().flags.has_weak_id = true;
         return weak_id << 1;
     }
 
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        if (!object.flags.has_weak_id) return null;
+        if (!object.header.metaConst().flags.has_weak_id) return null;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         return weak_id << 1;
@@ -1619,8 +1754,8 @@ pub const JSRuntime = struct {
     /// Removes `object` from the weak identity registry, returning its encoded
     /// weak identity (if any) so destruction can propagate it to weak slots.
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        if (!object.flags.has_weak_id) return null;
-        object.flags.has_weak_id = false;
+        if (!object.header.meta().flags.has_weak_id) return null;
+        object.header.meta().flags.has_weak_id = false;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         _ = self.weak_object_ids.remove(address);
@@ -1760,9 +1895,9 @@ pub const JSRuntime = struct {
 
     /// Internal-builtin record lookup: `domain_index` is the
     /// `NativeBuiltinDomain` enum value, `id` the domain-local method id.
-    /// Returns null for unmigrated domains/ids (caller falls back to the
-    /// transitional enum dispatch) and for runtimes whose builtins were never
-    /// installed. Two bounds-checked loads; no hashing or string compares.
+    /// Returns null for the separate host domain, invalid/gap ids, and runtimes
+    /// whose standard globals were never installed. Two bounds-checked loads;
+    /// no hashing or string compares.
     pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
         if (domain_index >= self.internal_builtins.len) return null;
         const records = self.internal_builtins[domain_index];
@@ -2030,7 +2165,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn gcStats(self: JSRuntime) gc.Stats {
-        var stats = self.gc.statsSnapshot();
+        var stats = self.gc.statsSnapshot(&self);
         stats.weak_ref_count = self.weakReferenceCount();
         stats.finalizer_queue_length = self.pending_finalization_jobs.len;
         stats.pending_finalization_job_count = self.pending_finalization_jobs.len;
@@ -2129,6 +2264,9 @@ pub const JSRuntime = struct {
         if (comptime memory.force_gc_on_allocation_enabled) {
             if (self.memory.trigger_gc_fn == null) return;
             if (self.gc_running) return;
+            // The force-GC build option is diagnostic instrumentation, not a
+            // scheduling-policy change. Preserve an explicitly configured
+            // threshold across the synthetic pre-allocation collection.
             const saved_threshold = self.malloc_gc_threshold;
             defer self.malloc_gc_threshold = saved_threshold;
             _ = self.forceGC(null) catch {};
@@ -2139,6 +2277,17 @@ pub const JSRuntime = struct {
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
+    }
+
+    /// QuickJS `JS_NewObjectFromShape` runs its threshold GC before entering
+    /// the allocator. Object construction uses this stronger boundary instead
+    /// of merely leaving a pending request for post-registration service: a
+    /// memory-limit check must be allowed to reuse space from reclaimable
+    /// cycles before rejecting the replacement object.
+    pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
+        self.requestGCForAllocation(size);
+        if (self.gc_running or !self.gc.hasPendingMajorRequest()) return;
+        _ = self.pollGC(null, .normal) catch {};
     }
 
     fn triggerGCOnAllocation(ctx: ?*anyopaque, size: usize) void {
@@ -2207,13 +2356,13 @@ pub const JSRuntime = struct {
         // Seeds the weak back-pointer (and, for non-tagged string atoms,
         // the table-side cache); no-op for symbol atoms.
         self.atoms.cacheString(atom_id, created);
-        const slot_index = self.recent_atom_string_next % self.recent_atom_strings.len;
+        const slot_index: usize = self.compact_state.recent_atom_string_next;
         const old = self.recent_atom_strings[slot_index];
         self.recent_atom_strings[slot_index] = .{
             .atom_id = atom_id,
             .string = created,
         };
-        self.recent_atom_string_next = (slot_index + 1) % self.recent_atom_strings.len;
+        self.compact_state.recent_atom_string_next = @intCast((slot_index + 1) % self.recent_atom_strings.len);
         if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
@@ -2245,6 +2394,7 @@ pub const JSRuntime = struct {
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
         self.stack_size = size;
+        self.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(size);
     }
 
     pub fn stackSize(self: JSRuntime) usize {
@@ -2304,11 +2454,11 @@ pub const JSRuntime = struct {
 
     /// Bootstrap the standard ECMAScript global object onto `global` via the
     /// registered installer. Fails with `error.InvalidBuiltinRegistry` if the
-    /// builtins subsystem never registered one (the installer also wires
+    /// exec bootstrap never registered one (the installer also wires
     /// `internal_builtins` and `materialize_builtin_namespace_cb`).
     ///
     /// The installer callback is typed `anyerror` so core need not name the
-    /// builtins error set, but the install only ever produces engine errors;
+    /// exec's error set, but the install only ever produces engine errors;
     /// narrow the result back to the engine-wide `DynamicImportError` set so the
     /// bounded-error callers of `installHostGlobals`/`contextGlobal` (notably the
     /// `DynamicImportCallback` host hook) keep a concrete error set.
@@ -2595,14 +2745,14 @@ pub const JSRuntime = struct {
     }
 
     pub fn enqueueDeferredWeakValueFree(self: *JSRuntime, value: JSValue) !void {
-        try self.enqueueDeferredWeakValueFreeWithPrequeuedIdentity(value, null);
+        try self.enqueueDeferredWeakValueFreeWithPreparedIdentity(value, null);
     }
 
-    pub fn enqueueDeferredWeakValueFreeWithPrequeuedIdentity(self: *JSRuntime, value: JSValue, prequeued_identity: ?usize) !void {
+    pub fn enqueueDeferredWeakValueFreeWithPreparedIdentity(self: *JSRuntime, value: JSValue, prepared_identity: ?usize) !void {
         const index = self.deferred_weak_value_frees.len;
         try self.ensureDeferredWeakValueFreeCapacity(index + 1);
         self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. index + 1];
-        self.deferred_weak_value_frees[index] = .{ .value = value, .prequeued_identity = prequeued_identity };
+        self.deferred_weak_value_frees[index] = .{ .value = value, .prepared_identity = prepared_identity };
     }
 
     pub fn hasDeferredWeakValueFrees(self: *const JSRuntime) bool {
@@ -2618,37 +2768,21 @@ pub const JSRuntime = struct {
             const old_len = self.deferred_weak_value_frees.len;
             const item = self.deferred_weak_value_frees[old_len - 1];
             self.deferred_weak_value_frees = self.deferred_weak_value_frees.ptr[0 .. old_len - 1];
-            var skip_identity = item.prequeued_identity;
+            var skip_identity = item.prepared_identity;
             if (skip_identity == null) {
-                if (objectFromLastRefValue(item.value)) |object| {
-                    const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-                    if (self.borrowed_weak_cleanup_active) {
-                        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
-                        if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-                        var enqueued_current_identity = true;
-                        self.enqueueBorrowedWeakCleanupIdentity(identity) catch {
-                            enqueued_current_identity = false;
-                        };
-                        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-                            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch {
-                                enqueued_current_identity = false;
-                            };
-                        }
-                        if (enqueued_current_identity) skip_identity = identity;
-                    }
-                }
+                skip_identity = self.prepareBorrowedWeakCleanupForLastRefValue(item.value);
             }
             const previous_skip_identity = self.current_deferred_weak_value_free_identity;
             self.current_deferred_weak_value_free_identity = skip_identity;
             defer self.current_deferred_weak_value_free_identity = previous_skip_identity;
             if (item.value.refCountHeader()) |header| {
                 if (header.meta().rc == 0) {
-                    const already_consumed_prequeued_object =
+                    const already_consumed_prepared_object =
                         header.meta().kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
-                    std.debug.assert(already_consumed_prequeued_object);
-                    if (already_consumed_prequeued_object) continue;
+                    std.debug.assert(already_consumed_prepared_object);
+                    if (already_consumed_prepared_object) continue;
                 }
             }
             item.value.free(self);
@@ -2766,32 +2900,30 @@ pub const JSRuntime = struct {
         const index = self.borrowed_weak_cleanup_identities.len;
         try self.ensureBorrowedWeakCleanupIdentityCapacity(index + 1);
         if ((identity & 1) == 0) {
-            try self.borrowed_weak_cleanup_identity_set.put(self.memory.allocator, identity, {});
+            try self.borrowed_weak_cleanup_identity_set.put(self.memory.persistent_allocator, identity, {});
         }
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;
     }
 
-    pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
-        const object = objectFromLastRefValue(value) orelse return;
-        const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
-        if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-        try self.enqueueBorrowedWeakCleanupIdentity(identity);
-        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-            try self.enqueueBorrowedWeakCleanupIdentity(weak_identity);
-        }
-    }
-
-    pub fn prequeueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
+    /// Prepare borrowed-pointer cleanup before a last-ref value is released.
+    /// The raw identity is also returned when no holder can reference the
+    /// ordinary object; that records the completed liveness check so the
+    /// deferred free does not conservatively enqueue an irrelevant full-table
+    /// cleanup later.
+    pub fn prepareBorrowedWeakCleanupForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
         if (!self.borrowed_weak_cleanup_active) return null;
         const object = objectFromLastRefValue(value) orelse return null;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        const weak_identity = self.peekWeakObjectIdentity(object);
+        if (!object.isGlobal() and weak_identity == null) return identity;
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-        self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
-        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
-            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch return null;
+        if (object.isGlobal()) {
+            self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+            self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
+        }
+        if (weak_identity) |stored_weak_identity| {
+            self.enqueueBorrowedWeakCleanupIdentity(stored_weak_identity) catch return null;
         }
         return identity;
     }

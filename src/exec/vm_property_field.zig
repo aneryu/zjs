@@ -173,7 +173,7 @@ pub noinline fn setName(
         op.set_name => {
             const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
             frame.pc += 4;
-            if (stack.values.len == 0) return error.StackUnderflow;
+            if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
             defer value.free(ctx.runtime);
             if (value.isObject()) {
@@ -184,10 +184,10 @@ pub noinline fn setName(
             }
         },
         op.set_name_computed => {
-            if (stack.values.len < 2) return error.StackUnderflow;
-            const value = stack.values[stack.values.len - 1].dup();
+            if (stack.len() < 2) return error.StackUnderflow;
+            const value = stack.values[stack.len() - 1].dup();
             defer value.free(ctx.runtime);
-            const key = stack.values[stack.values.len - 2].dup();
+            const key = stack.values[stack.len() - 2].dup();
             defer key.free(ctx.runtime);
             if (value.isObject()) {
                 const object = try property_ops.expectObject(value);
@@ -238,8 +238,8 @@ pub noinline fn field(
     frame.pc += 4;
     switch (opc) {
         op.get_field => {
-            if (stack.values.len == 0) return error.StackUnderflow;
-            const top_index = stack.values.len - 1;
+            if (stack.len() == 0) return error.StackUnderflow;
+            const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
@@ -265,7 +265,7 @@ pub noinline fn field(
                 replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            stack.values = stack.values.ptr[0..top_index];
+            stack.setLen(top_index);
             const obj = receiver;
             defer obj.free(ctx.runtime);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
@@ -345,7 +345,7 @@ pub noinline fn field(
 /// and objects with a `length` getter fall to the cold getLength.
 pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
-    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return null;
+    if (!object.isArray() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
     const len = object.arrayLength();
     if (len <= @as(u32, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(len));
     return core.JSValue.float64(@floatFromInt(len));
@@ -638,7 +638,7 @@ pub inline fn atomPropertyValueForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     if (objectFromValue(receiver)) |object| {
-        if (object.class_id == core.class.ids.object or object.flags.is_array or object.flags.is_global) {
+        if (object.class_id == core.class.ids.object or object.isArray() or object.isGlobal()) {
             return switch (property_ic.ordinaryComputedPropertyLookupForFastPath(rt, receiver, atom_id)) {
                 .value => |value| .{ .borrowed = value },
                 .getter => |getter| .{ .getter = getter },
@@ -724,7 +724,7 @@ fn setArrayLengthForPutFieldFastPath(
     const length = value.asInt32() orelse return false;
     if (length < 0) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (!object.flags.is_array or object.hasExoticMethods() or object.proxyTarget() != null) return false;
+    if (!object.isArray() or object.hasExoticMethods() or object.proxyTarget() != null) return false;
     if (!object.flags.length_writable) return false;
     const new_len: u32 = @intCast(length);
     if (new_len < object.arrayLength()) {
@@ -832,22 +832,22 @@ pub noinline fn arrayElement(
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
@@ -863,8 +863,8 @@ pub noinline fn arrayElement(
                 return err;
             };
             errdefer value.free(ctx.runtime);
-            const old_value = stack.values[stack.values.len - 1];
-            stack.values[stack.values.len - 1] = value;
+            const old_value = stack.values[stack.len() - 1];
+            stack.values[stack.len() - 1] = value;
             old_value.free(ctx.runtime);
         },
         op.get_array_el3 => {
@@ -907,8 +907,8 @@ pub noinline fn arrayElement(
                 return err;
             };
             errdefer value.free(ctx.runtime);
-            const old_key = stack.values[stack.values.len - 1];
-            stack.values[stack.values.len - 1] = key_value;
+            const old_key = stack.values[stack.len() - 1];
+            stack.values[stack.len() - 1] = key_value;
             key_value_owned = false;
             old_key.free(ctx.runtime);
             try stack.pushOwned(value);
@@ -1062,7 +1062,7 @@ fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom
         method.free(rt);
         return null;
     };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
         method.free(rt);
         return null;
     };
@@ -1085,7 +1085,7 @@ fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, 
         method.free(rt);
         return null;
     };
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse {
         method.free(rt);
         return null;
     };
@@ -1112,6 +1112,6 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
-    if (index_from_top >= stack.values.len) return error.StackUnderflow;
-    return stack.values[stack.values.len - 1 - index_from_top].dup();
+    if (index_from_top >= stack.len()) return error.StackUnderflow;
+    return stack.values[stack.len() - 1 - index_from_top].dup();
 }
