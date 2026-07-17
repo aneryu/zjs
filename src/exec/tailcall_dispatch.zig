@@ -742,6 +742,11 @@ fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!
 /// x-pair store — matching qjs, whose 16-byte JSValue return moves are
 /// ldp/stp integer pairs throughout (`ret_val = *--sp`, quickjs.c:18266).
 inline fn loadValueAsIntPair(slot: *const JSValue) JSValue {
+    if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) {
+        // Nan-boxed 8-byte repr: the slot is one machine word; a plain load is
+        // already width-matched with the single-word store that wrote it.
+        return slot.*;
+    }
     const words: *const [2]u64 = @ptrCast(@alignCast(slot));
     const lo = words[0];
     const hi = words[1];

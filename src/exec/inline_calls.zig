@@ -201,7 +201,7 @@ pub const Entry = struct {
     /// after moving `new.target` out of the hot Frame. The extra default-repr
     /// word restores the 248-byte Entry whose closure/negative-control layout
     /// is stable; a 240-byte layout regressed those probes despite fewer ops.
-    _stride_padding: [if (core.value.nan_boxing) 2 * @sizeOf(usize) else 0]u8,
+    _stride_padding: [if (core.value.nan_boxing) 2 * @sizeOf(usize) else 0]u8 align(if (core.value.nan_boxing) @alignOf(usize) else 1),
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
