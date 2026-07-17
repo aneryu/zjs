@@ -1,7 +1,7 @@
 //! Tail-call dispatch — terminal-state rewrite (docs/qjs-align/CALL-MACHINERY-FAITHFUL-FRONTIER.md).
 //!
 //! Every opcode is its own handler `fn(pc, sp, var_buf, vm) callconv(.c) Outcome`;
-//! dispatch is `@call(.always_tail) vm.tbl[pc[0]]` through a 256-entry table.
+//! dispatch is `@call(.always_tail) dispatch_table[pc[0]]` through a static 256-entry table.
 //! The 3 hottest values (pc/sp/var_buf) ride in argument registers; everything else
 //! is bundled behind the `*Vm` pointer (x3). Because each handler is a separate
 //! function, its JSValue temporaries live in ITS frame and die at ITS return — so the
@@ -104,10 +104,12 @@ pub const Vm = struct {
     /// compact layout was instruction-neutral but less cycle-stable on the
     /// call/closure probes, so this slot is deliberately not reclaimed.
     _dispatch_layout_padding: usize = undefined,
-    /// Dispatch table base. Reached via the Vm pointer so the dispatch is `ldr vm.tbl
-    /// + ldr [tbl, op<<3] + br` instead of recomputing the const table address with
-    /// `adrp+add` at EVERY dispatch site (the table-base-remat tax — see
-    /// dispatch-table-base-remat-rootcause). EXPERIMENT to measure that tax.
+    /// RETIRED dispatch-table base (B1: hot dispatch is `dispatch_table[op]` static
+    /// `adrp+add` now — two dependency-free insns beat the `ldr vm.tbl` whose load sat
+    /// on the `br`-target critical path; the historical remat tax this indirection
+    /// defended against was a multi-site monolith artifact, see
+    /// dispatch-table-base-remat-rootcause). Field kept ONLY to preserve the measured
+    /// Vm layout (same rationale as `_dispatch_layout_padding` above).
     tbl: [*]const Handler = undefined,
     /// Property-specialized handlers live behind a resident table pointer for the
     /// same reason cold_table does: the indirect tail call keeps their shape walks
@@ -223,7 +225,7 @@ inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Ha
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (@intFromPtr(pc) >= @intFromPtr(vm.code_end))
         return @call(.always_tail, op_falloff, .{ pc, sp, var_buf, vm });
-    return @call(.always_tail, vm.tbl[pc[0]], .{ pc, sp, var_buf, vm });
+    return @call(.always_tail, dispatch_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 // ===========================================================================
@@ -274,7 +276,7 @@ inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
     // a dangling pre-realloc pointer (the source of non-deterministic heap corruption).
     vm.stack_base = vm.stack.values;
     const npc = vm.code_base + vm.frame.pc;
-    return @call(.always_tail, vm.tbl[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
+    return @call(.always_tail, dispatch_table[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
 }
 
 /// `Step`-returning helper (`.done`/`.continue_loop` — both re-dispatch in the
@@ -1283,7 +1285,7 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
 /// return/return_undef), so `npc` never reaches code_end. Jumps (goto8/if_*8) keep
 /// `next` because their target CAN be code_end (forward branch-to-end → fall-off).
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    return @call(.always_tail, vm.tbl[npc[0]], .{ npc, nsp, var_buf, vm });
+    return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
 
 /// Per-variant local-access handler (qjs has OP_get_loc0..3 etc. as distinct labels).
@@ -2561,7 +2563,7 @@ inline fn reloadAfterPop(
 
 /// Run the tail-call chain to completion for the current top frame.
 pub fn run(vm: *Vm) HostError!JSValue {
-    vm.tbl = &dispatch_table; // resident table base (avoids per-dispatch adrp+add)
+    vm.tbl = &dispatch_table; // layout-preserving init of the retired slot; dispatch reads the static table
     vm.property_tail_tbl = &property_tail_table;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     var pc = vm.code_base + vm.frame.pc;
