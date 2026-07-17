@@ -553,7 +553,6 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .machine = m,
         .output = m.output,
         .code_base = func.code.ptr,
-        .code_end = func.code.ptr + func.code.len,
         .catch_target = level.catch_target,
         .poller = .init(m.ctx.runtime),
     };

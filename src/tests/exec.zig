@@ -9627,3 +9627,141 @@ test "reflect construct roots argument list while resolving prototype" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
+
+// ===========================================================================
+// Branch-to-end fall-off forms. The register-resident dispatch carries no
+// fall-off bounds check (qjs-aligned), so the jump-aware epilogues MUST
+// terminate every branch-to-end path with a real return op and the pipeline
+// MUST plant the trailing op.return sentinel for the eval-completion form.
+// Each test pins the observable completion value; a regression surfaces as
+// the sentinel popping an empty operand stack (garbage completion / UB).
+// ===========================================================================
+
+test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffIfThrow(x) { if (x) throw 1; }
+        \\assert.sameValue(fallOffIfThrow(false), undefined);
+        \\var threw = false;
+        \\try { fallOffIfThrow(true); } catch (e) { threw = (e === 1); }
+        \\assert.sameValue(threw, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "if-return fall-off form returns undefined on the fall-through leg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffIfReturn(x) { if (x) return 1; }
+        \\assert.sameValue(fallOffIfReturn(true), 1);
+        \\assert.sameValue(fallOffIfReturn(false), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "else-return goto-to-end form returns undefined on the taken if leg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffElseReturn(x) { if (x) { 1; } else return 2; }
+        \\assert.sameValue(fallOffElseReturn(true), undefined);
+        \\assert.sameValue(fallOffElseReturn(false), 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "nested-block branch-to-end survives trailing scope cleanup lowering" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Parser-phase target points at the block's leave_scope/close_loc run;
+    // lowering removes it, leaving the resolved target == code_end. The
+    // epilogue's jump-to-end scan must treat the trailing cleanup run as an
+    // end target and still append the terminator.
+    const result = try js.eval(
+        \\function fallOffNestedBlock(c) { { let x; if (c) throw 1; } }
+        \\assert.sameValue(fallOffNestedBlock(false), undefined);
+        \\function fallOffCaptured(c) { { let x = 1; if (c) throw 2; var probe = function () { return x; }; } return probe(); }
+        \\assert.sameValue(fallOffCaptured(false), 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "arrow block body branch-to-end returns undefined" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var fallOffArrow = (x) => { if (x) throw 3; };
+        \\assert.sameValue(fallOffArrow(false), undefined);
+        \\var fallOffArrowReturn = (x) => { if (x) return 4; };
+        \\assert.sameValue(fallOffArrowReturn(true), 4);
+        \\assert.sameValue(fallOffArrowReturn(false), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator branch-to-end completes with undefined value" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* fallOffGen(x) { if (x) throw 4; yield 1; }
+        \\var it = fallOffGen(false);
+        \\assert.sameValue(it.next().value, 1);
+        \\var r = it.next();
+        \\assert.sameValue(r.done, true);
+        \\assert.sameValue(r.value, undefined);
+        \\function* fallOffGenNoYield(x) { if (x) throw 5; }
+        \\var r2 = fallOffGenNoYield(false).next();
+        \\assert.sameValue(r2.done, true);
+        \\assert.sameValue(r2.value, undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "eval L0 completion falls off onto the op.return sentinel" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Direct/indirect eval bodies end with `scope_get_var <ret>` and fall off
+    // the end; the trailing sentinel returns the completion riding the stack.
+    const result = try js.eval(
+        \\assert.sameValue(eval("if (false) throw 5;"), undefined);
+        \\assert.sameValue(eval("1 + 2"), 3);
+        \\assert.sameValue(eval("{ let x; if (false) throw 6; }"), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    // Script completion (<repl> return_completion form) rides the same
+    // sentinel fall-off at the top level.
+    const repl_undef = try js.evalWithOptions("if (false) throw 7;", .{ .filename = "<repl>" });
+    defer repl_undef.free(js.runtime);
+    try std.testing.expect(repl_undef.isUndefined());
+
+    const repl_value = try js.evalWithOptions("40 + 2", .{ .filename = "<repl>" });
+    defer repl_value.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), repl_value.asInt32());
+}
+
+test "module top-level branch-to-end gets a terminator (no fall-off)" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\if (false) throw 9;
+    );
+    defer result.free(js.runtime);
+}

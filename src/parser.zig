@@ -10890,7 +10890,44 @@ pub const parser_core = struct {
         return last;
     }
 
-    fn hasJumpToCurrentEnd(code: []const u8, atoms: []const Atom, include_conditional: bool) bool {
+    /// Offset where the trailing cleanup-only run begins: the maximal code
+    /// suffix consisting of the ops `lastParserPhaseOpcode(skip_cleanup=true)`
+    /// skips (line_num / leave_scope / close_loc). Equals `code.len` when the
+    /// last instruction is a real op. Malformed code yields 0 so the caller's
+    /// jump-to-end answer degrades conservatively (treat as end-targeting).
+    fn trailingCleanupStart(code: []const u8, atoms: []const Atom) usize {
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        var tail_start: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > code.len) return 0;
+            if (op_id != opcode.op.line_num and
+                op_id != opcode.op.leave_scope and
+                op_id != opcode.op.close_loc)
+            {
+                tail_start = pc + size;
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        return tail_start;
+    }
+
+    /// True when any label operand (goto / if_* / gosub / catch / with-* /
+    /// scope_make_ref families — everything `parserPhaseLabelOperandOffset`
+    /// knows) targets the current end of `code`, INCLUDING the trailing
+    /// cleanup run (line_num / leave_scope / close_loc): those trailing ops
+    /// either vanish during lowering (line_num, leave_scope, uncaptured
+    /// close_loc — so the resolved target becomes `code_end`) or execute and
+    /// then fall off it. The register-resident dispatch mirrors qjs and has no
+    /// per-op fall-off bounds check, so every such jump must land on a real
+    /// terminator appended by the epilogues (qjs shape: emit_return after
+    /// js_is_live_code, quickjs.c js_parse_function_decl2 tail).
+    pub fn hasJumpToCurrentEnd(code: []const u8, atoms: []const Atom) bool {
+        const tail_start = trailingCleanupStart(code, atoms);
         var pc: usize = 0;
         var atom_index: usize = 0;
         while (pc < code.len) {
@@ -10898,11 +10935,9 @@ pub const parser_core = struct {
             const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
             const size: usize = instr.size;
             if (size == 0 or pc + size > code.len) return true;
-            if (op_id == opcode.op.goto or
-                (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
-            {
-                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (target == code.len) return true;
+            if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+                if (target >= tail_start) return true;
             }
             if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
             pc += size;
@@ -10910,11 +10945,21 @@ pub const parser_core = struct {
         return false;
     }
 
-    fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
+    /// Straight-line liveness only: does the fall-through path need an
+    /// implicit `return_undef`? Jump-to-end reachability is the caller's
+    /// separate `hasJumpToCurrentEnd` OR — a body whose last real op is a
+    /// terminator can still be entered at its end by a finished-construct
+    /// jump (if/else arm, break), and that path needs a landing terminator.
+    pub fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
         const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
         return switch (op_id) {
-            opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.tail_call, opcode.op.tail_call_method => false,
-            opcode.op.throw => hasJumpToCurrentEnd(code, atoms, false),
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.throw,
+            => false,
             else => true,
         };
     }
@@ -15993,7 +16038,12 @@ pub const parser_core = struct {
         control_boundary_active = false;
         if (capture_child) {
             const code = s.currentCode();
-            const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
+            const atoms = s.currentAtomOperands();
+            // A jump targeting the current end (post-lowering `code_end`) needs
+            // a real terminator to land on — the dispatch has no fall-off
+            // bounds check (qjs-aligned; qjs functions always end in a return).
+            const jump_to_end = hasJumpToCurrentEnd(code, atoms);
+            const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
             if (needs_return) {
                 if (func_kind == .async) {
                     try s.emitOp(opcode.op.undefined);
@@ -16006,7 +16056,10 @@ pub const parser_core = struct {
                     if (this_idx < 0) return Error.UnexpectedToken;
                     try s.emitOpU16(opcode.op.get_loc_check, @intCast(this_idx));
                     try s.emitOp(opcode.op.@"return");
-                } else if (code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                    // In-place drop → return_undef keeps code.len unchanged, so
+                    // it is only sound when nothing jumps to the current end
+                    // (the jump would still land past the rewritten byte).
                     var mutable_code = s.currentCode();
                     mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                 } else {
@@ -16425,12 +16478,18 @@ pub const parser_core = struct {
             try parseBlock(s);
             if (capture_child) {
                 const code = s.currentCode();
-                const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
+                const atoms = s.currentAtomOperands();
+                // See the function-body epilogue: an end-targeting jump must
+                // land on a real terminator (no dispatch fall-off check).
+                const jump_to_end = hasJumpToCurrentEnd(code, atoms);
+                const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
                 if (needs_return) {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
                         try s.emitOp(opcode.op.return_async);
-                    } else if (code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                    } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                        // In-place rewrite keeps code.len unchanged — only
+                        // sound when nothing jumps to the current end.
                         var mutable_code = s.currentCode();
                         mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                     } else {
@@ -21196,17 +21255,23 @@ pub const compile_entry = struct {
         }
 
         if (return_completion) {
+            // Eval/script-completion form: `scope_get_var <ret>` is the last
+            // op, the completion rides the operand stack off the end, and the
+            // trailing `op.return` sentinel (FunctionBytecode / setCode)
+            // returns it. Statement-level jumps patched before this final get
+            // land ON it, never past it — no terminator needed.
             try state.finalizeEvalReturn();
         } else {
+            // Jump-aware terminator decision mirroring the function epilogues:
+            // a label operand targeting the current end (post-lowering
+            // `code_end`) must land on a real terminator — the dispatch has no
+            // fall-off bounds check. The instruction walk also replaces the
+            // former raw `code[code.len - 1]` opcode probe, whose last byte
+            // could alias an operand of a multi-byte instruction.
             const code = function.code;
-            const needs_return = code.len == 0 or switch (code[code.len - 1]) {
-                bytecode.opcode.op.@"return",
-                bytecode.opcode.op.return_undef,
-                bytecode.opcode.op.return_async,
-                bytecode.opcode.op.throw,
-                => false,
-                else => true,
-            };
+            const atoms = function.atom_operands;
+            const needs_return = parser_impl.hasJumpToCurrentEnd(code, atoms) or
+                parser_impl.functionNeedsImplicitReturn(code, atoms);
             if (needs_return) try state.emitReturnUndefined();
         }
 

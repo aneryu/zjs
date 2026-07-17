@@ -92,10 +92,21 @@ pub const Vm = struct {
     machine: *inline_calls.Machine,
     output: ?*std.Io.Writer,
 
-    /// `function.code.ptr` and one-past-end, cached so the hot `next` bounds check
-    /// and operand reads avoid re-loading the slice through `function`.
+    /// `function.code.ptr`, cached so pc<->frame.pc derivation (publish/syncPc/
+    /// reloadPc/coldNext) and jump-target arithmetic avoid re-loading the slice
+    /// through `function`. Still hot: every cold op's publish and every jump
+    /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
-    code_end: [*]const u8,
+    /// RETIRED one-past-end mirror (F3): the hot `next` fall-off bounds check —
+    /// its only hot reader — is gone (jump-aware epilogues + the `code[len]`
+    /// op.return sentinel guarantee every dispatch lands on a real opcode), and
+    /// the two cold readers (op_for_of_next operand peek, `next`'s Debug
+    /// assert) derive the bound from the authoritative `vm.function.code`. No
+    /// reader ⇒ every per-boundary publication (enterEntry / popAndResume /
+    /// reloadTop / reloadAfterPop / runTC init) is a dead store, deleted.
+    /// Field kept ONLY to preserve the measured Vm layout (same rationale as
+    /// `_dispatch_layout_padding` below).
+    code_end: [*]const u8 = undefined,
     /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
     /// base from the authoritative `stack.values` (one dependent load off the
     /// `vm.stack` pointer the call handlers already hold for setTopPtr), so the
@@ -225,13 +236,20 @@ inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Ha
     return vm.property_tail_tbl[@intFromEnum(slot)];
 }
 
-/// Computed-goto: tail-call the handler for the opcode at `pc[0]`. A forward dispatch
-/// reaching code_end is a fall-off (implicit return of the stack top / undefined).
+/// Computed-goto: tail-call the handler for the opcode at `pc[0]`. No fall-off
+/// bounds check (qjs-aligned: emission guarantees every reachable path ends in
+/// a terminator op, and jump-aware epilogues terminate branch-to-end paths).
+/// `pc == code_end` is still legal and intentional: eval/script completion
+/// falls off the last op onto the trailing `op.return` sentinel at
+/// `code[len]` (FunctionBytecode block / setCode / ensureTrailingReturnSentinel
+/// all plant it), which returns the completion riding the stack top. Past
+/// `code_end` would be an emission-invariant violation — Debug asserts it
+/// (derived from `vm.function.code`; the retired `vm.code_end` mirror is gone).
 /// `callconv(.c)` + non-inline so its `always_tail` to a handler matches signatures
 /// (the driver calls it as a normal entry; handlers tail-chain via `coldNext`).
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (@intFromPtr(pc) >= @intFromPtr(vm.code_end))
-        return @call(.always_tail, op_falloff, .{ pc, sp, var_buf, vm });
+    if (comptime builtin.mode == .Debug)
+        std.debug.assert(@intFromPtr(pc) <= @intFromPtr(vm.function.code.ptr + vm.function.code.len));
     return @call(.always_tail, dispatch_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -335,15 +353,6 @@ inline fn evIsEval(vm: *Vm) bool {
 // Endpoint handlers
 // ===========================================================================
 
-fn op_falloff(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    _ = pc;
-    _ = var_buf;
-    // Sync top_ptr from the register sp so falloffReturn's stack.peek() sees
-    // the live top, then dup the completion value (see falloffReturn).
-    vm.stack.setTopPtr(sp);
-    return falloffReturn(vm);
-}
-
 fn op_invalid(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     _ = pc;
     _ = sp;
@@ -435,7 +444,6 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
-    vm.code_end = code_ptr + vm.function.code.len;
     // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
     vm.local_fast_blocked = false;
     const pc2: [*]const u8 = code_ptr; // fresh frame: frame.pc == 0
@@ -794,7 +802,6 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.code.ptr;
-            vm.code_end = caller_function.code.ptr + caller_function.code.len;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -1006,7 +1013,10 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
 /// malformed records retain the authoritative helper.
 fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    if (@intFromPtr(pc + 1) < @intFromPtr(vm.code_end)) {
+    // Defensive operand-existence peek for hand-built bytecode ending in this
+    // opcode; derives the bound from the authoritative `vm.function.code` (the
+    // per-frame `vm.code_end` mirror is retired — see the Vm field).
+    if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.code.ptr + vm.function.code.len)) {
         const depth = pc[1];
         const stack_len = vm.stack.len();
         if (stack_len >= @as(usize, depth) + 3) {
@@ -1359,11 +1369,12 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
     }.hnd;
 }
 
-/// Direct dispatch to the handler for the opcode at `npc[0]`, SKIPPING `next`'s
-/// fall-off bounds check + the `b next` indirection. Sound for linear ops: a fast
-/// op is never the last instruction (the compiler always terminates a body with
-/// return/return_undef), so `npc` never reaches code_end. Jumps (goto8/if_*8) keep
-/// `next` because their target CAN be code_end (forward branch-to-end → fall-off).
+/// Direct dispatch to the handler for the opcode at `npc[0]`, skipping the
+/// `b next` indirection. With the fall-off bounds check retired from `next`
+/// (jump-aware epilogues + the `code[len]` op.return sentinel guarantee every
+/// dispatch lands on a real opcode), `cont` and `next` are semantically
+/// identical; `next` additionally Debug-asserts `pc <= code_end` and remains
+/// the driver/jump entry point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
@@ -2328,9 +2339,10 @@ pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) ca
 }
 
 // Control flow (8-bit displacement). The displacement is relative to the operand
-// byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Jumping to
-// a target ≥ code_end (forward branch-to-end) is handled by `next`'s own fall-off
-// check, so no explicit branch-to-end test is needed here. When an interrupt
+// byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Branch
+// targets never exceed code_end: the jump-aware epilogues terminate every
+// branch-to-end path with a real return op, and `pc == code_end` reads the
+// trailing op.return sentinel — so no bounds test is needed here. When an interrupt
 // handler is installed, the conditional fast paths route to their cold handlers;
 // those consume the condition, update the pc, and then poll in the same order as
 // QuickJS OP_if_{true,false}{,8}.
@@ -2611,7 +2623,6 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
     vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
     vm.function = vm.frame.function;
     vm.code_base = vm.function.code.ptr;
-    vm.code_end = vm.function.code.ptr + vm.function.code.len;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
@@ -2646,7 +2657,6 @@ inline fn reloadAfterPop(
     }
     vm.function = vm.frame.function;
     vm.code_base = vm.function.code.ptr;
-    vm.code_end = vm.function.code.ptr + vm.function.code.len;
     pc.* = vm.code_base + vm.frame.pc;
     sp.* = vm.stack.topPtr();
     var_buf.* = vm.frame.locals.ptr;
@@ -2721,7 +2731,6 @@ comptime {
     _ = &coldStd;
     _ = &coldNext;
     _ = &evIsEval;
-    _ = &op_falloff;
     _ = &run;
     _ = dispatch_table;
 }

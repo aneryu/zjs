@@ -8869,12 +8869,10 @@ const function_mod = struct {
 
         pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
             freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
-            if (bytes.len == 0) {
-                self.code = &.{};
-                self.code_capacity = 0;
-                return;
-            }
             // Allocate one extra trailing byte holding an `op.return` sentinel.
+            // Even for empty code: execution of a zero-length body starts with
+            // `pc == code_end`, and the bounds-check-free dispatch reads
+            // `code[0]` — the sentinel — instead of a dangling pointer.
             // qjs-aligned: every real function is terminated by a return, so the
             // register-resident dispatch carries no per-op fall-off-end bounds
             // check. Hand-authored test bytecode that omits a terminator reads this
@@ -8906,7 +8904,9 @@ const function_mod = struct {
         /// but a hand-built top-level `BytecodeImpl` ending in a hot opcode would
         /// otherwise read `code[code.len]` (heap garbage) on fall-off.
         pub fn ensureTrailingReturnSentinel(self: *BytecodeImpl) !void {
-            if (self.code.len == 0) return;
+            // Also for empty code: a zero-length body starts execution with
+            // `pc == code_end`, and the bounds-check-free dispatch reads the
+            // sentinel there — never a dangling `&.{}` pointer.
             const len = self.code.len;
             _ = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, 1);
             self.code = self.code[0..len];

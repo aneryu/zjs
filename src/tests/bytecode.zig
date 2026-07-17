@@ -175,29 +175,28 @@ test "script or module metadata owns each bytecode transfer" {
     try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(referrer).?);
 }
 
-test "bytecode setCode skips zero-length allocation" {
+test "bytecode setCode plants the op.return sentinel even for empty code" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     defer function_bc.deinit(rt);
 
-    const base_bytes = rt.memory.allocated_bytes;
-    const base_allocations = rt.memory.allocation_count;
-
+    // The bounds-check-free dispatch starts a zero-length body with
+    // `pc == code_end` and reads `code[0]` there — the sentinel must exist
+    // (a bare `&.{}` slice would hand it a dangling pointer).
     try function_bc.setCode(&.{});
     try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
-    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), function_bc.code_capacity);
+    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[0]);
 
     try function_bc.setCode(&.{ 1, 2 });
     try std.testing.expectEqual(@as(usize, 2), function_bc.code.len);
+    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[2]);
     try function_bc.setCode(&.{});
     try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
-    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), function_bc.code_capacity);
+    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[0]);
 }
 
 test "bytecode appendCode does not infer direct eval from atom operand bytes" {
