@@ -867,17 +867,29 @@ pub const Machine = struct {
             (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
         const total = arg_storage_count + var_count + stack_count + open_slots + snapshot_count;
 
-        entry.arena_mark = rt.vm_stack.mark();
-        errdefer rt.vm_stack.restore(entry.arena_mark);
-
         // `local_buf = alloca(alloca_size)` (17846); the VM stack arena is
-        // zjs's C stack. Heap fallback only when the arena is exhausted.
+        // zjs's C stack. Warm arm first: one `carveActiveMarked` snapshot
+        // yields the watermark and the window behind a single capacity branch
+        // (the oversized-frame bound is subsumed — used never exceeds
+        // chunk_slots), and `entry.arena_mark` is published only after the
+        // carve, so LLVM no longer reloads chunk_count/active/used across a
+        // may-alias Entry store the way the previous mark()+carve() pair did.
+        // A miss is pure (arena untouched); the authoritative carve below
+        // keeps chunk switching and first use, with heap fallback only when
+        // the arena is exhausted.
         var storage_on_heap = false;
-        const slab_values = rt.vm_stack.carve(&rt.memory, total) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, total);
-            storage_on_heap = true;
-            break :blk heap;
+        const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
+            entry.arena_mark = active_carve.mark;
+            break :blk active_carve.window;
+        } else blk: {
+            entry.arena_mark = rt.vm_stack.mark();
+            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
+                const heap = try rt.memory.alloc(core.JSValue, total);
+                storage_on_heap = true;
+                break :heap heap;
+            };
         };
+        errdefer rt.vm_stack.restore(entry.arena_mark);
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
 
         // Pointer-arithmetic partition (17855-17866). Padded args occupy the
