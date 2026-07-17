@@ -2488,6 +2488,19 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// stalled on (int+float 29.7% idle cycles, measured). NOT a numeric fast path: it
 /// runs the exact same full `addLocal` (int+float stays with object/BigInt), unhopped.
 pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) {
+        // Generator/eval stop boundary (same arm as op_update_loc_cold /
+        // op_mod_cold / op_compare_cold): use the publishing path so coldNext's
+        // maybeStop fires when this op ends exactly at stop_before_pc. Without
+        // it the register-resident body below ends in `cont`, skipping the
+        // boundary check — a `.return()`-driven finally range whose LAST op is
+        // the fused `s += x` add_loc then blows past finally_range.stop and
+        // eagerly executes the code after the finally (observed: it.return()
+        // throws instead of returning {value, done:true}).
+        vm.publish(pc, sp);
+        _ = arith_vm.addLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, vm.output) catch |e| return vm.fail(e);
+        return coldNext(var_buf, vm);
+    }
     const idx: u16 = pc[1];
     const rhs = (sp - 1)[0];
     // qjs OP_add_loc → js_add_loc_slow(ctx, pv, sp): hand the local slot pointer and

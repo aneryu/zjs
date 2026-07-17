@@ -8763,6 +8763,38 @@ test "generator parameter eval cells close before body resume" {
     try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
 }
 
+test "generator return runs an add_loc-terminated finally to its stop boundary" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Regression: op_add_loc_cold lacked the local_fast_blocked publishing arm
+    // (its register-resident body ends in `cont`, which skips coldNext's
+    // maybeStop). A `.return()`-driven finally resume arms stop_before_pc =
+    // finally_range.stop, and the peephole fuses the finally body's trailing
+    // `s += 1` into add_loc — the finally range's LAST op. Blowing past the
+    // stop boundary executed the post-finally `s += 100; yield s` eagerly and
+    // it.return(42) threw instead of returning {value: 42, done: true}.
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function* g() {
+        \\  var s = 0;
+        \\  try { yield 1; } finally { s += 1; }
+        \\  s += 100;
+        \\  yield s;
+        \\}
+        \\var it = g();
+        \\var first = it.next();
+        \\var second = it.return(42);
+        \\var third = it.next();
+        \\print(first.value, first.done, second.value, second.done, third.value, third.done);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1 false 42 true undefined true\n", stream.buffered());
+}
+
 test "generator default argument stores release refcounted stack values" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
