@@ -225,12 +225,12 @@ pub fn compareAt(
 /// the caller falls through to the generic path. The `*2` (keep-receiver) and
 /// string/object/bigint/coercion cases are entirely the generic path's job.
 pub inline fn tryInt32Binary(stack: *stack_mod.Stack, binop: u8) bool {
-    const n = stack.values.len;
+    const n = stack.len();
     if (n < 2) return false;
     const ints = core.JSValue.asInt32Pair(stack.values[n - 2], stack.values[n - 1]) orelse return false;
     const result = fastBinaryInt32(binop, ints.lhs, ints.rhs) orelse return false;
     stack.values[n - 2] = result;
-    stack.values = stack.values.ptr[0 .. n - 1];
+    stack.setLen(n - 1);
     return true;
 }
 
@@ -248,7 +248,7 @@ pub inline fn tryInt32BinaryWindow(base: [*]core.JSValue, sp_len: *usize, binop:
 /// Mirrors `compare()`'s int32 branch exactly (same per-op boolean switch).
 /// Returns false untouched when either operand is not int32.
 pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
-    const n = stack.values.len;
+    const n = stack.len();
     if (n < 2) return false;
     const ints = core.JSValue.asInt32Pair(stack.values[n - 2], stack.values[n - 1]) orelse return false;
     const result = switch (cmp) {
@@ -261,7 +261,7 @@ pub inline fn tryInt32Compare(stack: *stack_mod.Stack, cmp: u8) bool {
         else => return false,
     };
     stack.values[n - 2] = core.JSValue.boolean(result);
-    stack.values = stack.values.ptr[0 .. n - 1];
+    stack.setLen(n - 1);
     return true;
 }
 

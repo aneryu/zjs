@@ -47,9 +47,9 @@ pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *f
     // popped ret_val — zero refcount traffic on the returned value. Mirror
     // that: take the top slot by value and shrink, so frame teardown
     // (Entry.deinitSimple / stack.deinit) never touches it.
-    const values = stack.values;
+    const values = stack.liveValues();
     const value = if (values.len != 0) blk: {
-        stack.values = values.ptr[0 .. values.len - 1];
+        stack.setLen(values.len - 1);
         break :blk values[values.len - 1];
     } else core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);

@@ -94,8 +94,8 @@ pub fn execCall(
     // The region is popped and released only after the call completes, so
     // the values stay rooted for the whole call.
     const total: usize = @as(usize, argc) + 1;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const func = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
@@ -191,16 +191,17 @@ pub fn execCall(
 /// Remove the callable at `region_base`, leaving its arguments on the operand
 /// stack for `initArgumentsFromStack` to transfer without duplication.
 pub fn popCallFuncFromStack(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
-    std.debug.assert(stack.values.len > region_base);
+    const stack_len = stack.len();
+    std.debug.assert(stack_len > region_base);
     const func_val = stack.values[region_base];
-    const argc = stack.values.len - region_base - 1;
+    const argc = stack_len - region_base - 1;
     if (argc > 0) {
-        const src = stack.values.ptr[region_base + 1 .. region_base + 1 + argc];
-        const dest = stack.values.ptr[region_base .. region_base + argc];
+        const src = stack.values[region_base + 1 .. region_base + 1 + argc];
+        const dest = stack.values[region_base .. region_base + argc];
         @memmove(dest, src);
     }
     func_val.free(rt);
-    stack.values = stack.values.ptr[0 .. stack.values.len - 1];
+    stack.setLen(stack_len - 1);
 }
 
 /// Pop and release every owned value above `region_base` on the operand
@@ -211,19 +212,19 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     // register-held local and the loop just `JS_FreeValue(call_argv[i])` — no
     // per-slot poison-store and no re-derivation of the operand-stack base.
     // `free`/`releaseAndDestroy` runs GC-release + object destructors; none of
-    // those push to this operand stack, so `stack.values.ptr` is loop-invariant.
+    // those push to this operand stack, so `stack.values` is loop-invariant.
     // Holding it in a local lets LLVM keep the base in a register instead of
-    // reloading `stack.values.ptr` each iteration (opaque free() otherwise
+    // reloading `stack.values` each iteration (opaque free() otherwise
     // forces the reload). Slots above the shrunk length are logically dead —
     // every `push*` overwrites its target and GC scans only `values[0..len]` —
     // so the qjs form omits the undefined poison-store entirely.
-    const base = stack.values.ptr;
-    var index = stack.values.len;
+    const base = stack.values;
+    var index = stack.len();
     while (index > region_base) {
         index -= 1;
         base[index].free(rt);
     }
-    stack.values = base[0..region_base];
+    stack.setLen(region_base);
 }
 
 // noinline: this is the cold exception path shared by every `*Vm` opcode wrapper.
@@ -567,13 +568,8 @@ fn callValueOrBytecodeClassModeDispatch(
             }
             return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
-        const effective_this = function_object.functionLexicalThis() orelse this_value;
-        const effective_new_target = if (fb.flags.is_arrow_function) blk: {
-            if (function_object.functionArrowNewTarget()) |new_target| break :blk new_target;
-            break :blk core.JSValue.undefinedValue();
-        } else core.JSValue.undefinedValue();
         const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
+        return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
@@ -2247,7 +2243,7 @@ pub fn constructDynamicFunctionFromSource(
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
         return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
     // outer frames hold roots this nested cycle pass cannot see, so running the
@@ -2268,12 +2264,12 @@ pub fn constructDynamicFunctionFromSource(
     // wrapper) — a refcount under-flow that dangles into a later cycle GC. Drain
     // the stack's owned copy now so the window is empty before any further
     // bytecode runs; `result` keeps the independently-owned reference.
-    for (nested_stack.values) |*slot| {
+    for (nested_stack.liveValues()) |*slot| {
         const stale = slot.*;
         slot.* = core.JSValue.undefinedValue();
         stale.free(ctx.runtime);
     }
-    nested_stack.values = nested_stack.values.ptr[0..0];
+    nested_stack.setLen(0);
     if (object_ops.functionObjectFromValue(result)) |function_object| {
         const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
         try function_object.setPrototype(ctx.runtime, prototype);
@@ -4368,7 +4364,7 @@ pub fn indirectEval(
         if (!compiled.function.flags.is_strict) {
             validateGlobalEvalFunctionDeclarationsFromBytecode(ctx, eval_global, &compiled.function, true) catch |err| break :blk err;
         }
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk runWithCallEnv(.{
             .ctx = ctx,
@@ -4722,9 +4718,9 @@ pub fn callFunctionBytecodeModeState(
     else
         null;
     var nested_stack = if (operand_window) |window|
-        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, window)
+        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.vm_stack_arena_policy, window)
     else
-        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
@@ -4764,7 +4760,7 @@ pub fn runGeneratorParameterInit(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !core.JSValue {
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer object.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     return runWithCallEnv(.{
@@ -5017,7 +5013,7 @@ pub fn stashGeneratorPendingReturn(
     stop_pc: usize,
 ) !void {
     const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
-    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stack_size, 2, generator.generatorStackUsesCombinedStorage());
+    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stackSize(), 2, generator.generatorStackUsesCombinedStorage());
     const values = saved_stack.values;
     values.ptr[values.len] = pending_value.dup();
     values.ptr[values.len + 1] = core.JSValue.int32(@intCast(stop_pc));
@@ -5688,7 +5684,7 @@ pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
     stack: *const stack_mod.Stack,
     frame: *const frame_mod.Frame,
 ) void {
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.values);
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.liveValues());
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
     // frame.var_refs: typed cell slots are never iterator-state Objects (the

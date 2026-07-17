@@ -120,9 +120,9 @@ const valuesStrictEqual = value_ops.valuesStrictEqual;
 pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peek()) |marker| {
         defer marker.free(rt);
-        if (marker.isCatchOffset() and stack.values.len >= 3) {
-            const maybe_next = stack.values[stack.values.len - 2];
-            const maybe_iterator = stack.values[stack.values.len - 3];
+        if (marker.isCatchOffset() and stack.len() >= 3) {
+            const maybe_next = stack.values[stack.len() - 2];
+            const maybe_iterator = stack.values[stack.len() - 3];
             if (isCallableValue(maybe_next) and isIteratorLikeValue(rt, maybe_iterator)) {
                 const record_marker = try stack.pop();
                 record_marker.free(rt);

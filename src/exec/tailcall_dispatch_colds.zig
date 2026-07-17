@@ -130,6 +130,10 @@ pub const SpecialHandlers = struct {
     op_return: Handler,
     op_return_undef: Handler,
     op_call: Handler,
+    op_call0: Handler,
+    op_call1: Handler,
+    op_call2: Handler,
+    op_call3: Handler,
     op_call_method: Handler,
     op_for_of_next: Handler,
     op_tail_call: Handler,
@@ -758,10 +762,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.return_undef] = s.op_return_undef;
     t[op.return_async] = s.op_return;
     t[op.call] = s.op_call;
-    t[op.call0] = s.op_call;
-    t[op.call1] = s.op_call;
-    t[op.call2] = s.op_call;
-    t[op.call3] = s.op_call;
+    t[op.call0] = s.op_call0;
+    t[op.call1] = s.op_call1;
+    t[op.call2] = s.op_call2;
+    t[op.call3] = s.op_call3;
     t[op.call_method] = s.op_call_method;
     t[op.tail_call] = s.op_tail_call;
     t[op.tail_call_method] = s.op_tail_call_method;

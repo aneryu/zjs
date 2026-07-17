@@ -258,7 +258,7 @@ pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
 pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const ret_value = try stack.pop();
 
-    while (stack.values.len != 0) {
+    while (stack.len() != 0) {
         const value = try stack.pop();
         if (value.isCatchOffset()) {
             value.free(rt);
@@ -573,11 +573,11 @@ fn adapterValueBorrow(slot: core.JSValue) core.JSValue {
 }
 
 fn requireStackLen(stack: *const stack_mod.Stack, required: usize) !void {
-    if (stack.values.len < required) return error.StackUnderflow;
+    if (stack.len() < required) return error.StackUnderflow;
 }
 
 fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void {
-    try std.testing.expectEqual(expected.len, stack.values.len);
+    try std.testing.expectEqual(expected.len, stack.len());
     for (expected, 0..) |value, index| {
         try std.testing.expectEqual(@as(?i32, value), stack.values[index].asInt32());
     }

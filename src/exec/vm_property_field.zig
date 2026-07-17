@@ -173,7 +173,7 @@ pub noinline fn setName(
         op.set_name => {
             const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
             frame.pc += 4;
-            if (stack.values.len == 0) return error.StackUnderflow;
+            if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
             defer value.free(ctx.runtime);
             if (value.isObject()) {
@@ -184,10 +184,10 @@ pub noinline fn setName(
             }
         },
         op.set_name_computed => {
-            if (stack.values.len < 2) return error.StackUnderflow;
-            const value = stack.values[stack.values.len - 1].dup();
+            if (stack.len() < 2) return error.StackUnderflow;
+            const value = stack.values[stack.len() - 1].dup();
             defer value.free(ctx.runtime);
-            const key = stack.values[stack.values.len - 2].dup();
+            const key = stack.values[stack.len() - 2].dup();
             defer key.free(ctx.runtime);
             if (value.isObject()) {
                 const object = try property_ops.expectObject(value);
@@ -238,8 +238,8 @@ pub noinline fn field(
     frame.pc += 4;
     switch (opc) {
         op.get_field => {
-            if (stack.values.len == 0) return error.StackUnderflow;
-            const top_index = stack.values.len - 1;
+            if (stack.len() == 0) return error.StackUnderflow;
+            const top_index = stack.len() - 1;
             const receiver = stack.values[top_index];
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
@@ -265,7 +265,7 @@ pub noinline fn field(
                 replaceTopOwned(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
             }
-            stack.values = stack.values.ptr[0..top_index];
+            stack.setLen(top_index);
             const obj = receiver;
             defer obj.free(ctx.runtime);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
@@ -832,22 +832,22 @@ pub noinline fn arrayElement(
             }
             if (fastDenseArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
             if (fastTypedArrayElementValue(ctx.runtime, obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
-                const old_value = stack.values[stack.values.len - 1];
-                stack.values[stack.values.len - 1] = value;
+                const old_value = stack.values[stack.len() - 1];
+                stack.values[stack.len() - 1] = value;
                 old_value.free(ctx.runtime);
                 return .done;
             }
@@ -863,8 +863,8 @@ pub noinline fn arrayElement(
                 return err;
             };
             errdefer value.free(ctx.runtime);
-            const old_value = stack.values[stack.values.len - 1];
-            stack.values[stack.values.len - 1] = value;
+            const old_value = stack.values[stack.len() - 1];
+            stack.values[stack.len() - 1] = value;
             old_value.free(ctx.runtime);
         },
         op.get_array_el3 => {
@@ -907,8 +907,8 @@ pub noinline fn arrayElement(
                 return err;
             };
             errdefer value.free(ctx.runtime);
-            const old_key = stack.values[stack.values.len - 1];
-            stack.values[stack.values.len - 1] = key_value;
+            const old_key = stack.values[stack.len() - 1];
+            stack.values[stack.len() - 1] = key_value;
             key_value_owned = false;
             old_key.free(ctx.runtime);
             try stack.pushOwned(value);
@@ -1112,6 +1112,6 @@ fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSVa
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
-    if (index_from_top >= stack.values.len) return error.StackUnderflow;
-    return stack.values[stack.values.len - 1 - index_from_top].dup();
+    if (index_from_top >= stack.len()) return error.StackUnderflow;
+    return stack.values[stack.len() - 1 - index_from_top].dup();
 }

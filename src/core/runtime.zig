@@ -72,6 +72,26 @@ pub fn setDefaultStandardGlobalsInstaller(
     default_standard_global_own_property_capacity = own_property_capacity;
 }
 
+/// Canonical operand-stack backing policy shared by Runtime and the execution
+/// Stack. Runtime owns the configured limit and precomputes the arena-window
+/// form when that limit changes; frame construction can then publish the one
+/// packed word instead of re-saturating the same immutable limit per call.
+pub const VmStackWindowPolicy = packed struct(u64) {
+    limit: u62,
+    arena_window: bool = false,
+    resident_window: bool = false,
+
+    pub fn forLimit(limit: usize) VmStackWindowPolicy {
+        return .{ .limit = @intCast(@min(limit, std.math.maxInt(u62))) };
+    }
+
+    pub fn arenaForLimit(limit: usize) VmStackWindowPolicy {
+        var policy = forLimit(limit);
+        policy.arena_window = true;
+        return policy;
+    }
+};
+
 /// Contiguous VM value-stack arena mirroring QuickJS's `alloca`-based
 /// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
 /// `[args | locals | operand stack]` instead of per-call heap allocations.
@@ -85,6 +105,11 @@ pub const VmStackArena = struct {
     pub const Mark = struct {
         chunk: usize,
         used: usize,
+    };
+
+    pub const ActiveCarve = struct {
+        mark: Mark,
+        window: []JSValue,
     };
 
     chunks: [max_chunks][]JSValue = @splat(&.{}),
@@ -110,6 +135,26 @@ pub const VmStackArena = struct {
             }
         }
         return self.carveSlow(account, n);
+    }
+
+    /// Allocation-free carve from the current chunk only, returning both the
+    /// original watermark and the carved window from one state snapshot.
+    /// Same-Machine hot frame constructors use this after their Entry storage
+    /// is warm; a miss leaves the arena unchanged so the authoritative `carve`
+    /// path can switch or allocate a chunk and preserve heap/OOM semantics.
+    pub inline fn carveActiveMarked(self: *VmStackArena, n: usize) ?ActiveCarve {
+        if (n == 0 or self.chunk_count == 0) return null;
+        const active = self.active;
+        const used = self.used[active];
+        // This comparison also rejects n > chunk_slots, since used never
+        // exceeds chunk_slots. Keeping one authoritative capacity predicate
+        // avoids rechecking the same bound in warm frame constructors.
+        if (chunk_slots - used < n) return null;
+        self.used[active] = used + n;
+        return .{
+            .mark = .{ .chunk = active, .used = used },
+            .window = self.chunks[active][used .. used + n],
+        };
     }
 
     /// Switch to or allocate another arena chunk.  The active chunk satisfies
@@ -671,11 +716,21 @@ pub const shared_lazy_native_function_slots = 12;
 pub const internal_destructuring_helper_slots = 14;
 const root_provider_inline_capacity = 1;
 
+/// Cold runtime bookkeeping whose ranges fit in one byte. The atom-string
+/// cache is four-way, so its cursor needs only two bits; combining it with the
+/// runtime-allocation ownership bit preserves both semantics while freeing the
+/// former usize cursor word for hot VM stack policy state.
+const RuntimeCompactState = packed struct(u8) {
+    recent_atom_string_next: u2 = 0,
+    owns_self_allocation: bool = false,
+    _padding: u5 = 0,
+};
+
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
     memory: memory.MemoryAccount,
-    owns_self_allocation: bool = false,
+    compact_state: RuntimeCompactState = .{},
     gc: gc.Registry,
     atoms: atom.AtomTable,
     classes: class.Table,
@@ -753,6 +808,7 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
     /// Native (machine C-stack) recursion guard, mirroring QuickJS
     /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860). Captured
     /// via `@frameAddress()` at the outermost eval entry (`updateNativeStackTop`,
@@ -794,7 +850,6 @@ pub const JSRuntime = struct {
     /// bytecode constants without retaining every atom string in the program;
     /// regexp literals in particular alternate between source and flags atoms.
     recent_atom_strings: [4]?RecentAtomString = @splat(null),
-    recent_atom_string_next: usize = 0,
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
     /// This is a general URI hot-path cache, not a fixture shortcut:
     /// ECMAScript URI helpers and decimal-to-percent harnesses both
@@ -860,7 +915,7 @@ pub const JSRuntime = struct {
 
     fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
         rt.memory = account;
-        rt.owns_self_allocation = owns_self_allocation;
+        rt.compact_state = .{ .owns_self_allocation = owns_self_allocation };
         // MemoryAccount's std.mem.Allocator facade stores a pointer to the
         // account, so bind it only after the account reaches this stable field
         // address. All runtime `.allocator` / `.persistent_allocator` users now
@@ -930,6 +985,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
         rt.native_stack_size = initial_native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
@@ -954,7 +1010,6 @@ pub const JSRuntime = struct {
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
         rt.recent_atom_strings = @splat(null);
-        rt.recent_atom_string_next = 0;
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.internal_destructuring_helpers = @splat(null);
@@ -994,7 +1049,7 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| JSValue.string(stored.string.header()).free(self);
         }
-        self.recent_atom_string_next = 0;
+        self.compact_state.recent_atom_string_next = 0;
         const empty_string = self.empty_string;
         self.empty_string = null;
         if (empty_string) |cached| JSValue.string(cached.header()).free(self);
@@ -1104,7 +1159,7 @@ pub const JSRuntime = struct {
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
         self.memory.deinitSmallObjectSlab();
-        if (self.owns_self_allocation) {
+        if (self.compact_state.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
             std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
         } else {
@@ -2301,13 +2356,13 @@ pub const JSRuntime = struct {
         // Seeds the weak back-pointer (and, for non-tagged string atoms,
         // the table-side cache); no-op for symbol atoms.
         self.atoms.cacheString(atom_id, created);
-        const slot_index = self.recent_atom_string_next % self.recent_atom_strings.len;
+        const slot_index: usize = self.compact_state.recent_atom_string_next;
         const old = self.recent_atom_strings[slot_index];
         self.recent_atom_strings[slot_index] = .{
             .atom_id = atom_id,
             .string = created,
         };
-        self.recent_atom_string_next = (slot_index + 1) % self.recent_atom_strings.len;
+        self.compact_state.recent_atom_string_next = @intCast((slot_index + 1) % self.recent_atom_strings.len);
         if (old) |stored| JSValue.string(stored.string.header()).free(self);
         return created;
     }
@@ -2339,6 +2394,7 @@ pub const JSRuntime = struct {
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
         self.stack_size = size;
+        self.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(size);
     }
 
     pub fn stackSize(self: JSRuntime) usize {

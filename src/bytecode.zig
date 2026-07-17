@@ -1600,6 +1600,19 @@ pub const function_bytecode = struct {
             };
         }
 
+        /// Materialize the immutable compatibility execution view before an FB
+        /// is published through a bytecode function object. QuickJS executes
+        /// the FB directly; while zjs still has a separate Bytecode view, making
+        /// publication fallible once keeps allocation and nullable cache logic
+        /// out of every later call-target resolution.
+        pub noinline fn ensureCachedView(self: *FunctionBytecodeImpl, account: *memory.MemoryAccount, atoms: *atom.AtomTable) !*function_mod.BytecodeImpl {
+            if (self.cached_view) |view| return view;
+            const slot = try account.alloc(function_mod.BytecodeImpl, 1);
+            slot[0] = function_mod.makeBytecodeView(self, account, atoms);
+            self.cached_view = &slot[0];
+            return &slot[0];
+        }
+
         /// Walk final-form bytecode `byte_code` opcode-by-opcode, dup'ing the
         /// inline atom of every atom-operand opcode. This is the retention
         /// scheme that replaces the former standalone `atom_operands` array:
@@ -8684,7 +8697,10 @@ const function_mod = struct {
         /// Runtime-created mapped Arguments objects open-alias every supplied
         /// argument slot in addition to the statically captured bindings.
         has_mapped_arguments: bool = false,
-        reserved: u1 = 0,
+        /// Exact-zero-argument sloppy leaf whose frame cannot acquire cold
+        /// state or value-bearing local/capture/open-ref windows. Published in
+        /// the previously reserved execution-view flag bit.
+        simple_inline_empty_leaf: bool = false,
     };
 
     /// Compatibility aliases for finalized runtime function bytecode.
@@ -9140,6 +9156,10 @@ const function_mod = struct {
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
                 .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
+                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and
+                    fb.arg_count == 0 and fb.var_count == 0 and fb.open_var_ref_count == 0 and
+                    fb.var_refs_len == 0 and !materializes_arguments_object and
+                    !rescues_implicit_arguments and !fb.flags.has_eval_call,
             },
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
@@ -9193,17 +9213,7 @@ const function_mod = struct {
     /// all — `b` IS the execution structure (`b = p->u.func.function_bytecode`,
     /// quickjs.c:17825) — so the hit leg must ride inline.
     pub inline fn cachedBytecodeView(fb: *const FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
-        return fb.cached_view orelse buildCachedBytecodeView(@constCast(fb), mem, atoms);
-    }
-
-    /// Cold once-per-FB build leg of `cachedBytecodeView` (see above).
-    /// `noinline` is load-bearing: keeping the alloc/build out of the caller
-    /// is the whole point of the split.
-    noinline fn buildCachedBytecodeView(fb: *FunctionBytecode, mem: *memory.MemoryAccount, atoms: *atom.AtomTable) ?*BytecodeImpl {
-        const slot = mem.alloc(BytecodeImpl, 1) catch return null;
-        slot[0] = function_mod.makeBytecodeView(fb, mem, atoms);
-        fb.cached_view = &slot[0];
-        return &slot[0];
+        return fb.cached_view orelse @constCast(fb).ensureCachedView(mem, atoms) catch null;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;

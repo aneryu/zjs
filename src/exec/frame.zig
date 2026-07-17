@@ -260,7 +260,6 @@ pub const Frame = struct {
     pc: usize = 0,
     this_value: JSValue = JSValue.undefinedValue(),
     current_function: JSValue = JSValue.undefinedValue(),
-    new_target: JSValue = JSValue.undefinedValue(),
     actual_arg_count: usize = 0,
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
@@ -285,6 +284,7 @@ pub const Frame = struct {
     cold: ?*FrameCold = null,
 
     pub const FrameCold = struct {
+        new_target: JSValue = JSValue.undefinedValue(),
         constructor_this_value: JSValue = JSValue.undefinedValue(),
         constructor_this_value_ownership: Ownership = .borrowed,
         arguments_object: ?JSValue = null,
@@ -337,6 +337,9 @@ pub const Frame = struct {
     pub inline fn constructorThisValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();
     }
+    pub inline fn newTargetValue(self: *const Frame) JSValue {
+        return if (self.cold) |c| c.new_target else JSValue.undefinedValue();
+    }
     pub inline fn argumentsObject(self: *const Frame) ?JSValue {
         return if (self.cold) |c| c.arguments_object else null;
     }
@@ -356,14 +359,12 @@ pub const Frame = struct {
         function: *const bytecode.Bytecode,
         this_value: JSValue,
         current_function: JSValue,
-        new_target: JSValue,
         actual_arg_count: usize,
     ) Frame {
         return .{
             .function = function,
             .this_value = this_value,
             .current_function = current_function,
-            .new_target = new_target,
             .actual_arg_count = actual_arg_count,
             .ownership = .{
                 .this_value = .borrowed,
@@ -396,21 +397,23 @@ pub const Frame = struct {
     pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
         // Allocate the only fallible part before retaining or taking any call
         // binding. On OOM the caller must still own every input unchanged.
-        const ctor_cold = if (inputs.constructor_this_value.isUndefined())
+        const binding_cold = if (inputs.constructor_this_value.isUndefined() and inputs.new_target_value.isUndefined())
             null
         else
             try self.ensureCold(account);
         self.this_value = bindCallValue(inputs.initial_this_value, modes.this_value);
         self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
-        self.new_target = inputs.new_target_value;
         self.ownership.this_value = modeOwnership(modes.this_value);
         self.ownership.current_function = modeOwnership(modes.current_function);
         // ctor_this is undefined for every non-derived-constructor frame (owned
         // undefined is a no-op to free), so only materialize `cold` when it is a
         // real value. The inline path never reaches here (no derived ctors inline).
-        if (ctor_cold) |c| {
-            c.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
-            c.constructor_this_value_ownership = modeOwnership(modes.constructor_this_value);
+        if (binding_cold) |c| {
+            c.new_target = inputs.new_target_value;
+            if (!inputs.constructor_this_value.isUndefined()) {
+                c.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
+                c.constructor_this_value_ownership = modeOwnership(modes.constructor_this_value);
+            }
         }
     }
 
@@ -451,7 +454,7 @@ pub const Frame = struct {
         self.actual_arg_count = argc;
         const frame_arg_count = @max(argc, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            if (stack.values.len < argc) return error.StackUnderflow;
+            if (stack.len() < argc) return error.StackUnderflow;
             const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, null);
             if (frame_arg_count > argc) @memset(owned_args[argc..], JSValue.undefinedValue());
             var remaining = argc;
@@ -585,36 +588,30 @@ pub const Frame = struct {
     fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {
         const this_value = self.this_value;
         const current_function = self.current_function;
-        const new_target = self.new_target;
         const this_value_ownership = self.ownership.this_value;
         const current_function_ownership = self.ownership.current_function;
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
-        self.new_target = JSValue.undefinedValue();
         self.ownership.this_value = .owned;
         self.ownership.current_function = .owned;
         // Frees constructor/arguments cold state and the box.
         self.freeCold(&rt.memory, rt);
         if (this_value_ownership == .owned) this_value.free(rt);
         if (current_function_ownership == .owned) current_function.free(rt);
-        _ = new_target;
     }
 
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const this_value = self.this_value;
         const current_function = self.current_function;
-        const new_target = self.new_target;
         const this_value_ownership = self.ownership.this_value;
         const current_function_ownership = self.ownership.current_function;
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
-        self.new_target = JSValue.undefinedValue();
         self.ownership.this_value = .owned;
         self.ownership.current_function = .owned;
 
         if (this_value_ownership == .owned) this_value.free(rt);
         if (current_function_ownership == .owned) current_function.free(rt);
-        _ = new_target;
 
         // releaseOwnedStorage frees the storage slices + clears the storage-coupled
         // cold state (original_args/sync). Then free the rest of cold (ctor_this,

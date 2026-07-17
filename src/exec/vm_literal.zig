@@ -516,7 +516,7 @@ pub noinline fn specialObject(
     } else if (subtype == 2) {
         try stack.push(frame.current_function);
     } else if (subtype == 3) {
-        try stack.push(frame.new_target);
+        try stack.push(frame.newTargetValue());
     } else if (subtype == 4) {
         if (property_ops.expectObject(frame.current_function)) |function_object| {
             if (function_object.functionHomeObject()) |home_object| {
@@ -605,8 +605,8 @@ pub noinline fn rest(
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
-    if (index_from_top >= stack.values.len) return error.StackUnderflow;
-    return stack.values[stack.values.len - 1 - index_from_top].dup();
+    if (index_from_top >= stack.len()) return error.StackUnderflow;
+    return stack.values[stack.len() - 1 - index_from_top].dup();
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

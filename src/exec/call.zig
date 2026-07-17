@@ -3312,7 +3312,7 @@ pub fn qjsEvalGlobalScriptSource(
             _ = error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
             break :blk error.SyntaxError;
         }
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk zjs_vm.runWithCallEnv(.{
             .ctx = ctx,

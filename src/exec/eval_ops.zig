@@ -475,8 +475,8 @@ pub fn execDirectEval(
     // with the tailCall flag); request frame reuse like op.tail_call.
     if (allow_tail_inline and frame.pc < function.code.len and function.code[frame.pc] == op.@"return") {
         const total = @as(usize, argc) + 1;
-        if (stack.values.len >= total) {
-            const region_base = stack.values.len - total;
+        if (stack.len() >= total) {
+            const region_base = stack.len() - total;
             const func_borrowed = stack.values[region_base];
             if (!isContextIntrinsicEval(ctx, func_borrowed)) {
                 // `eval(...)` is a plain call: no receiver, `this` is undefined.
@@ -664,7 +664,7 @@ pub fn directEval(
     if (eval_global_var_bindings) {
         try validateGlobalEvalFunctionDeclarationsFromBytecode(ctx, global, &compiled.function, false);
     }
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     var direct_eval_frame_var_refs = try createDirectEvalFrameVarRefs(ctx, global, &compiled.function, caller_function, caller_frame, eval_global_var_bindings);
     defer freeDirectEvalFrameVarRefs(ctx.runtime, direct_eval_frame_var_refs);
@@ -672,10 +672,10 @@ pub fn directEval(
     direct_eval_frame_var_refs_root.init(ctx.runtime, &direct_eval_frame_var_refs);
     defer direct_eval_frame_var_refs_root.deinit();
     const eval_this = try directEvalThisValue(ctx, global, caller_function, caller_frame);
-    const eval_new_target = if (eval_allows_new_target) blk: {
-        if (caller_frame) |outer_frame| break :blk outer_frame.new_target;
-        break :blk core.JSValue.undefinedValue();
-    } else core.JSValue.undefinedValue();
+    const eval_new_target = if (eval_allows_new_target)
+        directEvalNewTargetValue(caller_function, caller_frame)
+    else
+        core.JSValue.undefinedValue();
     const eval_current_function = blk: {
         if (caller_frame) |outer_frame| break :blk outer_frame.current_function;
         break :blk core.JSValue.undefinedValue();
@@ -705,10 +705,34 @@ pub fn directEvalThisValue(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const outer_frame = caller_frame orelse return core.JSValue.undefinedValue();
+    if (capturedArrowSpecialValue(caller_function, outer_frame, core.atom.ids.this_)) |value| return value;
     if (classStaticThisAtom(caller_function, caller_frame)) |atom_id| {
         if (classStaticThisValue(caller_function, outer_frame, atom_id)) |value| return value;
     }
     return object_ops.materializeFrameThisBinding(ctx, global, outer_frame);
+}
+
+fn capturedArrowSpecialValue(
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: *frame_mod.Frame,
+    name: core.Atom,
+) ?core.JSValue {
+    const function = caller_function orelse return null;
+    if (!function.flags.is_arrow_function) return null;
+    for (function.closure_var, 0..) |capture, index| {
+        if (capture.var_name == name and index < caller_frame.var_refs.len) {
+            return caller_frame.var_refs[index].varRefValue();
+        }
+    }
+    return null;
+}
+
+fn directEvalNewTargetValue(
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) core.JSValue {
+    const frame = caller_frame orelse return core.JSValue.undefinedValue();
+    return capturedArrowSpecialValue(caller_function, frame, core.atom.ids.new_target) orelse frame.newTargetValue();
 }
 
 pub fn directEvalPrivateBoundNames(
