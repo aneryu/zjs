@@ -406,23 +406,34 @@ noinline fn iteratorNextCallSetupRecover(vm: *Vm, err: HostError) bool {
 /// into the callee's first opcode. No driver round-trip: no Outcome encode,
 /// no tail_request staging, no driver-side spill/reload detour. Expanded
 /// inline into the (Handler-signature) caller so the tail calls are legal.
-inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry) Outcome {
+inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8) Outcome {
     // Enter the entry pushCall handed back instead of reloading
     // `machine.top` — qjs enters the callee via the alloca result pointer
     // already in a register (quickjs.c:17846); this is the equivalent
     // pointer pass-through (pushFrame just stored the same pointer into
     // `machine.top`, quickjs.c:17870). This is reloadTop's depth>0 arm for a
     // fresh frame, shared by every same-Machine call-entry path.
+    //
+    // `code_ptr` is the callee's first pc, read from the FB-resident
+    // `fb.byte_code` (qjs `pc = b->byte_code_buf`, quickjs.c:17872) instead of
+    // the `frame.function.code.ptr` view field. The two are identical by
+    // construction — `makeBytecodeView` sets `.code = fb.byteCode()` and the
+    // finalized FB's byte_code is immutable until deinit — but the FB copy is
+    // one dependent load closer to the callable: [obj+40]→fb→byte_code versus
+    // [obj+40]→fb→cached_view→code.ptr. The callee's first opcode fetch
+    // (ldrb → table load → br) gates on this pointer, so shortening its feed
+    // chain by one L1 level is the entry-side twin of the R2 resume record.
+    std.debug.assert(code_ptr == entry.frame.function.code.ptr);
     vm.function = entry.frame.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
-    vm.code_base = vm.function.code.ptr;
-    vm.code_end = vm.function.code.ptr + vm.function.code.len;
+    vm.code_base = code_ptr;
+    vm.code_end = code_ptr + vm.function.code.len;
     vm.stack_base = vm.stack.values;
     // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
     vm.local_fast_blocked = false;
-    const pc2: [*]const u8 = vm.code_base; // fresh frame: frame.pc == 0
+    const pc2: [*]const u8 = code_ptr; // fresh frame: frame.pc == 0
     const sp2: [*]JSValue = vm.stack.topPtr();
     const vb2: [*]JSValue = vm.frame.locals.ptr;
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
@@ -439,15 +450,16 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, target.fb.byte_code);
 }
 
 /// Warm OP_call0 entry after receiver-independent resolution has proved the
 /// published empty-leaf shape. Avoid both InlineTarget freight and the native
 /// frame of the authoritative fallible constructor. `resume_pc` (the caller's
 /// register-resident `pc + 1`) rides into the entry's resume record so the
-/// return arm restores pc/sp with one ldp.
-inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8) Outcome {
+/// return arm restores pc/sp with one ldp. `code_ptr` is the FB-resident
+/// callee first pc (`fb.byte_code`), pre-folded by the resolving handler.
+inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const entry = vm.machine.tryPushEmptyLeafCallFast(vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(vm, function, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
@@ -456,7 +468,7 @@ inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const by
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, code_ptr);
 }
 
 /// First-use/chunk-switch/heap/OOM arm for the warm call0 adapter. Keeping the
@@ -481,7 +493,7 @@ noinline fn pushEmptyLeafMiss(vm: *Vm, function: *const bytecode.Bytecode, regio
 /// Dynamic-argc empty-leaf entry. Keep its authoritative constructor out of
 /// the operand handler instead of duplicating the warm fixed-call0 body in a
 /// second large opcode instance.
-inline fn pushEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) Outcome {
+inline fn pushEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const entry = vm.machine.pushEmptyLeafCall(vm.global, vm.stack, function, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
@@ -489,7 +501,7 @@ inline fn pushEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const byteco
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, code_ptr);
 }
 
 /// Same-Machine entry for a call region already moved out of the caller's
@@ -515,7 +527,7 @@ inline fn pushMovedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, target.fb.byte_code);
 }
 
 /// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
@@ -541,7 +553,7 @@ inline fn pushBorrowedIteratorAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, target.fb.byte_code);
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
@@ -611,7 +623,7 @@ inline fn pushForwardedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry);
+    return enterEntry(vm, entry, target.fb.byte_code);
 }
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
@@ -908,9 +920,9 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     vm.stack.setTopPtr(region_start);
                     if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(vb, vm, resolved.view, region_start, pc + 1);
+                            return pushWarmEmptyLeafAndEnter(vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
                         }
-                        return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start);
+                        return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
                     return pushAndEnter(vb, vm, &target, region_start, argc, .plain);
