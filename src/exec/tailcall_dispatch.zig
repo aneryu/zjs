@@ -711,6 +711,24 @@ fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!
     };
 }
 
+/// Read a 16-byte JSValue operand-stack slot as two 64-bit integer loads.
+/// Left to itself, LLVM lowers the whole-value read as one 128-bit SIMD load
+/// (`ldur q0`), but the slot was written by the value-producing handler as an
+/// integer store pair (`stp x8, xzr` — see op_push_small): the 128-bit read
+/// spans two 64-bit store-buffer entries, so store-to-load forwarding fails
+/// and the load waits for the stores to drain (double-digit cycles on every
+/// return). Two u64 loads keep each read fully contained in one forwarding-
+/// eligible 64-bit store, and keep the value SSA-scalar so it rides integer
+/// callee-saved registers across the teardown call and is pushed with an
+/// x-pair store — matching qjs, whose 16-byte JSValue return moves are
+/// ldp/stp integer pairs throughout (`ret_val = *--sp`, quickjs.c:18266).
+inline fn loadValueAsIntPair(slot: *const JSValue) JSValue {
+    const words: *const [2]u64 = @ptrCast(@alignCast(slot));
+    const lo = words[0];
+    const hi = words[1];
+    return @bitCast([2]u64{ lo, hi });
+}
+
 /// Fused popFrame + reload for an in-handler return to an inline caller —
 /// qjs OP_return + the done: epilogue (quickjs.c:18266, 20698-20710):
 /// teardown, unlink the frame (`rt->current_stack_frame = sf->prev_frame`,
@@ -772,7 +790,7 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(
     // cloning the complete teardown path for malformed bytecode in production.
     std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack_base));
     const result_sp = sp - 1;
-    const value = result_sp[0];
+    const value = loadValueAsIntPair(&result_sp[0]);
     vm.syncSp(result_sp);
     return popAndResume(vm, value);
 }
