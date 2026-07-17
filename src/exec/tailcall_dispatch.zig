@@ -96,9 +96,16 @@ pub const Vm = struct {
     /// and operand reads avoid re-loading the slice through `function`.
     code_base: [*]const u8,
     code_end: [*]const u8,
-    /// Frame-constant operand-stack base (== stack.values); reg_base is gone, so
-    /// cold handlers re-derive sp from here after a helper grows the stack.
-    stack_base: [*]JSValue,
+    /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
+    /// base from the authoritative `stack.values` (one dependent load off the
+    /// `vm.stack` pointer the call handlers already hold for setTopPtr), so the
+    /// per-boundary republication in enterEntry/reloadTop/reloadAfterPop/
+    /// popAndResume and the per-cold-op refresh in coldNext are gone — and with
+    /// them the whole stale-base-after-grow bug class (a heap-stack realloc
+    /// updates `stack.values` in place; there is no second copy to forget).
+    /// Field kept ONLY to preserve the measured Vm layout (same rationale as
+    /// `_dispatch_layout_padding` below).
+    stack_base: [*]JSValue = undefined,
     /// Keep the dispatch tables and outcome payloads at their measured offsets
     /// after deriving the single-consumer argument pointer from `frame`. The
     /// compact layout was instruction-neutral but less cycle-stable on the
@@ -270,11 +277,10 @@ inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
     if (vm.frame.pc >= vm.function.code.len) return falloffReturn(vm);
     var stop_out: Outcome = undefined;
     if (maybeStop(vm, &stop_out)) return stop_out;
-    // A cold helper may have GROWN a heap stack (eval/generator/cold-call), which
-    // reallocates stack.values. Refresh stack_base so the next handler and
-    // falloff checks use the LIVE buffer base, not
-    // a dangling pre-realloc pointer (the source of non-deterministic heap corruption).
-    vm.stack_base = vm.stack.values;
+    // A cold helper may have GROWN a heap stack (eval/generator/cold-call),
+    // which reallocates stack.values — handlers read the base straight from
+    // the authoritative `vm.stack.values` (no mirror to refresh), so the
+    // pre-realloc dangling-base hazard cannot exist here.
     const npc = vm.code_base + vm.frame.pc;
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
 }
@@ -430,7 +436,6 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
     vm.code_end = code_ptr + vm.function.code.len;
-    vm.stack_base = vm.stack.values;
     // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
     vm.local_fast_blocked = false;
     const pc2: [*]const u8 = code_ptr; // fresh frame: frame.pc == 0
@@ -769,7 +774,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const caller_opt = dying.prev;
         machine.popReturnedEmptyLeaf();
         if (caller_opt) |caller| {
-            // Flat caller republication — same 7 fields reloadAfterPop's
+            // Flat caller republication — same fields reloadAfterPop's
             // entry arm publishes (enterEntry overwrote them with callee
             // values, and the resumed caller's arbitrary bytecode reads all
             // of them, so none can be skipped); only the pc/sp derivation
@@ -785,7 +790,6 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.function = caller_function;
             vm.code_base = caller_function.code.ptr;
             vm.code_end = caller_function.code.ptr + caller_function.code.len;
-            vm.stack_base = caller.stack.values;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -807,8 +811,8 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     if (continuation.action == .next) {
         std.debug.assert(continuation.payload == 0);
         // Deliver the result on the (now-current) caller stack. AssumeCapacity
-        // never reallocs, so the stack_base reloadAfterPop captured stays
-        // valid; sp just advances past the pushed slot.
+        // never reallocs, so the sp reloadAfterPop captured stays valid; it
+        // just advances past the pushed slot.
         vm.stack.pushOwnedAssumeCapacity(value);
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
@@ -841,7 +845,7 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(
     // bytecode always has one result; valueless returns use `return_undef`.
     // Keep that compiler/verifier contract explicit in Debug instead of
     // cloning the complete teardown path for malformed bytecode in production.
-    std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack_base));
+    std.debug.assert(@intFromPtr(sp) > @intFromPtr(vm.stack.values));
     const result_sp = sp - 1;
     const value = loadValueAsIntPair(&result_sp[0]);
     vm.syncSp(result_sp);
@@ -912,7 +916,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
             // handler (qjs CASE(OP_call)). A miss (host fn / ctor / cross-realm /
             // underflow) falls to execCall with allow_inline=false.
             const total = @as(usize, argc) + 1;
-            const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack_base);
+            const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack.values);
             if (live_bytes >= total * @sizeOf(JSValue)) {
                 const region_start = sp - total;
                 const func = region_start[0];
@@ -959,7 +963,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
     // operand so callMethod's own decode (native builtin dispatch, allow_inline
     // already tried here) reads it correctly.
     const total = @as(usize, argc) + 2;
-    const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack_base);
+    const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack.values);
     if (live_bytes >= total * @sizeOf(JSValue)) {
         const region_start = sp - total;
         const receiver = region_start[0];
@@ -972,7 +976,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else region_start[2];
             if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, this_arg, receiver)) |target| {
-                const region_base = (@intFromPtr(region_start) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue);
+                const region_base = (@intFromPtr(region_start) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
                 vm.frame.pc += 2;
                 vm.stack.setTopPtr(sp);
                 return pushForwardedAndEnter(vb, vm, &target, region_base, argc);
@@ -1857,7 +1861,7 @@ fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JS
 
 inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     vm.syncPc(pc, pc_advance);
-    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue);
+    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
     const getter = vm.stack.values[operand_len - 1];
     const receiver = vm.stack.values[operand_len - 2];
     // qjs invokes an accessor through the same JS_CallInternal path as an
@@ -1908,7 +1912,7 @@ fn op_get_field_cached_getter(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
 fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const pc_advance: usize = if (pc[0] == op.get_length) 1 else 5;
     vm.syncPc(pc, pc_advance);
-    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack_base)) / @sizeOf(JSValue);
+    const operand_len = (@intFromPtr(sp) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
     vm.stack.setTopPtr(sp);
     const receiver = vm.stack.values[operand_len - 1];
     if (tryInlineProxyTrap(false, var_buf, vm, vm.property_holder, vm.property_atom)) |outcome| return outcome;
@@ -2603,7 +2607,6 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
     vm.function = vm.frame.function;
     vm.code_base = vm.function.code.ptr;
     vm.code_end = vm.function.code.ptr + vm.function.code.len;
-    vm.stack_base = vm.stack.values;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
@@ -2639,7 +2642,6 @@ inline fn reloadAfterPop(
     vm.function = vm.frame.function;
     vm.code_base = vm.function.code.ptr;
     vm.code_end = vm.function.code.ptr + vm.function.code.len;
-    vm.stack_base = vm.stack.values;
     pc.* = vm.code_base + vm.frame.pc;
     sp.* = vm.stack.topPtr();
     var_buf.* = vm.frame.locals.ptr;
