@@ -444,9 +444,11 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 
 /// Warm OP_call0 entry after receiver-independent resolution has proved the
 /// published empty-leaf shape. Avoid both InlineTarget freight and the native
-/// frame of the authoritative fallible constructor.
-inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) Outcome {
-    const entry = vm.machine.tryPushEmptyLeafCallFast(vm.global, vm.stack, function, region_start) orelse switch (pushEmptyLeafMiss(vm, function, region_start)) {
+/// frame of the authoritative fallible constructor. `resume_pc` (the caller's
+/// register-resident `pc + 1`) rides into the entry's resume record so the
+/// return arm restores pc/sp with one ldp.
+inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushEmptyLeafCallFast(vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(vm, function, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -741,8 +743,47 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
     if (machine.topEntry().isEmptyLeaf()) {
+        const dying = machine.topEntry();
+        // One ldp: the caller's resume {pc, sp} stored by the empty-leaf
+        // constructor. Read FIRST so the dispatch-feeding chain
+        // (ldp → opcode ldrb → handler load → br) starts immediately; the
+        // inlined teardown (rc decrement + arena restore) and the vm field
+        // publication below run beside it instead of in front of it. This
+        // replaces the prev→frame.function→code.ptr→(+frame.pc) and
+        // stack→top_ptr re-derivation that used to gate the caller's next
+        // dispatch load.
+        const resume_pc = dying.emptyLeafResumePc();
+        const resume_sp = dying.emptyLeafResumeSp();
+        const caller_opt = dying.prev;
         machine.popReturnedEmptyLeaf();
-        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        if (caller_opt) |caller| {
+            // Flat caller republication — same 7 fields reloadAfterPop's
+            // entry arm publishes (enterEntry overwrote them with callee
+            // values, and the resumed caller's arbitrary bytecode reads all
+            // of them, so none can be skipped); only the pc/sp derivation
+            // is gone. local_fast_blocked stays false for a depth>0 caller,
+            // exactly like reloadAfterPop's entry arm.
+            std.debug.assert(caller == machine.top.?);
+            const caller_function = caller.frame.function;
+            std.debug.assert(resume_pc == caller_function.code.ptr + caller.frame.pc);
+            std.debug.assert(resume_sp == caller.stack.topPtr());
+            vm.frame = &caller.frame;
+            vm.stack = &caller.stack;
+            vm.catch_target = &caller.catch_target;
+            vm.function = caller_function;
+            vm.code_base = caller_function.code.ptr;
+            vm.code_end = caller_function.code.ptr + caller_function.code.len;
+            vm.stack_base = caller.stack.values;
+            vb2 = caller.frame.locals.ptr;
+            // Deliver the result on the caller stack: resume_sp IS the
+            // caller's operand top (asserted above), so store through the
+            // register instead of reloading top_ptr.
+            resume_sp[0] = value;
+            caller.stack.setTopPtr(resume_sp + 1);
+            return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+        }
+        // L0 caller: keep the authoritative reload (stop-boundary republication).
+        reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
         vm.stack.pushOwnedAssumeCapacity(value);
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
@@ -867,7 +908,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     vm.stack.setTopPtr(region_start);
                     if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(vb, vm, resolved.view, region_start);
+                            return pushWarmEmptyLeafAndEnter(vb, vm, resolved.view, region_start, pc + 1);
                         }
                         return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start);
                     }

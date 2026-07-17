@@ -7385,7 +7385,8 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) == null);
+    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
@@ -7402,7 +7403,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
@@ -7417,7 +7418,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     const heap_entry = try machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());

@@ -241,6 +241,43 @@ pub const Entry = struct {
         return self.teardown.empty_leaf;
     }
 
+    /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
+    /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
+    /// `native_caller` value is live ONLY under `teardown.has_native_caller`
+    /// (Function.prototype.call forwarding — never an empty leaf; every reader
+    /// checks the flag first, including the backtrace resolver). Nan-boxed
+    /// repr: `_stride_padding` is pure layout padding. The record holds the
+    /// caller's {resume pc, resume sp} so the return arm restores them with
+    /// one ldp instead of re-deriving them through the
+    /// prev→frame.function→code.ptr→(+frame.pc) load chain that feeds the
+    /// caller's next dispatch branch. Written once per empty-leaf push by
+    /// `finishEmptyLeafFrame` (the single constructor tail for the shape).
+    inline fn emptyLeafResumeWords(self: *Entry) *[2]usize {
+        if (comptime core.value.nan_boxing) {
+            comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) == 2 * @sizeOf(usize));
+            return @ptrCast(@alignCast(&self._stride_padding));
+        }
+        comptime std.debug.assert(@sizeOf(core.JSValue) == 2 * @sizeOf(usize));
+        return @ptrCast(@alignCast(&self.native_caller));
+    }
+
+    pub inline fn setEmptyLeafResume(self: *Entry, resume_pc: [*]const u8, resume_sp: [*]core.JSValue) void {
+        std.debug.assert(!self.teardown.has_native_caller);
+        const words = self.emptyLeafResumeWords();
+        words[0] = @intFromPtr(resume_pc);
+        words[1] = @intFromPtr(resume_sp);
+    }
+
+    pub inline fn emptyLeafResumePc(self: *Entry) [*]const u8 {
+        std.debug.assert(self.isEmptyLeaf());
+        return @ptrFromInt(self.emptyLeafResumeWords()[0]);
+    }
+
+    pub inline fn emptyLeafResumeSp(self: *Entry) [*]core.JSValue {
+        std.debug.assert(self.isEmptyLeaf());
+        return @ptrFromInt(self.emptyLeafResumeWords()[1]);
+    }
+
     /// Move post-call work from a retired frame into its tail-call replacement.
     fn adoptContinuation(self: *Entry, continuation: *ReturnContinuation) void {
         std.debug.assert(self.return_action == .next);
@@ -289,13 +326,22 @@ pub const Entry = struct {
             self.deinit(ctx);
     }
 
+    /// Outline wrapper for the cold consumers of the empty-leaf epilogue
+    /// (driver-side `.returned` / falloff completions). The hot in-handler
+    /// return arm uses `deinitEmptyLeafInline` directly so its non-zero
+    /// refcount leg and arena restore run without a bl/ret round trip, with
+    /// `destroyZeroRef` remaining the only (cold) call.
+    noinline fn deinitEmptyLeaf(self: *Entry, ctx: *core.JSContext) void {
+        self.deinitEmptyLeafInline(ctx);
+    }
+
     /// Return epilogue for a published empty leaf. The bytecode view proves
     /// this frame has no arguments/local/capture/open-ref windows and cannot
     /// materialize FrameCold through arguments or direct eval. Exact argc=0 is
     /// checked by the call adapter before setting the flag. The callable is the
     /// sole owned JSValue; the arena watermark and optional profile guard are
     /// the only remaining resources.
-    noinline fn deinitEmptyLeaf(self: *Entry, ctx: *core.JSContext) void {
+    inline fn deinitEmptyLeafInline(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
@@ -1068,11 +1114,16 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishEmptyLeafFrame(entry, global, function, callable_slot, stack_window, storage_on_heap);
+        return self.finishEmptyLeafFrame(entry, global, function, callable_slot, stack_window, storage_on_heap, self.callerResumePc());
     }
 
     /// Infallible publication tail shared by the cold authoritative
     /// constructor and the warm active-chunk constructor below.
+    /// `resume_pc` is the caller's post-operand resume pointer
+    /// (`caller_code_base + caller_frame.pc`), captured here together with the
+    /// caller's operand top (`callable_slot`, asserted == topPtr by both
+    /// constructors) as the empty-leaf resume record: the return arm restores
+    /// both with one ldp instead of chasing prev→function→code.ptr→frame.pc.
     inline fn finishEmptyLeafFrame(
         self: *Machine,
         entry: *Entry,
@@ -1081,6 +1132,7 @@ pub const Machine = struct {
         callable_slot: *core.JSValue,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        resume_pc: [*]const u8,
     ) *Entry {
         const rt = self.ctx.runtime;
         // No failable operation follows the ownership transfer.
@@ -1099,23 +1151,40 @@ pub const Machine = struct {
             .simple = true,
             .empty_leaf = !storage_on_heap,
         };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, @ptrCast(callable_slot));
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
         return entry;
     }
 
+    /// The caller's post-operand resume pointer, exactly what
+    /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
+    /// runs after the call opcode published the caller's resume offset
+    /// (handlers sync frame.pc before target resolution; driver-side pushes
+    /// run after the cold call helpers advanced it past the operand).
+    inline fn callerResumePc(self: *const Machine) [*]const u8 {
+        const caller_frame: *const frame_mod.Frame = if (self.top) |caller| &caller.frame else self.l0.level.frame;
+        return caller_frame.function.code.ptr + caller_frame.pc;
+    }
+
     /// Warm, allocation-free empty-leaf construction. A null result is a pure
     /// miss: call depth, arena watermark, source ownership, and Machine links
     /// are unchanged, so the caller can invoke pushEmptyLeafCall to handle
     /// first-use Entry allocation, chunk switching, heap fallback, OOM, or a
-    /// logical stack-overflow exception.
+    /// logical stack-overflow exception. `resume_pc` is the caller's
+    /// register-resident post-operand pc (== what `callerResumePc` derives);
+    /// the warm adapter passes it through so the resume record is stored
+    /// without reloading frame state.
     pub inline fn tryPushEmptyLeafCallFast(
         self: *Machine,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.Bytecode,
         region_start: [*]core.JSValue,
+        resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         std.debug.assert(function.flags.simple_inline_empty_leaf);
@@ -1137,7 +1206,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishEmptyLeafFrame(entry, global, function, &region_start[0], carve.window, false);
+        return self.finishEmptyLeafFrame(entry, global, function, &region_start[0], carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -1697,7 +1766,11 @@ pub const Machine = struct {
         std.debug.assert(dying.isEmptyLeaf());
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        dying.deinitEmptyLeaf(self.ctx);
+        // Inline epilogue: the hot leg is an rc decrement plus the arena
+        // watermark restore; keeping it in the return handler removes the
+        // only bl/ret on the empty-leaf return path (destroyZeroRef stays
+        // outline behind the rc==0 branch).
+        dying.deinitEmptyLeafInline(self.ctx);
         self.ctx.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;
