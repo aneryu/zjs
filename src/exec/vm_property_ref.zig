@@ -229,10 +229,10 @@ pub fn getRefValue(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (stack.values.len < 2) return error.StackUnderflow;
-    const obj = stack.values[stack.values.len - 2].dup();
+    if (stack.len() < 2) return error.StackUnderflow;
+    const obj = stack.values[stack.len() - 2].dup();
     defer obj.free(ctx.runtime);
-    const key = stack.values[stack.values.len - 1].dup();
+    const key = stack.values[stack.len() - 1].dup();
     defer key.free(ctx.runtime);
     if (obj.isUndefined()) return error.ReferenceError;
     if (varRefCellFromValue(obj) != null) {

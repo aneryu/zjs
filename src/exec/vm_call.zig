@@ -404,8 +404,8 @@ pub noinline fn callMethod(
     // `resolveInlineTarget`, so this never shadows the super-constructor path.
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
-        if (stack.values.len >= total) {
-            const region_base = stack.values.len - total;
+        if (stack.len() >= total) {
+            const region_base = stack.len() - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
@@ -420,8 +420,8 @@ pub noinline fn callMethod(
     // on the stack (rooting obj/func/args for the whole call), and is popped and
     // released only after the call completes.
     const total: usize = @as(usize, argc) + 2;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
@@ -491,8 +491,8 @@ pub noinline fn tailCallMethod(
     // through to the fast native dispatch below.
     if (allow_inline) {
         const total = @as(usize, argc) + 2;
-        if (stack.values.len >= total) {
-            const region_base = stack.values.len - total;
+        if (stack.len() >= total) {
+            const region_base = stack.len() - total;
             const receiver = stack.values[region_base];
             const method = stack.values[region_base + 1];
             if (inline_calls.resolveInlineTarget(ctx, global, receiver, method)) |target| {
@@ -507,8 +507,8 @@ pub noinline fn tailCallMethod(
     // on the stack (rooting obj/func/args for the whole call), and is popped and
     // released only after the call completes.
     const total: usize = @as(usize, argc) + 2;
-    if (stack.values.len < total) return error.StackUnderflow;
-    const region_base = stack.values.len - total;
+    if (stack.len() < total) return error.StackUnderflow;
+    const region_base = stack.len() - total;
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
@@ -784,7 +784,7 @@ pub noinline fn constructor(
 }
 
 pub fn checkCtor(frame: *frame_mod.Frame) !void {
-    if (frame.new_target.isUndefined()) return error.TypeError;
+    if (frame.newTargetValue().isUndefined()) return error.TypeError;
 }
 
 pub noinline fn checkCtorVm(
@@ -835,7 +835,7 @@ pub fn initCtor(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.new_target.isUndefined()) return error.TypeError;
+    if (frame.newTargetValue().isUndefined()) return error.TypeError;
     const function_object = try property_ops.expectObject(frame.current_function);
     const super = function_object.functionSuperConstructor() orelse return error.TypeError;
     const original_args = frame.originalArgs();
@@ -843,7 +843,7 @@ pub fn initCtor(
         original_args[0..@min(frame.actual_arg_count, original_args.len)]
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
-    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.new_target);
+    const result = try call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, super, args, function, frame, frame.newTargetValue());
     errdefer result.free(ctx.runtime);
     if (function_object.functionHomeObject()) |home_object| {
         const instance_object = try property_ops.expectObject(result);

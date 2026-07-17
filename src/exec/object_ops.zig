@@ -384,29 +384,9 @@ pub fn createBytecodeFunctionObject(
         try object.setOptionalValueSlot(ctx.runtime, try object.functionClassFieldsInitSlot(ctx.runtime), init_value);
     }
     if (fb.flags.is_arrow_function) {
-        // Arrow creation observes the enclosing ThisBinding even when the
-        // outer bytecode never executed OP_push_this. Materialize the outer
-        // sloppy binding once so arrows, direct `this`, and direct eval share
-        // the same wrapper/global object.
-        if (!frame.function.flags.is_derived_class_constructor) {
-            _ = try materializeFrameThisBinding(ctx, global, frame);
-        }
-        // Resolve the fallible slot before taking ownership of the lexical
-        // `this` value: a slot-allocation failure must not leak the derived
-        // arm's retained binding-cell reference.
-        const lexical_this_slot = try object.functionLexicalThisSlot(ctx.runtime);
-        const lexical_this_value = if (frame.function.flags.is_derived_class_constructor) blk: {
-            var this_local_idx: ?usize = null;
-            for (frame.function.vardefs, 0..) |vd, idx| {
-                if (vd.var_name == core.atom.ids.this_ and idx < frame.locals.len) {
-                    this_local_idx = idx;
-                    break;
-                }
-            }
-            const cell = try frame.captureLocal(ctx.runtime, this_local_idx orelse return error.InvalidBytecode);
-            break :blk cell.valueRef();
-        } else frame.this_value.dup();
-        try object.setOptionalValueSlot(ctx.runtime, lexical_this_slot, lexical_this_value);
+        // `this` and `new.target` now arrive through the ordinary closure-var
+        // capture loop below, matching qjs js_closure2. Home/super metadata is
+        // distinct method state and remains attached only when required.
         if (property_ops.expectObject(frame.current_function)) |function_object| {
             try object.setFunctionHomeObject(ctx.runtime, function_object.functionHomeObject());
             if (function_object.functionSuperConstructor()) |super_constructor| try object.setOptionalValueSlot(ctx.runtime, try object.functionSuperConstructorSlot(ctx.runtime), super_constructor.dup());
@@ -414,9 +394,6 @@ pub fn createBytecodeFunctionObject(
         } else |_| {}
         if (frame.function.flags.is_derived_class_constructor) {
             try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowConstructorThisSlot(ctx.runtime), frame.constructorThisValue().dup());
-        }
-        if (!frame.new_target.isUndefined()) {
-            try object.setOptionalValueSlot(ctx.runtime, try object.functionArrowNewTargetSlot(ctx.runtime), frame.new_target.dup());
         }
     }
     const effective_name = if (fb.func_name != core.atom.ids.empty_string and ctx.runtime.atoms.kind(fb.func_name) != null)
@@ -4147,7 +4124,12 @@ pub noinline fn getSuper(
         return;
     };
     if (function_object.functionSuperConstructor()) |super_constructor| {
-        if (function_object.functionLexicalThis() != null) {
+        const fb_value = function_object.functionBytecode();
+        const is_arrow = if (fb_value) |value|
+            if (functionBytecodeFromValue(value)) |fb| fb.flags.is_arrow_function else false
+        else
+            false;
+        if (is_arrow) {
             try stack.push(super_constructor);
         } else if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
@@ -4291,28 +4273,22 @@ pub noinline fn setHomeObject(
     if (func_value.isObject() and home_value.isObject()) {
         const func_object = try property_ops.expectObject(func_value);
         var can_set_home_object = true;
-        var is_arrow_function = false;
         if (func_object.functionBytecode()) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
                 can_set_home_object = !fb.flags.is_class_constructor;
-                is_arrow_function = fb.flags.is_arrow_function;
             }
         }
         if (can_set_home_object) {
             try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
-            if (is_arrow_function) {
-                const slot = try func_object.functionLexicalThisSlot(ctx.runtime);
-                try func_object.setOptionalValueSlot(ctx.runtime, slot, home_value.dup());
-            }
         }
     }
 }
 
 pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    if (stack.values.len < 2) return error.StackUnderflow;
-    const obj = stack.values[stack.values.len - 2].dup();
+    if (stack.len() < 2) return error.StackUnderflow;
+    const obj = stack.values[stack.len() - 2].dup();
     defer obj.free(ctx.runtime);
-    const func = stack.values[stack.values.len - 1].dup();
+    const func = stack.values[stack.len() - 1].dup();
     defer func.free(ctx.runtime);
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
@@ -4606,7 +4582,7 @@ fn defineObjectMethod(
     flags: u8,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    if (stack.values.len < 2) {
+    if (stack.len() < 2) {
         const maybe_object = stack.peek() orelse return error.StackUnderflow;
         defer maybe_object.free(rt);
         _ = property_ops.expectObject(maybe_object) catch return error.StackUnderflow;
@@ -4701,8 +4677,8 @@ fn defineObjectMethodValue(
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
-    if (index_from_top >= stack.values.len) return error.StackUnderflow;
-    return stack.values[stack.values.len - 1 - index_from_top].dup();
+    if (index_from_top >= stack.len()) return error.StackUnderflow;
+    return stack.values[stack.len() - 1 - index_from_top].dup();
 }
 
 fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {

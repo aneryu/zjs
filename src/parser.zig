@@ -5064,6 +5064,14 @@ pub const parser_core = struct {
             const fd = self.cur_func();
             fd.has_eval_call = true;
             fd.needs_dynamic_lvalue_refs = true;
+            // The eval source is not known at compile time. An arrow with
+            // direct eval must therefore carry both lexical special bindings
+            // that eval is permitted to observe, exactly as qjs seeds them in
+            // the closure environment rather than on the function object.
+            if (self.emit_to_function_def and fd.func_type == .arrow) {
+                try self.ensureClosureVar(atom_this);
+                if (fd.new_target_allowed) try self.ensureClosureVar(atom_new_target);
+            }
             if (fd.parent != null and fd.func_type != .arrow and fd.func_type != .class_static_init) {
                 if (fd.has_parameter_expressions and !fd.is_strict_mode) {
                     try ensureParameterArgumentsLocals(fd);
@@ -5400,6 +5408,12 @@ pub const parser_core = struct {
                 } else {
                     try self.emitScopeGetVar(atom_this);
                 }
+            } else if (self.emit_to_function_def and self.cur_func().func_type == .arrow) {
+                // Arrows have no own ThisBinding. Match qjs by resolving the
+                // nearest non-arrow function's hidden `this` local through the
+                // ordinary closure chain instead of carrying a per-function-
+                // object lexical-this side slot into every call.
+                try self.emitScopeGetVar(atom_this);
             } else {
                 try self.emitOp(opcode.op.push_this);
             }
@@ -5458,6 +5472,7 @@ pub const parser_core = struct {
             for (current.closure_var) |cv| {
                 if (cv.var_name == atom_id) return;
             }
+            if (try self.ensureArrowSpecialCapture(atom_id)) return;
 
             var parent_index = self.cur_func_stack.len;
             var visible_scope_level = current.parent_scope_level;
@@ -5547,6 +5562,47 @@ pub const parser_core = struct {
                     }
                 }
             }
+        }
+
+        /// qjs models an arrow's lexical `this` and `new.target` as normal
+        /// closure variables created on demand. Materialize the corresponding
+        /// hidden local on the nearest non-arrow FunctionDef, then let the same
+        /// ref chain used by user bindings carry it through nested arrows.
+        fn ensureArrowSpecialCapture(self: *State, atom_id: Atom) Error!bool {
+            const current = self.cur_func();
+            if (current.func_type != .arrow) return false;
+            if (atom_id != atom_this and atom_id != atom_new_target) return false;
+
+            var parent_index = self.cur_func_stack.len;
+            while (parent_index > 0) {
+                parent_index -= 1;
+                const parent = self.funcAtVirtualIndex(parent_index);
+                if (parent.func_type == .arrow) continue;
+
+                const var_idx: u16 = if (atom_id == atom_this) blk: {
+                    if (parent.this_var_idx < 0) {
+                        parent.this_var_idx = @intCast(try parent.addScopeVar(atom_this, .normal, 0, parent.is_derived_class_constructor, false));
+                    }
+                    break :blk @intCast(parent.this_var_idx);
+                } else blk: {
+                    if (!parent.new_target_allowed) return false;
+                    if (parent.new_target_var_idx < 0) {
+                        parent.new_target_var_idx = @intCast(try parent.addScopeVar(atom_new_target, .normal, 0, false, false));
+                    }
+                    break :blk @intCast(parent.new_target_var_idx);
+                };
+                const source_var = parent.vars[var_idx];
+                try self.ensureClosureChain(parent_index, .{
+                    .closure_type = .local,
+                    .is_lexical = source_var.is_lexical,
+                    .is_const = source_var.is_const,
+                    .var_kind = source_var.var_kind,
+                    .var_idx = var_idx,
+                    .var_name = atom_id,
+                });
+                return true;
+            }
+            return false;
         }
 
         fn emitCloseCurrentScopeLexicals(self: *State) Error!void {
@@ -8069,6 +8125,13 @@ pub const parser_core = struct {
             try s.emitScopeGetVar(this_atom);
             return;
         }
+        if (s.emit_to_function_def and s.cur_func().func_type == .arrow) {
+            // `super.prop` keeps the surrounding method's receiver inside an
+            // arrow, just like an ordinary `this` expression does. Resolve it
+            // through the closure chain so the arrow has no own ThisBinding.
+            try s.emitScopeGetVar(atom_this);
+            return;
+        }
         try s.emitOp(opcode.op.push_this);
     }
 
@@ -8743,7 +8806,11 @@ pub const parser_core = struct {
             }
             if (!s.new_target_allowed) return Error.UnexpectedToken;
             try s.advance();
-            try s.emitOpU8(opcode.op.special_object, 3);
+            if (s.emit_to_function_def and s.cur_func().func_type == .arrow) {
+                try s.emitScopeGetVar(atom_new_target);
+            } else {
+                try s.emitOpU8(opcode.op.special_object, 3);
+            }
             return;
         }
         if (s.peekKind() == tok.TOK_NEW) {

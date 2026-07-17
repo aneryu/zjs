@@ -3231,6 +3231,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(view.simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+        try std.testing.expect(view.flags.simple_inline_empty_leaf);
     }
 
     {
@@ -3248,6 +3249,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.simple_inline_eligible);
         try std.testing.expect(view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
     }
 
     {
@@ -3270,6 +3272,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_inline_eligible);
         try std.testing.expect(view.strict_simple_snapshot_inline_eligible);
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
     }
 }
 

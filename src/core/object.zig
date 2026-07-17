@@ -5319,6 +5319,10 @@ pub const Object = extern struct {
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
         std.debug.assert(header.meta().kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+        // Publish only fully executable FBs. This moves the compatibility-view
+        // allocation to closure construction so resolveInlineTarget has a
+        // non-null invariant and cannot turn OOM into a fast-path miss later.
+        _ = try fb.ensureCachedView(&rt.memory, &rt.atoms);
         const old_fb = self.u.bytecode_function.function_bytecode;
         self.u.bytecode_function.function_bytecode = fb;
         if (old_fb) |old| gc.release(rt, &old.header);
@@ -5654,6 +5658,20 @@ pub const Object = extern struct {
     pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return &.{};
         return self.u.bytecode_function.captureSlice();
+    }
+
+    /// Find one closure cell by its immutable FB metadata. Used for the
+    /// language's hidden arrow captures (`this` / `new.target`) on cold semantic
+    /// paths such as direct eval and super; ordinary opcodes index cells
+    /// directly and never scan.
+    pub fn functionCaptureCell(self: *const Object, name: atom.Atom) ?*var_ref_mod.VarRef {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return null;
+        const fb = self.u.bytecode_function.function_bytecode orelse return null;
+        const captures = self.u.bytecode_function.captureSlice();
+        for (fb.closureVar(), 0..) |capture, index| {
+            if (capture.var_name == name and index < captures.len) return captures[index];
+        }
+        return null;
     }
 
     /// Replace the closure-captures slice, releasing the previous cells —

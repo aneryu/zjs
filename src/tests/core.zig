@@ -106,6 +106,22 @@ test "refcounted JSValue payloads keep rc at the QuickJS minus-four offset" {
     }
 }
 
+test "proven object release preserves generic JSValue ownership semantics" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const baseline_objects = rt.gc.liveCount();
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const value = object.value();
+    const retained = value.dup();
+    try std.testing.expectEqual(@as(i32, 2), object.header.meta().rc);
+
+    retained.freeObjectAssumeObject(rt);
+    try std.testing.expectEqual(@as(i32, 1), object.header.meta().rc);
+    value.freeObjectAssumeObject(rt);
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
 test "primitive value predicates match QuickJS helpers" {
     try std.testing.expect(core.JSValue.int32(1).isNumber());
     try std.testing.expect(core.JSValue.float64(1.5).isNumber());
@@ -2677,6 +2693,9 @@ test "bytecode function state uses the inline qjs function arm" {
     try rt.gc.add(&fb.header);
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
     try std.testing.expectEqual(fb, function.bytecodeFunctionStoragePtr().function_bytecode.?);
+    // Every published bytecode function carries its immutable execution view;
+    // hot call-target resolution must never allocate or decline on a null cache.
+    try std.testing.expect(fb.cached_view != null);
     const captures = try rt.memory.alloc(*core.VarRef, 1);
     captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     function.setFunctionCaptures(rt, captures);
@@ -6443,6 +6462,13 @@ test "runtime stack and interrupt state are stored" {
 
     rt.setStackSize(4096);
     try std.testing.expectEqual(@as(usize, 4096), rt.stackSize());
+    try std.testing.expectEqual(@as(u62, 4096), rt.vm_stack_arena_policy.limit);
+    try std.testing.expect(rt.vm_stack_arena_policy.arena_window);
+    try std.testing.expect(!rt.vm_stack_arena_policy.resident_window);
+    rt.setStackSize(std.math.maxInt(usize));
+    try std.testing.expectEqual(std.math.maxInt(usize), rt.stackSize());
+    try std.testing.expectEqual(std.math.maxInt(u62), rt.vm_stack_arena_policy.limit);
+    rt.setStackSize(4096);
     try std.testing.expect(!rt.hasInterruptHandler());
     rt.setInterruptHandler(interruptOnce, null);
     try std.testing.expect(rt.hasInterruptHandler());

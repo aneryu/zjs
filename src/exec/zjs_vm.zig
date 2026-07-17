@@ -312,16 +312,18 @@ fn runWithArgsState(
     defer ctx.runtime.vm_stack.restore(frame_arena_mark);
 
     const resident_binding_shell = entry_generator_state != null and constructor_this_value.isUndefined();
-    var frame_storage = if (resident_binding_shell)
-        frame_mod.Frame.initResidentExecution(
+    var frame_storage = if (resident_binding_shell) blk: {
+        // Generator/async functions are not constructors; arrow new.target is
+        // an ordinary capture. A resident shell therefore never needs the cold
+        // new-target slot moved out of the hot Frame header.
+        std.debug.assert(new_target_value.isUndefined());
+        break :blk frame_mod.Frame.initResidentExecution(
             entry_function,
             initial_this_value,
             current_function_value,
-            new_target_value,
             entry_generator_state.?.generatorActualArgCount(),
-        )
-    else
-        frame_mod.Frame.init(entry_function);
+        );
+    } else frame_mod.Frame.init(entry_function);
     defer {
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
     }
@@ -528,7 +530,7 @@ noinline fn initFreshEntryFrame(
         .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
     };
     if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, slab.stack);
+        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.vm_stack_arena_policy, slab.stack);
     }
     try call_vm.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
     try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, need_original_args, frame_windows);
@@ -552,8 +554,7 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .output = m.output,
         .code_base = func.code.ptr,
         .code_end = func.code.ptr + func.code.len,
-        .stack_base = level.stack.values.ptr,
-        .arg_buf = level.frame.args.ptr,
+        .stack_base = level.stack.values,
         .catch_target = level.catch_target,
         .poller = .init(m.ctx.runtime),
     };

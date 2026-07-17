@@ -64,11 +64,10 @@ const sameObjectIdentity = object_ops.sameObjectIdentity;
 const adapterValueDup = slot_ops.adapterValueDup;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
-const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 pub fn classConstructorNewTarget(func: core.JSValue, caller_frame: ?*frame_mod.Frame) core.JSValue {
     if (caller_frame) |frame| {
-        if (!frame.new_target.isUndefined()) return frame.new_target;
+        if (!frame.newTargetValue().isUndefined()) return frame.newTargetValue();
     }
     return func;
 }
@@ -189,7 +188,7 @@ pub fn constructBuiltinSuperConstructor(
 
 pub fn currentArrowLexicalSuperThis(rt: *core.JSRuntime, frame: *frame_mod.Frame) ?core.JSValue {
     const current_object = currentArrowFunctionObject(frame) orelse return null;
-    if (current_object.functionLexicalThis()) |this_value| return adapterValueDup(this_value);
+    if (current_object.functionCaptureCell(core.atom.ids.this_)) |cell| return adapterValueDup(cell.varRefValue());
     _ = rt;
     return null;
 }
@@ -206,15 +205,11 @@ pub fn setCurrentArrowLexicalThis(ctx: *core.JSContext, frame: *frame_mod.Frame,
         value.free(ctx.runtime);
         return;
     };
-    if (current_object.functionLexicalThis()) |slot| {
-        if (varRefCellFromValue(slot)) |cell| {
-            cell.setVarRefValue(ctx.runtime, value);
-            return;
-        }
-        try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);
+    if (current_object.functionCaptureCell(core.atom.ids.this_)) |cell| {
+        cell.setVarRefValue(ctx.runtime, value);
         return;
     }
-    try current_object.setOptionalValueSlot(ctx.runtime, try current_object.functionLexicalThisSlot(ctx.runtime), value);
+    value.free(ctx.runtime);
 }
 
 pub inline fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, func: core.JSValue) bool {
@@ -222,7 +217,7 @@ pub inline fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.
     if (!frame.current_function.isObject()) return false;
     const current_object = property_ops.expectObject(frame.current_function) catch return false;
     const super_constructor = current_object.functionSuperConstructor() orelse return false;
-    if (current_object.functionLexicalThis() == null) {
+    if (currentArrowFunctionObject(frame) == null) {
         if (current_object.getPrototype()) |prototype| {
             if (sameObjectIdentity(prototype.value(), func)) return true;
         }

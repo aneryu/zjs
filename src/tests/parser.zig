@@ -4373,6 +4373,25 @@ fn functionBytecodeHasClosure(
     return false;
 }
 
+fn findArrowFunctionBytecode(fb: *const engine.bytecode.FunctionBytecode) ?*const engine.bytecode.FunctionBytecode {
+    if (fb.flags.is_arrow_function) return fb;
+    for (fb.cpoolSlice()) |value| {
+        if (functionBytecodeFromValue(value)) |child| {
+            if (findArrowFunctionBytecode(child)) |arrow| return arrow;
+        }
+    }
+    return null;
+}
+
+fn findArrowInFunction(function: *const engine.bytecode.Bytecode) ?*const engine.bytecode.FunctionBytecode {
+    for (function.constants.values) |value| {
+        if (functionBytecodeFromValue(value)) |fb| {
+            if (findArrowFunctionBytecode(fb)) |arrow| return arrow;
+        }
+    }
+    return null;
+}
+
 fn functionHasClosure(
     rt: *core.JSRuntime,
     function: *const engine.bytecode.Bytecode,
@@ -4407,6 +4426,51 @@ fn functionHasKind(function: *const engine.bytecode.Bytecode, kind: function_def
 
 fn expectFunctionKindRecursive(function: *const engine.bytecode.Bytecode, kind: function_def.FunctionKind) !void {
     try std.testing.expect(functionHasKind(function, kind));
+}
+
+test "arrow lexical this and new.target are ordinary closure captures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer() { return () => [this, new.target]; } outer;",
+        .{ .mode = .script },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const arrow = findArrowInFunction(&parsed.function) orelse return error.TestExpectedEqual;
+    var captured_this = false;
+    var captured_new_target = false;
+    for (arrow.closureVar()) |capture| {
+        captured_this = captured_this or capture.var_name == core.atom.ids.this_;
+        captured_new_target = captured_new_target or capture.var_name == core.atom.ids.new_target;
+    }
+    try std.testing.expect(captured_this);
+    try std.testing.expect(captured_new_target);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(arrow.byteCode(), qop.push_this));
+}
+
+test "arrow super property captures lexical this through an ordinary cell" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "class Base { method() {} } class Derived extends Base { make() { return () => super.method(); } }",
+        .{ .mode = .script },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const arrow = findArrowInFunction(&parsed.function) orelse return error.TestExpectedEqual;
+    var captured_this = false;
+    for (arrow.closureVar()) |capture| {
+        captured_this = captured_this or capture.var_name == core.atom.ids.this_;
+    }
+    try std.testing.expect(captured_this);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(arrow.byteCode(), qop.push_this));
 }
 
 fn expectAtomOperandName(rt: *core.JSRuntime, function: *const engine.bytecode.Bytecode, expected: []const u8) !void {

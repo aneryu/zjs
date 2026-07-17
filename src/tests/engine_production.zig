@@ -770,6 +770,26 @@ test "production embedding interrupt handler aborts conditional-only backedge" {
     try std.testing.expect(state.hits > 0);
 }
 
+test "production embedding interrupt handler aborts a recursion-only call loop" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var state = InterruptState{};
+    rt.setInterruptHandler(InterruptState.stop, &state);
+    defer rt.setInterruptHandler(null, null);
+
+    // There is no bytecode backedge in recurse: interruption depends on the
+    // bytecode-call entry poll, matching QuickJS JS_CallInternal's poll point.
+    try std.testing.expectError(
+        error.Interrupted,
+        ctx.eval("function recurse() { return 1 + recurse(); } recurse();", .{}),
+    );
+    try std.testing.expect(state.hits > 0);
+}
+
 test "production embedding takeException captures exception snapshot without leaking" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

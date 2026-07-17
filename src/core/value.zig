@@ -597,6 +597,25 @@ pub const JSValue = extern struct {
         self.releaseCommonRefCount(rt);
     }
 
+    /// Release a value whose caller has already proved the semantic tag is
+    /// `object`. This is the typed counterpart of QuickJS's direct Object
+    /// owner release: it preserves deinit/profile/zero-ref behavior while
+    /// avoiding the generic JSValue refcount-range and tag dispatch on the
+    /// common non-zero arm.
+    pub inline fn freeObjectAssumeObject(self: JSValue, rt: anytype) void {
+        std.debug.assert(self.tagOf() == Tag.object);
+        if (rt.gc.phase == .deinit) return;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        hdr.rc -= 1;
+        if (hdr.rc == 0) {
+            gc.destroyZeroRef(rt, ptrFromPayload(gc.Header, self.payloadOf()).?);
+        }
+    }
+
     inline fn refCountWordAssumeRefCounted(self: JSValue) *gc.RefCountHeader {
         const payload = ptrFromPayload(anyopaque, self.payloadOf()).?;
         return gc.refCountHeaderFromPayload(payload);

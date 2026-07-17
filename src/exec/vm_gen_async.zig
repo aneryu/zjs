@@ -38,15 +38,15 @@ pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.St
 
 inline fn reserveGeneratorExecutionStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, execution: *core.object.GeneratorExecutionState, additional: usize) !void {
     const parked = &execution.suspended.storage.stack;
-    if (parked.values.len <= stack.limit and
-        additional <= stack.limit - parked.values.len and
+    if (parked.values.len <= stack.stackLimit() and
+        additional <= stack.stackLimit() - parked.values.len and
         parked.values.len <= parked.capacity and
         additional <= parked.capacity - parked.values.len)
     {
         return;
     }
     const resident_backing = execution.stackUsesCombinedStorage();
-    try parked.ensureAdditionalWithResidentBacking(rt, stack.limit, additional, resident_backing);
+    try parked.ensureAdditionalWithResidentBacking(rt, stack.stackLimit(), additional, resident_backing);
 }
 
 fn sameSlice(comptime T: type, left: []T, right: []T) bool {
@@ -63,10 +63,9 @@ fn residentFrameViewsMatch(state: *const core.object.SuspendedExecutionState, fr
 }
 
 fn clearLiveExecutionViews(stack: *stack_mod.Stack, frame: *frame_mod.Frame) void {
-    stack.values = &.{};
-    stack.capacity = 0;
-    stack.arena_window = false;
-    stack.resident_window = false;
+    stack.clearBacking();
+    stack.setArenaWindow(false);
+    stack.setResidentWindow(false);
     frame.storage_values = &.{};
     frame.ownership.storage = .borrowed;
     frame.locals = &.{};
@@ -101,7 +100,7 @@ fn parkGeneratorExecutionState(
         const old_stack = state.storage.stack;
         const old_stack_uses_combined_storage = execution.stackUsesCombinedStorage();
         state.storage.stack = .{
-            .values = stack.values,
+            .values = stack.liveValues(),
             .capacity = stack.capacity,
         };
         state.pc = pc;
@@ -134,7 +133,7 @@ fn parkGeneratorExecutionState(
     const old_stack_uses_combined_storage = execution.stackUsesCombinedStorage();
     var replacement = core.object.SuspendedExecutionStorage{
         .stack = .{
-            .values = stack.values,
+            .values = stack.liveValues(),
             .capacity = stack.capacity,
         },
         .frame = .{
@@ -176,7 +175,7 @@ pub noinline fn saveGeneratorExecutionState(
     // Generator frames must run on heap-backed stacks: suspension transfers
     // buffer ownership into the generator object, which is incompatible with
     // borrowed VM stack-arena windows.
-    std.debug.assert(!stack.arena_window);
+    std.debug.assert(!stack.isArenaWindow());
     std.debug.assert(frame.ownership.storage == .owned or frame.storage_values.len == 0 or execution.frameUsesCombinedStorage());
     std.debug.assert(frame.ownership.var_refs == .owned or frame.var_refs.len == 0);
     std.debug.assert(frame.open_var_refs.len == 0 or frame.storage_values.len != 0);
@@ -222,10 +221,9 @@ inline fn installSuspendedExecutionStorage(
     frame.var_refs = suspended.frame.var_refs;
     frame.ownership.var_refs = .owned;
     frame.open_var_refs = suspended.frame.open_var_refs;
-    stack.values = suspended.stack.values;
-    stack.capacity = suspended.stack.capacity;
-    stack.arena_window = false;
-    stack.resident_window = resident_stack or resident_owner;
+    stack.installBacking(suspended.stack.values, suspended.stack.capacity);
+    stack.setArenaWindow(false);
+    stack.setResidentWindow(resident_stack or resident_owner);
     state.beginRunningAliases();
 }
 
@@ -262,11 +260,10 @@ noinline fn resumeExecutionStateRaw(
     const state = &execution.suspended;
     if (!state.has_frame) {
         if (execution.stackUsesCombinedStorage()) {
-            std.debug.assert(stack.capacity == 0 and stack.values.len == 0);
-            stack.values = state.storage.stack.values;
-            stack.capacity = state.storage.stack.capacity;
-            stack.arena_window = false;
-            stack.resident_window = true;
+            std.debug.assert(stack.capacity == 0 and stack.len() == 0);
+            stack.installBacking(state.storage.stack.values, state.storage.stack.capacity);
+            stack.setArenaWindow(false);
+            stack.setResidentWindow(true);
             state.beginRunningAliases();
         }
         payload.just_yielded = false;
@@ -274,7 +271,7 @@ noinline fn resumeExecutionStateRaw(
     }
     // Resume installs generator-owned heap buffers into the stack; the stack
     // must not be an arena window (its deinit would skip freeing them).
-    std.debug.assert(!stack.arena_window);
+    std.debug.assert(!stack.isArenaWindow());
 
     const resume_pc = state.pc;
     const generator_started = payload.started;
@@ -523,7 +520,7 @@ fn yieldStarRaw(
         if (generator_object.generatorYieldStarIterator()) |stored| {
             iterator_value = stored.dup();
             using_stored_iterator = true;
-            if (generator_object.generatorStarted() and stack.values.len > 0) {
+            if (generator_object.generatorStarted() and stack.len() > 0) {
                 next_arg = try stack.pop();
                 next_arg_needs_free = true;
             }

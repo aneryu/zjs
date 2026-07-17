@@ -254,7 +254,7 @@ pub fn forInHasEnumerableStringKey(
 }
 
 pub fn findForOfIteratorIndex(rt: *core.JSRuntime, stack: *const stack_mod.Stack) !usize {
-    var index = stack.values.len;
+    var index = stack.len();
     while (index > 0) {
         index -= 1;
         const value = stack.values[index];
@@ -306,7 +306,7 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
         if (isDestructuringIteratorState(object)) return;
     } else |_| {}
     if (frame) |active_frame| {
-        if (activeDestructuringStateTargetsIterator(stack.values, active_frame, iterator_value)) return;
+        if (activeDestructuringStateTargetsIterator(stack.liveValues(), active_frame, iterator_value)) return;
     }
 
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
@@ -317,8 +317,8 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
 }
 
 pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
-    if (stack.values.len < 3) return null;
-    var index = stack.values.len - 3;
+    if (stack.len() < 3) return null;
+    var index = stack.len() - 3;
     while (true) {
         if (isForOfRecordAt(stack, index) and !hasCatchMarkerAboveForOfRecord(stack, index)) {
             return index;
@@ -330,7 +330,7 @@ pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
 }
 
 pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
-    if (index + 2 >= stack.values.len) return false;
+    if (index + 2 >= stack.len()) return false;
     return stack.values[index].isObject() and
         isCallableValue(stack.values[index + 1]) and
         stack.values[index + 2].isCatchOffset();
@@ -338,7 +338,7 @@ pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
 
 pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {
     var index = record_index + 3;
-    while (index < stack.values.len) : (index += 1) {
+    while (index < stack.len()) : (index += 1) {
         if (stack.values[index].isCatchOffset()) return true;
     }
     return false;

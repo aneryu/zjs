@@ -12,6 +12,7 @@ const op = zjs.bytecode.opcode.op;
 const property_ops = zjs.exec.property_ops;
 const object_ops = zjs.exec.object_ops;
 const frame_mod = zjs.exec.frame;
+const inline_calls = zjs.exec.inline_calls;
 
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
@@ -1311,6 +1312,22 @@ test "M1.3: returned closure can update and return captured counter" {
     );
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
+test "a bytecode call at logical end completes through function falloff" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    // This script's outer bytecode ends with the ordinary call. The return from
+    // `identity` therefore resumes at code_end and must take the dispatcher's
+    // falloff path; there is no real continuation opcode to dispatch directly.
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function identity(value) { return value; })(42)
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
 test "TDZ: closure update and return of captured const throws TypeError" {
@@ -2726,6 +2743,13 @@ test "suspended generators retain one resident execution owner across resumes" {
     const value = global.getProperty(key);
     defer value.free(js.runtime);
     const generator = try property_ops.expectObject(value);
+    const generator_function = generator.generatorFunctionBytecode() orelse return error.TypeError;
+    try std.testing.expect(inline_calls.resolveInlineTarget(
+        js.context,
+        global,
+        core.JSValue.undefinedValue(),
+        generator_function,
+    ) == null);
     const state = generator.generatorExecutionState();
     try std.testing.expect(!generator.generatorDone());
     try std.testing.expect(state.has_frame);
@@ -4720,6 +4744,16 @@ test "native builtin errors capture a native callsite" {
         \\var forwardedFirstNewline = forwardedCallStack.indexOf("\n");
         \\assert.sameValue(forwardedCallStack.indexOf("    at forwardedCallTarget"), 0);
         \\assert.sameValue(forwardedCallStack.slice(forwardedFirstNewline + 1).indexOf("    at call (native)"), 0);
+        \\function forwardedCallCaller() {
+        \\    var stack = forwardedCallTarget.call(undefined);
+        \\    return stack + "";
+        \\}
+        \\var forwardedNestedStack = forwardedCallCaller();
+        \\var forwardedNestedFirst = forwardedNestedStack.indexOf("\n");
+        \\var forwardedNestedSecond = forwardedNestedStack.indexOf("\n", forwardedNestedFirst + 1);
+        \\assert.sameValue(forwardedNestedStack.indexOf("    at forwardedCallTarget"), 0);
+        \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedFirst + 1).indexOf("    at call (native)"), 0);
+        \\assert.sameValue(forwardedNestedStack.slice(forwardedNestedSecond + 1).indexOf("    at forwardedCallCaller"), 0);
         \\var applyStack;
         \\try {
         \\    Array.prototype.map.apply([], [null]);
@@ -7191,6 +7225,244 @@ test "missing-argument plain calls preserve parameter and arguments ownership" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "inline calls release lazily materialized arguments state" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function readArguments(value) {
+        \\    return arguments.length + value;
+        \\}
+        \\assert.sameValue(readArguments(1), 2);
+    );
+    setup.free(js.runtime);
+    const exercise =
+        \\(function exerciseArgumentsCalls() {
+        \\    let total = 0;
+        \\    for (let i = 0; i < 256; i++) total += readArguments(i);
+        \\    assert.sameValue(total, 32896);
+        \\})();
+    ;
+    const warmup = try js.eval(exercise);
+    warmup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval(exercise);
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "inline empty leaf abrupt teardown releases pending operands" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function throwWithPendingOperand() {
+        \\    return {} + null.missing;
+        \\}
+        \\function exerciseEmptyLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { throwWithPendingOperand(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseEmptyLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseEmptyLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "inline empty leaf warm constructor preserves miss fallback and ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const setup = try js.eval("globalThis.__warmEmptyLeaf = function () { return 1; };");
+    setup.free(rt);
+    const leaf_name = try rt.internAtom("__warmEmptyLeaf");
+    defer rt.atoms.free(leaf_name);
+    const callable = global.getProperty(leaf_name);
+    defer callable.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+
+    // A fresh Machine has neither Entry nor arena backing. The speculative
+    // arm must miss without consuming the source or changing call depth.
+    try l0_stack.pushOwned(callable.dup());
+    var region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+
+    const first = try machine.pushEmptyLeafCall(global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(first.isEmptyLeaf());
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Entry and arena chunks are now warm. A second exact call must publish
+    // the same leaf shape without touching the allocator.
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isEmptyLeaf());
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // An oversized operand window cannot use the active arena chunk. The fast
+    // miss is pure and the authoritative constructor owns/frees heap backing.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const heap_entry = try machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    try std.testing.expect(!heap_entry.isEmptyLeaf());
+    var continuation = machine.popReturnedFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // The same miss under a hard memory cap must restore depth/watermark and
+    // release the source slot, leaving the warmed Machine reusable.
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const failed = machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, failed);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "inline call teardown releases every escaped storage shape" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+
+    var function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer function.deinit(rt);
+    function.simple_inline_eligible = true;
+    var fb = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer fb.deinit(rt);
+    var unused_var_refs: [1]*core.VarRef = undefined;
+    const target = inline_calls.InlineTarget{
+        .var_refs = &unused_var_refs,
+        .callable = core.JSValue.undefinedValue(),
+        .fb = &fb,
+        .view = &function,
+        .this_value = core.JSValue.undefinedValue(),
+        .new_target = core.JSValue.undefinedValue(),
+    };
+
+    // Warm the Machine's Entry chunk and the VM stack-arena chunk; neither is
+    // per-call storage, so take the balance baseline only after this call.
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    _ = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    var continuation = machine.popFrame();
+    continuation.deinit(rt);
+    const baseline_bytes = rt.memory.allocated_bytes;
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    var entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    _ = try entry.frame.ensureCold(&rt.memory);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    _ = try entry.frame.allocOwnedStorage(&rt.memory, 1);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    entry = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    try entry.stack.reserveAdditional(entry.stack.capacity + 1);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+
+    // A window larger than one arena chunk uses the setup-time heap fallback.
+    function.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(core.JSValue.undefinedValue());
+    l0_stack.setLen(0);
+    _ = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
+    continuation = machine.popFrame();
+    continuation.deinit(rt);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+}
+
+test "inline operand Stack keeps limit and ownership flags in one word" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(engine.exec.stack.Stack));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(inline_calls.Machine.ArgsSource));
+    if (core.value.nan_boxing) {
+        try std.testing.expectEqual(@as(usize, 136), @sizeOf(engine.exec.frame.Frame));
+        try std.testing.expectEqual(@as(usize, 248), @sizeOf(inline_calls.Entry));
+    }
+}
+
 test "method calls preserve receiver arguments eval captures and abrupt ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -7981,6 +8253,49 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("LEX\nLEX\nLEX\nouter\n", stream.buffered());
+}
+
+test "arrow direct eval reads captured this and new.target" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function Replacement() {}
+        \\function Factory() {
+        \\    const expectedThis = this;
+        \\    return () => [eval("this") === expectedThis, eval("new.target")];
+        \\}
+        \\const read = Reflect.construct(Factory, [], Replacement);
+        \\const observed = read.call({ ignored: true });
+        \\assert.sameValue(observed[0], true);
+        \\assert.sameValue(observed[1], Replacement);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "arrow super property call keeps the enclosing method receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let derivedInstance;
+        \\class Base {
+        \\    method() {
+        \\        assert.sameValue(this, derivedInstance);
+        \\        return 42;
+        \\    }
+        \\}
+        \\class Derived extends Base {
+        \\    makeArrow() { return () => super.method(); }
+        \\}
+        \\derivedInstance = new Derived();
+        \\const callSuper = derivedInstance.makeArrow();
+        \\assert.sameValue(callSuper(), 42);
+        \\assert.sameValue(callSuper.call({ ignored: true }), 42);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "forwarded call releases ignored arrow thisArg" {
