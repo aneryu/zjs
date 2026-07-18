@@ -2805,6 +2805,35 @@ pub fn op_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// qjs OP_post_inc / OP_post_dec (quickjs.c:20009-20035) — two separate CASE
+/// labels, each with its own handler-inlined int fast arm (comptime `opc`, no
+/// runtime predicate select): the old value stays at sp[-1], old±1 is written to
+/// sp[0], sp++. INT32_MAX/INT32_MIN and non-int operands take js_post_inc_slow —
+/// here the indirect `cold_table[opc]` hop to the h_post/postUpdateVm shell, whose
+/// int leg widens through fastInt32Add/Sub to float64 exactly like JS_NewInt64.
+/// The hot arm mutates nothing before falling through, so the cold shell re-runs
+/// the op from the original pc/sp.
+pub fn opPostIncDec(comptime opc: u8) Handler {
+    return struct {
+        // I-cache pin (see op_return).
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
+            if ((sp - 1)[0].asInt32()) |iv| {
+                // qjs-literal `val == INT32_MAX` bound test, not @addWithOverflow —
+                // the latter materializes the overflow flag into a dead alloca
+                // (`cset vs` + `strb [sp]`), gratuitous store-buffer traffic right
+                // before the hot `stp` push.
+                const bound: i32 = if (opc == op.post_inc) std.math.maxInt(i32) else std.math.minInt(i32);
+                if (iv != bound) {
+                    @branchHint(.likely);
+                    sp[0] = JSValue.int32(if (opc == op.post_inc) iv + 1 else iv - 1);
+                    return cont(pc + 1, sp + 1, var_buf, vm);
+                }
+            }
+            return @call(.always_tail, cold_table[opc], .{ pc, sp, var_buf, vm });
+        }
+    }.h;
+}
+
 pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = (sp - 1)[0];
     sp[0] = if (v.requiresRefCount()) v.dup() else v;
