@@ -410,6 +410,12 @@ pub const Entry = struct {
     /// the VALUES are released; the backing region is reused by the caller's
     /// next push. Only the normal-return arm may use this: abrupt completion
     /// keeps general teardown (live operand values, cold state).
+    ///
+    /// Capture leaves (O2) publish the same teardown bit: their frame is the
+    /// zero-arg member of this family (args window empty — the release loop
+    /// zero-trips — with the same borrowed capture array), and they need this
+    /// arm's operand-window guard because inherited-capture bodies read free
+    /// names and may carry parser-elided leftovers at `return`.
     inline fn deinitExactArgsLeafInline(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         const frame = &self.frame;
@@ -419,8 +425,9 @@ pub const Entry = struct {
         std.debug.assert(frame.cold == null);
         std.debug.assert(frame.ownership.current_function == .owned);
         std.debug.assert(frame.ownership.storage == .borrowed);
-        std.debug.assert(frame.locals.len == 0 and frame.args.len != 0);
+        std.debug.assert(frame.locals.len == 0);
         std.debug.assert(frame.args.len == frame.function.arg_count);
+        std.debug.assert(frame.args.len != 0 or frame.var_refs.len != 0);
         // Inherited captures are borrowed from the closure's cell array and
         // are never released here (deinitSimple's exact contract for
         // borrowed var_refs); the callee can never CREATE cells.
@@ -1292,6 +1299,61 @@ pub const Machine = struct {
         return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
     }
 
+    /// Capture-leaf authoritative constructor (O2) — the deep fallible twin
+    /// of `pushEmptyLeafFrame` for the zero-arg leaf whose only frame window
+    /// is the inherited capture array (`() => this.x`, zero-arg closures
+    /// over upvalues). Region layout is the zero-arg `[callable]` /
+    /// `[receiver, callable]` — no args window, so the sole-owner errdefer
+    /// is the zero-arg form. Kept as a SEPARATE body (not a comptime variant
+    /// of either established constructor) for the same reason the exact-args
+    /// twin is: sharing one parameterized body measurably re-scheduled the
+    /// established zero-arg warm arms.
+    noinline fn pushCaptureLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertCaptureLeafEligible(leaf_this, function);
+        std.debug.assert(function.arg_count == 0 and function.var_count == 0);
+        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(captures.len != 0);
+
+        // Same sole-owner contract as the zero-arg constructor: the caller
+        // already retreated its logical operand top, so these slots must be
+        // released when depth/Entry acquisition fails.
+        errdefer {
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
     /// Debug-only proof that the comptime `this` arm matches the published
     /// per-policy eligibility bit and the callee's `this` policy: the sloppy
     /// arm substitutes the realm global for non-arrow sloppy functions; the
@@ -1319,6 +1381,20 @@ pub const Machine = struct {
             .raw_undefined => std.debug.assert(function.raw_this_inline_exact_args_leaf),
             .receiver => std.debug.assert(function.simple_inline_exact_args_leaf or
                 function.raw_this_inline_exact_args_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
+                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Capture-leaf twin of `assertLeafEligible` against the O2 fused kind
+    /// byte (the sole published eligibility carrier for this family).
+    inline fn assertCaptureLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(function.capture_leaf_kind == .sloppy),
+            .raw_undefined => std.debug.assert(function.capture_leaf_kind == .raw_this),
+            .receiver => std.debug.assert(function.capture_leaf_kind != .none),
         }
         if (comptime leaf_this != .receiver) {
             std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
@@ -1452,6 +1528,67 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// Capture-leaf publication tail (O2) — the parallel twin of
+    /// `finishEmptyLeafFrame` plus exactly the capture binding: `var_refs`
+    /// borrows the closure's cell array (qjs `var_refs = p->u.func.var_refs`,
+    /// quickjs.c:17844), rooted by the owned `current_function` until
+    /// teardown, `.borrowed` so no teardown path ever releases or closes the
+    /// cells (they belong to the still-live closure). No args window binds:
+    /// `args` keeps the empty default, so the published `exact_args_leaf`
+    /// teardown's release loop zero-trips and its
+    /// `args.len == function.arg_count` invariant holds at 0 == 0. The
+    /// teardown bit buys this family the GUARDED return arm — inherited-
+    /// capture bodies read free names, so leftover-carrying returns
+    /// (parser-elided trailing drops, switch discriminants) must route
+    /// through general teardown — while the zero-arg empty-leaf return arm
+    /// keeps its established unguarded single-bit form. Separate body from
+    /// both established tails (see `pushExactArgsLeafFrame`).
+    inline fn finishCaptureLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        // No failable operation follows the ownership transfer.
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
     /// The caller's post-operand resume pointer, exactly what
     /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
     /// runs after the call opcode published the caller's resume offset
@@ -1543,6 +1680,49 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free capture-leaf construction (O2) — the parallel
+    /// twin of `tryPushEmptyLeafCallFast` plus the borrowed capture binding.
+    /// A null result is the same pure miss contract: call depth, arena
+    /// watermark, source ownership (callable and optional receiver), and
+    /// Machine links are unchanged, so the caller can invoke
+    /// `pushCaptureLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling. Separate
+    /// body from both established warm constructors (see
+    /// `pushExactArgsLeafFrame`).
+    pub inline fn tryPushCaptureLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertCaptureLeafEligible(leaf_this, function);
+        std.debug.assert(captures.len != 0);
+        const ctx = self.ctx;
+        if (ctx.call_depth >= ctx.stack_limit) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -1944,6 +2124,24 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertExactArgsLeafEligible(leaf_this, function);
         return self.pushExactArgsLeafFrame(leaf_this, global, function, captures, region_start, argc);
+    }
+
+    /// Capture-leaf twin of `pushEmptyLeafCall`: authoritative fallible
+    /// entry for the zero-arg leaf whose frame borrows the closure's cell
+    /// array. Region layout stays the zero-arg `[callable]` /
+    /// `[receiver, callable]`.
+    pub inline fn pushCaptureLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertCaptureLeafEligible(leaf_this, function);
+        return self.pushCaptureLeafFrame(leaf_this, global, function, captures, region_start);
     }
 
     /// Push a method inline call whose raw source is

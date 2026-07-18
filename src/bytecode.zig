@@ -8793,6 +8793,23 @@ const function_mod = struct {
         /// call-closure-two-arg from the two-byte chain). The bools stay
         /// published for asserts and eligibility tests.
         exact_args_leaf_kind: ExactArgsLeafKind = .none,
+        /// Capture-leaf fused dispatch byte (O2): zero-arg callees whose ONLY
+        /// frame window is the inherited capture array — `() => this.x`
+        /// arrows (lexical `this` is an ordinary closure cell since the
+        /// capture conversion) and zero-arg closures over upvalues. Same
+        /// `leaf_body_geometry` as the exact-args family (no locals, no cell
+        /// CREATION, no arguments/direct eval) with `arg_count == 0` and
+        /// `var_refs_len > 0`, so the three leaf families partition cleanly:
+        /// empty leaf owns argc==0 without captures, this byte owns argc==0
+        /// with captures, exact-args owns argc==arg_count>0. The frame
+        /// borrows the closure's cell array (qjs `var_refs =
+        /// p->u.func.var_refs`, quickjs.c:17844; rooted by the owned
+        /// callable) and publishes the `exact_args_leaf` teardown bit: its
+        /// guarded return arm (callee operand window must be empty) is
+        /// load-bearing here because inherited-capture bodies may read free
+        /// names and leave parser-elided leftovers at `return`, and its args
+        /// release loop zero-trips on the empty args window.
+        capture_leaf_kind: ExactArgsLeafKind = .none,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -9255,6 +9272,20 @@ const function_mod = struct {
             .exact_args_leaf_kind = if (simple_inline_base and !strict_mode and fb.arg_count > 0 and leaf_body_geometry)
                 .sloppy
             else if (((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count > 0 and leaf_body_geometry)
+                .raw_this
+            else
+                .none,
+            // Capture-leaf twin (O2): argc==0 with inherited captures — the
+            // complement of `empty_leaf_geometry`'s `var_refs_len == 0` term
+            // over the same leaf body geometry, so the zero-arg families
+            // stay disjoint by construction. Mode split mirrors the other
+            // two families (sloppy substitutes the realm global; strict
+            // plain functions and arrows preserve the raw `this` word — an
+            // arrow body reads lexical `this` through its capture cell and
+            // never consults the frame slot).
+            .capture_leaf_kind = if (simple_inline_base and !strict_mode and fb.arg_count == 0 and fb.var_refs_len > 0 and leaf_body_geometry)
+                .sloppy
+            else if (((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count == 0 and fb.var_refs_len > 0 and leaf_body_geometry)
                 .raw_this
             else
                 .none,

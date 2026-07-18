@@ -594,6 +594,52 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
     return enterEntry(vm, entry, code_ptr);
 }
 
+/// Warm capture-leaf entry (O2) — the pivot arm for `() => this.x` style
+/// zero-arg captured callees on OP_call0. Same warm/miss split as the
+/// established zero-arg adapter; the warm constructor adds only the borrowed
+/// capture binding (two frame stores off the already-resolved closure record).
+inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, captures, region_start)) {
+        .entry => |slow_entry| slow_entry,
+        .threw => return .threw,
+        .recovered => return coldNext(vb, vm),
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    return enterEntry(vm, entry, code_ptr);
+}
+
+/// Handler-side adapter for the outline warm capture-leaf constructor (the
+/// non-pivot sloppy plain twin; see `warmCaptureLeafOutline`).
+inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, captures, region_start, resume_pc)) {
+        .entry => |e| e,
+        .threw => return .threw,
+        .recovered => return coldNext(vb, vm),
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    return enterEntry(vm, entry, code_ptr);
+}
+
+/// Out-of-line capture-leaf entry (dynamic-argc plain calls and the method
+/// receiver arm). One bl into the authoritative constructor mirrors the
+/// zero-arg raw method arm's rationale: a warm inline body here would be
+/// instruction-near-identical to the pivot one and could tail-merge back
+/// into a shared discrimination head on the established arms.
+inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return coldNext(vb, vm);
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    return enterEntry(vm, entry, code_ptr);
+}
+
 /// Same-Machine entry for a call region already moved out of the caller's
 /// operand layout. Proxy `get` uses this because its semantic arguments are
 /// `[target, key, receiver]`, while the caller must retain `[target, key]` for
@@ -1097,6 +1143,36 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         }
                         return pushEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
+                    // O2 capture-leaf arms: zero-arg callees whose only frame
+                    // window is the inherited capture array (`() => this.x`
+                    // arrow reads, zero-arg closures over upvalues). The fused
+                    // kind byte is tested only after BOTH established zero-arg
+                    // bits missed, so the harvested empty-leaf family keeps
+                    // its exact discrimination chain and a non-leaf zero-arg
+                    // miss pays one more predicted byte test. Policy split
+                    // mirrors O1 with the hot arm inverted to this knife's
+                    // pivot: raw-`this` (arrow-this) keeps the warm inline
+                    // body; the sloppy twin rides one bl into the outline
+                    // warm constructor so a second inline body cannot
+                    // re-register the neighboring established warm arms.
+                    if (argc == 0) {
+                        const capture_kind = resolved.view.capture_leaf_kind;
+                        if (capture_kind != .none) {
+                            const captures = resolved.var_refs[0..resolved.fb.var_refs_len];
+                            if (comptime argc_source == .zero) {
+                                if (capture_kind == .raw_this) {
+                                    return pushWarmCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.view, captures, region_start, pc + 1, resolved.fb.byte_code);
+                                }
+                                return pushWarmOutlineCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.view, captures, region_start, pc + 1, resolved.fb.byte_code);
+                            }
+                            // Dynamic-argc plain calls: authoritative outline,
+                            // mirroring the established zero-arg arm above.
+                            if (capture_kind == .raw_this) {
+                                return pushCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.view, captures, region_start, resolved.fb.byte_code);
+                            }
+                            return pushCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.view, captures, region_start, resolved.fb.byte_code);
+                        }
+                    }
                     // O1 exact-args leaf arms — fixed nonzero arity only (the
                     // recursive/leaf-heavy call family: fib's op_call1,
                     // add(a,b)'s op_call2). The fused kind byte is tested
@@ -1201,6 +1277,16 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // identical from there.
             if (argc == 0 and resolved.view.raw_this_inline_empty_leaf) {
                 return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+            }
+            // O2 capture-leaf method twin: `recv.cb()` where cb is a zero-arg
+            // closure/arrow over captured state. The receiver arm is
+            // policy-independent (the raw receiver transfers verbatim; an
+            // arrow body never consults the slot). One bl into the
+            // authoritative constructor mirrors the raw zero-arg method arm
+            // above; the kind byte is tested only after both established
+            // zero-arg bits missed.
+            if (argc == 0 and resolved.view.capture_leaf_kind != .none) {
+                return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, resolved.fb.byte_code);
             }
             // O1 exact-args method arms: `recv.m(x)` on a published exact-args
             // leaf. The receiver arm is policy-independent (raw receiver
@@ -2877,6 +2963,36 @@ noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm:
 noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
     const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, argc, resume_pc) orelse {
         const slow = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
+            if (!callSetupRecover(vm, err)) return .threw;
+            return .recovered;
+        };
+        return .{ .entry = slow };
+    };
+    return .{ .entry = entry };
+}
+
+// O2 capture-leaf cold constructors: same after-the-cluster placement as the
+// O1 bodies above (inserting new outline bodies mid-cluster shifted every
+// subsequent handler address; see the note before pushExactArgsLeafMiss).
+/// Capture-leaf twin of `pushEmptyLeafMiss`.
+noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue) EmptyLeafMiss {
+    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+        if (!callSetupRecover(vm, err)) return .threw;
+        return .recovered;
+    };
+    return .{ .entry = entry };
+}
+
+/// Outline WARM capture-leaf constructor for the sloppy plain arm. The
+/// zero-arg handlers keep exactly ONE new inline warm body (the raw-`this`
+/// pivot family: `() => this.x` arrow reads); expanding the sloppy twin
+/// inline as well risks re-registering the neighboring established warm
+/// bodies (the O1 measurement: a second inline body cost closure-two-arg
+/// +1.3% cyc from spilled freight stores). One bl into this warm body still
+/// deletes the InlineTarget freight and the three-deep constructor chain.
+noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, resume_pc) orelse {
+        const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
         };
