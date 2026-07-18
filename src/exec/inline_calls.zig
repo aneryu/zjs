@@ -1681,12 +1681,25 @@ pub const Machine = struct {
     }
 
     /// Push a method inline call whose raw source is
-    /// `[receiver, callable, args...]`. Strict functions that need an unmapped
-    /// arguments snapshot and already have their complete argv use the deep
+    /// `[receiver, callable, args...]`. Sloppy simple methods with their
+    /// complete argv — the established `recv.m(x)` hot shape — and strict
+    /// functions that need an unmapped arguments snapshot both use the deep
     /// constructor; all other shapes retain the established generic selector.
-    /// The guard is deliberately limited to one precomputed eligibility byte
-    /// plus the arity comparison, so non-snapshot methods still branch directly
+    /// Each guard is deliberately limited to one precomputed eligibility byte
+    /// plus the arity comparison (the receiver/`this` identity is a caller
+    /// invariant: every method-layout producer binds `values[0]` as the
+    /// target's `this_value`), so unmatched methods still branch directly
     /// to their established `pushFrame` instantiation.
+    ///
+    /// The sloppy-exact arm collapses the retired three-deep chain (bl
+    /// `pushFrame` -> bl `setupFallbackInlineEntry` -> b
+    /// `setupSimpleInlineEntry`) into one bl: qjs OP_call_method enters the
+    /// same single JS_CallInternal prologue as OP_call (quickjs.c:18201);
+    /// there is no second/third setup hop to re-save callee-saved registers
+    /// or re-classify the shape `methodSimpleInlineMode` already proved. The
+    /// shell stays outline (`pushExactSimpleFrame` is noinline): the win is
+    /// the two deleted bl round-trips and their freight reloads, not an
+    /// in-place expansion of the constructor body in the handler.
     pub inline fn pushMethodCall(
         self: *Machine,
         global: *core.Object,
@@ -1698,8 +1711,16 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         const source = ArgsSource.initStack(region_start, argc, true);
         const function = target.view;
-        if (function.strict_simple_snapshot_inline_eligible and argc >= function.arg_count) {
-            return self.pushExactSimpleFrame(false, true, true, global, target, source);
+        // Shared arity gate first: the padded (`argc < arg_count`) siblings
+        // fail one comparison and branch straight to the generic selector
+        // instead of walking every eligibility byte on their way out.
+        if (argc >= function.arg_count) {
+            if (function.simple_inline_eligible) {
+                return self.pushExactSimpleFrame(false, false, true, global, target, source);
+            }
+            if (function.strict_simple_snapshot_inline_eligible) {
+                return self.pushExactSimpleFrame(false, true, true, global, target, source);
+            }
         }
         return self.pushFrame(.generic, global, target, source);
     }
