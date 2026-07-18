@@ -474,9 +474,10 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
 }
 
-inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout) Outcome {
+inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout, comptime inline_exact: bool) Outcome {
+    comptime std.debug.assert(layout == .plain or !inline_exact);
     const entry = switch (layout) {
-        .plain => vm.machine.pushPlainCall(vm.global, vm.stack, target, region_start, argc),
+        .plain => vm.machine.pushPlainCall(inline_exact, vm.global, vm.stack, target, region_start, argc),
         .method => vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc),
     } catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
@@ -934,7 +935,11 @@ const CallArgcSource = enum { operand, zero, one, two, three };
 /// all variants on the same semantic path; only argc and pc advance specialize.
 fn opCall(comptime argc_source: CallArgcSource) Handler {
     return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+        // Same I-cache pin as op_call_method below: the fixed-arity instances
+        // carry the expanded exact-frame constructor, so their (and their
+        // neighbors') prologue phase must not drift when that body changes
+        // size.
+        fn h(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
             const argc: u16 = switch (argc_source) {
                 .operand => readInt(u16, pc + 1),
                 .zero => 0,
@@ -963,7 +968,16 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
-                    return pushAndEnter(vb, vm, &target, region_start, argc, .plain);
+                    // Fixed nonzero arity only: the recursive/leaf-heavy call
+                    // family (fib's op_call1..3). The operand form and call0's
+                    // non-leaf remainder keep the compact out-of-line
+                    // constructor so text growth stays on the measured hot
+                    // instances.
+                    const inline_exact = comptime switch (argc_source) {
+                        .one, .two, .three => true,
+                        .operand, .zero => false,
+                    };
+                    return pushAndEnter(vb, vm, &target, region_start, argc, .plain, inline_exact);
                 }
             }
             vm.stack.setTopPtr(sp);
@@ -1005,7 +1019,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
             vm.frame.pc += 2;
             vm.stack.setTopPtr(region_start);
-            return pushAndEnter(vb, vm, &target, region_start, argc, .method);
+            return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
         }
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else region_start[2];
@@ -1911,7 +1925,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
     if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, getter)) |target| {
         const region_start = sp - 2;
         vm.stack.setTopPtr(region_start);
-        return pushAndEnter(var_buf, vm, &target, region_start, 0, .method);
+        return pushAndEnter(var_buf, vm, &target, region_start, 0, .method, false);
     }
     vm.stack.setTopPtr(sp);
     const value = call_runtime.callValueOrBytecodeClassModePreRooted(

@@ -1028,7 +1028,32 @@ pub const Machine = struct {
     /// straight-line setup implementation: depth guard, stable slot, frame
     /// setup, and link are one unit; every other shape retains the generic
     /// fallback above.
+    ///
+    /// The out-of-line symbol stays authoritative for every cold caller
+    /// (driver fallback, strict/method shapes). The fixed-arity hot call
+    /// handlers alone expand `pushExactSimpleFrameImpl` in place, so their
+    /// steady-state loop crosses no bl/outparam seam: the error-union result
+    /// otherwise round-trips through a caller stack slot (`strh`+`str` in the
+    /// callee epilogue against an immediate `ldrh`+`ldr` readback after the
+    /// return — a store-to-load forward across the call boundary) and the
+    /// callee re-saves the caller's entire callee-saved register file.
     noinline fn pushExactSimpleFrame(
+        self: *Machine,
+        comptime strict_this: bool,
+        comptime snapshot_args: bool,
+        comptime method_receiver: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) HostError!*Entry {
+        return pushExactSimpleFrameImpl(self, strict_this, snapshot_args, method_receiver, global, target, source);
+    }
+
+    /// Shared straight-line body of `pushExactSimpleFrame`. `inline` is the
+    /// point: the sloppy-exact instantiation expands directly inside the
+    /// fixed-arity call opcode handlers while the noinline owner above keeps
+    /// the single cold symbol for every other caller.
+    inline fn pushExactSimpleFrameImpl(
         self: *Machine,
         comptime strict_this: bool,
         comptime snapshot_args: bool,
@@ -1540,8 +1565,12 @@ pub const Machine = struct {
     /// Push a plain inline call whose raw source is `[callable, args...]`.
     /// Exact sloppy/strict frames enter the deep constructor; all remaining
     /// plain shapes retain the authoritative generic setup implementation.
+    /// `inline_exact` (fixed-arity hot call handlers only) expands the
+    /// sloppy-exact constructor body in place of its out-of-line symbol; the
+    /// strict and generic arms always keep their cold calls.
     pub inline fn pushPlainCall(
         self: *Machine,
+        comptime inline_exact: bool,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         target: *const InlineTarget,
@@ -1554,6 +1583,9 @@ pub const Machine = struct {
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
+            if (inline_exact) {
+                return self.pushExactSimpleFrameImpl(false, false, false, global, target, source);
+            }
             return self.pushExactSimpleFrame(false, false, false, global, target, source);
         }
         if (isStrictSimpleInlineFrame(false, target, source)) {
@@ -1613,7 +1645,7 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!*Entry {
         return switch (layout) {
-            .plain => self.pushPlainCall(global, caller_stack, target, region_start, argc),
+            .plain => self.pushPlainCall(false, global, caller_stack, target, region_start, argc),
             .method => self.pushMethodCall(global, caller_stack, target, region_start, argc),
         };
     }
