@@ -561,6 +561,34 @@ inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.
     return enterEntry(vm, entry, code_ptr);
 }
 
+/// Capacity gate for the padded-args leaf family (Q3): the pad fill writes
+/// `arg_count - argc` undefined slots ABOVE the supplied args — still inside
+/// the caller's fixed operand backing, whose slots past the retreated top
+/// are dead capacity (the caller is suspended for the callee's whole life;
+/// after resume the pads sit above the delivered result and are dead again,
+/// exactly like the retired exact-args window). A region too close to the
+/// backing end fails this one compare and keeps the established full-price
+/// padded constructor (fail-open to the generic path).
+inline fn paddedLeafRegionHasCapacity(stack: *const stack_mod.Stack, region_start: [*]JSValue, comptime method_receiver: bool, arg_count: u16) bool {
+    const window_need = region_start + @as(usize, @intFromBool(method_receiver)) + 1 + @as(usize, arg_count);
+    return @intFromPtr(window_need) <= @intFromPtr(stack.basePtr() + stack.capacity);
+}
+
+/// Handler-side adapter for the padded-args outline warm constructor (Q3).
+/// EVERY padded arm rides one bl into the outline body — no handler
+/// instance gains a new inline constructor (see `warmPaddedArgsLeafOutline`).
+inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = switch (warmPaddedArgsLeafOutline(leaf_this, vm, function, captures, region_start, argc, resume_pc)) {
+        .entry => |e| e,
+        .threw => return .threw,
+        .recovered => return coldNext(vb, vm),
+    };
+    if (vm.poller.active) {
+        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+    }
+    return enterEntry(vm, entry, code_ptr);
+}
+
 /// Out-of-line empty-leaf entry (dynamic-argc plain calls and the strict
 /// method arm). Keep the authoritative constructor out of the handler instead
 /// of duplicating the warm fixed-call0 body in another large opcode instance;
@@ -1251,6 +1279,35 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                             }
                         }
                     }
+                    // Q3 padded-args leaf arms — the `argc < arg_count`
+                    // sibling shape of a published exact-args leaf callee
+                    // (`one()` with `function one(value)`): the missing
+                    // parameter slots become undefined written in place
+                    // above the supplied args, gated by ONE capacity compare
+                    // against the caller's operand backing (a miss keeps the
+                    // established full-price padded constructor). Wired on
+                    // the zero-arg and fixed-arity instances; tested only
+                    // after every established arm missed. The zero-arg
+                    // instance re-reads the kind byte the O1 block never
+                    // loaded there; on the fixed-arity instances LLVM folds
+                    // it into the O1 load. Every policy rides one bl into
+                    // the outline warm constructor — no new inline body in
+                    // any established instance (see warmPaddedArgsLeafOutline).
+                    const wire_padded_args_leaf = comptime switch (argc_source) {
+                        .zero, .one, .two, .three => true,
+                        .operand => false,
+                    };
+                    if (wire_padded_args_leaf) {
+                        const padded_kind = resolved.view.exact_args_leaf_kind;
+                        if (padded_kind != .none and argc < resolved.view.arg_count and
+                            paddedLeafRegionHasCapacity(vm.stack, region_start, false, resolved.view.arg_count))
+                        {
+                            if (padded_kind == .sloppy) {
+                                return pushWarmOutlinePaddedArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                            }
+                            return pushWarmOutlinePaddedArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                        }
+                    }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
                     // Fixed nonzero arity only: the recursive/leaf-heavy call
                     // family (fib's op_call1..3). The operand form and call0's
@@ -1350,6 +1407,19 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 3, resolved.fb.byte_code);
                     }
                     return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, resolved.fb.byte_code);
+                }
+                // Q3 padded method sibling: `recv.one()` with
+                // `function one(value)`. The receiver arm is
+                // policy-independent (the raw receiver transfers verbatim;
+                // both published kinds accept the .receiver instantiation),
+                // so ONE bl into the outline warm constructor serves both
+                // modes without adding a third warm inline body to this
+                // handler. Capacity compare mirrors the plain arm; a miss
+                // keeps the established full-price padded constructor.
+                if (argc < resolved.view.arg_count and
+                    paddedLeafRegionHasCapacity(vm.stack, region_start, true, resolved.view.arg_count))
+                {
+                    return pushWarmOutlinePaddedArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 3, resolved.fb.byte_code);
                 }
             }
             const target = resolved.bind(receiver, method);
@@ -3126,6 +3196,33 @@ noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *
 noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
     const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, resume_pc) orelse {
         const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+            if (!callSetupRecover(vm, err)) return .threw;
+            return .recovered;
+        };
+        return .{ .entry = slow };
+    };
+    return .{ .entry = entry };
+}
+
+// Q3 padded-args leaf outline constructor: same after-the-cluster placement
+// as the O1/O2 bodies above (inserting new outline bodies mid-cluster
+// shifted every subsequent handler address; see the note before
+// pushExactArgsLeafMiss).
+/// Outline WARM padded-args constructor (Q3). Every padded arm — plain
+/// sloppy/raw and the method receiver — rides one bl into this warm body:
+/// the zero-arg instance already hosts three established warm inline
+/// constructors, the fixed-arity instances host the exact family's, and the
+/// method handler hosts two, so a new inline body in ANY of them risks
+/// re-registering measured arms (the O1 measurement: a second inline body
+/// cost closure-two-arg +1.3% cyc from spilled freight stores). One bl
+/// still deletes the InlineTarget freight, the three-deep constructor
+/// chain, the slab arg-prefix copy, and buys the O1 one-ldp return
+/// epilogue. A warm miss falls to the authoritative constructor for
+/// first-use Entry allocation, chunk switching, heap fallback, OOM, and
+/// stack-overflow recovery.
+noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
+    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, argc, resume_pc) orelse {
+        const slow = vm.machine.pushPaddedArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
         };

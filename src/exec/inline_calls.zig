@@ -1406,6 +1406,68 @@ pub const Machine = struct {
         return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, self.callerResumePc());
     }
 
+    /// Padded-args authoritative constructor (Q3) — the deep fallible twin
+    /// of `pushExactArgsLeafFrame` for the `argc < arg_count` call shape.
+    /// The dispatch arm's capacity gate covers this path too (a warm miss
+    /// re-enters with the same already-proved region), and the pad fill
+    /// happens only inside the infallible publication tail
+    /// (`finishPaddedArgsLeafFrame`), so the sole-owner errdefer below
+    /// releases exactly the supplied `argc` values plus callable/receiver —
+    /// a pad slot is never written on a failure path. Kept as a SEPARATE
+    /// body (see `pushExactArgsLeafFrame` for the tail-merge re-scheduling
+    /// hazard).
+    noinline fn pushPaddedArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertPaddedArgsLeafEligible(leaf_this, function);
+        std.debug.assert(argc < function.arg_count);
+        std.debug.assert(function.var_count == 0);
+        std.debug.assert(function.open_var_ref_count == 0);
+
+        // Same sole-owner contract as the exact-args constructor, over the
+        // SUPPLIED args window only (reverse index order, mirroring
+        // cleanupStackSource). The missing tail has not been written.
+        errdefer {
+            var index: usize = argc;
+            while (index > 0) {
+                index -= 1;
+                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
+            }
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
     /// Debug-only proof that the comptime `this` arm matches the published
     /// per-policy eligibility bit and the callee's `this` policy: the sloppy
     /// arm substitutes the realm global for non-arrow sloppy functions; the
@@ -1447,6 +1509,26 @@ pub const Machine = struct {
             .sloppy_global => std.debug.assert(function.capture_leaf_kind == .sloppy),
             .raw_undefined => std.debug.assert(function.capture_leaf_kind == .raw_this),
             .receiver => std.debug.assert(function.capture_leaf_kind != .none),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
+                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Padded-args twin of `assertExactArgsLeafEligible` (Q3): the padded
+    /// call shape reuses the O1 family's publication byte verbatim — the
+    /// published conditions already prove what padding relies on
+    /// (`has_simple_parameter_list` excludes default/rest parameter
+    /// initializers via `simple_inline_base`, and the leaf body geometry
+    /// excludes `arguments` materialization/rescue), so a missing parameter
+    /// slot is exactly the spec's plain `undefined` binding.
+    inline fn assertPaddedArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(function.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(function.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(function.simple_inline_exact_args_leaf or
+                function.raw_this_inline_exact_args_leaf),
         }
         if (comptime leaf_this != .receiver) {
             std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
@@ -1641,6 +1723,88 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// Padded-args publication tail (Q3) — the parallel twin of
+    /// `finishExactArgsLeafFrame` for the `argc < arg_count` call shape of a
+    /// published exact-args leaf callee (separate body; see
+    /// `pushExactArgsLeafFrame` for the tail-merge re-scheduling hazard).
+    /// The ONLY divergence from the exact tail: the args window spans the
+    /// full `arg_count` parameter slots of the caller region and the missing
+    /// tail `[argc..arg_count)` is filled with undefined HERE, after the
+    /// last failable point — the leaf form of qjs's `arg_buf` missing-tail
+    /// fill (`for(i = argc; i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`,
+    /// quickjs.c:17856-17857) without the argv copy: the supplied prefix
+    /// already lives where the borrowed window wants it, and the dispatch
+    /// arm's capacity gate (`paddedLeafRegionHasCapacity`) proved the pad
+    /// slots stay inside the caller's fixed operand backing. Constructor
+    /// failure paths therefore release exactly the supplied `argc` values
+    /// (their errdefers never see a pad), while every teardown that runs
+    /// after publication releases the whole window exactly once (undefined
+    /// frees are tag-test no-ops). The teardown publishes the SAME
+    /// `exact_args_leaf` bit: after construction the frame is
+    /// indistinguishable from an exact-args leaf (`args.len == arg_count`),
+    /// so the O1 return arm and both teardown epilogues apply unchanged.
+    /// `actual_arg_count = argc` stays truthful for the
+    /// excluded-by-publication consumers (arguments/rest/super never
+    /// materialize in a leaf body).
+    inline fn finishPaddedArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        const args_base = region_start + @as(usize, @intFromBool(method_receiver)) + 1;
+        const args_window: []core.JSValue = args_base[0..function.arg_count];
+        // Missing-tail fill, in place. No failable operation follows (or
+        // precedes, within this tail), so an abandoned construction can
+        // never leave a written pad behind for a source-cleanup errdefer to
+        // double-free.
+        @memset(args_base[argc..function.arg_count], core.JSValue.undefinedValue());
+        // Ownership transfers mirror `finishExactArgsLeafFrame` exactly:
+        // `var_refs` borrows the closure's cell array (qjs `var_refs =
+        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
+        // `current_function` until teardown.
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .actual_arg_count = argc,
+            .args = args_window,
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
     /// The caller's post-operand resume pointer, exactly what
     /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
     /// runs after the call opcode published the caller's resume offset
@@ -1775,6 +1939,57 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free padded-args leaf construction (Q3) — the
+    /// `argc < arg_count` sibling of `tryPushExactArgsLeafCallFast`. The
+    /// dispatch arm has already proved the caller's operand backing keeps
+    /// `arg_count` slots addressable at the region's args base
+    /// (`paddedLeafRegionHasCapacity` — asserted below), so the publication
+    /// tail fills the missing slots with undefined IN PLACE and the frame
+    /// binds the same borrowed caller-region args window as the exact
+    /// family. Same pure-miss contract: a null result leaves call depth,
+    /// arena watermark, source ownership, the untouched pad slots, and
+    /// Machine links unchanged, so the caller can invoke
+    /// `pushPaddedArgsLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling. Kept as a
+    /// SEPARATE body (see `pushExactArgsLeafFrame` for the tail-merge
+    /// re-scheduling hazard).
+    pub inline fn tryPushPaddedArgsLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertPaddedArgsLeafEligible(leaf_this, function);
+        std.debug.assert(argc < function.arg_count);
+        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
+            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
+        const ctx = self.ctx;
+        if (ctx.call_depth >= ctx.stack_limit) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -2194,6 +2409,28 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertCaptureLeafEligible(leaf_this, function);
         return self.pushCaptureLeafFrame(leaf_this, global, function, captures, region_start);
+    }
+
+    /// Padded-args twin of `pushExactArgsLeafCall` (Q3): authoritative
+    /// fallible entry for a leaf call that supplies `argc < arg_count`
+    /// arguments in the caller region, with the missing tail padded in
+    /// place by the publication tail (capacity proved by the dispatch arm's
+    /// gate — asserted here).
+    pub inline fn pushPaddedArgsLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertPaddedArgsLeafEligible(leaf_this, function);
+        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
+            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
+        return self.pushPaddedArgsLeafFrame(leaf_this, global, function, captures, region_start, argc);
     }
 
     /// Push a method inline call whose raw source is
