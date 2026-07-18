@@ -7632,6 +7632,240 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
+test "forwarded leaf warm constructor preserves miss fallback and ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    // Publication pins for the O3 forwarded-leaf shapes: the pivot body, a
+    // throwing body (abrupt coverage really crosses the arm), and the
+    // leftover-operand body (the return-arm guard really routes it).
+    const setup = try js.eval(
+        \\globalThis.__fwdLeaf = function () { return 1; };
+        \\globalThis.__fwdLeafThrower = function () { return (void 0).x; };
+        \\globalThis.__fwdLeafLeftover = function () { ({}); };
+        \\globalThis.__fwdNativeCall = Function.prototype.call;
+    );
+    setup.free(rt);
+    const leaf_name = try rt.internAtom("__fwdLeaf");
+    defer rt.atoms.free(leaf_name);
+    const thrower_name = try rt.internAtom("__fwdLeafThrower");
+    defer rt.atoms.free(thrower_name);
+    const leftover_name = try rt.internAtom("__fwdLeafLeftover");
+    defer rt.atoms.free(leftover_name);
+    const native_name = try rt.internAtom("__fwdNativeCall");
+    defer rt.atoms.free(native_name);
+    const callable = global.getProperty(leaf_name);
+    defer callable.free(rt);
+    const thrower = global.getProperty(thrower_name);
+    defer thrower.free(rt);
+    const leftover = global.getProperty(leftover_name);
+    defer leftover.free(rt);
+    const native_call = global.getProperty(native_name);
+    defer native_call.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+    const resolved_thrower = inline_calls.resolveInlineFunction(global, thrower) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_thrower.view.flags.simple_inline_empty_leaf);
+    const resolved_leftover = inline_calls.resolveInlineFunction(global, leftover) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_leftover.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+
+    // A fresh Machine has neither Entry nor arena backing. The speculative
+    // arm must miss without consuming EITHER owned source slot (target and
+    // skipped native `call` function) or changing call depth — the adapter
+    // then restores its operand top and takes the authoritative
+    // pushForwardedCall path.
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    var region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+    region_start[1].free(rt);
+    region_start[1] = core.JSValue.undefinedValue();
+
+    // Prime Entry and arena chunks through the authoritative zero-arg leaf
+    // constructor (the forwarded twin shares both pools).
+    const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(primed.isEmptyLeaf());
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Warm hit: allocation-free, publishes the forwarded-leaf teardown shape
+    // (native ownership bit + forwarded bit, NEVER the empty-leaf bit whose
+    // resume record would overlay the live native_caller), consumes both
+    // source slots, and the paired pop releases the native frame and
+    // restores depth and watermark.
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isForwardedLeaf());
+    try std.testing.expect(warm.teardown.has_native_caller);
+    try std.testing.expect(!warm.isEmptyLeaf());
+    try std.testing.expect(!warm.isExactArgsLeaf());
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[1].isUndefined());
+    machine.popReturnedForwardedLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // An oversized operand window cannot use the active arena chunk. The
+    // fast miss is pure — both slots stay owned by the region for the
+    // authoritative fallback.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+    region_start[0].free(rt);
+    region_start[0] = core.JSValue.undefinedValue();
+    region_start[1].free(rt);
+    region_start[1] = core.JSValue.undefinedValue();
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "forwarded leaf call semantics keep exclusions on the authoritative path" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The O3 arm accepts only argc<=1 undefined-thisArg calls of published
+    // sloppy zero-arg leaves; strict/arrow targets, a null/object thisArg,
+    // and extra arguments must keep the authoritative forwarding semantics.
+    // 256 rounds cross the cold->warm seam (first call misses into the
+    // generic path, later calls ride the warm constructor).
+    const result = try js.evalWithOptions(
+        \\function fwdOne() { return 1; }
+        \\function fwdStrict() { "use strict"; return this === undefined ? 10 : 0; }
+        \\const fwdArrow = () => 100;
+        \\function fwdSloppyThis() { return this === globalThis ? 1000 : 0; }
+        \\let total = 0;
+        \\for (let i = 0; i < 256; i++) {
+        \\    total += fwdOne.call();
+        \\    total += fwdOne.call(undefined);
+        \\    total += fwdOne.call(null);
+        \\    total += fwdOne.call(undefined, 9);
+        \\    total += fwdStrict.call(undefined);
+        \\    total += fwdArrow.call(undefined);
+        \\    total += fwdSloppyThis.call(undefined);
+        \\}
+        \\total;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 256 * (1 + 1 + 1 + 1 + 10 + 100 + 1000)), result.asInt32());
+}
+
+test "forwarded leaf abrupt completion balances and keeps the native frame" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // A throwing published leaf entered through Function.prototype.call:
+    // abrupt completion must release the callee operands and the owned
+    // native `call` frame exactly once (liveCount balance over two rounds),
+    // and a backtrace captured while the forwarded frame is live must keep
+    // the qjs order target -> call (native) -> caller on BOTH the cold and
+    // warm entries.
+    const setup = try js.eval(
+        \\function fwdThrower() { return (void 0).missing; }
+        \\function exerciseForwardedThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        let hit = false;
+        \\        try {
+        \\            fwdThrower.call(undefined);
+        \\        } catch (error) {
+        \\            hit = true;
+        \\            const stack = String(error.stack);
+        \\            const first = stack.indexOf("\n");
+        \\            if (stack.indexOf("    at fwdThrower") !== 0)
+        \\                throw new Error("target frame missing at round " + i);
+        \\            if (stack.slice(first + 1).indexOf("    at call (native)") !== 0)
+        \\                throw new Error("native frame missing at round " + i);
+        \\        }
+        \\        if (!hit) throw new Error("forwarded thrower did not throw");
+        \\    }
+        \\}
+        \\exerciseForwardedThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseForwardedThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "forwarded leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Zero-arg leaf bodies that leave operands at `return` (parser-elided
+    // trailing expression-statement drop; a refcounted switch discriminant
+    // held across `return`) entered through Function.prototype.call: the
+    // forwarded return arm carries an operand-window guard, so these must
+    // fall back to general teardown, which releases the leftovers AND the
+    // owned native frame exactly once. Only forwarded entries are exercised
+    // — the shapes are never called directly here.
+    const setup = try js.eval(
+        \\function fwdTrailingDrop() { ({ z: 1 }); }
+        \\function fwdSwitchLeftover() { switch ({ x: 7 }) { default: return 5; } }
+        \\function exerciseForwardedLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        fwdTrailingDrop.call(undefined);
+        \\        if (fwdSwitchLeftover.call(undefined) !== 5)
+        \\            throw new Error("switch leftover result mismatch");
+        \\    }
+        \\}
+        \\exerciseForwardedLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseForwardedLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
 test "method call empty leaf binds receiver as this and balances refcounts" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
