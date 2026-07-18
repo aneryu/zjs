@@ -10591,3 +10591,73 @@ test "module top-level branch-to-end gets a terminator (no fall-off)" {
     );
     defer result.free(js.runtime);
 }
+
+test "get_var uninitialized-cell inline global-object leg preserves the cold waterfall semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+
+    // Q1 red lights: op_get_var's inline uninit leg (qjs OP_get_var
+    // quickjs.c:18469-18483 mirror) must stay outcome-identical to the cold
+    // waterfall (vm_property_globals.getVar) it short-circuits.
+    //
+    // JS level, exercised through function-hot reads of parked cells:
+    //   * frozen `undefined` own-data hit (the pivot shape), including under
+    //     "use strict" (runtime_strict gate falls back cold, same value);
+    //   * static shadows (var/param/catch) and direct-eval var injection
+    //     never reach the leg (locals / checked sequences);
+    //   * accessor globals miss the own-DATA test and keep protocol reads;
+    //   * deleted dynamic globals park back at UNINITIALIZED and throw
+    //     ReferenceError through the cold arm;
+    //   * store visibility: no caching, every read sees the live property;
+    //   * global lexical TDZ (lexical closure var) still throws cold.
+    const setup = try js.eval(
+        \\globalThis.__q1 = (function () {
+        \\  var out = [];
+        \\  function readUndef() { return undefined; }
+        \\  var hot = 0;
+        \\  for (var i = 0; i < 3000; i++) { if (readUndef() === void 0) hot++; }
+        \\  out.push(hot);                                            // [0] 3000
+        \\  out.push((function(){var undefined = 5; return undefined})()); // [1] 5
+        \\  out.push((function(undefined){return undefined})(7));     // [2] 7
+        \\  out.push((function(){try{throw 3}catch(undefined){return undefined}})()); // [3] 3
+        \\  out.push((function(){eval("var undefined=9"); return undefined})()); // [4] 9
+        \\  out.push((function(){"use strict"; return undefined === void 0})()); // [5] true
+        \\  Object.defineProperty(globalThis, "__q1acc", { get: function(){ return 42; }, configurable: true });
+        \\  var acc = 0;
+        \\  function readAcc() { return __q1acc; }
+        \\  for (var j = 0; j < 1000; j++) { acc += readAcc(); }
+        \\  out.push(acc);                                            // [6] 42000
+        \\  globalThis.__q1dyn = 3;
+        \\  function readDyn() { return __q1dyn; }
+        \\  var dyn = 0;
+        \\  for (var k = 0; k < 1000; k++) { dyn += readDyn(); }
+        \\  out.push(dyn);                                            // [7] 3000
+        \\  globalThis.__q1dyn = 4;
+        \\  out.push(readDyn());                                      // [8] 4 (no caching)
+        \\  delete globalThis.__q1dyn;
+        \\  var threw = 0;
+        \\  try { readDyn(); } catch (e) { threw = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(threw);                                          // [9] 1
+        \\  function readTdz() { return __q1lex; }
+        \\  var tdz = 0;
+        \\  try { readTdz(); } catch (e) { tdz = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(tdz);                                            // [10] 1
+        \\  return out.length * 100 +
+        \\    ((out[0] === 3000 && out[1] === 5 && out[2] === 7 && out[3] === 3 &&
+        \\      out[4] === 9 && out[5] === true && out[6] === 42000 && out[7] === 3000 &&
+        \\      out[8] === 4 && out[9] === 1 && out[10] === 1) ? 1 : 0);
+        \\})();
+        \\let __q1lex = 1;
+    );
+    setup.free(rt);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const q1_name = try rt.internAtom("__q1");
+    defer rt.atoms.free(q1_name);
+    const verdict = global.getProperty(q1_name);
+    defer verdict.free(rt);
+    // 11 probes, all green.
+    try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
+}
