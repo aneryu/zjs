@@ -5347,10 +5347,55 @@ pub const parser_core = struct {
         }
 
         fn emitScopeDeleteVar(self: *State, atom_id: Atom) Error!void {
+            try self.materializeFuncExprNameForDeleteVar(atom_id);
             if (self.emit_phase1_temp) {
                 try self.emitOpAtomU16(opcode.op.scope_delete_var, atom_id, @intCast(self.scope_level));
             } else {
                 try self.emitOpAtom(opcode.op.delete_var, atom_id);
+            }
+        }
+
+        /// `delete <name>` deliberately emits no ensureClosureVar (no capture
+        /// wiring), but finalize still resolves it against materialized vars
+        /// (writeLoweredScopeDeleteVar -> resolveScopeVar / lookupClosureVar,
+        /// where `.function_name` kinds are always visible). qjs routes
+        /// OP_scope_delete_var through the same resolve_scope_var that lazily
+        /// adds the func-expr self-binding and then lowers the delete to
+        /// push_false (quickjs.c:33086 / 33279-33281). Mirror only the
+        /// materialization decision here, capture-free: walk the same
+        /// visibility order ensureClosureVar uses and materialize when the
+        /// delete would otherwise fall through to a named function
+        /// expression's own name.
+        fn materializeFuncExprNameForDeleteVar(self: *State, atom_id: Atom) Error!void {
+            if (!self.emit_to_function_def) return;
+            const current = self.cur_func();
+            if (hasVisibleCurrentBinding(current, atom_id, self.scope_level)) return;
+            if (current.is_named_func_expr and atom_id == current.func_name) {
+                _ = try current.ensureFuncExprSelfBinding();
+                return;
+            }
+            for (current.closure_var) |cv| {
+                if (cv.var_name == atom_id) return;
+            }
+            var parent_index = self.cur_func_stack.len;
+            var visible_scope_level = current.parent_scope_level;
+            while (parent_index > 0) {
+                parent_index -= 1;
+                const parent = self.funcAtVirtualIndex(parent_index);
+                // Visibility check first: materializing under a chain-visible
+                // same-name binding would link the new scope-0 var *ahead* of
+                // it in the newest-first scope chain and flip resolution for
+                // the parent's own references. (An already-materialized
+                // self-binding is itself chain-visible and stops here too.)
+                if (hasVisibleCurrentBinding(parent, atom_id, visible_scope_level)) return;
+                for (parent.closure_var) |cv| {
+                    if (cv.var_name == atom_id) return;
+                }
+                if (parent.is_named_func_expr and atom_id == parent.func_name) {
+                    _ = try parent.ensureFuncExprSelfBinding();
+                    return;
+                }
+                visible_scope_level = parent.parent_scope_level;
             }
         }
 
@@ -5483,9 +5528,32 @@ pub const parser_core = struct {
                     }
                 }
             }
-            if (current.findVar(atom_id) >= 0 or current.findArg(atom_id) >= 0) return;
+            if (current.findVar(atom_id) >= 0 or current.findArg(atom_id) >= 0) {
+                // A flat name hit resolves locally with no capture needed. But
+                // zjs findVar is flat while qjs find_var is scope_level==0
+                // only: a block-scoped shadow that is *not* visible from this
+                // reference's scope chain must still materialize the lazy
+                // self-binding (`function rec(){ { let rec; } return rec; }`
+                // resolves to the self-binding — qjs falls through to
+                // add_func_var, quickjs.c:32975-32978).
+                if (current.is_named_func_expr and atom_id == current.func_name and
+                    !hasVisibleCurrentBinding(current, atom_id, self.scope_level))
+                {
+                    _ = try current.ensureFuncExprSelfBinding();
+                }
+                return;
+            }
             for (current.closure_var) |cv| {
                 if (cv.var_name == atom_id) return;
+            }
+            // Falling-through reference to the function expression's own
+            // name: materialize the self-binding on demand and resolve to it
+            // (resolve_scope_var quickjs.c:32975-32978). Sits after the
+            // `arguments` block and the local/arg/closure early-returns —
+            // the same precedence the eager var had.
+            if (current.is_named_func_expr and atom_id == current.func_name) {
+                _ = try current.ensureFuncExprSelfBinding();
+                return;
             }
             if (try self.ensureArrowSpecialCapture(atom_id)) return;
 
@@ -5634,7 +5702,7 @@ pub const parser_core = struct {
         fn findVisibleParentVarCapturingWith(
             self: *State,
             parent_index: usize,
-            parent: *const function_def_mod.FunctionDef,
+            parent: *function_def_mod.FunctionDef,
             atom_id: Atom,
             visible_scope_level: i32,
         ) Error!?i32 {
@@ -5666,6 +5734,14 @@ pub const parser_core = struct {
                 i -= 1;
                 const vd = parent.vars[i];
                 if (vd.var_name == atom_id and vd.var_kind == .function_name) return @intCast(i);
+            }
+            // Nested falling-through reference to an enclosing named function
+            // expression's own name: materialize the parent's self-binding at
+            // the exact fallback position the eager var used to occupy
+            // (resolve_scope_var enclosing-function leg, quickjs.c:
+            // 33151-33155), keeping capture order unchanged.
+            if (parent.is_named_func_expr and atom_id == parent.func_name) {
+                return try parent.ensureFuncExprSelfBinding();
             }
             return null;
         }
@@ -10914,7 +10990,44 @@ pub const parser_core = struct {
         return last;
     }
 
-    fn hasJumpToCurrentEnd(code: []const u8, atoms: []const Atom, include_conditional: bool) bool {
+    /// Offset where the trailing cleanup-only run begins: the maximal code
+    /// suffix consisting of the ops `lastParserPhaseOpcode(skip_cleanup=true)`
+    /// skips (line_num / leave_scope / close_loc). Equals `code.len` when the
+    /// last instruction is a real op. Malformed code yields 0 so the caller's
+    /// jump-to-end answer degrades conservatively (treat as end-targeting).
+    fn trailingCleanupStart(code: []const u8, atoms: []const Atom) usize {
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        var tail_start: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > code.len) return 0;
+            if (op_id != opcode.op.line_num and
+                op_id != opcode.op.leave_scope and
+                op_id != opcode.op.close_loc)
+            {
+                tail_start = pc + size;
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        return tail_start;
+    }
+
+    /// True when any label operand (goto / if_* / gosub / catch / with-* /
+    /// scope_make_ref families — everything `parserPhaseLabelOperandOffset`
+    /// knows) targets the current end of `code`, INCLUDING the trailing
+    /// cleanup run (line_num / leave_scope / close_loc): those trailing ops
+    /// either vanish during lowering (line_num, leave_scope, uncaptured
+    /// close_loc — so the resolved target becomes `code_end`) or execute and
+    /// then fall off it. The register-resident dispatch mirrors qjs and has no
+    /// per-op fall-off bounds check, so every such jump must land on a real
+    /// terminator appended by the epilogues (qjs shape: emit_return after
+    /// js_is_live_code, quickjs.c js_parse_function_decl2 tail).
+    pub fn hasJumpToCurrentEnd(code: []const u8, atoms: []const Atom) bool {
+        const tail_start = trailingCleanupStart(code, atoms);
         var pc: usize = 0;
         var atom_index: usize = 0;
         while (pc < code.len) {
@@ -10922,11 +11035,9 @@ pub const parser_core = struct {
             const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
             const size: usize = instr.size;
             if (size == 0 or pc + size > code.len) return true;
-            if (op_id == opcode.op.goto or
-                (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
-            {
-                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (target == code.len) return true;
+            if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+                if (target >= tail_start) return true;
             }
             if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
             pc += size;
@@ -10934,11 +11045,21 @@ pub const parser_core = struct {
         return false;
     }
 
-    fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
+    /// Straight-line liveness only: does the fall-through path need an
+    /// implicit `return_undef`? Jump-to-end reachability is the caller's
+    /// separate `hasJumpToCurrentEnd` OR — a body whose last real op is a
+    /// terminator can still be entered at its end by a finished-construct
+    /// jump (if/else arm, break), and that path needs a landing terminator.
+    pub fn functionNeedsImplicitReturn(code: []const u8, atoms: []const Atom) bool {
         const op_id = lastNonCleanupOpcode(code, atoms) orelse return true;
         return switch (op_id) {
-            opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.tail_call, opcode.op.tail_call_method => false,
-            opcode.op.throw => hasJumpToCurrentEnd(code, atoms, false),
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.throw,
+            => false,
             else => true,
         };
     }
@@ -15737,8 +15858,15 @@ pub const parser_core = struct {
                 });
             }
             if (!s.pending_function_is_decl) {
-                if (s.pending_function_name) |name| {
-                    child_fd.func_var_idx = try child_fd.addScopeVar(name, .function_name, 0, false, true);
+                if (s.pending_function_name != null) {
+                    // qjs js_parse_function_decl2 records only is_func_expr +
+                    // func_name here; the self-binding var is added lazily by
+                    // resolve_scope_var / add_eval_variables when a reference
+                    // actually falls through (add_func_var quickjs.c:24208,
+                    // call sites 32977 / 33153 / 33650 / 33698). child_fd
+                    // carries the name already: FunctionDef.init received
+                    // `child_name == s.pending_function_name` above.
+                    child_fd.is_named_func_expr = true;
                 }
             }
             if (s.pending_function_is_decl) {
@@ -16017,7 +16145,12 @@ pub const parser_core = struct {
         control_boundary_active = false;
         if (capture_child) {
             const code = s.currentCode();
-            const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
+            const atoms = s.currentAtomOperands();
+            // A jump targeting the current end (post-lowering `code_end`) needs
+            // a real terminator to land on — the dispatch has no fall-off
+            // bounds check (qjs-aligned; qjs functions always end in a return).
+            const jump_to_end = hasJumpToCurrentEnd(code, atoms);
+            const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
             if (needs_return) {
                 if (func_kind == .async) {
                     try s.emitOp(opcode.op.undefined);
@@ -16030,7 +16163,10 @@ pub const parser_core = struct {
                     if (this_idx < 0) return Error.UnexpectedToken;
                     try s.emitOpU16(opcode.op.get_loc_check, @intCast(this_idx));
                     try s.emitOp(opcode.op.@"return");
-                } else if (code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                    // In-place drop → return_undef keeps code.len unchanged, so
+                    // it is only sound when nothing jumps to the current end
+                    // (the jump would still land past the rewritten byte).
                     var mutable_code = s.currentCode();
                     mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                 } else {
@@ -16449,12 +16585,18 @@ pub const parser_core = struct {
             try parseBlock(s);
             if (capture_child) {
                 const code = s.currentCode();
-                const needs_return = functionNeedsImplicitReturn(code, s.currentAtomOperands());
+                const atoms = s.currentAtomOperands();
+                // See the function-body epilogue: an end-targeting jump must
+                // land on a real terminator (no dispatch fall-off check).
+                const jump_to_end = hasJumpToCurrentEnd(code, atoms);
+                const needs_return = jump_to_end or functionNeedsImplicitReturn(code, atoms);
                 if (needs_return) {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
                         try s.emitOp(opcode.op.return_async);
-                    } else if (code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                    } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
+                        // In-place rewrite keeps code.len unchanged — only
+                        // sound when nothing jumps to the current end.
                         var mutable_code = s.currentCode();
                         mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                     } else {
@@ -20769,10 +20911,42 @@ pub const parser_core = struct {
         var maybe_parent = fd.parent;
         var visible_scope_level = fd.parent_scope_level;
         while (maybe_parent) |parent| {
+            // eval source is unknown at compile time, so every enclosing
+            // named function expression must conservatively materialize its
+            // self-binding before the var scan below captures it. Mirrors
+            // add_eval_variables' enclosing-function leg (quickjs.c:
+            // 33697-33698). Guard: a chain-visible same-name *var* means the
+            // eval resolves that binding anyway, and late materialization
+            // would link the self-binding ahead of it in the newest-first
+            // scope-0 chain and flip the parent's own references — skip.
+            // (Args deliberately do not block: the eager var coexisted with
+            // shadowing args, and finalize arg resolution is unaffected.)
+            if (parent.is_named_func_expr and
+                !hasVisibleSameNameVar(parent, parent.func_name, visible_scope_level))
+            {
+                _ = try parent.ensureFuncExprSelfBinding();
+            }
             try captureVisibleParentVarsForDirectEval(fd, parent, visible_scope_level);
             visible_scope_level = parent.parent_scope_level;
             maybe_parent = parent.parent;
         }
+    }
+
+    /// Chain-visible same-name *var* scan (no args): the guard used before
+    /// lazily materializing a function-expression self-binding once parsing
+    /// has moved past the def (direct-eval conservative paths).
+    fn hasVisibleSameNameVar(
+        fd: *const function_def_mod.FunctionDef,
+        atom_id: Atom,
+        visible_scope_level: i32,
+    ) bool {
+        var index = fd.vars.len;
+        while (index > 0) {
+            index -= 1;
+            const vd = fd.vars[index];
+            if (vd.var_name == atom_id and State.scopeChainContains(fd, visible_scope_level, vd.scope_level)) return true;
+        }
+        return false;
     }
 
     fn localClosureVarForFunctionVar(fd: *function_def_mod.FunctionDef, var_idx: i32) function_def_mod.ClosureVar {
@@ -20870,7 +21044,7 @@ pub const parser_core = struct {
         }
     }
 
-    fn markDirectEvalVisibleOwnBindings(fd: *function_def_mod.FunctionDef) void {
+    fn markDirectEvalVisibleOwnBindings(fd: *function_def_mod.FunctionDef) Error!void {
         const eval_scope_mask: u16 = 0x3fff;
         var pc: usize = 0;
         var atom_index: usize = 0;
@@ -20896,6 +21070,17 @@ pub const parser_core = struct {
             };
             if (scope_level) |visible_scope| {
                 found_eval = true;
+                // The eval source may reference the enclosing named function
+                // expression's own name: materialize the self-binding for this
+                // eval site unless a chain-visible same-name var already
+                // resolves it (add_eval_variables quickjs.c:33649-33650).
+                // Materialize before the capture scan below so the new var is
+                // marked captured by its `.function_name` arm.
+                if (fd.is_named_func_expr and
+                    !hasVisibleSameNameVar(fd, fd.func_name, visible_scope))
+                {
+                    _ = try fd.ensureFuncExprSelfBinding();
+                }
                 for (fd.vars) |*vd| {
                     if (vd.var_kind == .eval_var_object) continue;
                     if (vd.var_kind == .function_name or State.scopeChainContains(fd, visible_scope, vd.scope_level)) {
@@ -20914,6 +21099,12 @@ pub const parser_core = struct {
         // conservative fallback for hand-built FunctionDefs so an understated
         // open-ref table can never turn into a dangling/boxed-slot mismatch.
         if (!found_eval or malformed) {
+            // Defensive arm (understated/hand-built streams): keep eval
+            // conservatism — materialize the self-binding too unless any
+            // same-name var exists at all (flat: visibility unknown here).
+            if (fd.is_named_func_expr and fd.findVar(fd.func_name) < 0) {
+                _ = try fd.ensureFuncExprSelfBinding();
+            }
             for (fd.vars) |*vd| if (vd.var_kind != .eval_var_object) {
                 vd.is_captured = true;
             };
@@ -20925,7 +21116,7 @@ pub const parser_core = struct {
         if (fd.has_eval_call) {
             // Reserve open references only for the union of bindings visible
             // at real eval call scopes. Sibling block lexicals remain bare.
-            markDirectEvalVisibleOwnBindings(fd);
+            try markDirectEvalVisibleOwnBindings(fd);
             try captureAllVisibleDirectEvalBindings(fd);
         }
         for (fd.child_list) |child| {
@@ -21219,17 +21410,23 @@ pub const compile_entry = struct {
         }
 
         if (return_completion) {
+            // Eval/script-completion form: `scope_get_var <ret>` is the last
+            // op, the completion rides the operand stack off the end, and the
+            // trailing `op.return` sentinel (FunctionBytecode / setCode)
+            // returns it. Statement-level jumps patched before this final get
+            // land ON it, never past it — no terminator needed.
             try state.finalizeEvalReturn();
         } else {
+            // Jump-aware terminator decision mirroring the function epilogues:
+            // a label operand targeting the current end (post-lowering
+            // `code_end`) must land on a real terminator — the dispatch has no
+            // fall-off bounds check. The instruction walk also replaces the
+            // former raw `code[code.len - 1]` opcode probe, whose last byte
+            // could alias an operand of a multi-byte instruction.
             const code = function.code;
-            const needs_return = code.len == 0 or switch (code[code.len - 1]) {
-                bytecode.opcode.op.@"return",
-                bytecode.opcode.op.return_undef,
-                bytecode.opcode.op.return_async,
-                bytecode.opcode.op.throw,
-                => false,
-                else => true,
-            };
+            const atoms = function.atom_operands;
+            const needs_return = parser_impl.hasJumpToCurrentEnd(code, atoms) or
+                parser_impl.functionNeedsImplicitReturn(code, atoms);
             if (needs_return) try state.emitReturnUndefined();
         }
 

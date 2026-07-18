@@ -7617,6 +7617,514 @@ test "inline empty leaf abrupt teardown releases pending operands" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
+test "exact-args leaf abrupt teardown releases borrowed args exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The callee is a published exact-args leaf (params only, no locals or
+    // cell creation); each call moves TWO refcounted argument objects into
+    // the caller-region args window before throwing mid-body. Abrupt
+    // completion must release each borrowed-window arg exactly once —
+    // a double free corrupts rc, a missed free strands the objects, and
+    // either breaks the liveCount balance below. Also covers the plain /
+    // strict / method entry arms.
+    const setup = try js.eval(
+        \\function leafThrow(a, b) {
+        \\    return a.x + null.missing + b.x;
+        \\}
+        \\function strictLeafThrow(a, b) {
+        \\    "use strict";
+        \\    return a.x + null.missing + b.x;
+        \\}
+        \\const leafRecv = { m: function (a, b) { return a.x + null.missing + b.x; } };
+        \\function exerciseExactArgsLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { leafThrow({ x: 1 }, { x: 2 }); } catch (error) {}
+        \\        try { strictLeafThrow({ x: 3 }, { x: 4 }); } catch (error) {}
+        \\        try { leafRecv.m({ x: 5 }, { x: 6 }); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseExactArgsLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseExactArgsLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The parser elides trailing expression-statement drops and leaves
+    // switch discriminants on the operand stack at `return` (qjs frees both
+    // in the done: local_buf..sp loop). The exact-args leaf return arm must
+    // detect the non-empty callee window and fall back to general teardown;
+    // the narrow epilogue would strand these object leftovers (rc leak, and
+    // a Debug assert abort). The zero-arg twin of this exposure (HEAD
+    // ec058eed: `function k(){ ({}); }` trips the same assert) is fixed on
+    // the publication side instead — the return-balance proof refuses those
+    // bodies the leaf flag; see "zero-arg leaf leftover bodies ..." below.
+    const setup = try js.eval(
+        \\function exactArgsLeftover(a) { ({ x: a }); }
+        \\function switchLeftover(a) {
+        \\    switch (a) { case 1: return { x: 9 }; }
+        \\}
+        \\function exerciseLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        exactArgsLeftover(i);
+        \\        switchLeftover(1).x;
+        \\    }
+        \\}
+        \\exerciseLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "padded-args leaf missing parameters read undefined across every entry arm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Q3 red lights, outcome side: the padded (`argc < arg_count`) call
+    // shape of a published exact-args leaf pads the missing tail with
+    // undefined IN PLACE above the supplied args. Every observable must be
+    // byte-identical to the generic padded constructor it replaces: missing
+    // params read undefined, writes to a padded slot stay frame-local
+    // (fresh undefined on the next call), the supplied prefix stays bound,
+    // and the sloppy/strict/arrow/method `this` arms keep their policies.
+    // The 256-iteration loops run every arm warm (first call may take the
+    // authoritative constructor; the rest take the warm fast path).
+    const setup = try js.eval(
+        \\globalThis.__padOne = function (value) { return value === undefined ? 1 : 0; };
+        \\globalThis.__padTwo = function (first, second) {
+        \\    return String(first) + "," + String(second);
+        \\};
+        \\globalThis.__padWrite = function (a, b) { b = 42; return b; };
+        \\globalThis.__padStrict = function (a, b) {
+        \\    "use strict";
+        \\    return String(this) + ":" + String(a) + ":" + String(b);
+        \\};
+        \\globalThis.__padStrictLeaf = function (a, b) {
+        \\    "use strict";
+        \\    return String(a) + "^" + String(b);
+        \\};
+        \\globalThis.__padArrow = (p, q) => String(p) + "&" + String(q);
+        \\const padRecv = { m: function (x, y) { return String(this === padRecv) + "|" + String(x) + "|" + String(y); } };
+        \\globalThis.__padRecv = padRecv;
+        \\function exercisePaddedLeafOutcomes() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__padOne() !== 1) throw new Error("missing-one read");
+        \\        if (__padTwo(i) !== i + ",undefined") throw new Error("missing-second read");
+        \\        if (__padTwo() !== "undefined,undefined") throw new Error("missing-both read");
+        \\        if (__padWrite(i) !== 42) throw new Error("pad write");
+        \\        if (__padWrite(i) !== 42) throw new Error("pad write not frame-local");
+        \\        if (__padStrict(i) !== "undefined:" + i + ":undefined") throw new Error("strict pad this");
+        \\        if (__padStrictLeaf(i) !== i + "^undefined") throw new Error("strict pad leaf");
+        \\        if (__padStrictLeaf() !== "undefined^undefined") throw new Error("strict pad leaf both");
+        \\        if (__padArrow(i) !== i + "&undefined") throw new Error("arrow pad");
+        \\        if (padRecv.m() !== "true|undefined|undefined") throw new Error("method pad receiver");
+        \\        if (padRecv.m(i) !== "true|" + i + "|undefined") throw new Error("method pad supplied");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafOutcomes();
+    );
+    setup.free(rt);
+
+    // Publication pins: the padded arms fire off the SAME O1 kind byte the
+    // exact family uses. The sloppy plain callee publishes `.sloppy`; the
+    // non-`this`-reading strict callee and the arrow publish `.raw_this`.
+    // The `this`-READING strict callee pins `.none`: `this` compiles to
+    // `push_this; put_loc` (a local), so `var_count > 0` refuses the whole
+    // leaf family by geometry and the raw frame `this` policy stays
+    // unobservable from a published plain body — its outcome line above
+    // covers the generic path instead. If a refactor stopped publishing the
+    // first three, the padded arm would silently never run and this test
+    // would only cover the generic path.
+    const one_name = try rt.internAtom("__padOne");
+    defer rt.atoms.free(one_name);
+    const strict_name = try rt.internAtom("__padStrict");
+    defer rt.atoms.free(strict_name);
+    const strict_leaf_name = try rt.internAtom("__padStrictLeaf");
+    defer rt.atoms.free(strict_leaf_name);
+    const arrow_name = try rt.internAtom("__padArrow");
+    defer rt.atoms.free(arrow_name);
+    const one_fn = global.getProperty(one_name);
+    defer one_fn.free(rt);
+    const strict_fn = global.getProperty(strict_name);
+    defer strict_fn.free(rt);
+    const strict_leaf_fn = global.getProperty(strict_leaf_name);
+    defer strict_leaf_fn.free(rt);
+    const arrow_fn = global.getProperty(arrow_name);
+    defer arrow_fn.free(rt);
+    const resolved_one = inline_calls.resolveInlineFunction(global, one_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_one.view.exact_args_leaf_kind == .sloppy);
+    const resolved_strict = inline_calls.resolveInlineFunction(global, strict_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_strict.view.exact_args_leaf_kind == .none);
+    const resolved_strict_leaf = inline_calls.resolveInlineFunction(global, strict_leaf_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_strict_leaf.view.exact_args_leaf_kind == .raw_this);
+    const resolved_arrow = inline_calls.resolveInlineFunction(global, arrow_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_arrow.view.exact_args_leaf_kind == .raw_this);
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafOutcomes()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "padded-args leaf excluded shapes keep generic-path outcomes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Q3 red lights, exclusion side: the shapes the padded arm must NEVER
+    // capture stay off the O1 kind byte at publication, so a missing-arg
+    // call keeps its authoritative semantics — `arguments` observes the
+    // real argc (not the padded window), default parameter initializers run
+    // (`has_simple_parameter_list` gate), rest parameters collect the real
+    // args, and a captured parameter reads through its cell
+    // (`open_var_ref_count` gate).
+    const setup = try js.eval(
+        \\globalThis.__exArguments = function (a, b) { return arguments.length; };
+        \\globalThis.__exDefault = function (a, b = 9) { return String(a) + ":" + String(b); };
+        \\globalThis.__exRest = function (a, ...rest) { return String(a) + "#" + rest.length; };
+        \\globalThis.__exCapture = function (a, b) { return function () { return String(b); }; };
+        \\function exercisePaddedExclusions() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__exArguments(1) !== 1) throw new Error("arguments.length");
+        \\        if (__exArguments() !== 0) throw new Error("arguments.length zero");
+        \\        if (__exDefault(3) !== "3:9") throw new Error("default init");
+        \\        if (__exRest(4) !== "4#0") throw new Error("rest collect");
+        \\        if (__exCapture(5)() !== "undefined") throw new Error("captured missing arg");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedExclusions();
+    );
+    setup.free(rt);
+
+    // Publication pins: every excluded shape must read `.none` — the padded
+    // arm shares the O1 byte, so `.none` here proves these calls can never
+    // enter the padded leaf constructors.
+    const names = [_][]const u8{ "__exArguments", "__exDefault", "__exRest", "__exCapture" };
+    for (names) |name| {
+        const atom_name = try rt.internAtom(name);
+        defer rt.atoms.free(atom_name);
+        const fn_value = global.getProperty(atom_name);
+        defer fn_value.free(rt);
+        const resolved = inline_calls.resolveInlineFunction(global, fn_value) orelse
+            return error.InvalidFunctionBytecode;
+        try std.testing.expect(resolved.view.exact_args_leaf_kind == .none);
+    }
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedExclusions()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "padded-args leaf abrupt teardown releases supplied args and pads exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Q3 red lights, release-balance side: a padded leaf that throws
+    // mid-body dies through general teardown, whose args release walks the
+    // FULL `arg_count` window — the supplied refcounted prefix exactly once
+    // (double free corrupts rc, missed free strands the object) and the
+    // undefined pads as tag-test no-ops. Covers supplied-prefix
+    // (argc=1 < 2), all-missing (argc=0 < 2), the plain/strict/method entry
+    // arms, and the deep-recursion overflow unwind through the padded
+    // authoritative constructor (every live padded frame's window released
+    // during the exception walk; the engine keeps running afterwards).
+    const setup = try js.eval(
+        \\function padThrow(a, b) { return a.x + null.missing + String(b); }
+        \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
+        \\const padThrowRecv = { m: function (a, b) { return a.x + null.missing + String(b); } };
+        \\function padOverflow(n, unused) { return padOverflow(n + 1) + (unused === undefined ? 1 : 0); }
+        \\function exercisePaddedLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { padThrow({ x: 1 }); } catch (error) {}
+        \\        try { padThrow(); } catch (error) {}
+        \\        try { strictPadThrow({ x: 2 }); } catch (error) {}
+        \\        try { padThrowRecv.m({ x: 3 }); } catch (error) {}
+        \\    }
+        \\    let overflow_caught = false;
+        \\    try { padOverflow(0); } catch (error) { overflow_caught = true; }
+        \\    if (!overflow_caught) throw new Error("overflow not raised");
+        \\    if (padThrowRecv.m !== padThrowRecv.m) throw new Error("machine wedged");
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "padded-args leaf leftover-carrying returns route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Q3 twin of the exact-args leftover coverage: the padded frame
+    // publishes the same `exact_args_leaf` teardown bit, so its return arm
+    // carries the same runtime len==0 operand-window guard. Parser-elided
+    // trailing drops and switch discriminants held across `return` must
+    // route to general teardown, which releases the leftovers AND the
+    // padded args window exactly once.
+    const setup = try js.eval(
+        \\function padLeftover(a, b) { ({ x: a, y: b }); }
+        \\function padSwitchLeftover(a, b) {
+        \\    switch (a) { case 1: return { x: String(b) }; }
+        \\}
+        \\function exercisePaddedLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        padLeftover(i);
+        \\        padLeftover();
+        \\        if (padSwitchLeftover(1).x !== "undefined") throw new Error("switch pad");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "zero-arg leaf leftover bodies are refused publication and balance rc" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    // Zero-arg bodies that leave operands live at return: the parser-elided
+    // trailing expression-statement drop and the switch discriminant held
+    // across `return`. HEAD ec058eed published these as zero-arg empty
+    // leaves, and that family's return arm is the one leaf epilogue WITHOUT
+    // an operand-window guard — the leftover was stranded (Debug assert in
+    // deinitEmptyLeafInline; one leaked object per call in ReleaseFast).
+    // The static return-balance proof now refuses them publication, so they
+    // ride the generic simple-inline path whose teardown releases leftovers
+    // exactly once — across the direct sloppy, method-receiver, strict and
+    // arrow entry shapes.
+    const setup = try js.eval(
+        \\globalThis.__zeroTrailingDrop = function () { ({ z: 1 }); };
+        \\globalThis.__zeroSwitchLeftover = function () { switch ({ x: 7 }) { default: return 5; } };
+        \\globalThis.__zeroBalancedBranchy = function () { if ("a" < "b") return 1; return 2; };
+        \\const zeroRecv = {
+        \\    drop: function () { ({ z: 2 }); },
+        \\    strictDrop: function () { "use strict"; ({ z: 3 }); },
+        \\};
+        \\const zeroArrowDrop = () => { ({ z: 4 }); };
+        \\function exerciseZeroArgLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__zeroTrailingDrop() !== undefined) throw new Error("drop result");
+        \\        if (__zeroSwitchLeftover() !== 5) throw new Error("switch result");
+        \\        if (zeroRecv.drop() !== undefined) throw new Error("method drop result");
+        \\        if (zeroRecv.strictDrop() !== undefined) throw new Error("strict drop result");
+        \\        if (zeroArrowDrop() !== undefined) throw new Error("arrow drop result");
+        \\        if (__zeroBalancedBranchy() !== 1) throw new Error("branchy result");
+        \\    }
+        \\}
+        \\exerciseZeroArgLeftovers();
+    );
+    setup.free(rt);
+
+    // Publication pins: unbalanced bodies are refused BOTH zero-arg leaf
+    // bits; the branchy-but-balanced body keeps its publication (the
+    // BFS proof carries exact per-pc levels — it is not a conservative
+    // straight-line scan that would refuse every branch).
+    const drop_name = try rt.internAtom("__zeroTrailingDrop");
+    defer rt.atoms.free(drop_name);
+    const switch_name = try rt.internAtom("__zeroSwitchLeftover");
+    defer rt.atoms.free(switch_name);
+    const branchy_name = try rt.internAtom("__zeroBalancedBranchy");
+    defer rt.atoms.free(branchy_name);
+    const drop_fn = global.getProperty(drop_name);
+    defer drop_fn.free(rt);
+    const switch_fn = global.getProperty(switch_name);
+    defer switch_fn.free(rt);
+    const branchy_fn = global.getProperty(branchy_name);
+    defer branchy_fn.free(rt);
+    const resolved_drop = inline_calls.resolveInlineFunction(global, drop_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!resolved_drop.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(!resolved_drop.view.raw_this_inline_empty_leaf);
+    const resolved_switch = inline_calls.resolveInlineFunction(global, switch_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!resolved_switch.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(!resolved_switch.view.raw_this_inline_empty_leaf);
+    const resolved_branchy = inline_calls.resolveInlineFunction(global, branchy_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_branchy.view.flags.simple_inline_empty_leaf);
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exerciseZeroArgLeftovers()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "capture leaf abrupt teardown releases operands and keeps borrowed cells" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Each callee is a published capture leaf (zero args, no locals, only an
+    // inherited capture cell) that throws mid-body with a live refcounted
+    // operand already on its stack. Abrupt completion must route through
+    // general teardown: the pending operand is released exactly once and the
+    // BORROWED capture cells are never closed or double-released (the cells
+    // belong to the still-live closure; a teardown release would corrupt
+    // their rc and break the second eval round). Covers the plain sloppy,
+    // plain arrow (raw-this pivot), and method receiver entry arms.
+    const setup = try js.eval(
+        \\const capThrowState = (function () {
+        \\    const held = { x: 1 };
+        \\    return {
+        \\        plain: function () { return held.x + null.missing; },
+        \\        arrow: () => held.x + null.missing,
+        \\    };
+        \\})();
+        \\const capRecv = {
+        \\    m: (function () { const held = { x: 2 }; return function () { return held.x + null.missing; }; })(),
+        \\};
+        \\function exerciseCaptureLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { capThrowState.plain(); } catch (error) {}
+        \\        try { capThrowState.arrow(); } catch (error) {}
+        \\        try { capRecv.m(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseCaptureLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseCaptureLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "capture leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Zero-arg twin of the exact-args leftover coverage, reachable in the
+    // capture family precisely because its bodies read free names: a
+    // refcounted switch discriminant left on the operand stack at `return`,
+    // and a parser-elided trailing expression-statement drop. The capture
+    // leaf publishes the exact_args_leaf teardown bit, so its return arm
+    // carries the operand-window guard and both shapes must fall back to
+    // general teardown (the narrow epilogue would strand the leftovers and
+    // Debug-assert).
+    const setup = try js.eval(
+        \\const capSwitchLeftover = (function () {
+        \\    const held = { x: 7 };
+        \\    return function () { switch (held) { case held: return held.x; } };
+        \\})();
+        \\const capTrailingDrop = (function () {
+        \\    const held = { y: 1 };
+        \\    return function () { ({ z: held.y }); };
+        \\})();
+        \\function exerciseCaptureLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        capSwitchLeftover();
+        \\        capTrailingDrop();
+        \\    }
+        \\}
+        \\exerciseCaptureLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseCaptureLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "capture leaf shares live cells with its closure across calls" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The capture-leaf frame BORROWS the closure's cell array — the same
+    // cells every other reference sees. Mutations through the leaf must be
+    // visible to siblings and persist across calls (a snapshot or copied
+    // window would reset the counter), and the lexical-this arrow must read
+    // and write its `this` cell (the pivot shape) through the borrowed
+    // array. `<repl>` filename keeps the script completion value.
+    const result = try js.evalWithOptions(
+        \\const counterPair = (function () {
+        \\    let n = 0;
+        \\    return { bump: () => ++n, read: function () { return n; } };
+        \\})();
+        \\counterPair.bump();
+        \\counterPair.bump();
+        \\const owner = {
+        \\    value: 40,
+        \\    makeReader() { return () => this.value; },
+        \\    makeBumper() { return () => ++this.value; },
+        \\};
+        \\const read = owner.makeReader();
+        \\const bump = owner.makeBumper();
+        \\bump();
+        \\bump();
+        \\counterPair.bump() * 1000000 + counterPair.read() * 10000 + read() * 100 + owner.value;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    // bump()=3, read()=3, arrow read()=42, owner.value=42.
+    try std.testing.expectEqual(@as(?i32, 3034242), result.asInt32());
+}
+
 test "inline empty leaf warm constructor preserves miss fallback and ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -7655,11 +8163,12 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) == null);
+    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
-    const first = try machine.pushEmptyLeafCall(global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
@@ -7672,7 +8181,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
@@ -7687,9 +8196,9 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
-    const heap_entry = try machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
     continuation.deinit(rt);
@@ -7701,11 +8210,566 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const failed = machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "forwarded leaf warm constructor preserves miss fallback and ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    // Publication pins for the O3 forwarded-leaf shapes: the pivot body, a
+    // throwing body (abrupt coverage really crosses the arm), and the
+    // leftover-operand body (refused publication by the return-balance
+    // proof, so it never reaches the forwarded arm).
+    const setup = try js.eval(
+        \\globalThis.__fwdLeaf = function () { return 1; };
+        \\globalThis.__fwdLeafThrower = function () { return (void 0).x; };
+        \\globalThis.__fwdLeafLeftover = function () { ({}); };
+        \\globalThis.__fwdNativeCall = Function.prototype.call;
+    );
+    setup.free(rt);
+    const leaf_name = try rt.internAtom("__fwdLeaf");
+    defer rt.atoms.free(leaf_name);
+    const thrower_name = try rt.internAtom("__fwdLeafThrower");
+    defer rt.atoms.free(thrower_name);
+    const leftover_name = try rt.internAtom("__fwdLeafLeftover");
+    defer rt.atoms.free(leftover_name);
+    const native_name = try rt.internAtom("__fwdNativeCall");
+    defer rt.atoms.free(native_name);
+    const callable = global.getProperty(leaf_name);
+    defer callable.free(rt);
+    const thrower = global.getProperty(thrower_name);
+    defer thrower.free(rt);
+    const leftover = global.getProperty(leftover_name);
+    defer leftover.free(rt);
+    const native_call = global.getProperty(native_name);
+    defer native_call.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+    const resolved_thrower = inline_calls.resolveInlineFunction(global, thrower) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_thrower.view.flags.simple_inline_empty_leaf);
+    const resolved_leftover = inline_calls.resolveInlineFunction(global, leftover) orelse
+        return error.InvalidFunctionBytecode;
+    // The leftover-operand body fails the static return-balance proof, so it
+    // is refused zero-arg leaf publication entirely: forwarded calls of it
+    // ride the authoritative forwarding path and the O3 arm's len==0 guard
+    // becomes a defensive backstop rather than the routing mechanism.
+    try std.testing.expect(!resolved_leftover.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+
+    // A fresh Machine has neither Entry nor arena backing. The speculative
+    // arm must miss without consuming EITHER owned source slot (target and
+    // skipped native `call` function) or changing call depth — the adapter
+    // then restores its operand top and takes the authoritative
+    // pushForwardedCall path.
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    var region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+    region_start[1].free(rt);
+    region_start[1] = core.JSValue.undefinedValue();
+
+    // Prime Entry and arena chunks through the authoritative zero-arg leaf
+    // constructor (the forwarded twin shares both pools).
+    const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(primed.isEmptyLeaf());
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Warm hit: allocation-free, publishes the forwarded-leaf teardown shape
+    // (native ownership bit + forwarded bit, NEVER the empty-leaf bit whose
+    // resume record would overlay the live native_caller), consumes both
+    // source slots, and the paired pop releases the native frame and
+    // restores depth and watermark.
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isForwardedLeaf());
+    try std.testing.expect(warm.teardown.has_native_caller);
+    try std.testing.expect(!warm.isEmptyLeaf());
+    try std.testing.expect(!warm.isExactArgsLeaf());
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[1].isUndefined());
+    machine.popReturnedForwardedLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // An oversized operand window cannot use the active arena chunk. The
+    // fast miss is pure — both slots stay owned by the region for the
+    // authoritative fallback.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(callable.dup());
+    try l0_stack.pushOwned(native_call.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+    region_start[0].free(rt);
+    region_start[0] = core.JSValue.undefinedValue();
+    region_start[1].free(rt);
+    region_start[1] = core.JSValue.undefinedValue();
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "forwarded leaf call semantics keep exclusions on the authoritative path" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The O3 arm accepts only argc<=1 undefined-thisArg calls of published
+    // sloppy zero-arg leaves; strict/arrow targets, a null/object thisArg,
+    // and extra arguments must keep the authoritative forwarding semantics.
+    // 256 rounds cross the cold->warm seam (first call misses into the
+    // generic path, later calls ride the warm constructor).
+    const result = try js.evalWithOptions(
+        \\function fwdOne() { return 1; }
+        \\function fwdStrict() { "use strict"; return this === undefined ? 10 : 0; }
+        \\const fwdArrow = () => 100;
+        \\function fwdSloppyThis() { return this === globalThis ? 1000 : 0; }
+        \\let total = 0;
+        \\for (let i = 0; i < 256; i++) {
+        \\    total += fwdOne.call();
+        \\    total += fwdOne.call(undefined);
+        \\    total += fwdOne.call(null);
+        \\    total += fwdOne.call(undefined, 9);
+        \\    total += fwdStrict.call(undefined);
+        \\    total += fwdArrow.call(undefined);
+        \\    total += fwdSloppyThis.call(undefined);
+        \\}
+        \\total;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 256 * (1 + 1 + 1 + 1 + 10 + 100 + 1000)), result.asInt32());
+}
+
+test "forwarded leaf abrupt completion balances and keeps the native frame" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // A throwing published leaf entered through Function.prototype.call:
+    // abrupt completion must release the callee operands and the owned
+    // native `call` frame exactly once (liveCount balance over two rounds),
+    // and a backtrace captured while the forwarded frame is live must keep
+    // the qjs order target -> call (native) -> caller on BOTH the cold and
+    // warm entries.
+    const setup = try js.eval(
+        \\function fwdThrower() { return (void 0).missing; }
+        \\function exerciseForwardedThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        let hit = false;
+        \\        try {
+        \\            fwdThrower.call(undefined);
+        \\        } catch (error) {
+        \\            hit = true;
+        \\            const stack = String(error.stack);
+        \\            const first = stack.indexOf("\n");
+        \\            if (stack.indexOf("    at fwdThrower") !== 0)
+        \\                throw new Error("target frame missing at round " + i);
+        \\            if (stack.slice(first + 1).indexOf("    at call (native)") !== 0)
+        \\                throw new Error("native frame missing at round " + i);
+        \\        }
+        \\        if (!hit) throw new Error("forwarded thrower did not throw");
+        \\    }
+        \\}
+        \\exerciseForwardedThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseForwardedThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "forwarded leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Zero-arg leaf bodies that leave operands at `return` (parser-elided
+    // trailing expression-statement drop; a refcounted switch discriminant
+    // held across `return`) entered through Function.prototype.call: the
+    // forwarded return arm carries an operand-window guard, so these must
+    // fall back to general teardown, which releases the leftovers AND the
+    // owned native frame exactly once. Only forwarded entries are exercised
+    // — the shapes are never called directly here.
+    const setup = try js.eval(
+        \\function fwdTrailingDrop() { ({ z: 1 }); }
+        \\function fwdSwitchLeftover() { switch ({ x: 7 }) { default: return 5; } }
+        \\function exerciseForwardedLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        fwdTrailingDrop.call(undefined);
+        \\        if (fwdSwitchLeftover.call(undefined) !== 5)
+        \\            throw new Error("switch leftover result mismatch");
+        \\    }
+        \\}
+        \\exerciseForwardedLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseForwardedLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "method call empty leaf binds receiver as this and balances refcounts" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\Object.defineProperty(String.prototype, "__leafThis", {
+        \\    value: function () { return this; },
+        \\    configurable: true,
+        \\});
+        \\function exerciseMethodEmptyLeaf() {
+        \\    const stable = { m() { return 1; }, self() { return this; } };
+        \\    let total = 0;
+        \\    for (let i = 0; i < 256; i++) {
+        \\        total += stable.m();
+        \\        if (stable.self() !== stable) throw new Error("stable this mismatch");
+        \\        const fresh = { self() { return this; } };
+        \\        if (fresh.self() !== fresh) throw new Error("fresh this mismatch");
+        \\        const boxed = "abc".__leafThis();
+        \\        if (typeof boxed !== "object" || String(boxed) !== "abc")
+        \\            throw new Error("primitive receiver coercion mismatch");
+        \\    }
+        \\    assert.sameValue(total, 256);
+        \\}
+        \\exerciseMethodEmptyLeaf();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseMethodEmptyLeaf()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "method call empty leaf abrupt teardown releases receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function exerciseMethodEmptyLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        const recv = { boom() { return null.missing; } };
+        \\        try { recv.boom(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseMethodEmptyLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseMethodEmptyLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "method empty leaf warm constructor moves receiver ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const setup = try js.eval("globalThis.__warmMethodLeafRecv = { m() { return 1; } };");
+    setup.free(rt);
+    const holder_name = try rt.internAtom("__warmMethodLeafRecv");
+    defer rt.atoms.free(holder_name);
+    const receiver = global.getProperty(holder_name);
+    defer receiver.free(rt);
+    const receiver_object = object_ops.objectFromValue(receiver) orelse
+        return error.Unexpected;
+    const method_name = try rt.internAtom("m");
+    defer rt.atoms.free(method_name);
+    const callable = receiver_object.getProperty(method_name);
+    defer callable.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+    const baseline_rc = receiver_object.header.meta().rc;
+
+    // Fresh Machine: the speculative arm must miss without consuming either
+    // slot of the [receiver, callable] region or changing call depth.
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    var region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+
+    // Authoritative constructor: receiver moves into the frame's owned raw
+    // `this` (region slot cleared, no extra refcount), and the empty-leaf
+    // return epilogue releases exactly that moved reference.
+    const first = try machine.pushEmptyLeafCall(.receiver, global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(first.isEmptyLeaf());
+    try std.testing.expect(first.frame.this_value.same(receiver));
+    try std.testing.expect(first.frame.ownership.this_value == .owned);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Warm hit: same leaf shape, allocation-free, same ownership movement.
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isEmptyLeaf());
+    try std.testing.expect(warm.frame.this_value.same(receiver));
+    try std.testing.expect(warm.frame.ownership.this_value == .owned);
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // Setup failure must restore depth/watermark and release BOTH region
+    // slots — receiver and callable — leaving the warmed Machine reusable.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, &oversized, region_start);
+    rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, failed);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[1].isUndefined());
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "strict empty leaf preserves undefined this across call forms" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Three plain-call forms of the strict leaf: a directly strict function,
+    // a nested function inheriting strictness from its enclosing 'use strict'
+    // body, and a strict method detached and called as a plain function. All
+    // must observe `this === undefined` (no sloppy global substitution).
+    const setup = try js.eval(
+        \\function strictLeafThis() {
+        \\    "use strict";
+        \\    return this;
+        \\}
+        \\function strictOuterFactory() {
+        \\    "use strict";
+        \\    function nestedStrictLeaf() { return this; }
+        \\    return nestedStrictLeaf;
+        \\}
+        \\const nestedLeaf = strictOuterFactory();
+        \\const holder = { m: function () { "use strict"; return this; } };
+        \\const detachedLeaf = holder.m;
+        \\function exerciseStrictLeafThis() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (strictLeafThis() !== undefined)
+        \\            throw new Error("strict leaf this must be undefined");
+        \\        if (nestedLeaf() !== undefined)
+        \\            throw new Error("nested strict leaf this must be undefined");
+        \\        if (detachedLeaf() !== undefined)
+        \\            throw new Error("detached strict leaf this must be undefined");
+        \\    }
+        \\}
+        \\exerciseStrictLeafThis();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseStrictLeafThis()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "strict method empty leaf passes primitive receiver uncoerced" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\Object.defineProperty(String.prototype, "__strictLeafThis", {
+        \\    value: function () { "use strict"; return this; },
+        \\    configurable: true,
+        \\});
+        \\Object.defineProperty(Number.prototype, "__strictLeafThis", {
+        \\    value: function () { "use strict"; return this; },
+        \\    configurable: true,
+        \\});
+        \\function exerciseStrictMethodLeaf() {
+        \\    const stable = { m() { "use strict"; return this; } };
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (stable.m() !== stable)
+        \\            throw new Error("strict method object this mismatch");
+        \\        const prim = "abc".__strictLeafThis();
+        \\        if (typeof prim !== "string" || prim !== "abc")
+        \\            throw new Error("strict primitive receiver must not box");
+        \\        const num = (5).__strictLeafThis();
+        \\        if (typeof num !== "number" || num !== 5)
+        \\            throw new Error("strict number receiver must not box");
+        \\    }
+        \\}
+        \\exerciseStrictMethodLeaf();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseStrictMethodLeaf()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "strict empty leaf frame preserves undefined this and borrowed ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const setup = try js.eval("globalThis.__strictWarmLeaf = function () { \"use strict\"; return 1; };");
+    setup.free(rt);
+    const leaf_name = try rt.internAtom("__strictWarmLeaf");
+    defer rt.atoms.free(leaf_name);
+    const callable = global.getProperty(leaf_name);
+    defer callable.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    // The raw-this leaf publishes its own eligibility byte (the packed sloppy
+    // bit stays clear); the call adapter selects the undefined-`this` arm.
+    try std.testing.expect(!resolved.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved.view.raw_this_inline_empty_leaf);
+    try std.testing.expect(resolved.view.flags.is_strict);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+
+    // Authoritative constructor: `this` stays undefined and borrowed (no rc
+    // traffic), matching setupSimpleInlineEntryImpl's strict plain arm.
+    try l0_stack.pushOwned(callable.dup());
+    var region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    const first = try machine.pushEmptyLeafCall(.raw_undefined, global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(first.isEmptyLeaf());
+    try std.testing.expect(first.frame.this_value.isUndefined());
+    try std.testing.expect(first.frame.ownership.this_value == .borrowed);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Warm arm publishes the same strict shape allocation-free.
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 1;
+    l0_stack.setTopPtr(region_start);
+    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isEmptyLeaf());
+    try std.testing.expect(warm.frame.this_value.isUndefined());
+    try std.testing.expect(warm.frame.ownership.this_value == .borrowed);
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -9032,6 +10096,38 @@ test "generator parameter eval cells close before body resume" {
     try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
 }
 
+test "generator return runs an add_loc-terminated finally to its stop boundary" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Regression: op_add_loc_cold lacked the local_fast_blocked publishing arm
+    // (its register-resident body ends in `cont`, which skips coldNext's
+    // maybeStop). A `.return()`-driven finally resume arms stop_before_pc =
+    // finally_range.stop, and the peephole fuses the finally body's trailing
+    // `s += 1` into add_loc — the finally range's LAST op. Blowing past the
+    // stop boundary executed the post-finally `s += 100; yield s` eagerly and
+    // it.return(42) threw instead of returning {value: 42, done: true}.
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function* g() {
+        \\  var s = 0;
+        \\  try { yield 1; } finally { s += 1; }
+        \\  s += 100;
+        \\  yield s;
+        \\}
+        \\var it = g();
+        \\var first = it.next();
+        \\var second = it.return(42);
+        \\var third = it.next();
+        \\print(first.value, first.done, second.value, second.done, third.value, third.done);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1 false 42 true undefined true\n", stream.buffered());
+}
+
 test "generator default argument stores release refcounted stack values" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -9863,4 +10959,295 @@ test "reflect construct roots argument list while resolving prototype" {
     result_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+// ===========================================================================
+// Branch-to-end fall-off forms. The register-resident dispatch carries no
+// fall-off bounds check (qjs-aligned), so the jump-aware epilogues MUST
+// terminate every branch-to-end path with a real return op and the pipeline
+// MUST plant the trailing op.return sentinel for the eval-completion form.
+// Each test pins the observable completion value; a regression surfaces as
+// the sentinel popping an empty operand stack (garbage completion / UB).
+// ===========================================================================
+
+test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffIfThrow(x) { if (x) throw 1; }
+        \\assert.sameValue(fallOffIfThrow(false), undefined);
+        \\var threw = false;
+        \\try { fallOffIfThrow(true); } catch (e) { threw = (e === 1); }
+        \\assert.sameValue(threw, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "if-return fall-off form returns undefined on the fall-through leg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffIfReturn(x) { if (x) return 1; }
+        \\assert.sameValue(fallOffIfReturn(true), 1);
+        \\assert.sameValue(fallOffIfReturn(false), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "else-return goto-to-end form returns undefined on the taken if leg" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function fallOffElseReturn(x) { if (x) { 1; } else return 2; }
+        \\assert.sameValue(fallOffElseReturn(true), undefined);
+        \\assert.sameValue(fallOffElseReturn(false), 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "nested-block branch-to-end survives trailing scope cleanup lowering" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Parser-phase target points at the block's leave_scope/close_loc run;
+    // lowering removes it, leaving the resolved target == code_end. The
+    // epilogue's jump-to-end scan must treat the trailing cleanup run as an
+    // end target and still append the terminator.
+    const result = try js.eval(
+        \\function fallOffNestedBlock(c) { { let x; if (c) throw 1; } }
+        \\assert.sameValue(fallOffNestedBlock(false), undefined);
+        \\function fallOffCaptured(c) { { let x = 1; if (c) throw 2; var probe = function () { return x; }; } return probe(); }
+        \\assert.sameValue(fallOffCaptured(false), 1);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "arrow block body branch-to-end returns undefined" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var fallOffArrow = (x) => { if (x) throw 3; };
+        \\assert.sameValue(fallOffArrow(false), undefined);
+        \\var fallOffArrowReturn = (x) => { if (x) return 4; };
+        \\assert.sameValue(fallOffArrowReturn(true), 4);
+        \\assert.sameValue(fallOffArrowReturn(false), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator branch-to-end completes with undefined value" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function* fallOffGen(x) { if (x) throw 4; yield 1; }
+        \\var it = fallOffGen(false);
+        \\assert.sameValue(it.next().value, 1);
+        \\var r = it.next();
+        \\assert.sameValue(r.done, true);
+        \\assert.sameValue(r.value, undefined);
+        \\function* fallOffGenNoYield(x) { if (x) throw 5; }
+        \\var r2 = fallOffGenNoYield(false).next();
+        \\assert.sameValue(r2.done, true);
+        \\assert.sameValue(r2.value, undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "eval L0 completion falls off onto the op.return sentinel" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Direct/indirect eval bodies end with `scope_get_var <ret>` and fall off
+    // the end; the trailing sentinel returns the completion riding the stack.
+    const result = try js.eval(
+        \\assert.sameValue(eval("if (false) throw 5;"), undefined);
+        \\assert.sameValue(eval("1 + 2"), 3);
+        \\assert.sameValue(eval("{ let x; if (false) throw 6; }"), undefined);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    // Script completion (<repl> return_completion form) rides the same
+    // sentinel fall-off at the top level.
+    const repl_undef = try js.evalWithOptions("if (false) throw 7;", .{ .filename = "<repl>" });
+    defer repl_undef.free(js.runtime);
+    try std.testing.expect(repl_undef.isUndefined());
+
+    const repl_value = try js.evalWithOptions("40 + 2", .{ .filename = "<repl>" });
+    defer repl_value.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), repl_value.asInt32());
+}
+
+test "module top-level branch-to-end gets a terminator (no fall-off)" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\if (false) throw 9;
+    );
+    defer result.free(js.runtime);
+}
+
+test "get_var uninitialized-cell inline global-object leg preserves the cold waterfall semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+
+    // Q1 red lights: op_get_var's inline uninit leg (qjs OP_get_var
+    // quickjs.c:18469-18483 mirror) must stay outcome-identical to the cold
+    // waterfall (vm_property_globals.getVar) it short-circuits.
+    //
+    // JS level, exercised through function-hot reads of parked cells:
+    //   * frozen `undefined` own-data hit (the pivot shape), including under
+    //     "use strict" (runtime_strict gate falls back cold, same value);
+    //   * static shadows (var/param/catch) and direct-eval var injection
+    //     never reach the leg (locals / checked sequences);
+    //   * accessor globals miss the own-DATA test and keep protocol reads;
+    //   * deleted dynamic globals park back at UNINITIALIZED and throw
+    //     ReferenceError through the cold arm;
+    //   * store visibility: no caching, every read sees the live property;
+    //   * global lexical TDZ (lexical closure var) still throws cold.
+    const setup = try js.eval(
+        \\globalThis.__q1 = (function () {
+        \\  var out = [];
+        \\  function readUndef() { return undefined; }
+        \\  var hot = 0;
+        \\  for (var i = 0; i < 3000; i++) { if (readUndef() === void 0) hot++; }
+        \\  out.push(hot);                                            // [0] 3000
+        \\  out.push((function(){var undefined = 5; return undefined})()); // [1] 5
+        \\  out.push((function(undefined){return undefined})(7));     // [2] 7
+        \\  out.push((function(){try{throw 3}catch(undefined){return undefined}})()); // [3] 3
+        \\  out.push((function(){eval("var undefined=9"); return undefined})()); // [4] 9
+        \\  out.push((function(){"use strict"; return undefined === void 0})()); // [5] true
+        \\  Object.defineProperty(globalThis, "__q1acc", { get: function(){ return 42; }, configurable: true });
+        \\  var acc = 0;
+        \\  function readAcc() { return __q1acc; }
+        \\  for (var j = 0; j < 1000; j++) { acc += readAcc(); }
+        \\  out.push(acc);                                            // [6] 42000
+        \\  globalThis.__q1dyn = 3;
+        \\  function readDyn() { return __q1dyn; }
+        \\  var dyn = 0;
+        \\  for (var k = 0; k < 1000; k++) { dyn += readDyn(); }
+        \\  out.push(dyn);                                            // [7] 3000
+        \\  globalThis.__q1dyn = 4;
+        \\  out.push(readDyn());                                      // [8] 4 (no caching)
+        \\  delete globalThis.__q1dyn;
+        \\  var threw = 0;
+        \\  try { readDyn(); } catch (e) { threw = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(threw);                                          // [9] 1
+        \\  function readTdz() { return __q1lex; }
+        \\  var tdz = 0;
+        \\  try { readTdz(); } catch (e) { tdz = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(tdz);                                            // [10] 1
+        \\  return out.length * 100 +
+        \\    ((out[0] === 3000 && out[1] === 5 && out[2] === 7 && out[3] === 3 &&
+        \\      out[4] === 9 && out[5] === true && out[6] === 42000 && out[7] === 3000 &&
+        \\      out[8] === 4 && out[9] === 1 && out[10] === 1) ? 1 : 0);
+        \\})();
+        \\let __q1lex = 1;
+    );
+    setup.free(rt);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const q1_name = try rt.internAtom("__q1");
+    defer rt.atoms.free(q1_name);
+    const verdict = global.getProperty(q1_name);
+    defer verdict.free(rt);
+    // 11 probes, all green.
+    try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
+}
+
+test "named function expression self-binding materializes lazily with unchanged semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+
+    // Q2 red lights: the self-binding var (kind `.function_name`) and its
+    // `special_object THIS_FUNC ; put_loc` prologue materialize lazily now
+    // (qjs add_func_var call sites: resolve_scope_var quickjs.c:32977/33153,
+    // add_eval_variables quickjs.c:33650/33698) instead of unconditionally at
+    // function entry. Every observable of the eager model must hold:
+    //   * self-reference returns/recurses the binding, incl. nested
+    //     functions, arrows, and generators;
+    //   * direct eval materializes conservatively (own body and nested,
+    //     including through an invisible block shadow);
+    //   * `delete name` stays false (own body and nested arrow);
+    //   * strict assignment throws TypeError, sloppy write is ignored;
+    //   * `.name` stays intact and non-referencing bodies stay correct;
+    //   * shadows win: param, whole-body var, let TDZ, with-object;
+    //   * `function arguments(){...}` resolves the arguments object (qjs
+    //     parity: the retired eager var used to shadow it -> "function");
+    //   * eval under a whole-body var shadow reads the var (spec value 11;
+    //     qjs's add_eval_variables quirk yields undefined here, the retired
+    //     eager model yielded the function -- we lock the spec/var answer).
+    const setup = try js.eval(
+        \\globalThis.__q2 = (function () {
+        \\  var out = [];
+        \\  var f = function rec(){ return rec; };
+        \\  out.push(f() === f);                                        // [0] true
+        \\  var fact = function frec(n){ return n <= 1 ? 1 : n * frec(n - 1); };
+        \\  out.push(fact(6));                                          // [1] 720
+        \\  var e1 = function rec(){ return eval('rec'); };
+        \\  out.push(e1() === e1);                                      // [2] true
+        \\  var e2 = function rec(){ return (function inner(){ return eval('rec'); })(); };
+        \\  out.push(e2() === e2);                                      // [3] true
+        \\  var e3 = function rec(){ { let rec = 0; } return eval('typeof rec'); };
+        \\  out.push(e3());                                             // [4] "function"
+        \\  out.push(f.name);                                           // [5] "rec"
+        \\  var a1 = function rec(){ return () => rec; };
+        \\  out.push(a1()() === a1);                                    // [6] true
+        \\  var d1 = function rec(){ return function m1(){ return function m2(){ return rec; }; }; };
+        \\  out.push(d1()()() === d1);                                  // [7] true
+        \\  out.push((function rec(){ return delete rec; })());         // [8] false
+        \\  out.push((function rec(){ return (() => delete rec)(); })()); // [9] false
+        \\  var threw = 0;
+        \\  try { (function rec(){ "use strict"; rec = 1; })(); } catch (e) { threw = e instanceof TypeError ? 1 : 2; }
+        \\  out.push(threw);                                            // [10] 1
+        \\  out.push((function rec(){ rec = 1; return rec; })() instanceof Function); // [11] true
+        \\  var g1 = function* grec(){ yield grec; };
+        \\  out.push(g1().next().value === g1);                         // [12] true
+        \\  var noref = function nr(a, b){ return a + b; };
+        \\  out.push(noref(1, 2) === 3 && noref.name === "nr");         // [13] true
+        \\  out.push((function rec(rec){ return rec; })(7));            // [14] 7
+        \\  out.push((function rec(){ var rec = 3; return rec; })());   // [15] 3
+        \\  var tdz = 0;
+        \\  try { (function rec(){ rec; let rec = 1; })(); } catch (e) { tdz = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(tdz);                                              // [16] 1
+        \\  out.push((function arguments(){ return typeof arguments; })()); // [17] "object"
+        \\  out.push((function rec(){ with ({ rec: 9 }) { return rec; } })()); // [18] 9
+        \\  var w1 = function rec(){ with ({}) { return rec; } };
+        \\  out.push(w1() === w1);                                      // [19] true
+        \\  out.push((function rec(){ var rec = 11; return eval('rec'); })()); // [20] 11
+        \\  out.push(typeof (function rec(){ { let rec; } return rec; })()); // [21] "function"
+        \\  return out.length * 1000 +
+        \\    ((out[0] === true && out[1] === 720 && out[2] === true && out[3] === true &&
+        \\      out[4] === "function" && out[5] === "rec" && out[6] === true && out[7] === true &&
+        \\      out[8] === false && out[9] === false && out[10] === 1 && out[11] === true &&
+        \\      out[12] === true && out[13] === true && out[14] === 7 && out[15] === 3 &&
+        \\      out[16] === 1 && out[17] === "object" && out[18] === 9 && out[19] === true &&
+        \\      out[20] === 11 && out[21] === "function") ? 1 : 0);
+        \\})();
+    );
+    setup.free(rt);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const q2_name = try rt.internAtom("__q2");
+    defer rt.atoms.free(q2_name);
+    const verdict = global.getProperty(q2_name);
+    defer verdict.free(rt);
+    // 22 probes, all green.
+    try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());
 }

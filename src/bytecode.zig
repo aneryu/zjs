@@ -2240,6 +2240,15 @@ pub const function_def = struct {
         func_kind: FunctionKind = .normal,
         func_type: ParseFunctionKind = .statement,
         is_strict_mode: bool = false,
+        /// qjs `fd->is_func_expr && fd->func_name != JS_ATOM_NULL`: this def
+        /// is a *named* function expression. Its self-binding var
+        /// (`func_var_idx`, kind `.function_name`) and the matching
+        /// `special_object THIS_FUNC ; put_loc` prologue materialize lazily on
+        /// the first falling-through reference — mirroring qjs, where
+        /// add_func_var is only called from resolve_scope_var
+        /// (quickjs.c:32975-32978 / 33151-33155) and add_eval_variables
+        /// (quickjs.c:33649-33650 / 33697-33698), never unconditionally.
+        is_named_func_expr: bool = false,
         func_name: atom.Atom,
 
         // Variables
@@ -2385,6 +2394,20 @@ pub const function_def = struct {
         /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom
         /// is duplicated; the caller keeps ownership of its copy.
         /// Returns the index of the new var.
+        /// Mirror qjs add_func_var (quickjs.c:24208-24219): create the named
+        /// function expression's self-binding var on demand, idempotent via
+        /// `func_var_idx`. Argument shape matches the retired eager site
+        /// (scope 0, non-lexical, const) so resolution order and the
+        /// sloppy-mode silent-ignore write path are unchanged; zjs registers
+        /// is_const unconditionally (see closureVarWriteThrowsReadOnly note)
+        /// while qjs sets it only in strict mode.
+        pub fn ensureFuncExprSelfBinding(self: *FunctionDefImpl) !i32 {
+            if (self.func_var_idx < 0) {
+                self.func_var_idx = try self.addScopeVar(self.func_name, .function_name, 0, false, true);
+            }
+            return self.func_var_idx;
+        }
+
         pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
             const tail = try growSliceBy(VarDef, self.memory, &self.vars, &self.vars_capacity, 1);
             tail[0] = var_def;
@@ -6792,12 +6815,33 @@ pub const pipeline_stack_size = struct {
     };
 
     /// Options for the BFS.
-    pub const Options = struct {};
+    pub const Options = struct {
+        /// When non-null, receives the return-balance proof: true iff every
+        /// reachable `return` / `return_undef` terminator — and any reachable
+        /// fall-off-the-end edge (executed as the hidden `return_undef`
+        /// sentinel, see `ensureTrailingReturnSentinel`) — completes with an
+        /// EMPTY operand stack once the return value is popped. The parser
+        /// elides trailing expression-statement drops and keeps switch
+        /// discriminants live across `return` (qjs releases both in the done:
+        /// local_buf..sp loop, quickjs.c:20701-20706), so this is a
+        /// per-return-site fact, not a validity check: `compute` still
+        /// succeeds for unbalanced functions. Sole consumer is the zero-arg
+        /// empty-leaf publication gate (`makeBytecodeView`), whose
+        /// normal-return arm runs a narrow epilogue with no operand-release
+        /// loop. Piggybacks on this BFS because the per-pc levels here are
+        /// exact (`seed` rejects any pc revisited at a different level), so
+        /// branchy-but-balanced bodies keep their proof — a linear scan would
+        /// have to refuse them conservatively.
+        returns_balanced_out: ?*bool = null,
+    };
 
     /// Compute the maximum stack size required to execute `bytecode`.
     ///
     /// Returns 0 for empty bytecode (no instructions to execute).
     pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
+        // Empty bytecode immediately falls off the end at level 0 (the hidden
+        // sentinel `return_undef`), which is a balanced return.
+        if (options.returns_balanced_out) |out| out.* = true;
         if (bytecode.len == 0) return 0;
 
         const allocator = std.heap.page_allocator;
@@ -6812,7 +6856,7 @@ pub const pipeline_stack_size = struct {
         defer pc_stack.deinit(allocator);
 
         // Seed: entry pc=0 with stack level 0.
-        try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, 0, 0, -1);
+        try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, 0, 0, -1, options.returns_balanced_out);
 
         var stack_len_max: u16 = 0;
 
@@ -6822,7 +6866,6 @@ pub const pipeline_stack_size = struct {
             var catch_pos = catch_pos_tab[pos];
             const op = bytecode[pos];
             if (op == 0) return error.InvalidOpcode;
-            _ = options;
             const meta = metadataFor(op) orelse return error.InvalidOpcode;
             const pos_next = pos + meta.size;
             if (pos_next > bytecode.len) return error.BytecodeOverflow;
@@ -6854,11 +6897,22 @@ pub const pipeline_stack_size = struct {
             // generically). Using name comparison is fine: the table is
             // small and this code runs once per function_mod.
             const name = meta.name;
-            if (eq(name, "return") or eq(name, "return_undef") or eq(name, "return_async") or
+            if (eq(name, "return") or eq(name, "return_undef")) {
+                // Normal-return terminator. `stack_len` already absorbed the
+                // return-value pop above, so any nonzero level here is a
+                // parser-elided leftover live across this return site.
+                if (stack_len != 0) {
+                    if (options.returns_balanced_out) |out| out.* = false;
+                }
+                continue; // terminator: no successors.
+            }
+            if (eq(name, "return_async") or
                 eq(name, "throw") or eq(name, "throw_error") or
                 eq(name, "tail_call") or eq(name, "tail_call_method") or
                 eq(name, "ret"))
             {
+                // Abrupt / tail-replacement terminators never reach the
+                // normal-return leaf epilogue, so they carry no balance fact.
                 continue; // terminator: no successors.
             }
 
@@ -6867,53 +6921,53 @@ pub const pipeline_stack_size = struct {
             if (eq(name, "goto")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "goto16")) {
                 const diff = std.mem.readInt(i16, bytecode[pos + 1 ..][0..2], .little);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "goto8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "if_true") or eq(name, "if_false")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (eq(name, "if_true8") or eq(name, "if_false8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.gosub) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_get_var or op == opcode.op.with_delete_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_make_ref or op == opcode.op.with_get_ref) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_put_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
                 if (stack_len == 0) return error.StackUnderflow;
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len - 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len - 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (eq(name, "catch")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 catch_pos = @intCast(pos);
             } else if (op == opcode.op.for_of_start or op == opcode.op.for_await_of_start) {
                 catch_pos = @intCast(pos);
@@ -6935,7 +6989,7 @@ pub const pipeline_stack_size = struct {
             }
 
             // Fall-through.
-            try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, pos_next, stack_len, catch_pos);
+            try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, pos_next, stack_len, catch_pos, options.returns_balanced_out);
         }
 
         return stack_len_max;
@@ -6970,8 +7024,18 @@ pub const pipeline_stack_size = struct {
         pos: u32,
         stack_len: u16,
         catch_pos: i32,
+        returns_balanced_out: ?*bool,
     ) Error!void {
-        if (pos == stack_level_tab.len) return;
+        if (pos == stack_level_tab.len) {
+            // Reachable fall-off-the-end edge: executes the hidden
+            // `return_undef` sentinel at this incoming level, so it
+            // participates in the returns-balanced proof exactly like an
+            // explicit `return_undef` site.
+            if (stack_len != 0) {
+                if (returns_balanced_out) |out| out.* = false;
+            }
+            return;
+        }
         if (pos > stack_level_tab.len) return error.BytecodeOverflow;
         const existing = stack_level_tab[pos];
         if (existing == STACK_LEVEL_UNVISITED) {
@@ -8697,9 +8761,12 @@ const function_mod = struct {
         /// Runtime-created mapped Arguments objects open-alias every supplied
         /// argument slot in addition to the statically captured bindings.
         has_mapped_arguments: bool = false,
-        /// Exact-zero-argument sloppy leaf whose frame cannot acquire cold
-        /// state or value-bearing local/capture/open-ref windows. Published in
-        /// the previously reserved execution-view flag bit.
+        /// Exact-zero-argument sloppy plain-function leaf whose frame cannot
+        /// acquire cold state or value-bearing local/capture/open-ref windows.
+        /// Published in the previously reserved execution-view flag bit. The
+        /// raw-`this` twin (strict plain functions and arrows) lives in the
+        /// `raw_this_inline_empty_leaf` view field (this packed word is full)
+        /// so this established sloppy test stays single-bit.
         simple_inline_empty_leaf: bool = false,
     };
 
@@ -8715,6 +8782,14 @@ const function_mod = struct {
         call_pc: u32,
         atom_id: atom.Atom,
         argc: u16,
+    };
+
+    /// Fused exact-args-leaf dispatch classification (see
+    /// `BytecodeImpl.exact_args_leaf_kind`).
+    pub const ExactArgsLeafKind = enum(u8) {
+        none = 0,
+        sloppy = 1,
+        raw_this = 2,
     };
 
     pub const BytecodeImpl = struct {
@@ -8746,6 +8821,59 @@ const function_mod = struct {
         /// before mutable parameter slots can change them. Selected only when
         /// finalized bytecode materializes an arguments object.
         strict_simple_snapshot_inline_eligible: bool = false,
+        /// Raw-`this` twin of `flags.simple_inline_empty_leaf` (the packed
+        /// flags word is full): identical empty-leaf frame geometry, published
+        /// for the callees whose frame preserves the caller-supplied raw
+        /// `this` word instead of substituting the sloppy realm global —
+        /// strict-mode plain functions and arrows (either mode; arrow
+        /// bytecode reads lexical `this`/`new.target` through ordinary
+        /// closure cells, so a zero-capture arrow leaf never consults the
+        /// frame slot, mirroring qjs JS_CallInternal which has no arrow arm).
+        /// Plain call sites select the undefined-`this` arm; the method
+        /// receiver arm is mode-independent. Kept as a separate view byte so
+        /// the established sloppy call arms retain their exact single-bit
+        /// test (see the empty_leaf_geometry note in `makeBytecodeView`).
+        raw_this_inline_empty_leaf: bool = false,
+        /// Exact-args generalization of the empty-leaf family: same leaf body
+        /// geometry (no locals/captures/open refs/arguments/direct eval) with
+        /// `arg_count > 0`. A call site that supplies exactly `arg_count`
+        /// arguments borrows them in place from the caller's operand region
+        /// (qjs `arg_buf = argv`, quickjs.c:17841) and enters the warm leaf
+        /// constructor. Published as two separate bytes mirroring the
+        /// zero-arg family split (the packed flags word is full and folding
+        /// modes into one bit measured +3 insn/call on the established
+        /// sloppy arm): this byte is the sloppy plain twin
+        /// (`this` = realm global on plain calls).
+        simple_inline_exact_args_leaf: bool = false,
+        /// Raw-`this` twin of `simple_inline_exact_args_leaf`: strict plain
+        /// functions and arrows (either mode), preserving the raw incoming
+        /// `this` word exactly like `raw_this_inline_empty_leaf`.
+        raw_this_inline_exact_args_leaf: bool = false,
+        /// Fused dispatch byte for the two exact-args policy bits above:
+        /// one load answers "is this ANY exact-args leaf, and which `this`
+        /// policy". The dominant real-world shape at the with-args call arms
+        /// is a NON-leaf callee (locals, named-expression self-binding), so
+        /// the miss must cost one byte test, not two (measured +1.3% insn on
+        /// call-closure-two-arg from the two-byte chain). The bools stay
+        /// published for asserts and eligibility tests.
+        exact_args_leaf_kind: ExactArgsLeafKind = .none,
+        /// Capture-leaf fused dispatch byte (O2): zero-arg callees whose ONLY
+        /// frame window is the inherited capture array — `() => this.x`
+        /// arrows (lexical `this` is an ordinary closure cell since the
+        /// capture conversion) and zero-arg closures over upvalues. Same
+        /// `leaf_body_geometry` as the exact-args family (no locals, no cell
+        /// CREATION, no arguments/direct eval) with `arg_count == 0` and
+        /// `var_refs_len > 0`, so the three leaf families partition cleanly:
+        /// empty leaf owns argc==0 without captures, this byte owns argc==0
+        /// with captures, exact-args owns argc==arg_count>0. The frame
+        /// borrows the closure's cell array (qjs `var_refs =
+        /// p->u.func.var_refs`, quickjs.c:17844; rooted by the owned
+        /// callable) and publishes the `exact_args_leaf` teardown bit: its
+        /// guarded return arm (callee operand window must be empty) is
+        /// load-bearing here because inherited-capture bodies may read free
+        /// names and leave parser-elided leftovers at `return`, and its args
+        /// release loop zero-trips on the empty args window.
+        capture_leaf_kind: ExactArgsLeafKind = .none,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -8869,12 +8997,10 @@ const function_mod = struct {
 
         pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
             freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
-            if (bytes.len == 0) {
-                self.code = &.{};
-                self.code_capacity = 0;
-                return;
-            }
             // Allocate one extra trailing byte holding an `op.return` sentinel.
+            // Even for empty code: execution of a zero-length body starts with
+            // `pc == code_end`, and the bounds-check-free dispatch reads
+            // `code[0]` — the sentinel — instead of a dangling pointer.
             // qjs-aligned: every real function is terminated by a return, so the
             // register-resident dispatch carries no per-op fall-off-end bounds
             // check. Hand-authored test bytecode that omits a terminator reads this
@@ -8906,7 +9032,9 @@ const function_mod = struct {
         /// but a hand-built top-level `BytecodeImpl` ending in a hot opcode would
         /// otherwise read `code[code.len]` (heap garbage) on fall-off.
         pub fn ensureTrailingReturnSentinel(self: *BytecodeImpl) !void {
-            if (self.code.len == 0) return;
+            // Also for empty code: a zero-length body starts execution with
+            // `pc == code_end`, and the bounds-check-free dispatch reads the
+            // sentinel there — never a dangling `&.{}` pointer.
             const len = self.code.len;
             _ = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, 1);
             self.code = self.code[0..len];
@@ -9114,6 +9242,40 @@ const function_mod = struct {
         );
     }
 
+    /// Static operand-balance proof required before publishing the ZERO-ARG
+    /// empty-leaf family (`flags.simple_inline_empty_leaf` /
+    /// `raw_this_inline_empty_leaf`). The empty-leaf normal-return arm
+    /// (`popAndResume` / `deinitEmptyLeafInline`) is the one leaf epilogue
+    /// with NO operand-window guard and no release loop: it assumes the
+    /// callee operand stack is empty once the return value is popped. The
+    /// parser elides trailing expression-statement drops and keeps switch
+    /// discriminants live across `return` (qjs frees both in the done:
+    /// local_buf..sp loop, quickjs.c:20701-20706), so an unproven body —
+    /// `function k(){ ({}); }` — would strand its leftover on that arm
+    /// (Debug assert / one leaked object per call). Proving balance at
+    /// publication instead of guarding at runtime keeps the established
+    /// return arm check-free; refused bodies simply stay off the leaf family
+    /// and ride the generic simple-inline path, whose teardown releases
+    /// leftovers exactly once (semantics identical to the pre-leaf world).
+    ///
+    /// The proof rides the same BFS finalize already ran for stack sizing
+    /// (`pipeline_stack_size.compute` mirrors qjs compute_stack_size,
+    /// quickjs.c:35167): per-pc levels are exact — every pc has ONE level on
+    /// all paths — so branchy-but-balanced bodies (`if`/`&&`/try) keep their
+    /// leaf eligibility; only genuinely unbalanced return sites refuse. Runs
+    /// once per FB behind the cached execution view, and only for bodies
+    /// that already passed the rest of the zero-arg leaf geometry. Any BFS
+    /// failure (e.g. OOM in its scratch tables) refuses the proof —
+    /// fail-closed to the generic path. The exact-args (O1), capture (O2)
+    /// and forwarded (O3) families keep their runtime len==0 return guards
+    /// instead: their arity/capture shapes (fib's `if` + recursion) must
+    /// stay eligible with arbitrary leftover-carrying bodies.
+    fn codeProvesLeafReturnBalance(code: []const u8) bool {
+        var balanced = true;
+        _ = pipeline_stack_size.compute(code, .{ .returns_balanced_out = &balanced }) catch return false;
+        return balanced;
+    }
+
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
     ///
     /// The returned value does not own any slices and must not be deinitialized.
@@ -9129,8 +9291,57 @@ const function_mod = struct {
             !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
             !fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
             fb.global_vars_len == 0;
+        // Arrow polarity twin of `simple_inline_base`. Arrows are excluded
+        // from the simple-inline family only because their frame must keep
+        // the raw incoming `this` (lexical `this`/`new.target` are ordinary
+        // closure cells since the capture conversion; qjs JS_CallInternal has
+        // no arrow arm at all). Mode-independent: an arrow frame preserves
+        // the raw `this` word in both strict and sloppy callees, so it rides
+        // the raw-`this` leaf arms that already exist for strict functions.
+        const arrow_inline_base = fb.flags.func_kind == .normal and
+            !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
+            fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
+            fb.global_vars_len == 0;
         const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
         const rescues_implicit_arguments = functionRescuesImplicitArgumentsViaGetVar(fb);
+        // Mode-independent empty-leaf frame geometry: no argument/local/
+        // capture/open-ref windows, no arguments-object materialization or
+        // implicit get_var rescue, no direct eval. Strict plain functions and
+        // arrows share every one of these conditions — their only plain-call
+        // semantic difference from the sloppy arm is preserving the raw
+        // (undefined) `this` instead of substituting the sloppy global — but
+        // the two policies publish SEPARATE eligibility bits
+        // (`flags.simple_inline_empty_leaf` vs `raw_this_inline_empty_leaf`)
+        // so the established sloppy call arms keep their exact single-bit
+        // test; measured: folding both modes into one bit put a per-call
+        // strict-mode discrimination on the sloppy arm (+3 insn/call,
+        // +1.55% cycles on call-const-zero-arg).
+        // Args-independent half of the leaf frame geometry. Captured args
+        // are excluded through `open_var_ref_count` (assignOpenBindingIndices
+        // walks fd.args and counts captured parameters), so `arg_count > 0`
+        // with this geometry still proves every arg slot stays a bare value.
+        const leaf_body_geometry = fb.var_count == 0 and
+            fb.open_var_ref_count == 0 and
+            !materializes_arguments_object and !rescues_implicit_arguments and
+            !fb.flags.has_eval_call;
+        // The zero-arg family additionally requires the static return-balance
+        // proof (`codeProvesLeafReturnBalance`): its return arm is the only
+        // leaf epilogue without an operand-window guard. Ordered last so the
+        // body scan runs only for candidates that already passed the cheap
+        // geometry tests.
+        const empty_leaf_geometry = fb.arg_count == 0 and fb.var_refs_len == 0 and
+            leaf_body_geometry and codeProvesLeafReturnBalance(fb.byteCode());
+        // Exact-args twin (O1): published only for `arg_count > 0` so the
+        // zero-arg family keeps sole ownership of the argc==0 shapes and the
+        // two families partition cleanly at every call arm. INHERITED
+        // captures (`var_refs_len > 0`) stay eligible — the frame borrows the
+        // closure's cell array exactly like the simple-inline path (qjs
+        // `var_refs = p->u.func.var_refs`, quickjs.c:17844) and borrowed
+        // captures are never released by teardown, so they add two frame
+        // stores and no epilogue work. The callee still cannot CREATE cells
+        // (`open_var_ref_count == 0`), which is what the leaf teardown relies
+        // on. This is load-bearing for the self-recursive statement-function
+        // shape (fib reads its own binding through a parent cell).
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -9156,11 +9367,31 @@ const function_mod = struct {
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
                 .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
-                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and
-                    fb.arg_count == 0 and fb.var_count == 0 and fb.open_var_ref_count == 0 and
-                    fb.var_refs_len == 0 and !materializes_arguments_object and
-                    !rescues_implicit_arguments and !fb.flags.has_eval_call,
+                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and empty_leaf_geometry,
             },
+            .raw_this_inline_empty_leaf = ((simple_inline_base and strict_mode) or arrow_inline_base) and empty_leaf_geometry,
+            .simple_inline_exact_args_leaf = simple_inline_base and !strict_mode and fb.arg_count > 0 and leaf_body_geometry,
+            .raw_this_inline_exact_args_leaf = ((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count > 0 and leaf_body_geometry,
+            .exact_args_leaf_kind = if (simple_inline_base and !strict_mode and fb.arg_count > 0 and leaf_body_geometry)
+                .sloppy
+            else if (((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count > 0 and leaf_body_geometry)
+                .raw_this
+            else
+                .none,
+            // Capture-leaf twin (O2): argc==0 with inherited captures — the
+            // complement of `empty_leaf_geometry`'s `var_refs_len == 0` term
+            // over the same leaf body geometry, so the zero-arg families
+            // stay disjoint by construction. Mode split mirrors the other
+            // two families (sloppy substitutes the realm global; strict
+            // plain functions and arrows preserve the raw `this` word — an
+            // arrow body reads lexical `this` through its capture cell and
+            // never consults the frame slot).
+            .capture_leaf_kind = if (simple_inline_base and !strict_mode and fb.arg_count == 0 and fb.var_refs_len > 0 and leaf_body_geometry)
+                .sloppy
+            else if (((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count == 0 and fb.var_refs_len > 0 and leaf_body_geometry)
+                .raw_this
+            else
+                .none,
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
             .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,
