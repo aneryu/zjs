@@ -1,7 +1,8 @@
 # OPT-ROADMAP 2026-07-19 — QuickJS 机制忠实对齐计划
 
-> 当前代码机制基线（compiler fix merge point）：
-> `c034597c604f0b3f7e884d0f83554eaee7e95180`
+> 当前 main 审计基线：`0c7a46f88ea9fe3e7c4a1bd2e8dd4b6f2c7124d1`；
+> 其中当前代码机制基线（compiler fix merge point）为
+> `c034597c604f0b3f7e884d0f83554eaee7e95180`。
 >
 > 本轮原始源码/性能冻结点：`5a2dad4fce9c95e0e868d5f00415275f2f024ce1`。compiler-correctness
 > 前置 `dbe50d7ddc78dff4affa35556db7909b4a0fe359` 已由 `c034597c` 合入；它不计作后续
@@ -37,10 +38,15 @@
 
 “Zig 限制”必须是可复核的编译器、calling convention、布局、错误传播或内存安全约束；
 代码写起来不方便、现有结构难改、或某个 benchmark 需要更快，都不算限制。resident Machine、
-tail-call dispatch、internal-record table、lazy property storage 和 parser 提前发 short opcode 都是
-zjs 的架构选择，不是 Zig 限制。已知的 Zig 0.16 `preserve_none` 缺失只说明不能请求该 handler
-calling convention；它不证明整套 tail-dispatch 架构不可替换，也不能替代 QuickJS 调用协议的
-逐段对照。
+internal-record table、lazy property storage 和 parser 提前发 short opcode 是需要逐项审计的 zjs
+架构选择，不自动等于 Zig 限制。tail-call dispatch 需要更精确地分类：历史
+comptime-delete 二分已证明单体 Zig dispatcher 会引入约 3,504 bytes 的加性 spill，而 224-arm
+tailcall 与 labeled-switch 的实测基本等价，两者的 next-dispatch 也已与 qjs computed-goto 处在同一量级。
+这些数据的 owning 事实文档是 [CALL-MACHINERY-FAITHFUL-FRONTIER.md](CALL-MACHINERY-FAITHFUL-FRONTIER.md)。
+因此当前 tailcall 形态是有代码生成证据的 Zig/LLVM 等价适配，整体 dispatch 战役冻结；
+Zig 0.16 缺少 `preserve_none` 既不是这个结论的唯一理由，也不能用来免于逐 opcode 对照。
+冷 handler 中单个 opcode family 的 pc/sp 发布与 residency 仍是可审计的执行差异，但不延伸成
+“重写整个 dispatcher”。
 
 禁止：
 
@@ -99,7 +105,7 @@ median，baseline 为页首冻结 zjs：
 |---|---:|---:|---|
 | short plain read | 0.897x | 0.874x | zjs 已快于 qjs；不是当前收益面 |
 | generic plain read | 0.899x | 0.884x | 同上，不能仅因源码多一个分支就开刀 |
-| short plain put | 1.787x | 1.661x | P1 的第一执行候选 |
+| short plain put | 1.787x | 1.661x | 旧 baseline 的最大 direct 写差距；P1a 构造对齐后重测，才裁决 P1b |
 | short set | 1.349x | 1.293x | 与 put 分开，作为第二候选 |
 | short post-inc | 2.276x | 1.953x | 混入 read/number/update/lowering，只作后续 consumer |
 
@@ -117,7 +123,8 @@ median，baseline 为页首冻结 zjs：
 
 按 §8 该候选已回退，保留最终 opcode 契约测试。结论不是“分流机制错误”，而是这次 read-only
 布局变化没有转化为 cycles，且污染了更重要的 write controls；没有新的源码事实、handler-cluster
-策略或工具链变化，不得换名重跑。P1 直接转向 plain put，再单独做 set。
+策略或工具链变化，不得换名重跑。当前先完成 P1a 构造对齐，重冻后 P1b 直接转向
+plain put，再单独做 set。
 
 这些数字只是本计划的最新快照。正式候选开始前，M0 必须把原始逐轮数据、二进制 hash、
 命令和环境固化到当前工作项；计划文本不代替可审计的原始证据。
@@ -151,16 +158,16 @@ median，baseline 为页首冻结 zjs：
 
 | 机制面 | QuickJS 实际实现 | 当前 zjs 结论 | 路线图动作 |
 |---|---|---|---|
-| call/dispatch | 单体 `JS_CallInternal`，computed-goto；bytecode call 递归进入新的 C frame，locals/stack 用 `alloca` | resident Machine + tail handlers + inline Entry；属于架构偏离，不是 Zig 限制 | 不全盘重开；先隔离 return-continuation transport，frame 只条件性重开 |
-| generic iterator | `js_for_of_next → JS_IteratorNext → JS_IteratorNext2 → JS_Call`；generic result 依次读 `done`、ToBool、仅在 false 时读 `value`，最后 free result | `finishForOfNextResult` 的可观察顺序已基本相同；主要差异是 bytecode `next()` 返回后还要走 `return_action/payload` 和 cold continuation | 改列 M-RETURN-CONT；iterator 只是 direct consumer，不再成立 feature 刀 |
-| captured cell | `JSVarRef **var_refs` 直接取 `pvalue`；plain get/put/set 无 TDZ 检查，只有 `*_check` opcode 检查；0..3 有独立 short handler | `VarRef.pvalue`/slot type 已对齐；plain read 虽多分支但 direct cycles 已优于 qjs，read split 也已证伪；put/set 仍主要进入宽 cold funnel | M-CELL-EXEC 先修编译 construction invariant，再依次做 resident plain put、resident set；不再改 cell 表示或重做 read split |
-| binding resolution | `add_func_var` 用 `add_var` 建特殊 fallback，不挂 scope 链；const 取决于**定义函数** strict；sloppy `scope_put`→drop、`scope_make_ref`→临时对象引用；`with_make_ref` 在 RHS 前快照引用 | 历史 lazy self-binding 只搬了 materialization/prologue，保留了 scope-linked/unconditional const 和 runtime function-name workaround；`dbe50d7d` 已补 exact `add_var`、strict metadata、parameter-env fallback、drop/dummy-ref；zjs `with_get_ref + selected_reference with_put_var` 已证明是快照等价机制 | 作为 M-CELL 的 compiler construction 前置合入并重冻；最终字节码等价即可，不把 zjs `with` transport 改成源码外形相同 |
+| call/dispatch | 单体 `JS_CallInternal`，computed-goto；bytecode call 递归进入新的 C frame，locals/stack 用 `alloca` | resident Machine + tail handlers + inline Entry 与 qjs 外形不同；但 3,504B spill 二分、224-arm A/B 和 next-dispatch 指令数已证明当前 dispatch 是 Zig/LLVM 下的等价适配 | 整体 dispatch 标记 DONE，不再全盘重开；只审计 qjs CASE-inline opcode 在 zjs 的冷/常驻位置，以及非 `.next` post-call continuation |
+| generic iterator | `js_for_of_next → JS_IteratorNext → JS_IteratorNext2 → JS_Call`；generic result 依次读 `done`、ToBool、仅在 false 时读 `value`，最后 free result | `finishForOfNextResult` 的可观察顺序已基本相同；for-of 这类需要返回后继续作业的非 `.next` action 额外经 `return_action/payload` 和 cold continuation，普通 call 不经该路径 | 只将 post-call work 列入 M-RETURN-CONT；iterator 只是 direct consumer，不再成立 feature 刀 |
+| captured cell | `js_closure2` 先检查声明、再只创建/别名 `JSVarRef*`；`instantiate_hoisted_definitions` 把函数值发布留给最终 `fclosure + put_var_ref`；plain get/put/set 直接访问 `pvalue`，只有 `*_check` 做 TDZ | `VarRef.pvalue`/slot type 已对齐，module 的 short-cpool 链接前缀等价；但 module wide `fclosure` 未被 link-time scanner 执行，部分 script/direct-eval 非 lexical 函数值又由实例化 helper 提前创建，compiler 反向抑制了前缀 | 先做 M-FCLOSURE-WIDTH correctness，再做 M-HOIST-CONSTRUCTION 对齐，重冻后才做 M-CELL-EXEC resident plain put、set；不重做 read split |
+| binding resolution | `add_func_var` 用 `add_var` 建特殊 fallback，不挂 scope 链；const 取决于**定义函数** strict；sloppy `scope_put`→drop、`scope_make_ref`→临时对象引用；`with_make_ref` 在 RHS 前快照引用 | 历史 lazy self-binding 只搬了 materialization/prologue，保留了 scope-linked/unconditional const 和 runtime function-name workaround；`dbe50d7d` 已补 exact `add_var`、strict metadata、parameter-env fallback、drop/dummy-ref；zjs `with_get_ref + selected_reference with_put_var` 已证明是快照等价机制 | 该正确性前置已由 `c034597c` 合入；钉最终 bytecode snapshot 后封账，不把等价 `with` transport 改成源码外形相同 |
 | named property read | `GET_FIELD_INLINE` 直接 `find_own_property`，沿 prototype walk；data hit dup，accessor/exotic/primitive 才进 `JS_GetPropertyInternal`；没有 IC | zjs ordinary data walk 已近似镜像，但 slow-object 顺序、null-prototype class fallback 和 tail transport 不同 | 从 native call 中拆出 M-PROPERTY-LOOKUP，独立测 lookup 与 fallback |
 | native call | c-function object 直接保存 function union、cproto、magic、realm；`js_call_c_function` 建 native `JSStackFrame`、补可读缺参，再按 cproto switch | zjs function object 缓存 `InternalRecord*`，经 table/host-call transport；直接指针是等价候选，但不是 qjs 原布局 | M-NATIVE-CALL 只审计 callable→frame→record，不再混入 property lookup |
 | empty object | `OP_object → JS_NewObject → JS_NewObjectFromShape`：GC trigger、Object alloc、按 shape `prop_size` 分配 property array、rc=1、挂 GC list | zjs 使用 shared root，但空对象 lazy-skip property array，并承担 MemoryAccount/Registry；这是已有 zjs 优化，不是 Zig 限制 | 按事件和关键链比较，不以分配次数机械求同 |
 | shape transition | `find_hashed_shape_prop` 不比较 `prop_size`；cache hit 后若容量不同就 realloc 对象 property array，再采用目标 shape | zjs 三臂已存在，但 `findHashedShapeProperty` 要求 candidate `prop_size == property_capacity` | M-SHAPE-PUBLISH 的第一项改为验证并对齐 cache-hit 资格/容量协调 |
 | RC/free | inline `JS_DupValue/JS_FreeValue`；对象到 0 后入 `gc_zero_ref_count_list`，由最外层 drain 调 `free_object/free_gc_object` | 默认 value representation 和 zero-ref queue 已同构 | 不重开抽象；只在 allocation direct profile 证明重复记账或关键链差异时动 |
-| compiler | `resolve_variables → resolve_labels → compute_stack_size`；short opcode、tail rewrite 和 peephole 在最终字节码上生效 | pipeline 顺序已同构，但部分规则在 parser 提前完成，另有规则尚无明确 matcher | 以最终 bytecode 等价为准，建立规则矩阵，不按 pass 所在文件判断缺失 |
+| compiler | `resolve_variables → resolve_labels → compute_stack_size`；`OP_fclosure` 先保留宽 cpool index，`resolve_labels` 仅在 index≤255 时缩成 `fclosure8` | pipeline 顺序已同构，但 parser 有 4 个生产 call site 绕过 `emitFClosure` 直接 `@intCast` 后发 `fclosure8`；第 257 个 arrow/function expression 在 Debug 下 panic | 先修 M-FCLOSURE-WIDTH 并审计所有 cpool emitter/consumer；其余仍以 final-bytecode 等价为准，不按 pass 所在文件判断缺失 |
 | stack/interrupt | stack overflow 是 native SP + planned `alloca_size` 检查；interrupt counter 在 call entry 和 jump/backedge poll | jump/call interrupt poll 已有；无限 tail recursion 来自 frame reuse 未消耗等价 stack budget | 正确性项只修 tail-chain stack budget；interrupt 作为既有门禁，不混成一项 |
 
 ## 2. 正确性前置依赖
@@ -170,11 +177,14 @@ median，baseline 为页首冻结 zjs：
 
 | 正确性项 | 当前复现 | 阻塞的性能机制 |
 |---|---|---|
-| force-GC heap accounting | `test-exec -Dzjs_force_gc=true` 在 `gc.zig:1662` 报 `HeapLiveBytesMismatch` | M-ALLOC-LIFECYCLE、M-SHAPE-PUBLISH |
-| tail-call reuse 的等价 stack budget | zjs 无限运行；qjs 由 `js_check_stack_overflow` 抛 `InternalError: stack overflow` | M-RETURN-CONT、M-FRAME-CONT |
-| generator 函数表达式作默认参数 | zjs `UnexpectedToken`；qjs 正常 | M-EMIT 的 parser/发码面 |
-| named function-expression self-binding construction | 原冻结点的 lazy materialization 沿用旧 scope-linked/unconditional-const metadata，且参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs 修复并由 `c034597c` 合入；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | 已解除 correctness 阻塞；立即废弃旧 M-CELL A/B 并从当前 main 重冻，随后才能移除 runtime const/function-name/publication 分支 |
-| direct eval 下 function-name 与同名 body `var` | 既有 zjs 测试锁定 `(function rec(){var rec=11; return eval('rec')})()` 为 `11`；pinned qjs 会建立两个 `rec` local，把 `var rec=11` 降为 drop，eval 捕获未初始化为 `undefined` 的 loc0。这是已知、非 Zig 限制的 observable divergence，不是本轮 worktree 新增 | 完整 binding-construction 宣称前单独最小化并按当前“优先 qjs”原则裁决；未裁决前不得用“所有 direct-eval binding 已等价”删除 runtime 兼容腿 |
+| force-GC heap accounting | 已在 `0c7a46f8` 重验：`zig build test-exec -Dzjs_force_gc=true --summary all` 仍在 `gc.zig:1662` 抛 `HeapLiveBytesMismatch`，栈经 collection destroy/deferred weak-value free | M-ALLOC-LIFECYCLE、M-SHAPE-PUBLISH |
+| tail-call reuse 的等价 stack budget | 已在 `0c7a46f8` 重验：`function f(){"use strict";return f()} f()` 的 zjs 1s 超时，qjs 由 `js_check_stack_overflow` 抛 `InternalError: stack overflow` | M-RETURN-CONT、M-FRAME-CONT |
+| generator 函数表达式作默认参数 | 已在 `0c7a46f8` 重验：`function f(x=function*(){yield 1}){...}` 在 zjs 为 `UnexpectedToken`，qjs 返回 `1` | M-EMIT 的 parser/发码面 |
+| named function-expression self-binding construction | 原冻结点的 lazy materialization 沿用旧 scope-linked/unconditional-const metadata，且参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs 修复并由 `c034597c` 合入；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | 已解除 correctness 阻塞并废弃旧 M-CELL A/B；这一项本身不授权删 runtime publication，后者仍受 M-HOIST-CONSTRUCTION 阻塞 |
+| `fclosure` cpool 宽度 | 已在 `0c7a46f8` 复现：同一 function 中 260 个 arrow expression 使 zjs-dev 在 `parser.zig:16646` 的 `@intCast(child_cpool_idx)` panic，qjs 正常编译/执行；parser 还有 3 个同类 direct-`emitFClosure8` 生产点 | M-FCLOSURE-WIDTH，阻塞 M-HOIST-CONSTRUCTION 和相关 M-EMIT |
+| module link-time wide-function hoist | 已在 `0c7a46f8` 复现：260 个 exported module function 的循环依赖中，zjs 对所选 cpool 0/1/127/254/255 观察为 `function`，256/258/259 为 `ReferenceError`；pinned qjs 所选项全部为 `function`。`module.zig` 的链接扫描与 body-start 跳过都只识别 `fclosure8` | M-FCLOSURE-WIDTH，直接阻塞“module hoist 已等价”结论 |
+| script/direct-eval 函数声明的创建阶段 | qjs `js_closure2` 只建/别名 cell，最终字节码仍是 `fclosure8; put_var_ref0`；zjs 的部分 nonlexical `global_vars.cpool_idx` 在 `instantiateGlobalVarDeclarations` 路径提前创建/发布函数值，`functionHasGlobalFunctionVarCpool` 再抑制字节码前缀 | M-HOIST-CONSTRUCTION，并是 M-CELL-EXEC baseline 的前置 |
+| direct eval 下 function-name 与同名 body `var` | 已裁决：zjs 返回 `11`，pinned qjs 返回 `undefined`。test262 的 named-function-expression 规范测试明确要求独立 immutable function-name environment，body var environment 在其内层并可遮蔽；因此保留 zjs `11` | 已解除；记为有规范测试证据的 pinned-qjs 例外，不是 Zig 限制，不为清理 hot path 而改语义 |
 
 依赖规则：
 
@@ -182,8 +192,13 @@ median，baseline 为页首冻结 zjs：
 - 再动 M-RETURN-CONT/M-FRAME-CONT 前，先为复用 frame 的 tail chain 实现并验证与 qjs stack guard
   等价的可观察终止；现有 call/jump interrupt polling 单独保留并回归，不把两种机制揉成一个计数器；
 - parser 正确性修复可独立进行，但若合入，M-EMIT 的 bytecode 基线必须重冻；
+- M-FCLOSURE-WIDTH 必须在构造阶段优化前修复：所有 producer 统一保留宽 index/安全选 short，
+  所有扫描 hoist prefix 的 consumer 统一 decode `fclosure8/fclosure`；修复后废弃 construction bytecode baseline；
 - named function-expression 修复已独立 review/合入；当前 M-CELL 性能 baseline 已作废，新的
-  plain-put 候选不得跨这个 compiler invariant 状态比较；
+  plain-put 候选不得跨这个 compiler invariant 状态比较；并且必须先完成
+  M-HOIST-CONSTRUCTION 的对齐/裁决，不能把构造阶段改变的性能算给 resident put；
+- pinned QuickJS 默认是实现参照；若其可观察行为与明确的 test262/规范测试矛盾，
+  必须用最小复现和规范证据建立单项 reference exception，不能把“qjs 也这样”用作引入已知错误的理由；
 - 不把正确性修复的性能变化计入随后某把优化刀的收益。
 
 这些项不是全局串行屏障：不依赖它们的 source recon 和机制可以先推进；但某机制的最终
@@ -196,8 +211,11 @@ baseline/candidate PMU 必须在自己的正确性前置合入后冻结，禁止
 
 | 顺序 | 机制 | QuickJS 锚点 | 当前判断 |
 |---:|---|---|---|
-| P1 | M-CELL-EXEC：captured-cell construction contract + plain put/set 执行 | `add_func_var/resolve_scope_var`、`JSVarRef.pvalue`、plain/short/checked var-ref opcodes | 表示已对齐；read direct 已约 0.90x qjs 且 split 候选失败，真实剩余差距集中在 put/set cold funnel；先封闭 compiler/instantiation invariant |
-| P2 | M-RETURN-CONT：bytecode callee 返回后的 continuation transport | `JS_CallInternal` 的嵌套 call/return、`JS_IteratorNext` | zjs `return_action/payload → op_post_call_continuation` 是共同架构成本；iterator/Proxy 只是消费者 |
+| P0 | M-FCLOSURE-WIDTH correctness：cpool 宽/短编码与 hoist consumer | parser 先发宽 `OP_fclosure`，`resolve_labels` 只在 index≤255 时缩短；module linker 执行两种形态 | 已有 parser panic 和 module-cycle TDZ 双复现；这是正确性前置，不计性能收益 |
+| P1a | M-HOIST-CONSTRUCTION：声明 cell 与函数值的创建/发布阶段 | `add_global_variables`、`js_closure2`、`instantiate_hoisted_definitions` | local/arg 已近似对齐，module short form 等价但 wide form 受 P0 阻塞；script/部分 direct eval 仍有 helper 提前创建函数值 + compiler 抑制前缀的双向补偿，默认对齐 qjs |
+| P1b | M-CELL-EXEC：plain put/set 执行与 opcode residency | `JSVarRef.pvalue`、plain/short/checked var-ref CASE labels、`set_value` | 表示已对齐；read direct 已约 0.90x qjs 且 split 候选失败；P1a 合入重冻后，依次只做 resident plain put、resident set |
+| P1c recon | M-DYNAMIC-VAR：`.global/.global_ref` 的 `get_var/put_var` 两腿 | qjs `OP_get_var/OP_put_var` CASE 内先直接 cell，只在 uninitialized/const 时进 global-object slow leg | zjs get 侧已有对齐历史，`put_var` 目前整体仍在 `h_put_var/coldStd`。但 P0/P1a 会改变可达 lowering；只在它们合入后建 direct probe/重排，不混入 plain-var-ref 收益 |
+| P2 | M-RETURN-CONT：bytecode callee 返回后的 non-`.next` continuation transport | `JS_CallInternal` 的嵌套 call/return、`JS_IteratorNext` | `return_action/payload → op_post_call_continuation` 是所有返回后需要 post-work 形态的共同成本；普通 call/return 已排除，iterator/Proxy 只是消费者 |
 | P3 | M-PROPERTY-LOOKUP：named property shape/prototype walk | `GET_FIELD_INLINE`、`find_own_property`、`JS_GetPropertyInternal` | push/pop 最大前置面之一；已部分对齐，先找 fallback/transport 残差 |
 | P4 | M-NATIVE-CALL：callable→native frame→cproto/record | `JS_CallInternal`、`js_call_c_function`、各 cproto | 与 lookup 分离；push/pop/regexp/Math 等共享 |
 | P5 | M-ALLOC-LIFECYCLE：object create/free/accounting | `JS_NewObjectFromShape`、`js_malloc/free`、`__JS_FreeValueRT`、`free_gc_object` | 当前 1.149x；force-GC 修复后执行 |
@@ -208,8 +226,17 @@ baseline/candidate PMU 必须在自己的正确性前置合入后冻结，禁止
 M-ARRAY-STORAGE 暂停：qjs 式 fast push/count/length 已存在，当前 profile 不支持它是主杠杆。
 RegExp、Array、for-of、spread、objlit 等只作为机制消费者和语义验证面，不各自成立性能战役。
 
-## 4. M0：所有生产改动的统一证据包
+**Opcode residency 规则：** 不新建宽泛 M-DISPATCH。只有当 qjs 对应 opcode 是 CASE-inline、zjs 因冷 helper
+额外发布/恢复 pc/sp，且 direct profile 证明该段在关键链上时，才能把**一个完整语义 family**
+迁入 resident handler。这是逐 opcode 对齐，不是 benchmark fast path，也不允许顺手改 next-dispatch 架构。
 
+P1c 是本次查漏补上的**强制 recon 项**，不是已批准的生产刀。它的 direct probe 必须分开
+initialized-cell hit、uninitialized global-object hit/miss、strict miss、lexical TDZ/const 和 Proxy/exotic global；只有
+cell-hit 差距与实际 consumer 同时成立，才按 opcode-residency 规则排到 P2 之前。
+
+## 4. M0：每个生产改动的统一证据包
+
+M0 是**按当前机制增量完成**的前置，不是要求 P1–P7 全部 recon 完才能产出第一把刀。
 每个机制先完成一个只读 recon 包，内容必须齐全。源码/字节码 recon 可以早于正确性修复；
 最终 PMU freeze 必须晚于该机制在 §2 中的前置门禁：
 
@@ -244,6 +271,10 @@ compiler/bytecode recon 另建一个同 commit 的 diagnostic qjs（当前源码
 性能参照。diagnostic 与 performance qjs 的 hash、flags 和用途分开记录，禁止把带诊断宏的二进制
 混入 PMU。
 
+当前 diagnostic qjs 已存在：`/home/aneryu/quickjs-zjs-dump` @
+`04be246001599f5995fa2f2d8c91a0f198d3f34c`，唯一源码差异是启用 `DUMP_BYTECODE=7`；其 `qjs`
+完整 SHA-256 为 `c8785a6e40e0c570f23d19f1b91db8e4202d66d3959980af88bb03e352cc534f`。
+
 测量约定：
 
 - 每个生产候选从冻结 baseline 建独立 worktree/branch，diff 只含一个机制；期间若合入相关
@@ -261,76 +292,102 @@ compiler/bytecode recon 另建一个同 commit 的 diagnostic qjs（当前源码
 
 ## 5. 第一阶段：解释执行共同热机制
 
-### 5.1 M-CELL-EXEC — construction invariant 与 plain put/set
+### 5.1 M-HOIST-CONSTRUCTION → M-CELL-EXEC
 
-这不是重新设计 `VarRef`。当前 `[]*VarRef`、open cell 的 `pvalue → frame slot`、close 后
-`pvalue → self.value` 已能直接表达 qjs；没有已知 Zig 限制。
+这里有两个必须分开的机制：**cell/函数值在什么阶段被创建与发布**，以及最终
+`put_var_ref/set_var_ref` **如何执行一次已授权的 cell 写入**。前者改变可达字节码和 runtime
+补偿分支，必须先独立对齐；不得把它的收益算给后者。当前 `[]*VarRef`、open cell 的
+`pvalue → frame slot`、close 后 `pvalue → self.value` 已能表达 qjs，没有已知 Zig 限制。
 
-QuickJS 的热契约更窄：
+#### QuickJS 的完整构造链
 
-- `get_var_ref{0..3}`/plain `get_var_ref` 只做 `*pvalue → JS_DupValue → *sp++`；
-- `put_var_ref` 消费 TOS，用 `set_value` 写 `pvalue`；`set_var_ref` 写入 dup 后保留 TOS；
-- 只有 `get_var_ref_check`、`put_var_ref_check`、`put_var_ref_check_init` 承担 TDZ/初始化检查；
-- 0..3 short opcode 是独立 labels，不经过通用 operand decode。
+1. compiler 用 `add_global_variables` 生成 closure/global metadata，并由
+   `instantiate_hoisted_definitions` 把初始化序列编入最终 bytecode；
+2. `js_closure2` pass 1 只做 eval/global declaration 合法性检查；
+3. `js_closure2` pass 2 为 local/arg/ref/global/module 创建或别名**精确的 `JSVarRef*`**，不创建
+   hoisted function value；global object 的普通 var/function property 也优先与 `JS_PROP_VARREF` 共享 cell；
+4. 最终 bytecode 再执行 `fclosure + put_var_ref`。diagnostic qjs 中 script/global function 的 final
+   前缀就是 `fclosure8 0; put_var_ref0 0:f`。module 额外带
+   `push_this; if_false; ...; return_undef` 链接前缀，linker 用 `this=true` 只执行这段，正常求值再从
+   body 入口继续。cpool index 0..255 最终为 `fclosure8`，256 起保留宽 `fclosure`；两者只是
+   operand 编码不同，构造/链接语义完全相同。
 
-当前 zjs 的具体差异是：resident `opGetVarRef` 同时服务 plain/check，所有形态都付
-`idx < frame.var_refs.len` 和 `isUninitialized`；put 形态仍进入 `h_varref → execPutVarRef`，与
-ensure-capacity、const/function-name、global publication 等冷语义共用 funnel；set 形态则进入
-`h_varref → execSetVarRef`，仍承担 capacity/stack 检查和通用 replace/dup/free 包装。两类不能在
-profile 或候选中合并归因。direct 证据又补了一条重要边界：plain read 当前约 0.90x qjs，拆掉
-TDZ compare 只减少 instructions、没有减少 cycles，并使 put/set controls 回退。因此这里不再把
-“源码里还有分支”自动当作可约成本。
+执行端的契约同样窄：
 
-Recon/候选顺序：
+- `get_var_ref{0..3}`/plain get 只做 `*pvalue → JS_DupValue → *sp++`；
+- plain put 消费 TOS，plain set 写入 dup 并保留 TOS；`set_value` 先保存 old，再把 new
+  写入 slot，最后 free old，避免 old 的释放重入后破坏目标 slot；
+- 只有 `*_check`/`*_check_init` 做 TDZ/初始化检查，0..3 short forms 是独立 CASE labels。
 
-1. **先封闭 compiler construction contract。** 合入并 review §2 的 named function-expression
-   修复；再用最终 bytecode snapshot 证明 mutable var、lexical TDZ、const、module import、function
-   name、direct eval、parameter environment、closure chain 各自落入 plain/check/throw/drop/dummy-ref
-   的正确 family。QuickJS 的关键不是 runtime cell 带更多 flag，而是 `resolve_scope_var` 已把
-   const/function-name 动作提前决定。§2 的 direct-eval same-name-`var` divergence 必须在本步
-   单独裁决，不能被 broad test pass 掩盖。这里的 invariant 是“每个 plain put/set 都已获准做
-   unconditional `set_value`”，不等于“目标必为 mutable”：qjs 也用 plain `put_var_ref` 完成某些
-   module/eval const 初始化，const 的非法**重写**才由 resolution 阶段排除。
-2. **把动态环境的等价 transport 写进契约。** qjs `with_make_ref` 在 RHS 前选中 object reference，
-   miss 时建立静态 dummy reference；zjs 当前 `with_get_ref` 留下 selected object/value，随后
-   `with_put_var(selected_reference)` 消费同一快照，RHS 改增删属性也不会重做 HasProperty/
-   unscopables。该最终控制流已由 hit/miss 与 RHS mutation probes 证明等价，不为源码外形改写。
-3. **证明 publication 不属于 plain store。** 逐个验证 script/global function declaration 已由
-   `instantiateGlobalVarDeclarations → defineGlobalVarDeclaration/defineGlobalFunctionBindingValue`
-   发布；direct eval 的 `.closure/.var_object` binding 在实例化时选定；module/top-level closure
-   store 不走 global-object publication。证明完才允许从 `execPutVarRef` plain arm 删除
-   `publishTopLevelFunctionVarRef`，不能凭当前 benchmark 没触发就删。
-4. **证明 TOS 不是 VarRef adapter。** 在 finalized parser bytecode、direct eval、module linking、
-   generator resume 和 synthetic test construction 中追踪所有 plain put/set producer；只有确认
-   stack value 不会暴露内部 VarRef handle，才删除 `varRefCellFromValue/adapterValueDup` 兼容腿。
-5. **第一生产候选只做 resident plain put。** short/generic plain put 共用 qjs 的 decode→pop→
-   `set_value(pvalue)` 契约，checked/init forms 留在 cold handler；不同时动 set、read、post-inc、
-   publication 或 adapter 表示。
-6. **第二生产候选只做 resident set。** 单独保留 TOS/dup/free 所有权证明和 direct set/control
-   PMU；post-inc 只是 consumer，不能把 arithmetic/lowering 收益记给 set handler。
-7. read split 已按 §1.2 止损，不重做。bounds check 是否可删取决于 finalized/synthetic bytecode、
-   eval/module construction 和 alternate repr 的统一 invariant；证明不足就保留，并明确记作 zjs
-   validation policy，而不是 Zig 限制。
+#### 当前 zjs 对照矩阵
 
-closure 逃逸、close、generator suspend、GC/OOM 只验证既有 cell 表示，不借本战役引入 pointer
-cache、第二套 cell layout 或 benchmark-local slot typing。
+| binding 形态 | 当前对齐状态 | 裁决 |
+|---|---|---|
+| local/arg hoisted function | compiler 已生成 `fclosure + put_loc/put_arg` 等价前缀 | 补 final-bytecode/所有权 snapshot 后封账，不重写 |
+| module declaration | `initializeModuleFunctionDeclarations` 与 `moduleFunctionDeclarationBodyStart` 目前只识别 `fclosure8`；short form 等价，wide form 错过 link-time hoist，到 normal evaluation 才执行 | 先修 M-FCLOSURE-WIDTH，同一 decoder 覆盖宽/短 form；修复后才可将 module transport 封账为等价 |
+| script/global function | cell 先建，但 `global_vars.cpool_idx` 路径在 `instantiateGlobalVarDeclarations` 过程中提前创建/发布函数值；`functionHasGlobalFunctionVarCpool` 同时抑制 final-bytecode 前缀 | 无已知 Zig 阻塞；默认对齐 qjs 的 cells-first + bytecode-value-publication |
+| direct eval declaration | `.closure/.var_object/.global` 已表达声明目标，但函数 cpool 的创建阶段与 script 共享部分 eager helper 路径 | 分别对照 qjs closure `put_var_ref` 与 dynamic var-object `define_field`，不把两者强行合并 |
+| `.global/.global_ref` closure metadata | zjs 中是携 atom 的动态环境 carrier，`closureVarIsRuntimeVarRef` 明确排除；最终走 `get_var/put_var` 的动态两腿 | 不纳入 plain-var-ref 契约，不宣称所有 closure metadata 外形与 qjs 相同 |
+
+当前 `ensureGlobalObjectVarRefCell` 等路径已让新建 global var/function 常态共享 cell；不得复活
+“zjs global 仍为普通 data slot”这个过期前提。既有 non-varref property、auto-init 和动态全局仍是
+独立 slow/correctness 形态。
+
+#### Recon/候选顺序
+
+1. **先修 M-FCLOSURE-WIDTH 正确性。** 审计 parser 所有 `emitFClosure8/emitFClosure` producer，
+   禁止把未证明≤255 的 cpool index 直接 cast 成 `u8`；审计 module/diagnostic/snapshot 等所有扫描
+   function-hoist prefix 的 consumer，对 `fclosure8(u8)` 和 `fclosure(u32)` 使用同一安全 decoder。
+   固化两条红灯：同 function 的 >255 函数表达式不 panic/不截断，module cycle 在 evaluation
+   前对 index 255/256 两边都观察到正确 function identity。
+2. **再冻结 construction matrix，不冻结 put PMU。** 用 diagnostic qjs final bytecode 与 zjs snapshot
+   覆盖 local、arg、script global、global lexical、module decl/import、direct eval closure/var-object/global、
+   parameter environment、nested closure，同时记录 instantiation 与 OOM rollback 顺序。
+3. **第一生产候选只对齐构造阶段。** 让 script 与可静态选定 cell 的 direct-eval function
+   declaration 恢复 qjs 的 final `fclosure + put_var_ref`；helper 仍只做 declaration validation、cell
+   creation/aliasing 和属性旗标。dynamic var-object 保留它对应的 `define_field` 语义。这一刀不同时
+   改 put handler。
+4. **用构造证明删除 runtime 补偿，不是用 benchmark 证明“没触发”。** 逐个证明
+   global property 与 frame slot 别名同一 cell，函数值只由 hoist bytecode 写一次，再判断
+   `publishTopLevelFunctionVarRef`、runtime function-name/const 分支是否全部不可达。只能删除已被
+   final-bytecode + construction invariant 封闭的腿。
+5. **封闭 operand-stack VarRef handle 的生产者集合。** 正常 reference-object 生产者是
+   `make_loc_ref/make_arg_ref/make_var_ref_ref`，由 `get_ref_value/put_ref_value` 消费；普通
+   expression read 必须只把 plain JSValue 交给 plain put/set。在 parser/eval/module/generator 最终字节码上
+   证明闭包后，才能删 `varRefCellFromValue/adapterValueDup`；synthetic malformed bytecode 要么明确
+   拒绝，要么保留冷验证，不能污染正常 hot opcode。
+6. **构造候选合入后重冻 M-CELL baseline。** 不再使用页首旧 binary 做因果 A/B；重跑
+   short/generic read、plain put、set、post-inc 与 sentinels，重算收益上限。
+7. **第二生产候选只做 resident plain put。** short/generic plain put 镜像 qjs
+   decode→pop→`set_value(pvalue)`；当前 `VarRef.setVarRefValue` 已与 qjs 一样先发布 new、后 free old。
+   checked/init forms 保留 cold，不同时动 set/read/post-inc 或 next-dispatch。
+8. **第三生产候选只做 resident set。** 单独证明 TOS 保留、dup/free 和异常顺序；
+   post-inc 只是 consumer，不把 arithmetic/lowering 收益记给 set。
+9. read split 已按 §1.2 止损，不重做。正常 compiled frame 的 `var_refs` 按 closure count 精确定容；
+   bounds check 只有在 finalized bytecode 与 synthetic policy 共同证明后才可移出 hot arm。证明不足就保留并记为
+   zjs validation policy，而不是 Zig 限制。
+
+closure 逃逸/close、generator suspend、module cycle、direct-eval abrupt completion、GC/OOM 只用来验证同一套 cell
+和构造契约；不借本战役引入 pointer cache、第二套 cell layout 或 benchmark-local slot typing。
 
 ### 5.2 M-RETURN-CONT — 通用 post-call continuation transport
 
 QuickJS 在 `JS_IteratorNext2` 中递归 `JS_Call`；callee 返回后，C 控制流直接继续读取 result。
-zjs 不递归第二个 VM，而是发布 `return_action/payload`，经 `popAndResume` 与
-`op_post_call_continuation` 再进入 `finishForOfNextResult`。这是 call/return 机制差异，不是 iterator
-feature，也不是已证明的 Zig 限制。
+zjs 不递归第二个 VM；普通 `.next` call/return 已在专用 handler 内完成 teardown/resume，不经过
+通用 `op_post_call_continuation`。只有 `for_of_next`、Proxy 等需要 callee 返回后继续作业的
+**非 `.next` action** 才发布 `return_action/payload`，经 `popAndResume` 和
+`op_post_call_continuation` 回到 `finishForOfNextResult` 等消费者。因此这里只审计 post-call work
+的 continuation transport，不把普通 call/return 或整体 dispatch 重新归因给它。
 
 Recon 顺序：
 
-1. 用普通 zero-arg method、self-result iterator、constant-result iterator 和 bytecode Proxy `get`
-   分别隔离普通 return、带 post-work return 和 result-property work。
+1. 用普通 zero-arg method 证明 `.next` control 不进通用 continuation；再用 self-result iterator、
+   constant-result iterator 和 bytecode Proxy `get` 分别隔离 post-work return 与 result-property work。
 2. 逐项计数 action/payload publish、frame pop、resume pc/sp 恢复、post-call indirect dispatch、
    `done/value` lookup 与 ownership；`finishForOfNextResult` self% 不能全部算作 continuation。
 3. 对照 qjs 的 receiver/method/argv 所有权、异常回到 caller 的位置、`sf->cur_pc`、result free 和
    done 时 iterator 清理；先确认现有语义相同，再找重复 transport。
-4. 候选必须简化所有同类 post-call action 的 continuation 表示，或把 continuation 直接并入既有
+4. 候选必须简化所有同类**非 `.next`** post-call action 的 continuation 表示，或把 continuation 直接并入既有
    return 协议；不得按 iterator result shape、固定 `next`、Proxy trap 名称或 benchmark 建分支。
 
 生产修改受 §2 tail-chain stack budget 阻塞。若剩余差异只是 resident Machine 的架构成本，记录为
@@ -345,8 +402,10 @@ data hit dup，miss 沿 `shape->proto` 继续；property kind 或 exotic/primiti
 zjs 的 `qjsGetFieldFast/findOwnDataValueFast` 已镜像普通 data walk，因此本战役不是新增 property
 fast path，而是核对当前链为何仍比 qjs 贵：
 
-1. 建 own-data、prototype-data、true-miss、getter、primitive 和 exotic 六个 direct/control，
-   另用 Array.push/pop、regexp method、普通 bytecode method 作 consumers。
+1. 建 ordinary object 的 own-data、prototype-data、true-miss、getter、primitive 和 exotic 六个
+   direct/control，另用 Array.push/pop、regexp method、普通 bytecode method 作 consumers。global object 的
+   `JS_PROP_VARREF`/zjs var-ref property 另建 probe，不混进 ordinary-data direct attribution；否则样本同时测了
+   M-CELL 别名与 property lookup。
 2. 对照 atom→bucket、hash-chain load、kind flags、prototype load、receiver dup/free 和 slow-path
    publication；把 callable 后续 dispatch 从样本和 profile 中扣除。
 3. 单独审计 zjs 的 `needsSlowPropertyAccess`、private-atom probe、null-prototype class-global fallback
@@ -381,7 +440,8 @@ Recon 顺序：
 
 ### 6.1 M-ALLOC-LIFECYCLE — create/free/accounting
 
-前置：force-GC accounting 恢复；否则 allocation/ownership 候选没有可靠门禁。
+前置：先修复当前 `test-exec -Dzjs_force_gc=true` 在 `gc.zig:1662` 的
+`HeapLiveBytesMismatch`；否则 allocation/ownership 候选没有可靠门禁。
 
 QuickJS 空对象链是 `OP_object → JS_NewObject → JS_NewObjectProtoClass →
 JS_NewObjectFromShape`：先找/retain empty prototype shape，再 `js_trigger_gc`，分配 `JSObject` 和
@@ -389,6 +449,18 @@ JS_NewObjectFromShape`：先找/retain empty prototype shape，再 `js_trigger_g
 → outermost `free_zero_refcount` → `free_object`。当前 zjs 已镜像 RC queue，但空对象 lazy-skip
 property array，且初始 shape capacity 为 4（qjs `JS_PROP_INITIAL_SIZE` 为 2）。这是事件数不同的
 既有优化，不能为了“忠实”恢复一次无收益分配。
+
+两个历史 allocation 差异在当前代码已经 **CLOSED**，不得重列为未来刀：
+
+- `SpaceAccount.recordAlloc/recordFree` 热路现在只更新 `live_bytes`，committed/free page geometry
+  已改为 `refreshPageState` 在 stats/debug verify 时惰性派生；
+- `Object.createInternal` 现在用 `recordPtr(class_id)` 的 `class_record` 指针视图，不再把整个
+  class Record 按值复制到热栈。
+
+历史文档可以用来说明这两项为何曾经昂贵，不能用来证明它们在当前 HEAD 仍存活。
+这只封闭“per-allocation page geometry”和“整个 class Record 按值复制”两把旧刀；如果当前 profile
+另外证明 pointer view 的必需标量读、allocator limit 或其他记账在关键链上，必须以新的
+QuickJS 对照事实单独立项，不从已关闭收益外推。
 
 Recon 顺序：
 
@@ -439,8 +511,8 @@ final bytecode 与 zjs snapshot 证明：
 
 | QJS rule family | 当前 zjs 状态 | 动作 |
 |---|---|---|
-| binding resolution：scope/arg/function-name/eval-object/with/closure/global 优先级；const/import/function-name 的 put/make-ref/delete 动作 | 历史 lazy function-name 只对齐 materialization，遗漏 `add_var`、定义侧 strict metadata、dummy ref 和 parameter-env fallback；worktree 已补。zjs `with_get_ref + selected_reference with_put_var` 是 qjs reference snapshot 的最终字节码等价物 | 先把它作为 construction correctness 合入并钉 local/closure/default/eval/with snapshots；不把它误列为 peephole，也不把等价 `with` transport 改成同名 opcode |
-| pipeline order、short loc/arg/var-ref、const8/fclosure8 | 已有对应 pipeline/encoding | 只补矩阵证据，不重做 |
+| binding resolution 与 hoist construction：scope/arg/function-name/eval-object/with/closure/global 优先级，以及 cell/value 的创建阶段 | function-name 的 `add_var`、定义侧 strict metadata、dummy ref 和 parameter-env fallback 已由 `c034597c` 对齐；`with_get_ref + selected_reference with_put_var` 是 reference snapshot 的等价 transport。但 script/部分 eval 函数值仍 eager-instantiated 并抑制 hoist bytecode | 前一部分钉 snapshot 后封账；后一部分作为 M-HOIST-CONSTRUCTION 先于 M-CELL 独立对齐。它们都不是 peephole，不进行“只缩短序列”的 PMU 归因 |
+| pipeline order、short loc/arg/var-ref、const8/fclosure8 | 普通 pipeline/encoding 已有，但 `fclosure` cpool >255 的 producer/consumer 不完整，已有 parser panic 与 module-cycle TDZ 复现 | 先以 M-FCLOSURE-WIDTH correctness 修复宽/短边界；其他 short family 只补矩阵证据，不重做 |
 | tail call、`get_field(length)`、empty string short form | zjs 多在 parser 提前输出 | 用复杂 short-circuit/finally case 验证最终等价，不搬 pass |
 | logical chain、null/undefined/typeof、constant branch、push-neg、dup-put/set、return-undef、dead code、inc/add-loc | 已有 matcher 或独立 fuse | 逐条钉 snapshot 后封账；不能再用旧的粗粒度族数代替 coverage |
 | `insert3 + put_array_el/put_ref_value + drop` | 待 final-bytecode diff | 若 zjs 最终仍保留该序列，一条规则一刀 |
@@ -451,8 +523,9 @@ final bytecode 与 zjs snapshot 证明：
 
 执行纪律：
 
-- binding construction 与 peephole 分账：前者改变哪些 runtime opcode 可达，必须先于 M-CELL
-  baseline；后者只在同一语义动作上缩短最终序列；
+- binding resolution/hoist construction 与 peephole 分账：前者决定 cell 和函数值的创建阶段、
+  属性别名及哪些 runtime opcode 可达，必须先于 M-CELL baseline；后者才只在同一语义动作上
+  缩短最终序列；
 - 一条独立 qjs rule 一个候选和一组 bytecode snapshot；
 - 先证明最终 bytecode 差异，再测执行性能；没有 bytecode 差异就不进入 PMU；
 - atom ownership、jump target、finally/rethrow、generator、eval/with、TDZ 和 dead-code
@@ -475,8 +548,9 @@ descriptor/interface 包装、额外长期活跃参数、raw resume、target 字
 - 先修 tail-call reuse 的等价 stack budget，再重新 profile fib/closure/borrowed continuation；
   qjs 的 native-SP guard 与 interrupt counter 是两个机制，zjs 不得用一个廉价计数器冒充两者；
 - 只有同一个 qjs 对齐缺口在至少两个 frame shape 的关键链上出现，才重开生产候选；
-- resident Machine、Entry slab 和 frame reuse 都是 zjs 架构选择；只有 `preserve_none` calling
-  convention 本身是明确工具链等待项，普通 C ABI 多传状态已经被历史实验证伪；
+- resident Machine、Entry slab 和 frame reuse 仍要按各自契约审计；但 tailcall dispatch 本身已由
+  单体 dispatcher 3,504B spill 二分、224-arm A/B 和 next-dispatch 指令数封账，不得从 frame
+  战役侧面重开。`preserve_none` 是明确工具链缺口，但不是当前结论的唯一证据；
 - 架构可维护性重构另立工作项，不把“代码更少”记成性能收益。
 
 ## 8. 候选判定与止损协议
@@ -526,12 +600,13 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 
 | 阶段 | 工作 | 出口 |
 |---|---|---|
-| M0 | 重建可追溯 performance/diagnostic qjs；为 P1–P7 做只读 source recon | qjs/zjs 差异、最终 bytecode、直接探针、收益上限齐全；不把早期 PMU 当最终 baseline |
-| W1 | ~~review/合入 function-name construction 修复~~ → **重冻 M-CELL** → resident plain put → resident set → tail-chain stack correctness → 重冻 → M-RETURN-CONT | correctness 前置已在 `c034597c` 完成；read split 已失败且不重试；put/set 各自一刀，先证明 publication/adapter/capacity invariant；continuation 候选不跨 stack-guard 状态 |
-| W2 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | lookup 与 callable dispatch 分开保留/回退 |
-| W3 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分 |
-| W4 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | 只做 final bytecode 确认仍缺的 qjs rule |
-| W5 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
+| M0 | 维持可追溯 performance/diagnostic qjs；按**当前机制**逐个做 source/final-bytecode recon | 当前候选的 qjs/zjs 差异、direct/control、收益上限齐全；不等待 P1–P7 全部完成，也不把早期 PMU 当最终 baseline |
+| W1 | M-FCLOSURE-WIDTH parser/module correctness → 重冻 diagnostic construction matrix → M-HOIST-CONSTRUCTION script/eval 阶段对齐 → 语义/OOM 收口 → 重冻 M-CELL → resident plain put → resident set → P1c M-DYNAMIC-VAR recon/重排 | cpool-width 与构造收益都不计入 put；module 255/256 cycle 红灯先过；publication/adapter/capacity 只在 invariant 封闭后删；read split 不重试；put/set 各一刀；dynamic carrier 不越过证据直接上生产 |
+| W2 | tail-chain stack correctness → 重冻 → 只审计非 `.next` 的 M-RETURN-CONT | 观察终止与 qjs 对齐；continuation 候选不跨 stack-guard 状态，不重开整体 dispatch |
+| W3 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | ordinary/global-varref lookup probe 分开；lookup 与 callable dispatch 分开保留/回退 |
+| W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
+| W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
+| W6 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
 失败候选删除代码但保留结论；完成后更新本计划的当前优先级，不追加逐日流水账。
@@ -542,8 +617,18 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   热机制相同。
 - **源码宏和构建配置属于 reference。** `DIRECT_DISPATCH/SHORT_OPCODES/CONFIG_STACK_CHECK` 不同，
   即使同一 commit 也不是同一机制基线；diagnostic qjs 不能拿来跑性能。
-- **zjs 架构选择不是 Zig 限制。** tail dispatch、record table、lazy property storage、提前发码
-  都必须按 deliberate divergence 审计，不能用“Zig 写法不同”自动免责。
+- **zjs 架构选择不自动是 Zig 限制。** record table、lazy property storage、提前发码都必须
+  按 deliberate divergence 审计。tail dispatch 则已有单体 spill 与 224-arm A/B 证据，当前作为
+  Zig/LLVM 等价适配封账；这个结论来自数据，不是来自“Zig 写法不同”。
+- **runtime 补偿分支往往是构造阶段不同的信号。** `publishTopLevelFunctionVarRef` 不能凭
+  benchmark 没触发就删；先对照 qjs 的 metadata→cell→value-publication 阶段，再用 final
+  bytecode 和别名 invariant 证明补偿不可达。
+- **short opcode 是最终编码选择，不是数据模型。** qjs 先保留宽 `fclosure` index，只在
+  index≤255 时缩短。zjs 直接把 cpool index cast 成 `u8` 不仅会 panic/截断，还使只识别
+  `fclosure8` 的 module hoist consumer 在 255/256 边界出现可观察 TDZ。producer 与 consumer 必须成对审计。
+- **QuickJS 例外需要比普通对齐更强的证据。** direct-eval same-name body `var` 的 pinned-qjs
+  `undefined` 与 test262 明确的 function-name environment 要求冲突，所以保留 zjs `11`。没有
+  最小复现 + 规范测试证据，不允许自行宣布 qjs bug。
 - **复合 benchmark 必须最小化。** for-of 同时混入 cell/property/arith；push/pop 混入
   lookup/call/length。症状比值不能直接给机制排功劳。
 - **占用不等于承载。** profile self% 只是入口；要追值是否进入间接跳转、依赖 load、allocator
@@ -558,6 +643,8 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   不把静态分支删除当成果。
 - **状态先审计。** shape unique arm、Array.push fast arm、多族 peephole 已完成却被旧计划重列，
   此后每个计划项必须先经 `git blame/log + 当前源码` 双确认。
+- **已关闭的 allocation 差异不用历史 profile 复活。** page geometry 已移到惰性 refresh，
+  class metadata 已是 pointer-only view；只有当前 HEAD 的调用链/汇编再次证明它们存活才可重开。
 - **迁移一个机制要同时迁移 metadata、resolution action 与初始化。** `6fdaf1be` 正确对齐了 qjs
   lazy named-function self-binding 的 materialization/prologue，获得了真实调用收益，但保留了旧 zjs
   的 scope-linked、unconditional-const 形状和 runtime function-name write workaround；因此漏掉定义侧
