@@ -3309,6 +3309,69 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
     }
 }
 
+test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("exact-args-leaf");
+    const arg_name = try rt.internAtom("value");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(arg_name);
+
+    const Mode = struct { strict: bool, arrow: bool, captured_arg: bool };
+    const modes = [_]Mode{
+        .{ .strict = false, .arrow = false, .captured_arg = false },
+        .{ .strict = true, .arrow = false, .captured_arg = false },
+        .{ .strict = false, .arrow = true, .captured_arg = false },
+        .{ .strict = false, .arrow = false, .captured_arg = true },
+    };
+    for (modes) |mode| {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        fd.is_strict_mode = mode.strict;
+        if (mode.arrow) fd.func_type = .arrow;
+        _ = try fd.appendArg(.{
+            .var_name = rt.atoms.dup(arg_name),
+            .scope_level = 0,
+            .is_lexical = false,
+        });
+        // A captured PARAMETER opens a cell window at frame setup, which the
+        // leaf constructor cannot build — publication must reject it.
+        if (mode.captured_arg) fd.args[0].is_captured = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        const expect_sloppy = !mode.strict and !mode.arrow and !mode.captured_arg;
+        const expect_raw = (mode.strict or mode.arrow) and !mode.captured_arg;
+        try std.testing.expectEqual(expect_sloppy, view.simple_inline_exact_args_leaf);
+        try std.testing.expectEqual(expect_raw, view.raw_this_inline_exact_args_leaf);
+        // The zero-arg family never overlaps the exact-args family.
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+    }
+
+    {
+        // Zero-arg functions stay exclusively on the empty-leaf bytes.
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expect(!view.simple_inline_exact_args_leaf);
+        try std.testing.expect(!view.raw_this_inline_exact_args_leaf);
+        try std.testing.expect(view.flags.simple_inline_empty_leaf);
+    }
+}
+
 test "implicit arguments get_var rescue reserves mapped arg aliases" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

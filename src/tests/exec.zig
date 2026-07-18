@@ -7347,6 +7347,82 @@ test "inline empty leaf abrupt teardown releases pending operands" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
+test "exact-args leaf abrupt teardown releases borrowed args exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The callee is a published exact-args leaf (params only, no locals or
+    // cell creation); each call moves TWO refcounted argument objects into
+    // the caller-region args window before throwing mid-body. Abrupt
+    // completion must release each borrowed-window arg exactly once —
+    // a double free corrupts rc, a missed free strands the objects, and
+    // either breaks the liveCount balance below. Also covers the plain /
+    // strict / method entry arms.
+    const setup = try js.eval(
+        \\function leafThrow(a, b) {
+        \\    return a.x + null.missing + b.x;
+        \\}
+        \\function strictLeafThrow(a, b) {
+        \\    "use strict";
+        \\    return a.x + null.missing + b.x;
+        \\}
+        \\const leafRecv = { m: function (a, b) { return a.x + null.missing + b.x; } };
+        \\function exerciseExactArgsLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { leafThrow({ x: 1 }, { x: 2 }); } catch (error) {}
+        \\        try { strictLeafThrow({ x: 3 }, { x: 4 }); } catch (error) {}
+        \\        try { leafRecv.m({ x: 5 }, { x: 6 }); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseExactArgsLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseExactArgsLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The parser elides trailing expression-statement drops and leaves
+    // switch discriminants on the operand stack at `return` (qjs frees both
+    // in the done: local_buf..sp loop). The exact-args leaf return arm must
+    // detect the non-empty callee window and fall back to general teardown;
+    // the narrow epilogue would strand these object leftovers (rc leak, and
+    // a Debug assert abort). The zero-arg twin of this exposure PREDATES the
+    // exact-args family (HEAD ec058eed: `function k(){ ({}); }` trips the
+    // same assert) and stays out of this coverage until its own fix lands.
+    const setup = try js.eval(
+        \\function exactArgsLeftover(a) { ({ x: a }); }
+        \\function switchLeftover(a) {
+        \\    switch (a) { case 1: return { x: 9 }; }
+        \\}
+        \\function exerciseLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        exactArgsLeftover(i);
+        \\        switchLeftover(1).x;
+        \\    }
+        \\}
+        \\exerciseLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
 test "inline empty leaf warm constructor preserves miss fallback and ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
