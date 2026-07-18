@@ -1,9 +1,11 @@
 # OPT-ROADMAP 2026-07-19 — QuickJS 机制忠实对齐计划
 
-> 本轮冻结源码/性能基线：zjs `main` `5a2dad4fce9c95e0e868d5f00415275f2f024ce1`
+> 当前代码机制基线（compiler fix merge point）：
+> `c034597c604f0b3f7e884d0f83554eaee7e95180`
 >
-> 待合入的 compiler-correctness 前置：`perf/cell-exec-qjs-align`
-> `dbe50d7ddc78dff4affa35556db7909b4a0fe359`；它不计作后续 plain-put 收益，合入后重冻。
+> 本轮原始源码/性能冻结点：`5a2dad4fce9c95e0e868d5f00415275f2f024ce1`。compiler-correctness
+> 前置 `dbe50d7ddc78dff4affa35556db7909b4a0fe359` 已由 `c034597c` 合入；它不计作后续
+> plain-put 收益，页首旧 M-CELL binary 只保留历史证据用途，下一步必须从当前 main 重冻。
 >
 > M-CELL 冻结 ReleaseFast zjs：完整 SHA-256
 > `5da80d18ca74466513be780c31df3662358c184c3508904aacd3f7463c9894fc`；`.text`
@@ -120,6 +122,9 @@ median，baseline 为页首冻结 zjs：
 这些数字只是本计划的最新快照。正式候选开始前，M0 必须把原始逐轮数据、二进制 hash、
 命令和环境固化到当前工作项；计划文本不代替可审计的原始证据。
 
+注意：上面 M-CELL 的机制排序和失败刀结论仍有效，但 `c034597c` 已改变 compiler construction，
+旧 zjs binary 不得继续充当 plain-put 候选的因果 baseline。
+
 ### 1.3 已确认的归因修正
 
 1. `for-of-bytecode-next-zero-arg-2m.js` 在循环外创建并反复复用同一个 result 对象，
@@ -168,7 +173,7 @@ median，baseline 为页首冻结 zjs：
 | force-GC heap accounting | `test-exec -Dzjs_force_gc=true` 在 `gc.zig:1662` 报 `HeapLiveBytesMismatch` | M-ALLOC-LIFECYCLE、M-SHAPE-PUBLISH |
 | tail-call reuse 的等价 stack budget | zjs 无限运行；qjs 由 `js_check_stack_overflow` 抛 `InternalError: stack overflow` | M-RETURN-CONT、M-FRAME-CONT |
 | generator 函数表达式作默认参数 | zjs `UnexpectedToken`；qjs 正常 | M-EMIT 的 parser/发码面 |
-| named function-expression self-binding construction | 冻结 main 上 lazy materialization 仍沿用旧的 scope-linked/unconditional-const metadata；另发现参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs `add_func_var/resolve_scope_var` 修复；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | M-CELL-EXEC：在移除 runtime const/function-name/publication 分支前必须先保证这些动作已由编译/实例化阶段封闭 |
+| named function-expression self-binding construction | 原冻结点的 lazy materialization 沿用旧 scope-linked/unconditional-const metadata，且参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs 修复并由 `c034597c` 合入；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | 已解除 correctness 阻塞；立即废弃旧 M-CELL A/B 并从当前 main 重冻，随后才能移除 runtime const/function-name/publication 分支 |
 | direct eval 下 function-name 与同名 body `var` | 既有 zjs 测试锁定 `(function rec(){var rec=11; return eval('rec')})()` 为 `11`；pinned qjs 会建立两个 `rec` local，把 `var rec=11` 降为 drop，eval 捕获未初始化为 `undefined` 的 loc0。这是已知、非 Zig 限制的 observable divergence，不是本轮 worktree 新增 | 完整 binding-construction 宣称前单独最小化并按当前“优先 qjs”原则裁决；未裁决前不得用“所有 direct-eval binding 已等价”删除 runtime 兼容腿 |
 
 依赖规则：
@@ -177,8 +182,8 @@ median，baseline 为页首冻结 zjs：
 - 再动 M-RETURN-CONT/M-FRAME-CONT 前，先为复用 frame 的 tail chain 实现并验证与 qjs stack guard
   等价的可观察终止；现有 call/jump interrupt polling 单独保留并回归，不把两种机制揉成一个计数器；
 - parser 正确性修复可独立进行，但若合入，M-EMIT 的 bytecode 基线必须重冻；
-- named function-expression 修复先独立 review/合入，再废弃当前 M-CELL 性能 baseline；新的 plain-put
-  候选不得跨这个 compiler invariant 状态比较；
+- named function-expression 修复已独立 review/合入；当前 M-CELL 性能 baseline 已作废，新的
+  plain-put 候选不得跨这个 compiler invariant 状态比较；
 - 不把正确性修复的性能变化计入随后某把优化刀的收益。
 
 这些项不是全局串行屏障：不依赖它们的 source recon 和机制可以先推进；但某机制的最终
@@ -522,7 +527,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | 阶段 | 工作 | 出口 |
 |---|---|---|
 | M0 | 重建可追溯 performance/diagnostic qjs；为 P1–P7 做只读 source recon | qjs/zjs 差异、最终 bytecode、直接探针、收益上限齐全；不把早期 PMU 当最终 baseline |
-| W1 | review/合入 function-name construction 修复 → 重冻 M-CELL → resident plain put → resident set → tail-chain stack correctness → 重冻 → M-RETURN-CONT | read split 已失败且不重试；put/set 各自一刀，先证明 publication/adapter/capacity invariant；continuation 候选不跨 stack-guard 状态 |
+| W1 | ~~review/合入 function-name construction 修复~~ → **重冻 M-CELL** → resident plain put → resident set → tail-chain stack correctness → 重冻 → M-RETURN-CONT | correctness 前置已在 `c034597c` 完成；read split 已失败且不重试；put/set 各自一刀，先证明 publication/adapter/capacity invariant；continuation 候选不跨 stack-guard 状态 |
 | W2 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | lookup 与 callable dispatch 分开保留/回退 |
 | W3 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分 |
 | W4 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | 只做 final bytecode 确认仍缺的 qjs rule |
