@@ -209,7 +209,13 @@ pub const Entry = struct {
         simple: bool = false,
         has_native_caller: bool = false,
         empty_leaf: bool = false,
-        _padding: u5 = 0,
+        /// Exact-args leaf twin of `empty_leaf`: same warm construction and
+        /// one-ldp resume record, plus a caller-region args window whose
+        /// values the return epilogue releases. Kept as a separate bit so
+        /// the established zero-arg return arm retains its exact single-bit
+        /// test (no args len probe on the argc==0 leaf family).
+        exact_args_leaf: bool = false,
+        _padding: u4 = 0,
     };
 
     /// The Entry's sole persistent execution-view source is `frame.function`;
@@ -261,6 +267,10 @@ pub const Entry = struct {
         return self.teardown.empty_leaf;
     }
 
+    pub inline fn isExactArgsLeaf(self: *const Entry) bool {
+        return self.teardown.exact_args_leaf;
+    }
+
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
     /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
     /// `native_caller` value is live ONLY under `teardown.has_native_caller`
@@ -289,12 +299,12 @@ pub const Entry = struct {
     }
 
     pub inline fn emptyLeafResumePc(self: *Entry) [*]const u8 {
-        std.debug.assert(self.isEmptyLeaf());
+        std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
         return @ptrFromInt(self.emptyLeafResumeWords()[0]);
     }
 
     pub inline fn emptyLeafResumeSp(self: *Entry) [*]core.JSValue {
-        std.debug.assert(self.isEmptyLeaf());
+        std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
         return @ptrFromInt(self.emptyLeafResumeWords()[1]);
     }
 
@@ -328,7 +338,12 @@ pub const Entry = struct {
     /// authoritative Stack/Frame cleanup instead of using the normal-return
     /// leaf epilogue.
     inline fn deinit(self: *Entry, ctx: *core.JSContext) void {
-        if (self.teardown.empty_leaf)
+        // Exact-args leaves must ALSO route through general teardown here:
+        // their `frame.locals` is the empty-slice default (not the stack
+        // base deinitSimple's live_values derivation assumes), and general
+        // teardown releases the caller-region args window exactly once via
+        // `deinitInlineCall` while leaving its borrowed backing untouched.
+        if (self.teardown.empty_leaf or self.teardown.exact_args_leaf)
             self.deinitGeneral(ctx)
         else if (self.canUseSimpleTeardown())
             self.deinitSimple(ctx)
@@ -336,11 +351,15 @@ pub const Entry = struct {
             self.deinitGeneral(ctx);
     }
 
-    /// Normal-return teardown. The return handler has already moved the result
-    /// out and published the retreated sp, proving the empty leaf has no live
-    /// operand values; only this completion edge may use its narrow epilogue.
+    /// Normal-return teardown. The narrow leaf epilogue additionally requires
+    /// an EMPTY callee operand window: the parser elides trailing
+    /// expression-statement drops and leaves switch discriminants on the
+    /// stack at `return` (qjs frees them in the done: local_buf..sp loop,
+    /// quickjs.c:20701-20706), and the driver-side falloff completion peeks
+    /// its result without popping. Those returns route through general
+    /// teardown, which releases the remaining operand values exactly once.
     inline fn deinitReturned(self: *Entry, ctx: *core.JSContext) void {
-        if (self.teardown.empty_leaf)
+        if (self.teardown.empty_leaf and self.stack.len() == 0)
             self.deinitEmptyLeaf(ctx)
         else
             self.deinit(ctx);
@@ -378,6 +397,39 @@ pub const Entry = struct {
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         frame.current_function.freeObjectAssumeObject(rt);
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    /// Exact-args twin of `deinitEmptyLeafInline`: identical narrow normal-
+    /// return epilogue plus the caller-region args release — qjs OP_call's
+    /// post-return `for(i = -1; i < call_argc; i++) JS_FreeValue(ctx,
+    /// call_argv[i])` (quickjs.c:18229-18232) collapsed into the callee
+    /// teardown that runs at the same point on this path. The args window
+    /// borrows the caller's operand slots above the retreated top, so only
+    /// the VALUES are released; the backing region is reused by the caller's
+    /// next push. Only the normal-return arm may use this: abrupt completion
+    /// keeps general teardown (live operand values, cold state).
+    inline fn deinitExactArgsLeafInline(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.teardown.simple);
+        std.debug.assert(self.teardown.exact_args_leaf and !self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(frame.cold == null);
+        std.debug.assert(frame.ownership.current_function == .owned);
+        std.debug.assert(frame.ownership.storage == .borrowed);
+        std.debug.assert(frame.locals.len == 0 and frame.args.len != 0);
+        std.debug.assert(frame.args.len == frame.function.arg_count);
+        // Inherited captures are borrowed from the closure's cell array and
+        // are never released here (deinitSimple's exact contract for
+        // borrowed var_refs); the callee can never CREATE cells.
+        std.debug.assert(frame.ownership.var_refs == .borrowed);
+        std.debug.assert(frame.open_var_refs.len == 0);
+        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        frame.current_function.freeObjectAssumeObject(rt);
+        for (frame.args) |v| v.free(rt);
         rt.vm_stack.restore(self.arena_mark);
         self.profile_guard.deinit();
     }
@@ -1122,15 +1174,18 @@ pub const Machine = struct {
     }
 
     /// Deep constructor for the published empty-leaf shape. Its adapter has
-    /// already proved a call with exact argc=0 and no locals,
+    /// already proved a call with exact argc (0 for the empty family,
+    /// == arg_count for the exact-args family) and no locals,
     /// captures, open bindings, arguments materialization, or direct eval.
     /// Keeping that proof at this interface removes the general setup's
     /// geometry/capture selectors and initializes only the operand-stack arena
     /// that executing the leaf can actually use. `leaf_this` selects the
-    /// region layout and the frame's `this` arm: `[callable]` for plain calls
-    /// (sloppy borrows the realm global, strict preserves undefined),
-    /// `[receiver, callable]` for method calls whose receiver becomes the
-    /// callee's raw `this`.
+    /// region layout and the frame's `this` arm: `[callable, args...]` for
+    /// plain calls (sloppy borrows the realm global, strict preserves
+    /// undefined), `[receiver, callable, args...]` for method calls whose
+    /// receiver becomes the callee's raw `this`. `exact_args` frames borrow
+    /// the args window in place from the caller region (qjs `arg_buf = argv`,
+    /// quickjs.c:17841).
     noinline fn pushEmptyLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
@@ -1177,6 +1232,66 @@ pub const Machine = struct {
         return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, self.callerResumePc());
     }
 
+    /// Exact-args authoritative constructor (O1) — the deep fallible twin of
+    /// `pushEmptyLeafFrame` for a leaf whose call supplies exactly
+    /// `arg_count > 0` arguments in the caller region
+    /// (`[callable, args...]` / `[receiver, callable, args...]`). Kept as a
+    /// SEPARATE body (not a comptime variant of the zero-arg constructor) so
+    /// the established empty-leaf instantiations compile from byte-identical
+    /// source: sharing one parameterized body measurably re-scheduled the
+    /// zero-arg warm arms (LLVM tail-merged their frame-store blocks, adding
+    /// a branch to the established sloppy const path).
+    noinline fn pushExactArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertExactArgsLeafEligible(leaf_this, function);
+        std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
+        std.debug.assert(function.var_count == 0);
+        std.debug.assert(function.open_var_ref_count == 0);
+
+        // Same sole-owner contract as the zero-arg constructor, extended over
+        // the args window (reverse index order, mirroring cleanupStackSource).
+        errdefer {
+            var index: usize = argc;
+            while (index > 0) {
+                index -= 1;
+                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
+            }
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
     /// Debug-only proof that the comptime `this` arm matches the published
     /// per-policy eligibility bit and the callee's `this` policy: the sloppy
     /// arm substitutes the realm global for non-arrow sloppy functions; the
@@ -1190,6 +1305,20 @@ pub const Machine = struct {
             .raw_undefined => std.debug.assert(function.raw_this_inline_empty_leaf),
             .receiver => std.debug.assert(function.flags.simple_inline_empty_leaf or
                 function.raw_this_inline_empty_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
+                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Exact-args twin of `assertLeafEligible` against the O1 policy bytes.
+    inline fn assertExactArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(function.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(function.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(function.simple_inline_exact_args_leaf or
+                function.raw_this_inline_exact_args_leaf),
         }
         if (comptime leaf_this != .receiver) {
             std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
@@ -1254,6 +1383,75 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// Exact-args publication tail (O1) — the parallel twin of
+    /// `finishEmptyLeafFrame` (separate body; see `pushExactArgsLeafFrame`
+    /// for why the zero-arg source is not shared). Adds exactly the args
+    /// window binding: the frame borrows the caller-region slots in place —
+    /// qjs `arg_buf = argv` (quickjs.c:17841). Value ownership transfers to
+    /// the frame (the caller's logical top already retreated below the
+    /// window); the backing slots stay caller storage, the same
+    /// `initArgumentsBorrowedSlots` contract the exact simple frame uses.
+    /// The teardown publishes the `exact_args_leaf` bit instead of
+    /// `empty_leaf`, so the zero-arg return arm keeps its single-bit test
+    /// and abrupt completion routes to general teardown (which releases the
+    /// args values exactly once and never frees their borrowed backing).
+    inline fn finishExactArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        const args_window: []core.JSValue =
+            (region_start + @as(usize, @intFromBool(method_receiver)) + 1)[0..argc];
+        // No failable operation follows the ownership transfer. `var_refs`
+        // borrows the closure's cell array (qjs `var_refs =
+        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
+        // `current_function` until teardown. Unconditionally `.borrowed`
+        // (the general path publishes `.owned` for the empty slice, but both
+        // dispositions are teardown no-ops at len 0 and the constant byte
+        // keeps a len test off this path).
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .actual_arg_count = argc,
+            .args = args_window,
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
     /// The caller's post-operand resume pointer, exactly what
     /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
     /// runs after the call opcode published the caller's resume offset
@@ -1302,6 +1500,49 @@ pub const Machine = struct {
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
         return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free exact-args leaf construction (O1) — the
+    /// parallel twin of `tryPushEmptyLeafCallFast` (separate body; see
+    /// `pushExactArgsLeafFrame` for why the zero-arg source is not shared).
+    /// A null result is the same pure miss contract: call depth, arena
+    /// watermark, source ownership (callable, optional receiver, and the
+    /// args window), and Machine links are unchanged, so the caller can
+    /// invoke `pushExactArgsLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling.
+    pub inline fn tryPushExactArgsLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertExactArgsLeafEligible(leaf_this, function);
+        std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
+        const ctx = self.ctx;
+        if (ctx.call_depth >= ctx.stack_limit) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -1686,6 +1927,25 @@ pub const Machine = struct {
         return self.pushEmptyLeafFrame(leaf_this, global, function, region_start);
     }
 
+    /// Exact-args twin of `pushEmptyLeafCall`: authoritative fallible entry
+    /// for a leaf whose call supplies exactly `arg_count > 0` arguments in
+    /// the caller region. Region layout gains the trailing args window that
+    /// the frame borrows in place.
+    pub inline fn pushExactArgsLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertExactArgsLeafEligible(leaf_this, function);
+        return self.pushExactArgsLeafFrame(leaf_this, global, function, captures, region_start, argc);
+    }
+
     /// Push a method inline call whose raw source is
     /// `[receiver, callable, args...]`. Sloppy simple methods with their
     /// complete argv — the established `recv.m(x)` hot shape — and strict
@@ -1901,6 +2161,20 @@ pub const Machine = struct {
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
         // outline behind the rc==0 branch).
         dying.deinitEmptyLeafInline(self.ctx);
+        self.ctx.call_depth -= 1;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
+    /// Exact-args twin of `popReturnedEmptyLeaf`. Its inline epilogue adds
+    /// only the caller-region args release loop; abrupt completion still
+    /// inspects and releases the callee through general teardown.
+    pub inline fn popReturnedExactArgsLeaf(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isExactArgsLeaf());
+        std.debug.assert(dying.return_action == .next);
+        std.debug.assert(dying.continuation_payload == 0);
+        dying.deinitExactArgsLeafInline(self.ctx);
         self.ctx.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;

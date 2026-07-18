@@ -8720,6 +8720,14 @@ const function_mod = struct {
         argc: u16,
     };
 
+    /// Fused exact-args-leaf dispatch classification (see
+    /// `BytecodeImpl.exact_args_leaf_kind`).
+    pub const ExactArgsLeafKind = enum(u8) {
+        none = 0,
+        sloppy = 1,
+        raw_this = 2,
+    };
+
     pub const BytecodeImpl = struct {
         memory: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
@@ -8762,6 +8770,29 @@ const function_mod = struct {
         /// the established sloppy call arms retain their exact single-bit
         /// test (see the empty_leaf_geometry note in `makeBytecodeView`).
         raw_this_inline_empty_leaf: bool = false,
+        /// Exact-args generalization of the empty-leaf family: same leaf body
+        /// geometry (no locals/captures/open refs/arguments/direct eval) with
+        /// `arg_count > 0`. A call site that supplies exactly `arg_count`
+        /// arguments borrows them in place from the caller's operand region
+        /// (qjs `arg_buf = argv`, quickjs.c:17841) and enters the warm leaf
+        /// constructor. Published as two separate bytes mirroring the
+        /// zero-arg family split (the packed flags word is full and folding
+        /// modes into one bit measured +3 insn/call on the established
+        /// sloppy arm): this byte is the sloppy plain twin
+        /// (`this` = realm global on plain calls).
+        simple_inline_exact_args_leaf: bool = false,
+        /// Raw-`this` twin of `simple_inline_exact_args_leaf`: strict plain
+        /// functions and arrows (either mode), preserving the raw incoming
+        /// `this` word exactly like `raw_this_inline_empty_leaf`.
+        raw_this_inline_exact_args_leaf: bool = false,
+        /// Fused dispatch byte for the two exact-args policy bits above:
+        /// one load answers "is this ANY exact-args leaf, and which `this`
+        /// policy". The dominant real-world shape at the with-args call arms
+        /// is a NON-leaf callee (locals, named-expression self-binding), so
+        /// the miss must cost one byte test, not two (measured +1.3% insn on
+        /// call-closure-two-arg from the two-byte chain). The bools stay
+        /// published for asserts and eligibility tests.
+        exact_args_leaf_kind: ExactArgsLeafKind = .none,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -9170,10 +9201,27 @@ const function_mod = struct {
         // test; measured: folding both modes into one bit put a per-call
         // strict-mode discrimination on the sloppy arm (+3 insn/call,
         // +1.55% cycles on call-const-zero-arg).
-        const empty_leaf_geometry = fb.arg_count == 0 and fb.var_count == 0 and
-            fb.open_var_ref_count == 0 and fb.var_refs_len == 0 and
+        // Args-independent half of the leaf frame geometry. Captured args
+        // are excluded through `open_var_ref_count` (assignOpenBindingIndices
+        // walks fd.args and counts captured parameters), so `arg_count > 0`
+        // with this geometry still proves every arg slot stays a bare value.
+        const leaf_body_geometry = fb.var_count == 0 and
+            fb.open_var_ref_count == 0 and
             !materializes_arguments_object and !rescues_implicit_arguments and
             !fb.flags.has_eval_call;
+        const empty_leaf_geometry = fb.arg_count == 0 and fb.var_refs_len == 0 and
+            leaf_body_geometry;
+        // Exact-args twin (O1): published only for `arg_count > 0` so the
+        // zero-arg family keeps sole ownership of the argc==0 shapes and the
+        // two families partition cleanly at every call arm. INHERITED
+        // captures (`var_refs_len > 0`) stay eligible — the frame borrows the
+        // closure's cell array exactly like the simple-inline path (qjs
+        // `var_refs = p->u.func.var_refs`, quickjs.c:17844) and borrowed
+        // captures are never released by teardown, so they add two frame
+        // stores and no epilogue work. The callee still cannot CREATE cells
+        // (`open_var_ref_count == 0`), which is what the leaf teardown relies
+        // on. This is load-bearing for the self-recursive statement-function
+        // shape (fib reads its own binding through a parent cell).
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -9202,6 +9250,14 @@ const function_mod = struct {
                 .simple_inline_empty_leaf = simple_inline_base and !strict_mode and empty_leaf_geometry,
             },
             .raw_this_inline_empty_leaf = ((simple_inline_base and strict_mode) or arrow_inline_base) and empty_leaf_geometry,
+            .simple_inline_exact_args_leaf = simple_inline_base and !strict_mode and fb.arg_count > 0 and leaf_body_geometry,
+            .raw_this_inline_exact_args_leaf = ((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count > 0 and leaf_body_geometry,
+            .exact_args_leaf_kind = if (simple_inline_base and !strict_mode and fb.arg_count > 0 and leaf_body_geometry)
+                .sloppy
+            else if (((simple_inline_base and strict_mode) or arrow_inline_base) and fb.arg_count > 0 and leaf_body_geometry)
+                .raw_this
+            else
+                .none,
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
             .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,
