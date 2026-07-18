@@ -8002,6 +8002,15 @@ pub const parser_core = struct {
                 }
                 return Error.AwaitOutsideAsyncFunction;
             }
+            // AwaitExpression while the enclosing async function's parameters
+            // are still being parsed — qjs rejects this at parse time with
+            // "await in default expression" (quickjs.c:27679, reading
+            // cur_func->in_function_body; the yield twin is quickjs.c:28010).
+            // The parse-time gate replaces the former whole-initializer token
+            // scan, which also rejected awaits inside nested function bodies
+            // that legally re-legalize them (their entry reset lives in
+            // parseFunctionParamsAndBody).
+            if (s.reject_await_in_parameter_initializer) return Error.UnexpectedToken;
             if (top_level_module_await) s.function.ensureModule().has_top_level_await = true;
             try s.advance();
             // `await`'s operand is a UnaryExpression (spec AwaitExpression:
@@ -15737,6 +15746,27 @@ pub const parser_core = struct {
         if (func_kind != .arrow) s.class_static_field_this_atom = null;
         defer s.class_field_initializer_depth = saved_class_field_initializer_depth;
         defer s.class_static_field_this_atom = saved_class_static_field_this_atom;
+        // A non-arrow function re-legalizes yield/await from its own context
+        // even when the function expression sits inside an enclosing default
+        // parameter initializer. qjs models this with the per-JSFunctionDef
+        // in_function_body flag (quickjs.c:22026): a nested fd starts fresh,
+        // so `function* outer(a = function* g(){ yield 1; }){}` and an inner
+        // async body's await both parse — the "yield/await in default
+        // expression" gates (quickjs.c:28010, 27679) read only the CURRENT
+        // fd's flag. zjs keeps this state on the shared parser State, so the
+        // nested parse must clear it here; the nested function's own
+        // parameter parsing re-arms both flags, and arrows inherit the
+        // enclosing context exactly like qjs (arrow parameters stay governed
+        // by the outer [Yield]/[Await] grammar, e.g.
+        // `function* outer(b = (a = yield) => a){}` keeps failing).
+        const saved_in_parameter_initializer = s.in_parameter_initializer;
+        const saved_reject_await_in_parameter_initializer_entry = s.reject_await_in_parameter_initializer;
+        if (func_kind != .arrow) {
+            s.in_parameter_initializer = false;
+            s.reject_await_in_parameter_initializer = false;
+        }
+        defer s.in_parameter_initializer = saved_in_parameter_initializer;
+        defer s.reject_await_in_parameter_initializer = saved_reject_await_in_parameter_initializer_entry;
         s.function_expr_name_binding = switch (func_kind) {
             .normal, .async, .generator, .async_generator => if (!s.pending_function_is_decl) s.pending_function_name else null,
             else => null,
@@ -16536,6 +16566,15 @@ pub const parser_core = struct {
         if (s.lex.got_lf) return Error.UnexpectedToken;
         try s.expectToken(tok.TOK_ARROW);
         s.in_async = is_async;
+        // The arrow BODY leaves the parameter-initializer await context: qjs
+        // sets fd->in_function_body = TRUE right after the parameters
+        // (quickjs.c:36883), so an async arrow body's await is legal even
+        // when the arrow sits inside an async function's default parameter
+        // initializer (e.g. test262 asyncTest(async () => { await ...; })
+        // callers). Only the arrow's parameter list above inherited the
+        // outer [Await] restriction; the enclosing value is restored by the
+        // arming defer on exit.
+        s.reject_await_in_parameter_initializer = false;
 
         const saved_static_block = s.in_class_static_block;
         s.in_class_static_block = false;
@@ -17102,45 +17141,6 @@ pub const parser_core = struct {
         return false;
     }
 
-    fn parameterInitializerContainsAwait(s: *State) bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var paren_depth: usize = 0;
-        var bracket_depth: usize = 0;
-        var brace_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const k = s.peekKind();
-            if (k == tok.TOK_AWAIT) return true;
-            if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and
-                (k == @as(tok.TokenKind, @intCast(',')) or k == @as(tok.TokenKind, @intCast(')'))))
-            {
-                return false;
-            }
-            switch (k) {
-                '(' => paren_depth += 1,
-                '[' => bracket_depth += 1,
-                '{' => brace_depth += 1,
-                ')' => {
-                    if (paren_depth == 0) return false;
-                    paren_depth -= 1;
-                },
-                ']' => {
-                    if (bracket_depth == 0) return false;
-                    bracket_depth -= 1;
-                },
-                '}' => {
-                    if (brace_depth == 0) return false;
-                    brace_depth -= 1;
-                },
-                else => {},
-            }
-            advanceRegexpAwareSpeculativeToken(s, &previous_token_kind) catch return false;
-        }
-        return false;
-    }
-
     fn arrowBlockStartsUseStrict(s: *State) bool {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
@@ -17418,9 +17418,6 @@ pub const parser_core = struct {
     }
 
     fn parseNamedBindingDefaultInitializer(s: *State, atom_id: Atom) Error!void {
-        if (s.reject_await_in_parameter_initializer and parameterInitializerContainsAwait(s)) {
-            return Error.UnexpectedToken;
-        }
         const saved_pending_name = s.pending_function_name;
         const saved_pending_decl = s.pending_function_is_decl;
         s.pending_function_name = atom_id;

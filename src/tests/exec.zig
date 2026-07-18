@@ -4873,6 +4873,59 @@ test "Error stack preserves construction frames across delayed access" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "nested function bodies in default parameter initializers re-legalize yield and await" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // qjs per-JSFunctionDef in_function_body model (quickjs.c:22026): a
+    // nested non-arrow function starts a fresh context, so its body may use
+    // yield/await even while the enclosing function's default parameter
+    // initializer is being parsed (the "yield/await in default expression"
+    // gates, quickjs.c:28010 / 27679, read only the CURRENT fd's flag). All
+    // of the `ok` sources were UnexpectedToken before the parser's shared
+    // state gained the nested-function reset; the `bad` set (the enclosing
+    // initializer context itself, inherited by arrow parameters) must keep
+    // failing — bit-for-bit the qjs rejection set. The flagship generator
+    // and async forms also execute end-to-end.
+    const result = try js.eval(
+        \\function accepts(src) { try { eval(src); return true; } catch (e) { return e instanceof SyntaxError ? false : "threw:" + e; } }
+        \\var ok = [
+        \\    "function* outer(a = function* g(){ yield 1; }){ }",
+        \\    "function* outer(a = function* g(){ yield* [1]; }){ }",
+        \\    "var o = { *m(a = function* g(){ yield 1; }) { } };",
+        \\    "class K { *m(a = function* g(){ yield 2; }) { } }",
+        \\    "function* outer(b = (a = function* (){ yield 1; }) => a){ }",
+        \\    "async function outer(a = async function inner(){ await 1; }){ }",
+        \\    "async function outer(a = function* g(){ yield 1; }){ }",
+        \\    "async function outer(a = function inner(){ return await; }){ }",
+        \\];
+        \\var bad = [
+        \\    "function* outer(a = yield){ }",
+        \\    "function* outer(a = yield 1){ }",
+        \\    "function* outer(a = function* g(b = yield 1){}){ }",
+        \\    "function* outer(b = (a = yield) => a){ }",
+        \\    "function* outer({a = yield}){ }",
+        \\    "async function outer(a = await 1){ }",
+        \\    "async function outer({a = await 1}){ }",
+        \\    "async function outer(a = (b = await 1) => b){ }",
+        \\];
+        \\for (var i = 0; i < ok.length; i++) assert.sameValue(accepts(ok[i]), true, "ok[" + i + "]: " + ok[i]);
+        \\for (var j = 0; j < bad.length; j++) assert.sameValue(accepts(bad[j]), false, "bad[" + j + "]: " + bad[j]);
+        \\function* genOuter(a = function* g(){ yield 41; yield 42; }){ var it = a(); it.next(); return it.next().value; }
+        \\assert.sameValue(genOuter().next().value, 42);
+        \\var asyncSettled = "pending";
+        \\async function asyncOuter(a = async function inner(){ return await 7; }){ return a(); }
+        \\asyncOuter().then(function (v) { asyncSettled = v; });
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    try js.runJobs();
+    const settled = try js.eval("assert.sameValue(asyncSettled, 7);");
+    defer settled.free(js.runtime);
+    try std.testing.expect(settled.isUndefined());
+}
+
 test "eval SyntaxError carries construction stack" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
