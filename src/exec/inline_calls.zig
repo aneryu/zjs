@@ -224,7 +224,17 @@ pub const Entry = struct {
         /// instead of reading the record, and the established leaf arms keep
         /// their exact single-bit tests.
         forwarded_leaf: bool = false,
-        _padding: u3 = 0,
+        /// This frame is a tail-call chain accumulator: `native_caller`
+        /// storage (dead for every non-forwarded frame; readers all test
+        /// `has_native_caller` first) holds the u32 count of retired tail
+        /// links whose logical call-depth units this frame still occupies.
+        /// qjs OP_tail_call keeps each retired link blocked in a nested
+        /// JS_CallInternal (quickjs.c:18191), so those stack levels stay
+        /// consumed until the chain completes; `popFrameMode` releases them
+        /// with the chain frame. Never combined with `has_native_caller`
+        /// (tail replacements are plain `.generic` pushes) or a leaf bit.
+        tail_chain: bool = false,
+        _padding: u2 = 0,
     };
 
     /// The Entry's sole persistent execution-view source is `frame.function`;
@@ -319,6 +329,15 @@ pub const Entry = struct {
     pub inline fn emptyLeafResumeSp(self: *Entry) [*]core.JSValue {
         std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
         return @ptrFromInt(self.emptyLeafResumeWords()[1]);
+    }
+
+    /// Retired-tail-link counter for chain-accumulator frames, overlaid on
+    /// `native_caller` storage (same dead-storage reuse as
+    /// `emptyLeafResumeWords`; live only under `teardown.tail_chain`).
+    inline fn tailChainExtraSlot(self: *Entry) *u32 {
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(!self.teardown.empty_leaf and !self.teardown.exact_args_leaf and !self.teardown.forwarded_leaf);
+        return @ptrCast(@alignCast(&self.native_caller));
     }
 
     /// Move post-call work from a retired frame into its tail-call replacement.
@@ -2673,6 +2692,14 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!*Entry {
         std.debug.assert(self.depth > 0);
+        // qjs OP_tail_call is a full nested JS_CallInternal (quickjs.c:18191):
+        // the dying invocation stays blocked on the stack until the chain
+        // completes, so each link consumes one stack level and an unbounded
+        // chain terminates with InternalError "stack overflow" at the callee
+        // entry guard. Gate on the same logical budget here, while the dying
+        // frame is still intact, so the error is delivered at the tail-call
+        // site exactly like any other failed call setup.
+        try vm_call.checkTailCallChainDepth(self.ctx, global);
         const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
 
@@ -2689,10 +2716,32 @@ pub const Machine = struct {
         // args not yet transferred into the new frame).
         defer for (moved) |value| value.free(rt);
 
+        // Transfer the dying frame's accumulated chain units to the
+        // replacement. Clear the flag first so popFrame releases only the
+        // dying frame's OWN logical unit — its retired predecessors' units
+        // stay occupied (their qjs counterparts are still blocked in nested
+        // JS_CallInternal levels until the chain completes).
+        const dying = self.topEntry();
+        const chain_extra: u32 = if (dying.teardown.tail_chain) blk: {
+            dying.teardown.tail_chain = false;
+            break :blk dying.tailChainExtraSlot().*;
+        } else 0;
         var continuation = self.popFrame();
         defer continuation.deinit(rt);
-        const entry = try self.pushFrame(.generic, global, target, ArgsSource.initMoved(moved, has_receiver));
+        const entry = self.pushFrame(.generic, global, target, ArgsSource.initMoved(moved, has_receiver)) catch |err| {
+            // The dying frame is gone and cannot resume; the chain's retired
+            // links unwind with the propagating error (qjs: each blocked
+            // JS_CallInternal level forwards the exception in turn).
+            self.ctx.call_depth -= chain_extra;
+            return err;
+        };
         entry.adoptContinuation(&continuation);
+        // The retired link's logical unit stays occupied: fold it into the
+        // replacement's accumulator, and grow the logical depth by the new
+        // link (qjs net effect of entering one more JS_CallInternal level).
+        entry.teardown.tail_chain = true;
+        entry.tailChainExtraSlot().* = chain_extra + 1;
+        self.ctx.call_depth += 1;
         return entry;
     }
 
@@ -2701,12 +2750,18 @@ pub const Machine = struct {
     /// transferred to a tail-call replacement, or explicitly deinitialized.
     inline fn popFrameMode(self: *Machine, comptime returned: bool) ReturnContinuation {
         const dying = self.topEntry();
+        // Read the chain-accumulator state BEFORE teardown: deinit releases
+        // frame resources but must not be reordered after the overlay read.
+        const chain_extra: u32 = if (dying.teardown.tail_chain) dying.tailChainExtraSlot().* else 0;
         const continuation = dying.takeContinuation();
         if (returned)
             dying.deinitReturned(self.ctx)
         else
             dying.deinit(self.ctx);
-        self.ctx.call_depth -= 1;
+        // Release this frame's own logical unit plus every retired tail
+        // link's unit it carried (qjs: the chain's blocked JS_CallInternal
+        // levels all return in turn once the final callee completes).
+        self.ctx.call_depth -= 1 + @as(usize, chain_extra);
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
@@ -2732,6 +2787,7 @@ pub const Machine = struct {
     pub inline fn popReturnedEmptyLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isEmptyLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         // Inline epilogue: the hot leg is an rc decrement plus the arena
@@ -2750,6 +2806,7 @@ pub const Machine = struct {
     pub inline fn popReturnedExactArgsLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isExactArgsLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         dying.deinitExactArgsLeafInline(self.ctx);
@@ -2766,6 +2823,7 @@ pub const Machine = struct {
     pub inline fn popReturnedForwardedLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isForwardedLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         dying.deinitForwardedLeafInline(self.ctx);

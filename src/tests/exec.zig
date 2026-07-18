@@ -9358,6 +9358,52 @@ test "Phase 7: arrow and method tail calls reuse inline frames for deep recursio
     try std.testing.expectEqualStrings("40000\neven\n800020000\n", stream.buffered());
 }
 
+test "tail-call frame reuse enforces the qjs logical stack budget" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // qjs OP_tail_call is a plain nested JS_CallInternal (quickjs.c:18191):
+    // every tail link occupies one more stack level until the chain completes,
+    // so an unbounded chain terminates with InternalError "stack overflow"
+    // (js_check_stack_overflow -> JS_ThrowStackOverflow, quickjs.c:17837) in
+    // sloppy and strict mode alike — qjs implements no proper-tail-call
+    // elision. zjs's frame-reusing chain must terminate observably the same
+    // way against the logical budget (before this guard, `spin()` span
+    // forever), must release the whole chain's depth units when the overflow
+    // unwinds (the bounded chains after each failure would otherwise trip
+    // early), and must keep bounded chains completing. A small limit keeps
+    // the failing chains short; the 40000-deep bounded coverage lives in
+    // "Phase 7: arrow and method tail calls reuse inline frames".
+    js.context.setStackLimit(20000);
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function spin() { return spin(); }
+        \\try { spin(); } catch (e) { print("self:" + e.name + ":" + e.message); }
+        \\function pa() { return pb(); }
+        \\function pb() { return pa(); }
+        \\try { pa(); } catch (e) { print("mutual:" + e.name); }
+        \\var o = { m: function () { return o.m(); } };
+        \\try { o.m(); } catch (e) { print("method:" + e.name); }
+        \\(function () {
+        \\    "use strict";
+        \\    function s() { return s(); }
+        \\    try { s(); } catch (e) { print("strict:" + e.name); }
+        \\})();
+        \\function down(n) { return n === 0 ? "done" : down(n - 1); }
+        \\print("bounded:" + down(15000));
+        \\print("bounded2:" + down(15000));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "self:InternalError:stack overflow\nmutual:InternalError\nmethod:InternalError\nstrict:InternalError\nbounded:done\nbounded2:done\n",
+        stream.buffered(),
+    );
+}
+
 test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

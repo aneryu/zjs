@@ -93,6 +93,22 @@ pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
     ctx.call_depth += 1;
 }
 
+/// Depth gate for tail-call frame reuse (`Machine.tailCallReuse`). qjs
+/// OP_tail_call is a plain nested JS_CallInternal (quickjs.c:18191): the
+/// caller's invocation stays blocked on the stack until the whole chain
+/// completes, so every tail link occupies one more stack level and an
+/// unbounded chain terminates with InternalError "stack overflow" from the
+/// callee entry guard (js_check_stack_overflow -> JS_ThrowStackOverflow,
+/// quickjs.c:17837, 7789-7791). zjs's reused frame keeps the memory constant,
+/// but the logical stack budget must be observably equivalent, so the chain
+/// checks the same logical limit here; the net +1 unit per link is applied by
+/// `tailCallReuse` itself after the frame swap.
+pub fn checkTailCallChainDepth(ctx: *core.JSContext, global: *core.Object) !void {
+    if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
+        return inlineCallDepthOverflow(ctx, global);
+    }
+}
+
 /// Stack exhaustion is exceptional and constructs a JS error.  Keep it out of
 /// the same-native-stack inline-call prologue: otherwise LLVM couples the
 /// thrower's large error-union frame and callee-saved register set to every
