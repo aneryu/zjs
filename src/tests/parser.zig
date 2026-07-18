@@ -4088,6 +4088,44 @@ test "nested function declarations fit the QuickJS native parser stack budget" {
     try std.testing.expect(parsed.syntax_error == null);
 }
 
+test "function expressions widen closure operands after constant index 255" {
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "const functions = [");
+    for (0..257) |index| {
+        if (index != 0) try source.append(std.testing.allocator, ',');
+        try source.appendSlice(std.testing.allocator, "() => 0");
+    }
+    try source.appendSlice(std.testing.allocator, "]; functions[256]();");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(rt, source.items, .{
+        .mode = .script,
+        .filename = "wide-function-expression.js",
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var saw_short_255 = false;
+    var saw_wide_256 = false;
+    var pc: usize = 0;
+    while (pc < parsed.function.code.len) {
+        const opcode_id = parsed.function.code[pc];
+        switch (opcode_id) {
+            op.fclosure8 => saw_short_255 = saw_short_255 or parsed.function.code[pc + 1] == 255,
+            op.fclosure => saw_wide_256 = saw_wide_256 or readU32(parsed.function.code, pc + 1) == 256,
+            else => {},
+        }
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size != 0);
+        pc += size;
+    }
+    try std.testing.expect(saw_short_255);
+    try std.testing.expect(saw_wide_256);
+}
+
 test "F10.1c Nested function: bytecode dual-buffering" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

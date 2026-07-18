@@ -5197,7 +5197,7 @@ pub const parser_core = struct {
             try self.emitOpU8(opcode.op.fclosure8, idx);
         }
 
-        fn emitFClosure(self: *State, idx: u16) Error!void {
+        fn emitFClosure(self: *State, idx: u32) Error!void {
             if (idx < 256) {
                 try self.emitFClosure8(@intCast(idx));
             } else {
@@ -16210,18 +16210,18 @@ pub const parser_core = struct {
             child_moved = true;
             s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
             if (!s.pending_function_is_decl) {
-                try s.emitFClosure8(@intCast(child_cpool_idx));
+                try s.emitFClosure(child_cpool_idx);
                 s.last_anonymous_function_expr = s.pending_function_name == null;
             } else if (emit_child_decl_global_inline and !emit_child_decl_inline) {
                 const name = s.pending_function_name orelse s.function.name;
                 if (!s.assignPendingGlobalFunctionVarCpool(parent_fd, name, child_cpool_idx)) {
-                    try s.emitFClosure8(@intCast(child_cpool_idx));
+                    try s.emitFClosure(child_cpool_idx);
                     try s.emitGlobalScopePutVar(name);
                 }
             } else if (emit_child_decl_inline) {
                 if (child_decl_skip_init) return;
                 std.debug.assert(child_decl_var_idx >= 0);
-                try s.emitFClosure8(@intCast(child_cpool_idx));
+                try s.emitFClosure(child_cpool_idx);
                 if (emit_child_decl_global_inline) try s.emitOp(opcode.op.dup);
                 if (emit_child_decl_eval_var_inline) try s.emitOp(opcode.op.dup);
                 if (emit_child_decl_var_inline) {
@@ -16643,7 +16643,7 @@ pub const parser_core = struct {
             try parent_fd.addChild(child_ptr);
             child_moved = true;
             s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
-            try s.emitFClosure8(@intCast(child_cpool_idx));
+            try s.emitFClosure(child_cpool_idx);
             s.last_anonymous_function_expr = true;
         }
     }

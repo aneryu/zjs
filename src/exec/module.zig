@@ -257,6 +257,77 @@ pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []*core.VarRef) void {
     if (refs.len != 0) runtime.memory.free(*core.VarRef, refs);
 }
 
+const ModuleFunctionDeclaration = struct {
+    constant_index: usize,
+    ref_index: usize,
+    closure_opcode: u8,
+    next_pc: usize,
+};
+
+/// Decode one function-declaration instantiation pair emitted by the bytecode
+/// finalizer. QuickJS keeps `fclosure` wide until label resolution and only
+/// shortens indices below 256, so both closure forms are valid here. The
+/// compiler-published declaration count owns the prefix boundary; this decoder
+/// validates exactly those pairs and never infers a boundary from body opcodes.
+fn decodeModuleFunctionDeclaration(
+    function: *const bytecode.Bytecode,
+    pc: usize,
+) !?ModuleFunctionDeclaration {
+    if (pc >= function.code.len) return null;
+
+    var cursor = pc;
+    const closure_opcode = function.code[cursor];
+    const constant_index: usize = switch (closure_opcode) {
+        op.fclosure8 => blk: {
+            if (cursor + 2 > function.code.len) return error.InvalidBytecode;
+            const index = function.code[cursor + 1];
+            cursor += 2;
+            break :blk index;
+        },
+        op.fclosure => blk: {
+            if (cursor + 5 > function.code.len) return error.InvalidBytecode;
+            const index = std.mem.readInt(u32, function.code[cursor + 1 ..][0..4], .little);
+            cursor += 5;
+            break :blk @intCast(index);
+        },
+        else => return null,
+    };
+
+    if (cursor >= function.code.len) return error.InvalidBytecode;
+    const ref_index: usize = switch (function.code[cursor]) {
+        op.put_var_ref0 => blk: {
+            cursor += 1;
+            break :blk 0;
+        },
+        op.put_var_ref1 => blk: {
+            cursor += 1;
+            break :blk 1;
+        },
+        op.put_var_ref2 => blk: {
+            cursor += 1;
+            break :blk 2;
+        },
+        op.put_var_ref3 => blk: {
+            cursor += 1;
+            break :blk 3;
+        },
+        op.put_var_ref => blk: {
+            if (cursor + 3 > function.code.len) return error.InvalidBytecode;
+            const index = std.mem.readInt(u16, function.code[cursor + 1 ..][0..2], .little);
+            cursor += 3;
+            break :blk @intCast(index);
+        },
+        else => return null,
+    };
+
+    return .{
+        .constant_index = constant_index,
+        .ref_index = ref_index,
+        .closure_opcode = closure_opcode,
+        .next_pc = cursor,
+    };
+}
+
 pub fn moduleNamespaceValue(ctx: *core.JSContext, module_name: core.Atom) !core.JSValue {
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     const cell = try moduleNamespaceCell(ctx, record);
@@ -298,45 +369,26 @@ pub fn initializeModuleFunctionDeclarations(
         rooted_frame_var_refs = frame.var_refs;
     }
 
-    var pc: usize = moduleFunctionDeclarationPrologueEnd(function);
-    while (pc < function.code.len) {
-        if (function.code[pc] != op.fclosure8) break;
-        if (pc + 2 > function.code.len) return error.InvalidBytecode;
-        const constant_index = function.code[pc + 1];
-        pc += 2;
+    var pc: usize = 0;
+    var declarations_remaining = function.module_function_declaration_count;
+    while (declarations_remaining != 0) : (declarations_remaining -= 1) {
+        const declaration = try decodeModuleFunctionDeclaration(function, pc) orelse return error.InvalidBytecode;
+        pc = declaration.next_pc;
+        if (declaration.ref_index >= frame.var_refs.len) return error.InvalidBytecode;
 
-        if (pc >= function.code.len) return error.InvalidBytecode;
-        const ref_idx: usize = switch (function.code[pc]) {
-            op.put_var_ref0 => blk: {
-                pc += 1;
-                break :blk 0;
-            },
-            op.put_var_ref1 => blk: {
-                pc += 1;
-                break :blk 1;
-            },
-            op.put_var_ref2 => blk: {
-                pc += 1;
-                break :blk 2;
-            },
-            op.put_var_ref3 => blk: {
-                pc += 1;
-                break :blk 3;
-            },
-            op.put_var_ref => blk: {
-                if (pc + 3 > function.code.len) return error.InvalidBytecode;
-                const idx = std.mem.readInt(u16, function.code[pc + 1 ..][0..2], .little);
-                pc += 3;
-                break :blk @intCast(idx);
-            },
-            else => break,
-        };
-        if (ref_idx >= frame.var_refs.len) return error.InvalidBytecode;
-
-        const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
+        const value = function.constants.get(declaration.constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
-        const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true);
-        slot_ops.replaceVarRefValueOwned(ctx, &frame, ref_idx, function_value);
+        const function_value = try object_ops.createBytecodeFunctionObject(
+            ctx,
+            &frame,
+            function,
+            global,
+            value,
+            function.name,
+            declaration.closure_opcode,
+            true,
+        );
+        slot_ops.replaceVarRefValueOwned(ctx, &frame, declaration.ref_index, function_value);
     }
     record.function_declarations_initialized = true;
 }
@@ -345,32 +397,13 @@ pub fn initializeModuleFunctionDeclarations(
 /// `initializeModuleFunctionDeclarations` has already executed these pairs;
 /// evaluating them again would replace the live-binding function identity.
 pub fn moduleFunctionDeclarationBodyStart(function: *const bytecode.Bytecode) !usize {
-    var pc: usize = moduleFunctionDeclarationPrologueEnd(function);
-    while (pc < function.code.len and function.code[pc] == op.fclosure8) {
-        const pair_start = pc;
-        if (pc + 2 > function.code.len) return error.InvalidBytecode;
-        pc += 2;
-        if (pc >= function.code.len) return error.InvalidBytecode;
-        switch (function.code[pc]) {
-            op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3 => pc += 1,
-            op.put_var_ref => {
-                if (pc + 3 > function.code.len) return error.InvalidBytecode;
-                pc += 3;
-            },
-            else => return pair_start,
-        }
+    var pc: usize = 0;
+    var declarations_remaining = function.module_function_declaration_count;
+    while (declarations_remaining != 0) : (declarations_remaining -= 1) {
+        const declaration = try decodeModuleFunctionDeclaration(function, pc) orelse return error.InvalidBytecode;
+        pc = declaration.next_pc;
     }
     return pc;
-}
-
-fn moduleFunctionDeclarationPrologueEnd(function: *const bytecode.Bytecode) usize {
-    if (function.code.len >= 3 and
-        function.code[0] == op.push_this and
-        function.code[1] == op.if_false8)
-    {
-        return 3;
-    }
-    return 0;
 }
 
 fn requestName(record: bytecode.module.Record, request_index: u32) !bytecode.module.Request {

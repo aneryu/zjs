@@ -4975,6 +4975,7 @@ pub const pipeline_resolve_variables = struct {
         }
         const prologue_size: usize = prologue_lexical_count * 3;
         var top_level_closure_init_size: usize = 0;
+        var top_level_closure_init_count: usize = 0;
         var child_decl_init_size: usize = 0;
         if (ctx.function_def) |fd| {
             for (fd.child_list) |child| {
@@ -4982,6 +4983,7 @@ pub const pipeline_resolve_variables = struct {
                     if (functionHasGlobalFunctionVarCpool(fd, child.parent_cpool_idx)) continue;
                     if (child.parent_cpool_idx < 0 or child.top_level_closure_var_idx < 0) continue;
                     top_level_closure_init_size += try fclosureEncodingSize(child.parent_cpool_idx) + selectVarRefForm(ctx, opcode.op.put_var_ref, @intCast(child.top_level_closure_var_idx)).size;
+                    top_level_closure_init_count += 1;
                     continue;
                 }
                 // Script global function decl: installed from the global_vars hoist
@@ -5001,6 +5003,10 @@ pub const pipeline_resolve_variables = struct {
                 child_decl_init_size += try fclosureEncodingSize(child.parent_cpool_idx) + form.size;
             }
         }
+        func.module_function_declaration_count = if (func.flags.is_module)
+            std.math.cast(u32, top_level_closure_init_count) orelse return error.InvalidBytecode
+        else
+            0;
 
         var output_size: usize = top_level_closure_init_size + child_decl_init_size + prologue_size;
         var output_atom_count: usize = 0;
@@ -9032,6 +9038,12 @@ const function_mod = struct {
         private_bound_names: []atom.Atom = &.{},
         constants: constant.Pool,
         module_record: ?module.Record = null,
+        /// Exact number of link-time function-declaration init pairs at the
+        /// start of module bytecode. The module linker must not infer this
+        /// boundary from opcode shape: executable module code can also begin
+        /// with `fclosure*; put_var_ref*` (for example a named function
+        /// expression initializing a lexical binding).
+        module_function_declaration_count: u32 = 0,
         debug_table: ?debug.Table = null,
         direct_call_sites: []DirectCallSite = &.{},
         direct_call_sites_capacity: usize = 0,

@@ -1609,6 +1609,28 @@ test "top-level function declarations use wide closure operands past 255 constan
     try std.testing.expectEqual(@as(i32, 259), result.asInt32().?);
 }
 
+test "function expressions execute wide closure operands past 255 constants" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "const functions = [");
+    for (0..257) |index| {
+        if (index != 0) try source.append(std.testing.allocator, ',');
+        var expression_buffer: [32]u8 = undefined;
+        const expression = try std.fmt.bufPrint(&expression_buffer, "() => {d}", .{index});
+        try source.appendSlice(std.testing.allocator, expression);
+    }
+    try source.appendSlice(std.testing.allocator, "]; functions[256]();");
+
+    const result = try vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx, source.items);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 256), result.asInt32().?);
+}
+
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
@@ -10739,6 +10761,135 @@ test "module evaluation does not skip a body-leading function expression" {
     defer result.free(js.runtime);
 
     try std.testing.expectEqualStrings("42\n", output.buffered());
+}
+
+test "module evaluation does not mistake a body-leading this branch for a hoist prologue" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithOutput(
+        \\if (this) print('bad');
+        \\print('ok');
+    ,
+        &output,
+        "module-leading-this-branch.mjs",
+        std.testing.io,
+        std.testing.allocator,
+        2048,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("ok\n", output.buffered());
+}
+
+test "module cycles initialize wide function declaration closures before evaluation" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var module_a: std.ArrayList(u8) = .empty;
+    defer module_a.deinit(std.testing.allocator);
+    try module_a.appendSlice(std.testing.allocator, "import { pre } from './b.mjs';\n");
+    for (0..257) |index| {
+        var line_buffer: [80]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &line_buffer,
+            "export function f{d}() {{ return {d}; }}\n",
+            .{ index, index },
+        );
+        try module_a.appendSlice(std.testing.allocator, line);
+    }
+    try module_a.appendSlice(std.testing.allocator, "export const observed = pre;\n");
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./a.mjs",
+            .path = "/fixture/a.mjs",
+            .source = module_a.items,
+            .kind = .esm,
+        },
+        .{
+            .specifier = "./b.mjs",
+            .path = "/fixture/b.mjs",
+            .source =
+            \\import { f255, f256 } from './a.mjs';
+            \\export const pre = (() => {
+            \\  try { return typeof f255 + ',' + typeof f256; }
+            \\  catch (error) { return typeof f255 + ',' + error.name; }
+            \\})();
+            ,
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+    const hooks = hostHooks(&host);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import { observed } from './a.mjs';
+        \\print(observed);
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hooks,
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("function,function\n", output.buffered());
+}
+
+test "module cycles do not hoist a body-leading named function expression" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./a.mjs",
+            .path = "/fixture/a.mjs",
+            .source =
+            \\import { observed } from './b.mjs';
+            \\export const value = function inner() { return 1; };
+            \\export const result = observed;
+            ,
+            .kind = .esm,
+        },
+        .{
+            .specifier = "./b.mjs",
+            .path = "/fixture/b.mjs",
+            .source =
+            \\import { value } from './a.mjs';
+            \\let observed;
+            \\try { observed = typeof value; }
+            \\catch (error) { observed = error.name; }
+            \\export { observed };
+            ,
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+    const hooks = hostHooks(&host);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import { result } from './a.mjs';
+        \\print(result);
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hooks,
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
 test "module top-level await resumes in Promise reaction FIFO order" {
