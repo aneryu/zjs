@@ -7423,6 +7423,122 @@ test "leaf returns with leftover operands route through general teardown" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
+test "capture leaf abrupt teardown releases operands and keeps borrowed cells" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Each callee is a published capture leaf (zero args, no locals, only an
+    // inherited capture cell) that throws mid-body with a live refcounted
+    // operand already on its stack. Abrupt completion must route through
+    // general teardown: the pending operand is released exactly once and the
+    // BORROWED capture cells are never closed or double-released (the cells
+    // belong to the still-live closure; a teardown release would corrupt
+    // their rc and break the second eval round). Covers the plain sloppy,
+    // plain arrow (raw-this pivot), and method receiver entry arms.
+    const setup = try js.eval(
+        \\const capThrowState = (function () {
+        \\    const held = { x: 1 };
+        \\    return {
+        \\        plain: function () { return held.x + null.missing; },
+        \\        arrow: () => held.x + null.missing,
+        \\    };
+        \\})();
+        \\const capRecv = {
+        \\    m: (function () { const held = { x: 2 }; return function () { return held.x + null.missing; }; })(),
+        \\};
+        \\function exerciseCaptureLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { capThrowState.plain(); } catch (error) {}
+        \\        try { capThrowState.arrow(); } catch (error) {}
+        \\        try { capRecv.m(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseCaptureLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseCaptureLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "capture leaf returns with leftover operands route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Zero-arg twin of the exact-args leftover coverage, reachable in the
+    // capture family precisely because its bodies read free names: a
+    // refcounted switch discriminant left on the operand stack at `return`,
+    // and a parser-elided trailing expression-statement drop. The capture
+    // leaf publishes the exact_args_leaf teardown bit, so its return arm
+    // carries the operand-window guard and both shapes must fall back to
+    // general teardown (the narrow epilogue would strand the leftovers and
+    // Debug-assert).
+    const setup = try js.eval(
+        \\const capSwitchLeftover = (function () {
+        \\    const held = { x: 7 };
+        \\    return function () { switch (held) { case held: return held.x; } };
+        \\})();
+        \\const capTrailingDrop = (function () {
+        \\    const held = { y: 1 };
+        \\    return function () { ({ z: held.y }); };
+        \\})();
+        \\function exerciseCaptureLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        capSwitchLeftover();
+        \\        capTrailingDrop();
+        \\    }
+        \\}
+        \\exerciseCaptureLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseCaptureLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "capture leaf shares live cells with its closure across calls" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // The capture-leaf frame BORROWS the closure's cell array — the same
+    // cells every other reference sees. Mutations through the leaf must be
+    // visible to siblings and persist across calls (a snapshot or copied
+    // window would reset the counter), and the lexical-this arrow must read
+    // and write its `this` cell (the pivot shape) through the borrowed
+    // array. `<repl>` filename keeps the script completion value.
+    const result = try js.evalWithOptions(
+        \\const counterPair = (function () {
+        \\    let n = 0;
+        \\    return { bump: () => ++n, read: function () { return n; } };
+        \\})();
+        \\counterPair.bump();
+        \\counterPair.bump();
+        \\const owner = {
+        \\    value: 40,
+        \\    makeReader() { return () => this.value; },
+        \\    makeBumper() { return () => ++this.value; },
+        \\};
+        \\const read = owner.makeReader();
+        \\const bump = owner.makeBumper();
+        \\bump();
+        \\bump();
+        \\counterPair.bump() * 1000000 + counterPair.read() * 10000 + read() * 100 + owner.value;
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    // bump()=3, read()=3, arrow read()=42, owner.value=42.
+    try std.testing.expectEqual(@as(?i32, 3034242), result.asInt32());
+}
+
 test "inline empty leaf warm constructor preserves miss fallback and ownership" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

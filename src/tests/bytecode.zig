@@ -3372,6 +3372,123 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
     }
 }
 
+test "bytecode view publishes capture leaf kind by mode and geometry" {
+    const LeafKind = @FieldType(bytecode.Bytecode, "capture_leaf_kind");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("capture-leaf");
+    const capture_name = try rt.internAtom("held");
+    const arg_name = try rt.internAtom("value");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(capture_name);
+    defer rt.atoms.free(arg_name);
+
+    const Mode = struct { strict: bool, arrow: bool };
+    const modes = [_]Mode{
+        .{ .strict = false, .arrow = false },
+        .{ .strict = true, .arrow = false },
+        .{ .strict = false, .arrow = true },
+        .{ .strict = true, .arrow = true },
+    };
+    for (modes) |mode| {
+        // Zero args + one inherited capture: the O2 capture-leaf shape.
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        fd.is_strict_mode = mode.strict;
+        if (mode.arrow) fd.func_type = .arrow;
+        _ = try fd.addClosureVar(.{
+            .closure_type = .local,
+            .var_idx = 0,
+            .var_name = capture_name,
+        });
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        const expect_kind: LeafKind = if (mode.strict or mode.arrow) .raw_this else .sloppy;
+        try std.testing.expectEqual(expect_kind, view.capture_leaf_kind);
+        // Captured callees never overlap the established zero-arg empty-leaf
+        // bytes or the with-args exact-args family.
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+        try std.testing.expectEqual(LeafKind.none, view.exact_args_leaf_kind);
+    }
+
+    {
+        // No captures: the empty-leaf family keeps sole ownership and the
+        // capture kind stays .none.
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
+        try std.testing.expect(view.flags.simple_inline_empty_leaf);
+    }
+
+    {
+        // Captures + a parameter: the exact-args family owns it; the capture
+        // kind stays .none (argc==0 is load-bearing for its constructors).
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        _ = try fd.appendArg(.{
+            .var_name = rt.atoms.dup(arg_name),
+            .scope_level = 0,
+            .is_lexical = false,
+        });
+        _ = try fd.addClosureVar(.{
+            .closure_type = .local,
+            .var_idx = 0,
+            .var_name = capture_name,
+        });
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
+        try std.testing.expectEqual(LeafKind.sloppy, view.exact_args_leaf_kind);
+    }
+
+    {
+        // Captures + a local: leaf body geometry fails, every family rejects.
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.has_simple_parameter_list = true;
+        _ = try fd.appendVar(.{
+            .var_name = arg_name,
+            .scope_level = 0,
+            .is_lexical = false,
+        });
+        _ = try fd.addClosureVar(.{
+            .closure_type = .local,
+            .var_idx = 0,
+            .var_name = capture_name,
+        });
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
+        try std.testing.expectEqual(LeafKind.none, view.exact_args_leaf_kind);
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+    }
+}
+
 test "implicit arguments get_var rescue reserves mapped arg aliases" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
