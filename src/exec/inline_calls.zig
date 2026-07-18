@@ -215,7 +215,16 @@ pub const Entry = struct {
         /// the established zero-arg return arm retains its exact single-bit
         /// test (no args len probe on the argc==0 leaf family).
         exact_args_leaf: bool = false,
-        _padding: u4 = 0,
+        /// Function.prototype.call forwarding into a published zero-arg leaf
+        /// (O3): empty-leaf frame geometry PLUS the owned synthetic native
+        /// `call` frame. A separate bit (never combined with `empty_leaf`)
+        /// because the default-repr resume record overlays `native_caller`
+        /// storage, which this shape needs live for observable backtraces —
+        /// its return arm re-derives the caller resume through `prev`
+        /// instead of reading the record, and the established leaf arms keep
+        /// their exact single-bit tests.
+        forwarded_leaf: bool = false,
+        _padding: u3 = 0,
     };
 
     /// The Entry's sole persistent execution-view source is `frame.function`;
@@ -269,6 +278,10 @@ pub const Entry = struct {
 
     pub inline fn isExactArgsLeaf(self: *const Entry) bool {
         return self.teardown.exact_args_leaf;
+    }
+
+    pub inline fn isForwardedLeaf(self: *const Entry) bool {
+        return self.teardown.forwarded_leaf;
     }
 
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
@@ -343,7 +356,10 @@ pub const Entry = struct {
         // base deinitSimple's live_values derivation assumes), and general
         // teardown releases the caller-region args window exactly once via
         // `deinitInlineCall` while leaving its borrowed backing untouched.
-        if (self.teardown.empty_leaf or self.teardown.exact_args_leaf)
+        // Forwarded leaves (O3) share the empty-slice geometry and rely on
+        // general teardown's established `has_native_caller` release.
+        if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
+            self.teardown.forwarded_leaf)
             self.deinitGeneral(ctx)
         else if (self.canUseSimpleTeardown())
             self.deinitSimple(ctx)
@@ -437,6 +453,37 @@ pub const Entry = struct {
         if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         frame.current_function.freeObjectAssumeObject(rt);
         for (frame.args) |v| v.free(rt);
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    /// Forwarded-leaf twin of `deinitEmptyLeafInline` (O3): identical narrow
+    /// normal-return epilogue plus the owned synthetic native `call` frame
+    /// release. The forwarding adapter proved `native_caller` is a callable
+    /// object (its record's `forwards_call` gate), so the release skips the
+    /// full JSValue classifier exactly like the callable itself — qjs frees
+    /// both the argument buffer entry for the target and the native frame's
+    /// func_obj with plain object decrements on the same return edge
+    /// (js_call_c_function done:, quickjs.c:18229-18232). Only the
+    /// normal-return arm may use this: abrupt completion keeps general
+    /// teardown, whose established cold `releaseNativeCaller` handles the
+    /// same ownership.
+    inline fn deinitForwardedLeafInline(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.teardown.simple);
+        std.debug.assert(self.teardown.forwarded_leaf and !self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.exact_args_leaf);
+        std.debug.assert(self.teardown.has_native_caller);
+        std.debug.assert(frame.cold == null);
+        std.debug.assert(frame.ownership.current_function == .owned);
+        std.debug.assert(frame.ownership.storage == .borrowed);
+        std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
+        std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
+        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        frame.current_function.freeObjectAssumeObject(rt);
+        self.native_caller.freeObjectAssumeObject(rt);
         rt.vm_stack.restore(self.arena_mark);
         self.profile_guard.deinit();
     }
@@ -2253,6 +2300,97 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// Infallible publication tail for the forwarded empty leaf (O3) —
+    /// SEPARATE body from `finishEmptyLeafFrame` (sharing one parameterized
+    /// body measurably re-scheduled established arms; see
+    /// `pushExactArgsLeafFrame`). Region is `[target, call, thisArg?]` with
+    /// the caller top already retreated to `region_start`: the target
+    /// transfers into the frame callable exactly like the plain leaf, the
+    /// skipped native `call` function transfers into the entry's owned
+    /// `native_caller` (same slot `pushForwardedCall` publishes; the
+    /// backtrace resolver's `has_native_caller` arm reads it unchanged), and
+    /// the undefined `thisArg` slot needs no release. No resume record is
+    /// stored: its default-repr storage IS `native_caller`, so the return
+    /// arm re-derives the caller resume through `prev`. The sloppy `this`
+    /// arm borrows the realm global — identical to the plain sloppy leaf;
+    /// Function.prototype.call with an undefined thisArg reaches the same
+    /// deferred-coercion state as a plain call of the same target.
+    inline fn finishForwardedEmptyLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.Bytecode,
+        region_start: [*]core.JSValue,
+        stack_window: []core.JSValue,
+    ) *Entry {
+        comptime std.debug.assert(leaf_this == .sloppy_global);
+        const rt = self.ctx.runtime;
+        // No failable operation follows the ownership transfers.
+        entry.frame = .{
+            .function = function,
+            .this_value = global.value(),
+            .current_function = takeSourceSlot(&region_start[0]),
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .storage = .borrowed,
+            },
+        };
+        entry.native_caller = takeSourceSlot(&region_start[1]);
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .has_native_caller = true,
+            .forwarded_leaf = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// Warm, allocation-free forwarded empty-leaf construction (O3) — the
+    /// Function.prototype.call twin of `tryPushEmptyLeafCallFast` (separate
+    /// body; see `pushExactArgsLeafFrame` for why the established zero-arg
+    /// source is not shared). A null result is the same pure miss contract:
+    /// call depth, arena watermark, source ownership (target, native `call`
+    /// function, and the optional undefined thisArg all still owned by their
+    /// region slots), and Machine links are unchanged, so the caller can
+    /// restore its operand top and take the authoritative generic forwarding
+    /// path (`pushForwardedCall`), which owns first-use Entry allocation,
+    /// chunk switching, heap fallback, OOM, and stack-overflow recovery.
+    pub inline fn tryPushForwardedEmptyLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.Bytecode,
+        region_start: [*]core.JSValue,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertLeafEligible(leaf_this, function);
+        const ctx = self.ctx;
+        if (ctx.call_depth >= ctx.stack_limit) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishForwardedEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window);
+    }
+
     /// Push a bytecode target reached through Function.prototype.call. Takes
     /// ownership of `native_caller` only on success; the caller retains and
     /// frees it when frame setup fails.
@@ -2373,6 +2511,22 @@ pub const Machine = struct {
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         dying.deinitExactArgsLeafInline(self.ctx);
+        self.ctx.call_depth -= 1;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
+    /// Forwarded-leaf twin of `popReturnedEmptyLeaf` (O3). Its inline
+    /// epilogue adds only the owned native `call` frame release; abrupt
+    /// completion still inspects and releases the callee through general
+    /// teardown (whose cold `releaseNativeCaller` arm handles the same
+    /// ownership).
+    pub inline fn popReturnedForwardedLeaf(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isForwardedLeaf());
+        std.debug.assert(dying.return_action == .next);
+        std.debug.assert(dying.continuation_payload == 0);
+        dying.deinitForwardedLeafInline(self.ctx);
         self.ctx.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;

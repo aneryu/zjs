@@ -988,6 +988,44 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
+    if (machine.topEntry().isForwardedLeaf() and machine.topEntry().stack.len() == 0) {
+        // Forwarded-leaf return (O3): the zero-arg leaf epilogue plus the
+        // owned native `call` frame release inside `popReturnedForwardedLeaf`.
+        // No resume record exists for this shape (its default-repr storage
+        // holds `native_caller` for observable backtraces), so the caller
+        // resume {pc, sp} is re-derived through `prev` — the same chain
+        // `reloadAfterPop` walks — before the flat republication the leaf
+        // arms established. The len==0 guard routes parser-elided operand
+        // leftovers to the general return path below, whose teardown
+        // releases the remaining window (and the native frame) exactly once.
+        const dying = machine.topEntry();
+        const caller_opt = dying.prev;
+        machine.popReturnedForwardedLeaf();
+        if (caller_opt) |caller| {
+            std.debug.assert(caller == machine.top.?);
+            const caller_function = caller.frame.function;
+            const resume_pc = caller_function.code.ptr + caller.frame.pc;
+            const resume_sp = caller.stack.topPtr();
+            vm.frame = &caller.frame;
+            vm.stack = &caller.stack;
+            vm.catch_target = &caller.catch_target;
+            vm.function = caller_function;
+            vm.code_base = caller_function.code.ptr;
+            vb2 = caller.frame.locals.ptr;
+            // Deliver the result on the caller stack: the retired target slot
+            // at the caller's operand top is dead (its value transferred into
+            // the callee frame at push), exactly where the generic path would
+            // push.
+            resume_sp[0] = value;
+            caller.stack.setTopPtr(resume_sp + 1);
+            return @call(.always_tail, next, .{ resume_pc, resume_sp + 1, vb2, vm });
+        }
+        // L0 caller: keep the authoritative reload (stop-boundary republication).
+        reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
+        vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
     var continuation = machine.popReturnedFrame();
     // popFrame just installed qjs's `sf->prev_frame` in Machine.top. Its null
     // state already distinguishes L0, so do not reload and test depth as well.
@@ -1310,6 +1348,33 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {
             const this_arg = if (argc == 0) JSValue.undefinedValue() else region_start[2];
             if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, this_arg, receiver)) |target| {
+                // O3 forwarded empty-leaf arm: `f.call()` / `f.call(undefined)`
+                // where f is a published sloppy zero-arg leaf. The region
+                // already has the target at `region_start[0]` — exactly the
+                // plain leaf `[callable]` layout — so no rewrite is needed:
+                // the caller top retreats to the region base, the skipped
+                // native `call` function at `region_start[1]` transfers into
+                // the entry's owned `native_caller` (observable backtraces
+                // keep the qjs frame order target -> call (native) -> caller),
+                // and the undefined thisArg slot is already the dead-slot
+                // fill value. An undefined thisArg reaches the same
+                // deferred-coercion sloppy `this` state as a plain call,
+                // mirrored by the constructor's borrowed-realm-global arm.
+                // Non-leaf forwarded calls pay one flag test on the already-
+                // resolved view; a warm-miss (first-use chunk, arena chunk
+                // boundary, stack limit) changes nothing — restore the
+                // operand top and take the authoritative path below.
+                if (argc <= 1 and target.view.flags.simple_inline_empty_leaf and this_arg.isUndefined()) {
+                    vm.stack.setTopPtr(region_start);
+                    if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.view, region_start)) |entry| {
+                        vm.frame.pc += 2;
+                        if (vm.poller.active) {
+                            vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
+                        }
+                        return enterEntry(vm, entry, target.fb.byte_code);
+                    }
+                    vm.stack.setTopPtr(sp);
+                }
                 const region_base = (@intFromPtr(region_start) - @intFromPtr(vm.stack.values)) / @sizeOf(JSValue);
                 vm.frame.pc += 2;
                 vm.stack.setTopPtr(sp);
