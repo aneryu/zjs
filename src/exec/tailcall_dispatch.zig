@@ -2974,7 +2974,65 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     // (18461-18488).
     const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     const v = cell.pvalue.*;
-    if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (v.isUninitialized()) {
+        // qjs OP_get_var uninitialized arm (quickjs.c:18469-18483): a
+        // non-lexical closure var parked at UNINITIALIZED — an undeclared
+        // global such as the frozen `undefined` data property — resolves via
+        // a property read on the global OBJECT, and qjs keeps that leg INSIDE
+        // the handler (`sf->cur_pc = pc` + JS_GetPropertyInternal on
+        // ctx->global_obj), not behind a generic cold spine. Mirror the
+        // plain-data own-property hit inline: pure own-shape hash probe +
+        // dup — no getter, no proto walk, no allocation, no throw — so it
+        // stays publish-free like the hit leg. The probe chain is forced
+        // inline (leaf loads only): one outlined bl here would grow a
+        // prologue on the WHOLE handler and tax the initialized hit leg
+        // (measured +5.4% cyc on a top-level global-var loop). Every other
+        // outcome (lexical TDZ throw, `arguments` rescue, runtime_strict
+        // lexical preference, missing-binding ReferenceError vs
+        // get_var_undef undefined, accessor/proto-chain reads) keeps the
+        // exact cold waterfall (vm_property_globals.getVar), which starts
+        // with this same own-data probe.
+        const function = vm.function;
+        if (idx < function.closure_var.len) {
+            const cv = function.closure_var[idx];
+            if (!cv.is_lexical and cv.var_name != core.atom.ids.arguments and
+                !function.flags.runtime_strict)
+            {
+                const global = vm.global;
+                if (!global.hasExoticMethods()) {
+                    // Private frameless twin of Object.findProperty + the
+                    // asDataAt data test (traversal identical, hot-arm
+                    // non-sharing discipline): the shared helpers'
+                    // Flags.fromBits packed-struct bitcast materializes
+                    // through a stack slot when inlined here, which grew a
+                    // scratch frame on the WHOLE handler and taxed the
+                    // initialized hit leg (+2 sp insns per read). Raw-bits
+                    // probe: atom match + !deleted (bit 5) + kind == .data
+                    // (bits 3-4) — register tests only. Mirrors qjs
+                    // find_own_property + the JS_PROP_NORMAL value read.
+                    const shape_ref = global.shape_ref;
+                    const props = global.shapeProps();
+                    var shape_index: u32 = @call(.always_inline, core.Shape.firstPropertyIndex, .{ shape_ref, cv.var_name });
+                    var steps: usize = 0;
+                    while (shape_index != core.shape.no_property_index and steps < shape_ref.prop_count) : (steps += 1) {
+                        const prop_index: usize = @intCast(shape_index);
+                        if (prop_index >= shape_ref.prop_count) break;
+                        const prop = shape_ref.props()[prop_index];
+                        shape_index = prop.hash_next;
+                        if (prop_index >= props.len) continue;
+                        if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
+                            if ((prop.flags & 0b011000) == 0) {
+                                sp[0] = global.prop_values[prop_index].slot.data.dup();
+                                return cont(pc + 3, sp + 1, var_buf, vm);
+                            }
+                            break; // found, but not a plain data slot → cold waterfall
+                        }
+                    }
+                }
+            }
+        }
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
     // Guard #7 (nested-cell check) and global-lexical shadow checks are not
     // part of qjs's hot OP_get_var. They are folded into the cell at
     // definition/mutation time.
