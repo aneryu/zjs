@@ -3992,6 +3992,21 @@ pub const parser_core = struct {
             return state;
         }
 
+        /// Initialize a parser state that may emit runtime-owned constants.
+        /// QuickJS's `JSParseState` always carries its `JSContext`; zjs keeps
+        /// the runtime-less initializer for low-level parser-only tests, while
+        /// production compilation and executable-bytecode helpers use this
+        /// entry point.
+        pub fn initWithRuntime(
+            rt: *core.JSRuntime,
+            lex: *lexer_mod.Lexer,
+            function: *bytecode_function.Bytecode,
+        ) Error!State {
+            var state = try init(lex, function);
+            state.runtime = rt;
+            return state;
+        }
+
         /// Release State-owned resources. `rt` is forwarded to
         /// `FunctionDef.deinit` so constants in `function_def.cpool` can
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
@@ -9437,7 +9452,16 @@ pub const parser_core = struct {
         };
         defer compiled.deinit(s.function.memory.allocator);
         try emitStringLiteralBytes(s, pattern);
-        try emitStringLiteralBytes(s, flags);
+        // qjs compiles a literal once while parsing, stores the lre bytecode as
+        // an 8-bit JSString constant, and lets OP_regexp share that immutable
+        // string with each fresh RegExp instance (quickjs.c:26891-26913,
+        // 47565-47668). ZJS used to discard this validation result and emit the
+        // flags string, forcing the runtime constructor to compile on every
+        // literal evaluation.
+        const compiled_string = core.string.String.createLatin1(s.runtime.?, compiled.bytecode) catch |err| switch (err) {
+            error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
+        };
+        try s.emitPushConstOwned(compiled_string.value());
         try s.emitOp(opcode.op.regexp);
         try s.advance();
     }
@@ -21131,9 +21155,8 @@ pub const compile_entry = struct {
         if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
             try lex.enableTypeScript();
         }
-        var state = try parser_core.ParseState.init(&lex, function);
+        var state = try parser_core.ParseState.initWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
-        state.runtime = rt;
         state.is_strict = options.mode == .module or effective_strict;
         state.function_def.is_strict_mode = options.mode == .module or effective_strict;
         state.function_def.is_indirect_eval = options.mode == .eval_indirect;

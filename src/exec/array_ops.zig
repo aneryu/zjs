@@ -442,7 +442,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
     return error.JSException;
 }
 
-pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
+pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !core.JSValue {
     const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &out.header);
 
@@ -452,7 +452,7 @@ pub fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, input
 
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
-        const capture = found.captures[capture_index];
+        const capture = found.captureAt(capture_index);
         if (capture.undefined) {
             try defineSplitValueElement(rt, out, @intCast(capture_index + 1), core.JSValue.undefinedValue());
         } else {

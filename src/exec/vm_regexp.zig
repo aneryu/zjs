@@ -1,40 +1,52 @@
-const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const stack_mod = @import("stack.zig");
 
-// RegExp construct record keyed by native-builtin ref: the `OP_regexp` literal
-// handler runs the builtin RegExp constructor body through the record table
-// (Phase 6b-3 STEP 4) rather than naming the RegExp owner directly. The
-// `.construct` ref validates the (pattern, flags) value pair; the construct
-// branch reads only `args`/`new_target`, so no constructor function object or
-// caller frame is threaded.
-const regexp_construct_ref = core.function.NativeBuiltinRef{
-    .domain = .regexp,
-    .id = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct),
-};
-
-fn constructRegExpRecord(
-    ctx: *core.JSContext,
-    native_ref: core.function.NativeBuiltinRef,
-    prototype: ?*core.Object,
-    pattern: core.JSValue,
-    flags: core.JSValue,
+/// qjs OP_regexp consumes `[pattern, compiled-bytecode]` constants and creates
+/// a fresh object from the realm's fixed regexp shape. It does not call or
+/// consult a possibly-replaced global `RegExp` constructor.
+fn constructCompiledLiteralInRealm(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    source: core.JSValue,
+    compiled_value: core.JSValue,
 ) !core.JSValue {
-    const args = [_]core.JSValue{ pattern, flags };
-    return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, native_ref, prototype, &args, null, null)) orelse error.TypeError;
+    if (!compiled_value.isString()) return error.TypeError;
+    const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TypeError;
+    if (compiled_string.isWide() or compiled_string.len() == 0) return error.TypeError;
+    const template_value = global.cachedRealmValue(.regexp_instance_template) orelse return error.TypeError;
+    const template = try core.Object.expect(template_value);
+
+    var source_val = source;
+    var compiled_root = compiled_value;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &source_val },
+        .{ .value = &compiled_root },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const object = try core.Object.createRegExpFromPropertyTemplate(rt, template);
+    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    try object.setRegexpSource(rt, source_val);
+    try object.setRegexpCompiledBytecodeString(rt, compiled_string);
+    return object.value();
 }
 
 pub noinline fn pushLiteral(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    prototype: ?*core.Object,
+    global: *core.Object,
 ) !void {
-    const flags = try stack.pop();
-    defer flags.free(ctx.runtime);
+    const compiled = try stack.pop();
+    defer compiled.free(ctx.runtime);
     const pattern = try stack.pop();
     defer pattern.free(ctx.runtime);
 
-    const value = try constructRegExpRecord(ctx, regexp_construct_ref, prototype, pattern, flags);
+    const value = try constructCompiledLiteralInRealm(ctx.runtime, global, pattern, compiled);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }

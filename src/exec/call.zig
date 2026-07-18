@@ -1540,7 +1540,7 @@ pub fn callNativeFunctionRecord(
 /// (HTML btoa/atob/queueMicrotask, the zjs `gc` helper, navigator accessors,
 /// host constructor stubs, the shared species getter, and CallSite methods).
 /// Replaces the retired string-name dispatch branches in `callNativeBuiltin`.
-fn callHostGlobalNativeFunctionRecord(
+pub fn callHostGlobalNativeFunctionRecord(
     ctx: *core.JSContext,
     global: ?*core.Object,
     this_value: core.JSValue,

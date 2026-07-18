@@ -137,6 +137,29 @@ pub fn toUint16CodeUnit(number: f64) u16 {
 }
 
 pub fn toLengthIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize {
+    var index: usize = undefined;
+    try toLengthIndexInto(ctx, output, global, value, &index);
+    return index;
+}
+
+/// QJS's `JS_ToLengthFree` returns an integer status and writes the converted
+/// length through an out pointer. Keep the same ABI shape here so callers do
+/// not need a 16-byte `!usize` result slot around the tag switch.
+noinline fn toLengthIndexInto(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, index: *usize) !void {
+    // QJS `JS_ToLengthFree` enters `JS_ToInt64SatFree`, whose first switch
+    // handles integer/float tags directly and invokes ToNumber only for other
+    // values. Keep object/Symbol/BigInt coercion on the observable slow path.
+    if (fastToLengthIndex(value)) |converted| {
+        index.* = converted;
+        return;
+    }
+    index.* = try toLengthIndexSlow(ctx, output, global, value);
+}
+
+/// Observable ToPrimitive/ToNumber half of ToLength. Callers that have
+/// already rejected the numeric tags can enter here without repeating the
+/// primitive discriminator.
+pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize {
     const length = try toLengthNumber(ctx, output, global, value);
     if (length >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
     return @intFromFloat(length);

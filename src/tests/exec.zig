@@ -853,7 +853,7 @@ pub const vm_helpers = struct {
         defer function.deinit(rt);
 
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.init(&lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         try parser_core.parseExpr(&state);
 
@@ -875,7 +875,7 @@ pub const vm_helpers = struct {
         defer function.deinit(rt);
 
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.init(&lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
         try parser_core.parseExpr(&state);
@@ -908,7 +908,7 @@ pub const vm_helpers = struct {
         defer function.deinit(rt);
 
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.init(&lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
 
         try state.enableEvalReturn();
@@ -932,7 +932,7 @@ pub const vm_helpers = struct {
         defer function.deinit(rt);
 
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.init(&lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
 
@@ -4335,6 +4335,43 @@ test "regexp accessor native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
 }
 
+test "vm host native builtin records dispatch by id before name fallback" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+
+    const fake_species = try engine.core.function.nativeFunction(rt, "notSpeciesGetter", 0);
+    defer fake_species.free(rt);
+    const fake_species_object: *core.Object = @fieldParentPtr("header", fake_species.refHeader().?);
+    fake_species_object.setNativeBuiltinIdAndRecord(
+        rt,
+        core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)),
+    );
+    const native_ref = core.function.decodeNativeBuiltinId(fake_species_object.nativeFunctionId()).?;
+
+    const receiver = try core.Object.create(rt, core.class.ids.object, null);
+    defer receiver.value().free(rt);
+    const dispatched = try engine.exec.call_runtime.callNativeBuiltinRecordForVm(
+        ctx,
+        null,
+        global,
+        fake_species,
+        receiver.value(),
+        fake_species_object,
+        native_ref,
+        &.{},
+        null,
+        null,
+    );
+    try std.testing.expect(dispatched != null);
+    const result = dispatched.?;
+    defer result.free(rt);
+    try std.testing.expect(result.same(receiver.value()));
+}
+
 test "vm collection constructors use registered prototype methods" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -5456,6 +5493,239 @@ test "Engine eval executes simple variable assignment and print" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("12\n", stream.buffered());
+}
+
+test "String.prototype.match invokes a custom matcher before coercing the receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = [];
+        \\var receiver = { toString: function () { log.push("toString"); return "abc"; } };
+        \\var matcher = {};
+        \\matcher[Symbol.match] = function (value) { log.push(value === receiver ? "same" : "different"); return 7; };
+        \\print(String.prototype.match.call(receiver, matcher));
+        \\print(log.join(","));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("7\nsame\n", stream.buffered());
+}
+
+test "RegExp Symbol.split preserves captures returned by custom exec" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = [];
+        \\var capture = { toString: function () { log.push("coerced"); return "capture"; } };
+        \\function Splitter() { this.lastIndex = 0; }
+        \\Splitter.prototype.exec = function () {
+        \\  if (this.lastIndex === 1) { this.lastIndex = 2; return { 0: "x", 1: capture, length: 2 }; }
+        \\  return null;
+        \\};
+        \\var regexp = /x/;
+        \\regexp.constructor = {};
+        \\regexp.constructor[Symbol.species] = Splitter;
+        \\var parts = regexp[Symbol.split]("axb");
+        \\print(parts[1] === capture);
+        \\print(log.join(","));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\n\n", stream.buffered());
+}
+
+test "RegExp Symbol.split propagates invalid species exec TypeError" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var regexp = /,/;
+        \\function Splitter() { return { exec: 1, lastIndex: 0 }; }
+        \\regexp.constructor = { [Symbol.species]: Splitter };
+        \\try { "a,b".split(regexp); } catch (error) { print(error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("TypeError\n", stream.buffered());
+}
+
+test "RegExp Symbol.split appends sticky flag without narrowing wide species flags" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var seen;
+        \\function Splitter(pattern, flags) { seen = flags; return /,/y; }
+        \\var regexp = /,/;
+        \\Object.defineProperty(regexp, "flags", { get: function () { return "\u0100"; } });
+        \\regexp.constructor = { [Symbol.species]: Splitter };
+        \\var parts = "a,b".split(regexp);
+        \\print(seen === "\u0100y");
+        \\print(parts.join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\na|b\n", stream.buffered());
+}
+
+test "flagless RegExp flags accessor reuses the runtime empty string" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const pattern = try core.string.String.createAscii(rt, "a");
+    defer pattern.value().free(rt);
+    const empty = try rt.emptyString();
+    const regexp = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern.value(), empty.value(), null);
+    defer regexp.free(rt);
+
+    const allocations = rt.memory.allocation_count;
+    const flags = try engine.exec.regexp_ops.accessor(rt, regexp, "flags");
+    defer flags.free(rt);
+    try std.testing.expect(flags.asStringBody().? == empty);
+    try std.testing.expectEqual(allocations, rt.memory.allocation_count);
+}
+
+test "RegExp exec result template preserves metadata groups and indices" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [192]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var plain = /a/.exec("ba");
+        \\print([plain.length, plain[0], plain.index, plain.input, plain.groups === undefined].join("|"));
+        \\var named = /(?<word>a)/d.exec("ba");
+        \\print([named.length, named[0], named[1], named.index, named.input, named.groups.word,
+        \\       named.indices[0][0], named.indices[0][1], named.indices.groups.word[0], named.indices.groups.word[1]].join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1|a|1|ba|true\n2|a|a|1|ba|a|1|2|1|2\n", stream.buffered());
+}
+
+test "RegExp literals reuse parse-time bytecode and the intrinsic realm shape" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [192]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var IntrinsicRegExp = RegExp;
+        \\var intrinsicPrototype = RegExp.prototype;
+        \\function make() { return /(?<letter>a)/dgi; }
+        \\var first = make();
+        \\var second = make();
+        \\first.lastIndex = 3;
+        \\print([first !== second, first.lastIndex, second.lastIndex, first.source, first.flags].join("|"));
+        \\print([first.exec("---A").groups.letter, first.lastIndex].join("|"));
+        \\var constructorCalls = 0;
+        \\function ReplacementRegExp() { constructorCalls++; }
+        \\ReplacementRegExp.prototype = { replacement: true };
+        \\globalThis.RegExp = ReplacementRegExp;
+        \\var afterReplacement = /b/gy;
+        \\print([Object.getPrototypeOf(afterReplacement) === intrinsicPrototype,
+        \\       afterReplacement.constructor === IntrinsicRegExp, constructorCalls,
+        \\       afterReplacement.source, afterReplacement.flags,
+        \\       afterReplacement.test("b"), afterReplacement.lastIndex].join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "true|3|0|(?<letter>a)|dgi\n" ++
+            "A|4\n" ++
+            "true|true|0|b|gy|true|1\n",
+        stream.buffered(),
+    );
+}
+
+test "RegExp legacy statics preserve the realm snapshot across constructor replacement" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var IntrinsicRegExp = RegExp;
+        \\var noCapture = /x/;
+        \\var captured = /(a)/;
+        \\/(a)(b)?/.exec("zabq");
+        \\print([IntrinsicRegExp.input, IntrinsicRegExp.lastMatch, IntrinsicRegExp.lastParen,
+        \\       IntrinsicRegExp.leftContext, IntrinsicRegExp.rightContext,
+        \\       IntrinsicRegExp.$1, IntrinsicRegExp.$2, IntrinsicRegExp.$3].join("|"));
+        \\globalThis.RegExp = function Replacement() {};
+        \\noCapture.exec("xx");
+        \\print([IntrinsicRegExp.input, IntrinsicRegExp.lastMatch, IntrinsicRegExp.lastParen,
+        \\       IntrinsicRegExp.leftContext, IntrinsicRegExp.rightContext,
+        \\       IntrinsicRegExp.$1].join("|"));
+        \\captured.exec("zaq");
+        \\IntrinsicRegExp.input = "override";
+        \\print([IntrinsicRegExp.input, IntrinsicRegExp.lastMatch, IntrinsicRegExp.leftContext,
+        \\       IntrinsicRegExp.rightContext, IntrinsicRegExp.$1].join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "zabq|ab|b|z|q|a|b|\n" ++
+            "xx|x|||x|\n" ++
+            "override|a|z|q|a\n",
+        stream.buffered(),
+    );
+}
+
+test "regexp split and global match arrays use the realm Array prototype" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(Object.getPrototypeOf("a".split(/x/)) === Array.prototype);
+        \\print(Object.getPrototypeOf("a".split(/x/, 0)) === Array.prototype);
+        \\print(Object.getPrototypeOf("a".match(/a/g)) === Array.prototype);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\ntrue\ntrue\n", stream.buffered());
+}
+
+test "RegExp Symbol.split uses the realm intrinsic default species" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var IntrinsicRegExp = RegExp;
+        \\var split = IntrinsicRegExp.prototype[Symbol.split];
+        \\var rx = /,/;
+        \\Object.defineProperty(rx, "constructor", { value: undefined, configurable: true });
+        \\var fakeCalls = 0;
+        \\globalThis.RegExp = function FakeRegExp() { fakeCalls++; return { lastIndex: 0, exec: function () { return null; } }; };
+        \\var parts = split.call(rx, "a,b");
+        \\print(fakeCalls + ":" + parts.join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("0:a|b\n", stream.buffered());
 }
 
 test "Engine eval preserves global lexical write fast path semantics" {

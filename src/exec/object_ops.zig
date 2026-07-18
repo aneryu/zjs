@@ -1086,6 +1086,10 @@ pub fn setValuePropertyStrict(
     if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value_to_set)) return;
     }
+    // Match QuickJS's first `find_own_property` branch: a writable own data
+    // property is updated before any prototype/accessor walk. This also covers
+    // synthesized own data slots such as RegExp `lastIndex`.
+    if (try object.setOwnWritableDataProperty(ctx.runtime, atom_id, value_to_set)) return;
     const called_setter = callAccessorSetter(ctx, output, global, object_value, object, atom_id, value, caller_function, caller_frame) catch |err| switch (err) {
         error.AccessorWithoutSetter => return error.TypeError,
         else => return err,
@@ -1243,15 +1247,8 @@ pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object
 }
 
 pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Object, out: *core.Object, found: *const RegExpMatch) !void {
-    var has_named = false;
-    for (found.captures[0..found.capture_count]) |capture| {
-        if (capture.name != null) {
-            has_named = true;
-            break;
-        }
-    }
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    if (!has_named) {
+    if (!found.has_named_captures) {
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
         return;
     }
@@ -1259,8 +1256,10 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    for (found.captures[0..found.capture_count]) |capture| {
-        const name = capture.name orelse continue;
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const name = found.captureNameAt(capture_index) orelse continue;
+        const capture = found.captureAt(capture_index);
         var decoded_name = std.ArrayList(u8).empty;
         defer decoded_name.deinit(rt.memory.allocator);
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
@@ -1283,15 +1282,8 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
 }
 
 pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_bytes: []const u8, found: *const RegExpMatch) !void {
-    var has_named = false;
-    for (found.captures[0..found.capture_count]) |capture| {
-        if (capture.name != null) {
-            has_named = true;
-            break;
-        }
-    }
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    if (!has_named) {
+    if (!found.has_named_captures) {
         try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
         return;
     }
@@ -1299,8 +1291,10 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    for (found.captures[0..found.capture_count]) |capture| {
-        const name = capture.name orelse continue;
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const name = found.captureNameAt(capture_index) orelse continue;
+        const capture = found.captureAt(capture_index);
         var decoded_name = std.ArrayList(u8).empty;
         defer decoded_name.deinit(rt.memory.allocator);
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
@@ -1326,24 +1320,21 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
 }
 
 pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Object, input_value: core.JSValue, found: *const RegExpMatch) !void {
-    var has_named = false;
-    for (found.captures[0..found.capture_count]) |capture| {
-        if (capture.name != null) {
-            has_named = true;
-            break;
-        }
-    }
+    const groups_value = try createRegExpGroupsValueFromValue(rt, input_value, found);
+    defer groups_value.free(rt);
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
-    if (!has_named) {
-        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
-        return;
-    }
+    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
+}
+
+pub fn createRegExpGroupsValueFromValue(rt: *core.JSRuntime, input_value: core.JSValue, found: *const RegExpMatch) !core.JSValue {
+    if (!found.has_named_captures) return core.JSValue.undefinedValue();
 
     const groups = try core.Object.create(rt, core.class.ids.object, null);
-    var groups_raw_owned = true;
-    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    for (found.captures[0..found.capture_count]) |capture| {
-        const name = capture.name orelse continue;
+    errdefer core.Object.destroyFromHeader(rt, &groups.header);
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const name = found.captureNameAt(capture_index) orelse continue;
+        const capture = found.captureAt(capture_index);
         var decoded_name = std.ArrayList(u8).empty;
         defer decoded_name.deinit(rt.memory.allocator);
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
@@ -1359,10 +1350,37 @@ pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Objec
         defer value.free(rt);
         try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
     }
-    const groups_value = groups.value();
-    groups_raw_owned = false;
-    defer groups_value.free(rt);
-    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
+    return groups.value();
+}
+
+// The RegExp result already owns one value for every capture. Reuse those
+// values when materializing named groups instead of slicing the input a second
+// time. QuickJS fills the dense result and `groups` from the same capture loop
+// in `js_regexp_exec`; keeping this helper separate preserves a compact common
+// result-construction body while retaining that ownership model.
+pub noinline fn populateRegExpGroupsFromCaptureValues(
+    rt: *core.JSRuntime,
+    groups: *core.Object,
+    found: *const RegExpMatch,
+    capture_values: []const core.JSValue,
+) !void {
+    std.debug.assert(found.has_named_captures);
+    std.debug.assert(capture_values.len >= found.capture_count + 1);
+
+    var capture_index: usize = 0;
+    while (capture_index < found.capture_count) : (capture_index += 1) {
+        const name = found.captureNameAt(capture_index) orelse continue;
+        const capture = found.captureAt(capture_index);
+        var decoded_name = std.ArrayList(u8).empty;
+        defer decoded_name.deinit(rt.memory.allocator);
+        try appendDecodedRegExpGroupName(rt, &decoded_name, name);
+        const atom = try rt.internAtom(decoded_name.items);
+        defer rt.atoms.free(atom);
+        // Duplicate named groups share one property; the participating
+        // (matched) capture wins, an unset duplicate must not overwrite it.
+        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
+        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(capture_values[capture_index + 1], true, true, true));
+    }
 }
 
 pub fn qjsPrimitivePrototypeMethod(
@@ -2657,15 +2675,24 @@ pub fn getValueProperty(
     const rt = ctx.runtime;
     if (value.isObject()) {
         const object = try property_ops.expectObject(value);
-        if (rt.atoms.kind(atom_id) == .private) {
+        // QJS keeps private-field access out of JS_GetPropertyInternal. ZJS
+        // shares this entry point, so reject ordinary property atoms with the
+        // AtomTable's conservative lower bound before consulting the full
+        // dynamic kind table. Predefined names such as exec/flags/lastIndex
+        // therefore pay only the cheap bound check; a possible private atom is
+        // still confirmed exactly before taking private-field semantics.
+        if (rt.atoms.mightBePrivate(atom_id) and rt.atoms.kind(atom_id) == .private) {
             const effective_atom = remapPrivateAtomForOperation(rt, caller_frame, object, atom_id);
             return getPrivateValueProperty(ctx, output, global, value, object, effective_atom, caller_function, caller_frame);
         }
-        if (object.proxyTarget() != null) {
+        // Mapped arguments overlay their live parameter cell on the ordinary
+        // shape entry. This is the one representation-specific exception to
+        // the universal shape walk below.
+        if (mappedArgumentsValue(ctx.runtime, object, atom_id)) |mapped_value| return mapped_value;
+        if (object.class_id == core.class.ids.proxy) {
             return getProxyProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame);
         }
-        if (mappedArgumentsValue(ctx.runtime, object, atom_id)) |mapped_value| return mapped_value;
-        if (core.object.isTypedArrayObject(object)) {
+        if (object.class_id >= core.class.ids.uint8c_array and object.class_id <= core.class.ids.float64_array) {
             // qjs JS_GetPropertyInternal probes the shape before its typed-array
             // exotic arm. Canonical numeric elements never occupy a shape slot;
             // named length/byteLength/byteOffset continue through the actual
@@ -2686,11 +2713,10 @@ pub fn getValueProperty(
                 if (object.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
             }
         }
-        if (try functionCallerArgumentsProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |function_value| {
-            return function_value;
-        }
-        if (try getAccessorDescriptorValue(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |accessor_value| {
-            return accessor_value;
+        if (isFunctionLikeClass(object.class_id)) {
+            if (try functionCallerArgumentsProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |function_value| {
+                return function_value;
+            }
         }
         if (object.moduleNamespaceOwnBindingValue(atom_id)) |binding_value| {
             if (binding_value.isUninitialized()) {
@@ -2699,65 +2725,86 @@ pub fn getValueProperty(
             }
             return binding_value;
         }
-        if (object.class_id == core.class.ids.dataview and
-            (atom_id == atom_buffer or
-                atom_id == atom_byte_length or
-                atom_id == atom_byte_offset))
-        {
-            if (atom_id == atom_buffer) return (object.typedArrayBuffer() orelse return error.TypeError).dup();
-            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(rt, object)));
-            return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(rt, object)));
+        // QuickJS resolves an ordinary property with one shape/prototype walk:
+        // find_own_property comes before every class/exotic check at every
+        // prototype depth (quickjs.c:8268-8330). Class-specific numeric,
+        // proxy, module and legacy-function behavior is handled by that same
+        // walk only after a shape miss.
+        if (try getPropertyValueFromObjectChain(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |property_value| {
+            return property_value;
         }
-        if (object.getOwnProperty(rt, atom_id)) |own_desc| {
-            defer own_desc.destroy(rt);
-            switch (own_desc.kind) {
-                .data => return own_desc.value.dup(),
-                .generic => return core.JSValue.undefinedValue(),
-                .accessor => {
-                    if (own_desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                    return callValueOrBytecode(ctx, output, global, value, own_desc.getter, &.{}, caller_function, caller_frame);
-                },
-            }
-        }
-        if (try getPrototypePropertyValue(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |prototype_value| {
-            return prototype_value;
-        }
-        const direct = object.getProperty(atom_id);
-        if (!direct.isUndefined()) return direct;
-        direct.free(rt);
-        if (rt.atoms.kind(atom_id) == .private) return error.TypeError;
-        if (object.isArray() and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
-        if (object.class_id == core.class.ids.string) {
-            if (object.objectData()) |string_data| {
-                if (try getStringIndexValue(rt, string_data, atom_id)) |indexed| return indexed;
-            }
-        }
-        if (object.isArray()) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
-        if (object.class_id == core.class.ids.object) {
-            if (object.hasNullPrototype()) return core.JSValue.undefinedValue();
-            return getPrototypeMethod(rt, global, "Object", atom_id);
-        }
-        if (object.class_id == core.class.ids.string) return getPrototypeMethod(rt, global, "String", atom_id);
-        if (object.class_id == core.class.ids.number) return getPrototypeMethod(rt, global, "Number", atom_id);
-        if (object.class_id == core.class.ids.boolean) return getPrototypeMethod(rt, global, "Boolean", atom_id);
-        if (object.class_id == core.class.ids.big_int) return getPrototypeMethod(rt, global, "BigInt", atom_id);
-        if (object.class_id == core.class.ids.symbol) return getPrototypeMethod(rt, global, "Symbol", atom_id);
-        if (isFunctionLikeClass(object.class_id)) {
-            return getPrototypeMethodWithFallback(rt, global, "Function", atom_id, "Object");
-        }
-        if (object.class_id == core.class.ids.date) return getPrototypeMethod(rt, global, "Date", atom_id);
-        if (object.class_id == core.class.ids.regexp) return getPrototypeMethodWithFallback(rt, global, "RegExp", atom_id, "Object");
-        if (object.class_id == core.class.ids.promise) return getPrototypeMethod(rt, global, "Promise", atom_id);
-        if (object.class_id == core.class.ids.array_buffer) return getPrototypeMethod(rt, global, "ArrayBuffer", atom_id);
-        if (object.class_id == core.class.ids.shared_array_buffer) return getPrototypeMethod(rt, global, "SharedArrayBuffer", atom_id);
-        if (object.class_id == core.class.ids.weak_ref) return getPrototypeMethod(rt, global, "WeakRef", atom_id);
-        if (object.class_id == core.class.ids.finalization_registry) return getPrototypeMethod(rt, global, "FinalizationRegistry", atom_id);
-        if (object.class_id == core.class.ids.disposable_stack) return getPrototypeMethod(rt, global, "DisposableStack", atom_id);
-        if (object.class_id == core.class.ids.async_disposable_stack) return getPrototypeMethod(rt, global, "AsyncDisposableStack", atom_id);
-        if (object.class_id == core.class.ids.dataview) return getPrototypeMethod(rt, global, "DataView", atom_id);
-        return core.JSValue.undefinedValue();
+        return getValuePropertyObjectMiss(ctx, global, value, object, atom_id);
     }
-    if (rt.atoms.kind(atom_id) == .private) return error.TypeError;
+    return getValuePropertyNonObject(ctx, output, global, value, atom_id, caller_function, caller_frame);
+}
+
+/// Object-property fallback after the real shape/prototype chain missed. QJS
+/// reaches the equivalent cases only from the cold exotic/missing-property
+/// arms of JS_GetPropertyInternal; keeping them out of the common frame avoids
+/// making every successful RegExp/result lookup carry their error paths.
+noinline fn getValuePropertyObjectMiss(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    value: core.JSValue,
+    object: *core.Object,
+    atom_id: core.Atom,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    if (object.class_id == core.class.ids.dataview and
+        (atom_id == atom_buffer or
+            atom_id == atom_byte_length or
+            atom_id == atom_byte_offset))
+    {
+        if (atom_id == atom_buffer) return (object.typedArrayBuffer() orelse return error.TypeError).dup();
+        if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(rt, object)));
+        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(rt, object)));
+    }
+    const direct = object.getProperty(atom_id);
+    if (!direct.isUndefined()) return direct;
+    direct.free(rt);
+    if (object.isArray() and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
+    if (object.class_id == core.class.ids.string) {
+        if (object.objectData()) |string_data| {
+            if (try getStringIndexValue(rt, string_data, atom_id)) |indexed| return indexed;
+        }
+    }
+    if (object.isArray()) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
+    if (object.class_id == core.class.ids.object) {
+        if (object.hasNullPrototype()) return core.JSValue.undefinedValue();
+        return getPrototypeMethod(rt, global, "Object", atom_id);
+    }
+    if (object.class_id == core.class.ids.string) return getPrototypeMethod(rt, global, "String", atom_id);
+    if (object.class_id == core.class.ids.number) return getPrototypeMethod(rt, global, "Number", atom_id);
+    if (object.class_id == core.class.ids.boolean) return getPrototypeMethod(rt, global, "Boolean", atom_id);
+    if (object.class_id == core.class.ids.big_int) return getPrototypeMethod(rt, global, "BigInt", atom_id);
+    if (object.class_id == core.class.ids.symbol) return getPrototypeMethod(rt, global, "Symbol", atom_id);
+    if (isFunctionLikeClass(object.class_id)) {
+        return getPrototypeMethodWithFallback(rt, global, "Function", atom_id, "Object");
+    }
+    if (object.class_id == core.class.ids.date) return getPrototypeMethod(rt, global, "Date", atom_id);
+    if (object.class_id == core.class.ids.regexp) return getPrototypeMethodWithFallback(rt, global, "RegExp", atom_id, "Object");
+    if (object.class_id == core.class.ids.promise) return getPrototypeMethod(rt, global, "Promise", atom_id);
+    if (object.class_id == core.class.ids.array_buffer) return getPrototypeMethod(rt, global, "ArrayBuffer", atom_id);
+    if (object.class_id == core.class.ids.shared_array_buffer) return getPrototypeMethod(rt, global, "SharedArrayBuffer", atom_id);
+    if (object.class_id == core.class.ids.weak_ref) return getPrototypeMethod(rt, global, "WeakRef", atom_id);
+    if (object.class_id == core.class.ids.finalization_registry) return getPrototypeMethod(rt, global, "FinalizationRegistry", atom_id);
+    if (object.class_id == core.class.ids.disposable_stack) return getPrototypeMethod(rt, global, "DisposableStack", atom_id);
+    if (object.class_id == core.class.ids.async_disposable_stack) return getPrototypeMethod(rt, global, "AsyncDisposableStack", atom_id);
+    if (object.class_id == core.class.ids.dataview) return getPrototypeMethod(rt, global, "DataView", atom_id);
+    return core.JSValue.undefinedValue();
+}
+
+noinline fn getValuePropertyNonObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    atom_id: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    if (rt.atoms.mightBePrivate(atom_id) and rt.atoms.kind(atom_id) == .private) return error.TypeError;
     if (value.isString()) {
         if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
         if (try getStringIndexValue(rt, value, atom_id)) |indexed| return indexed;
@@ -2772,7 +2819,7 @@ pub fn getValueProperty(
     return error.TypeError;
 }
 
-pub fn functionCallerArgumentsProperty(
+noinline fn functionCallerArgumentsProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -2803,7 +2850,7 @@ pub fn functionCallerArgumentsProperty(
     return error.TypeError;
 }
 
-pub fn getPrivateValueProperty(
+noinline fn getPrivateValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3764,7 +3811,7 @@ pub fn getPrototypePropertyValue(
     return getPropertyValueFromObjectChain(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);
 }
 
-fn getPropertyValueFromObjectChain(
+inline fn getPropertyValueFromObjectChain(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3776,29 +3823,58 @@ fn getPropertyValueFromObjectChain(
 ) !?core.JSValue {
     var current: ?*core.Object = first;
     while (current) |prototype| : (current = prototype.getPrototype()) {
-        if (prototype.proxyTarget() != null) {
-            return try getProxyProperty(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame);
-        }
-        // qjs JS_GetPropertyInternal proto walk: a JS_PROP_NORMAL hit answers
-        // with a plain dup — no Descriptor materialization. The synthesized
-        // own properties (module-namespace bindings, array length, regexp
-        // lastIndex, dense elements) never live in the shape table, so a
-        // shape data hit here cannot shadow getOwnProperty's synthesis
-        // branches; accessor/auto-init/miss fall through to the descriptor
-        // path below unchanged.
-        if (!prototype.hasExoticMethods()) {
-            if (prototype.getOwnDataPropertyValue(atom_id)) |own_data| return own_data;
-        }
-        if (prototype.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-            defer desc.destroy(ctx.runtime);
-            switch (desc.kind) {
-                .data => return desc.value.dup(),
-                .generic => return core.JSValue.undefinedValue(),
+        // qjs JS_GetPropertyInternal always probes the ordinary shape FIRST,
+        // for every class, and only enters its exotic arm after a miss. A
+        // normal data/accessor hit therefore pays no Proxy/class-policy test.
+        // Keep the paired shape/value result so the matching entry is read
+        // once and only the live getter is retained.
+        const shape_lookup = prototype.findOwnPropertySlotTrusted(atom_id);
+        if (shape_lookup) |lookup| {
+            switch (lookup.flags.kind) {
+                .data => return lookup.entry.slot.data.dup(),
                 .accessor => {
-                    if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
-                    return try callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+                    const getter = lookup.entry.slot.accessor.getterValue().dup();
+                    defer getter.free(ctx.runtime);
+                    if (getter.isUndefined()) return core.JSValue.undefinedValue();
+                    return try callValueOrBytecode(ctx, output, global, receiver, getter, &.{}, caller_function, caller_frame);
                 },
+                // Auto-init materialization and var-ref/TDZ handling remain
+                // centralized in getOwnProperty, exactly like qjs's retry and
+                // VARREF branches after find_own_property.
+                .auto_init, .var_ref => {},
             }
+        }
+        if (shape_lookup == null and !prototype.needsSlowPropertyAccess()) continue;
+        if (try getSlowPropertyValueFromObject(ctx, output, global, receiver, prototype, atom_id, caller_function, caller_frame)) |value| return value;
+    }
+    return null;
+}
+
+/// Class/exotic synthesis and shape kinds that require materialization are the
+/// slow arm after QuickJS's `find_own_property` miss/non-normal result. Keep
+/// them out of the ordinary shape-loop frame without changing their order.
+noinline fn getSlowPropertyValueFromObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    object: *core.Object,
+    atom_id: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    if (object.class_id == core.class.ids.proxy) {
+        return try getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
+    }
+    if (object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+        defer desc.destroy(ctx.runtime);
+        switch (desc.kind) {
+            .data => return desc.value.dup(),
+            .generic => return core.JSValue.undefinedValue(),
+            .accessor => {
+                if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
+                return try callValueOrBytecode(ctx, output, global, receiver, desc.getter, &.{}, caller_function, caller_frame);
+            },
         }
     }
     return null;

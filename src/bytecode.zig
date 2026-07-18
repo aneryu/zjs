@@ -7132,10 +7132,10 @@ pub const pipeline_stack_size = struct {
     test "stack_size: regexp literal QuickJS shape is strict-computable" {
         const op = opcode.op;
 
-        // push_atom_value "a" ; push_atom_value "g" ; regexp ; return_undef
+        // push_atom_value "a" ; push_const compiled_bytecode ; regexp ; return_undef
         var bc = [_]u8{0} ** 12;
         bc[0] = op.push_atom_value;
-        bc[5] = op.push_atom_value;
+        bc[5] = op.push_const;
         bc[10] = op.regexp;
         bc[11] = op.return_undef;
 

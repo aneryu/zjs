@@ -985,6 +985,22 @@ pub fn addStringsOwned(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue
     return stringAddStringsOwned(rt, lhs, rhs);
 }
 
+/// Consume a known string and append an ASCII literal with one result
+/// allocation. Mirrors qjs `JS_ConcatString3(ctx, "", value, suffix)` without
+/// first materializing `suffix` as a second JSString.
+pub fn appendAsciiSuffixOwned(rt: *core.JSRuntime, value: core.JSValue, suffix: []const u8) !core.JSValue {
+    const body = value.asStringBody() orelse {
+        value.free(rt);
+        return error.TypeError;
+    };
+    const result = core.string.String.createAsciiSuffix(rt, body.resolveData(), suffix) catch |err| {
+        value.free(rt);
+        return err;
+    };
+    value.free(rt);
+    return result.value();
+}
+
 /// Consumes two known string values, mirroring `JS_ConcatString` rather than
 /// retaining children into a result and then freeing the input owners again.
 fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {

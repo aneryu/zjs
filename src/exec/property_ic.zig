@@ -213,7 +213,6 @@ fn setObjectDataPropertyForSimplePutFieldOwned(rt: *core.JSRuntime, receiver: co
     if (object.isArray()) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     }
-    if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
     const lookup = writableOwnDataPropertyLookupForObject(object, atom_id) orelse return false;
     return setOwnDataPropertyLookupOwned(rt, object, lookup, atom_id, value);
 }

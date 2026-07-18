@@ -906,6 +906,32 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
     try std.testing.expectEqual(@as(u16, 0xd800), lone_surrogate.codeUnitAt(0));
 }
 
+test "ASCII suffix concatenation preserves source width with one result allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const narrow_source = try core.string.String.createLatin1(rt, "ab");
+    defer narrow_source.value().free(rt);
+    const narrow_allocations = rt.memory.allocation_count;
+    const narrow = try core.string.String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
+    defer narrow.value().free(rt);
+    try std.testing.expect(!narrow.isWide());
+    try std.testing.expect(narrow.eqlBytes("aby"));
+    try std.testing.expectEqual(narrow_allocations + 1, rt.memory.allocation_count);
+
+    const wide_source = try core.string.String.createUtf16(rt, &.{ 0x0100, 'a' });
+    defer wide_source.value().free(rt);
+    const wide_allocations = rt.memory.allocation_count;
+    const wide = try core.string.String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
+    defer wide.value().free(rt);
+    try std.testing.expect(wide.isWide());
+    try std.testing.expectEqual(@as(usize, 3), wide.len());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
+    try std.testing.expectEqual(@as(u16, 'a'), wide.codeUnitAt(1));
+    try std.testing.expectEqual(@as(u16, 'y'), wide.codeUnitAt(2));
+    try std.testing.expectEqual(wide_allocations + 1, rt.memory.allocation_count);
+}
+
 test "flat strings store characters inline in a single fixed-size allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -1603,11 +1629,11 @@ test "regexp lastIndex set defers value finalizer reentry" {
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
     });
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
-    regexp.regexpLastIndexWritableSlot().* = true;
+    try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    regexp.regexpLastIndexSlot().* = value.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1640,11 +1666,11 @@ test "regexp lastIndex define defers value finalizer reentry" {
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
     });
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
-    regexp.regexpLastIndexWritableSlot().* = true;
+    try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    regexp.regexpLastIndexSlot().* = value.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -2315,25 +2341,29 @@ test "value root buffer exposes mutable copied slice" {
     try std.testing.expectEqual(@as(?i32, 302), buffer.values[0].asInt32());
 }
 
-test "regexp state uses payload storage" {
+test "regexp internals use inline storage and lastIndex uses first shape slot" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source = try core.string.String.createAscii(rt, "a+");
     defer source.value().free(rt);
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
 
-    try std.testing.expect(regexp.u.payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, regexp.flags.class_payload_kind);
-    regexp.regexpSourceSlot().* = source.value().dup();
+    try regexp.initializeRegExpLastIndex(rt);
+    try regexp.setRegexpSource(rt, source.value());
     try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    regexp.regexpLastIndexSlot().* = core.JSValue.int32(3);
-    regexp.regexpLastIndexWritableSlot().* = false;
+    try regexp.defineOwnProperty(
+        rt,
+        core.atom.ids.lastIndex,
+        core.Descriptor.data(core.JSValue.int32(3), false, false, false),
+    );
 
     try std.testing.expect(regexp.regexpSource() != null);
     try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
+    try std.testing.expectEqual(core.atom.ids.lastIndex, regexp.propAtomAt(0));
     try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
@@ -6209,14 +6239,17 @@ test "typed-array buffer self-cycle is released by runtime cycle removal" {
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
 }
 
-test "regexp payload self-cycle is released by runtime cycle removal" {
+test "regexp lastIndex self-cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
-    regexp.regexpSourceSlot().* = regexp.value().dup();
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
+    try regexp.initializeRegExpLastIndex(rt);
+    const source = try core.string.String.createAscii(rt, "a");
+    defer source.value().free(rt);
+    try regexp.setRegexpSource(rt, source.value());
     try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    regexp.regexpLastIndexSlot().* = regexp.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, regexp.value());
 
     regexp.value().free(rt);
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());

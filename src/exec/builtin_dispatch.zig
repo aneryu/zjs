@@ -239,95 +239,65 @@ noinline fn callTypedInternalRecordDirect(
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     const native = record.native_function orelse return error.TypeError;
+    // `InternalRecord` is engine-owned and its table builder guarantees that
+    // the function union tag equals `cproto`. QuickJS likewise stores an
+    // untagged `JSCFunctionType` and interprets it solely through `cproto`;
+    // retain the invariant check in safe builds without redispatching on the
+    // duplicate union tag in every hot ABI arm.
+    std.debug.assert(std.meta.activeTag(native) == record.cproto);
     switch (record.cproto) {
         .generic => {
-            const native_fn = switch (native) {
-                .generic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.generic;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
-            const native_fn = switch (native) {
-                .constructor => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_or_func => {
-            const native_fn = switch (native) {
-                .constructor_or_func => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_or_func;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .generic_magic => {
-            const native_fn = switch (native) {
-                .generic_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.generic_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_magic => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
-            const native_fn = switch (native) {
-                .constructor_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_or_func_magic => {
-            const native_fn = switch (native) {
-                .constructor_or_func_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_or_func_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .getter => {
-            const native_fn = switch (native) {
-                .getter => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.getter;
             return native_fn(ctx, this_value) catch |err| return @as(HostError, @errorCast(err));
         },
         .setter => {
-            const native_fn = switch (native) {
-                .setter => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.setter;
             return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]) catch |err| return @as(HostError, @errorCast(err));
         },
         .getter_magic => {
-            const native_fn = switch (native) {
-                .getter_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.getter_magic;
             return native_fn(ctx, this_value, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .setter_magic => {
-            const native_fn = switch (native) {
-                .setter_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.setter_magic;
             return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .f_f => {
-            const native_fn = switch (native) {
-                .f_f => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.f_f;
             const value = primitiveF64Arg(args, 0) orelse
                 return callInternalRecordFallback(ctx, this_value, record, args);
             return value_ops.numberToValue(native_fn(value));
         },
         .f_f_f => {
-            const native_fn = switch (native) {
-                .f_f_f => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.f_f_f;
             const lhs = primitiveF64Arg(args, 0) orelse
                 return callInternalRecordFallback(ctx, this_value, record, args);
             const rhs = primitiveF64Arg(args, 1) orelse

@@ -56,8 +56,22 @@ pub fn execCaptureSlotsOnStringFromIndex(
     const string_object = string_value.asStringBody() orelse return .not_available;
     try string_object.ensureFlat(rt);
 
+    return execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_object.resolveData(), start_index, capture);
+}
+
+/// Execute against the flat string payload already retained by the caller.
+/// QuickJS carries the same `JSString *`/buffer from `js_regexp_exec` into
+/// `lre_exec`; keeping the resolved width here avoids re-decoding a JSValue on
+/// every iteration of global match/replace loops.
+pub fn execCaptureSlotsOnResolvedStringFromIndex(
+    rt: *core.JSRuntime,
+    compiled: Compiled,
+    string_data: core.string.String.ResolvedData,
+    start_index: usize,
+    capture: []usize,
+) ExecError!ExecResult {
     const options = execOptions(rt);
-    return switch (string_object.resolveData()) {
+    return switch (string_data) {
         .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
         .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
@@ -65,6 +79,10 @@ pub fn execCaptureSlotsOnStringFromIndex(
 
 pub fn captureSlotValue(value: usize) ?usize {
     return regexp_bytecode.captureSlotValue(value);
+}
+
+pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8 {
+    return regexp_bytecode.groupName(bytecode, one_based_capture_index);
 }
 
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {

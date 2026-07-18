@@ -36,6 +36,12 @@ pub const AccessorMethod = core.host_function.builtin_method_ids.regexp.Accessor
 
 pub const LegacyAccessorMethod = core.host_function.builtin_method_ids.regexp.LegacyAccessorMethod;
 
+/// QuickJS creates `ctx->regexp_result_shape` while installing the RegExp
+/// intrinsic. Keep the corresponding realm template on the same lifecycle.
+pub fn installRegExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !void {
+    _ = try string_ops.initRegExpResultPropertyTemplate(rt, global);
+}
+
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "escape")) return @intFromEnum(StaticMethod.escape);
     return null;
@@ -122,24 +128,24 @@ pub const internal_entries = regexpEntries: {
         // `decodePrototypeMethodId` decodes).
         regexpEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), false),
         regexpEntry("test", 1, @intFromEnum(PrototypeMethod.test_), true),
-        regexpEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), true),
+        regexpGenericEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), true, &regexpExecCall),
         regexpEntry("[Symbol.search]", 1, @intFromEnum(PrototypeMethod.symbol_search), false),
-        regexpEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), false),
+        regexpGenericEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), false, &regexpSymbolMatchCall),
         regexpEntry("[Symbol.matchAll]", 1, @intFromEnum(PrototypeMethod.symbol_match_all), false),
         regexpEntry("[Symbol.replace]", 2, @intFromEnum(PrototypeMethod.symbol_replace), false),
-        regexpEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), false),
+        regexpGenericEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), false, &regexpSymbolSplitCall),
         regexpEntry("compile", 2, @intFromEnum(PrototypeMethod.compile), false),
         // Flag/source accessor getters.
-        regexpEntry("get source", 0, @intFromEnum(AccessorMethod.source), false),
-        regexpEntry("get flags", 0, @intFromEnum(AccessorMethod.flags), false),
-        regexpEntry("get global", 0, @intFromEnum(AccessorMethod.global), false),
-        regexpEntry("get ignoreCase", 0, @intFromEnum(AccessorMethod.ignore_case), false),
-        regexpEntry("get multiline", 0, @intFromEnum(AccessorMethod.multiline), false),
-        regexpEntry("get dotAll", 0, @intFromEnum(AccessorMethod.dot_all), false),
-        regexpEntry("get unicode", 0, @intFromEnum(AccessorMethod.unicode), false),
-        regexpEntry("get sticky", 0, @intFromEnum(AccessorMethod.sticky), false),
-        regexpEntry("get hasIndices", 0, @intFromEnum(AccessorMethod.has_indices), false),
-        regexpEntry("get unicodeSets", 0, @intFromEnum(AccessorMethod.unicode_sets), false),
+        regexpGetterEntry("get source", @intFromEnum(AccessorMethod.source), &regexpSourceAccessorCall),
+        regexpGetterEntry("get flags", @intFromEnum(AccessorMethod.flags), &regexpFlagsAccessorCall),
+        regexpFlagGetterEntry("get global", @intFromEnum(AccessorMethod.global), regexp_adapter.flag_bits.global),
+        regexpFlagGetterEntry("get ignoreCase", @intFromEnum(AccessorMethod.ignore_case), regexp_adapter.flag_bits.ignore_case),
+        regexpFlagGetterEntry("get multiline", @intFromEnum(AccessorMethod.multiline), regexp_adapter.flag_bits.multiline),
+        regexpFlagGetterEntry("get dotAll", @intFromEnum(AccessorMethod.dot_all), regexp_adapter.flag_bits.dot_all),
+        regexpFlagGetterEntry("get unicode", @intFromEnum(AccessorMethod.unicode), regexp_adapter.flag_bits.unicode),
+        regexpFlagGetterEntry("get sticky", @intFromEnum(AccessorMethod.sticky), regexp_adapter.flag_bits.sticky),
+        regexpFlagGetterEntry("get hasIndices", @intFromEnum(AccessorMethod.has_indices), regexp_adapter.flag_bits.indices),
+        regexpFlagGetterEntry("get unicodeSets", @intFromEnum(AccessorMethod.unicode_sets), regexp_adapter.flag_bits.unicode_sets),
         // Legacy static RegExp accessors (input/$_, lastMatch, capture groups).
         regexpEntry("get input", 0, @intFromEnum(LegacyAccessorMethod.get_input), false),
         regexpEntry("set input", 1, @intFromEnum(LegacyAccessorMethod.set_input), false),
@@ -168,6 +174,56 @@ fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32,
         .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&regexpCall),
+    };
+}
+
+fn regexpGenericEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime prepared: bool,
+    comptime implementation: core.host_function.NativeGenericFn,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = 0,
+        .prepared_call_ok = prepared,
+        .cproto = .generic,
+        .native_function = .{ .generic = implementation },
+    };
+}
+
+/// QuickJS gives `flags` and `source` distinct getter functions and shares only
+/// the eight boolean flag getters through `JS_CGETSET_MAGIC_DEF`. Preserve that
+/// call shape here: the record id still names the installed builtin while
+/// `magic` carries the compiled regexp flag mask, exactly like QuickJS.
+fn regexpGetterEntry(
+    comptime name: []const u8,
+    comptime id: u32,
+    comptime implementation: core.host_function.NativeGetterFn,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = 0,
+        .id = id,
+        .magic = 0,
+        .prepared_call_ok = false,
+        .cproto = .getter,
+        .native_function = .{ .getter = implementation },
+    };
+}
+
+fn regexpFlagGetterEntry(comptime name: []const u8, comptime id: u32, comptime mask: u16) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = 0,
+        .id = id,
+        .magic = mask,
+        .prepared_call_ok = false,
+        .cproto = .getter_magic,
+        .native_function = .{ .getter_magic = &regexpFlagAccessorCall },
     };
 }
 
@@ -221,11 +277,16 @@ fn regexpCall(
         // already a RegExp and no flags are given" call-only behavior).
         if (host_call.is_constructor) {
             const rt = ctx.runtime;
+            // QJS's context is permanently tied to its realm. ZJS also permits
+            // callers to run bytecode against an explicit global before
+            // `ctx.global` is initialized, so OP_regexp supplies that active
+            // VM global through the construct environment.
+            const active_global = host_call.global orelse ctx.global orelse return error.TypeError;
             const pattern = if (args.len >= 1) args[0] else try createStringValue(rt, "");
             defer if (args.len < 1) pattern.free(rt);
             const flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
             defer if (args.len < 2) flags.free(rt);
-            return constructWithPrototype(rt, pattern, flags, host_call.new_target);
+            return constructWithPrototypeInRealm(rt, active_global, pattern, flags, host_call.new_target);
         }
         const active_global = host_call.global orelse return error.TypeError;
         return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, host_call.func_obj, args, caller_function, caller_frame);
@@ -236,10 +297,6 @@ fn regexpCall(
     if (legacyAccessorMethodFromId(id)) |method| {
         const active_global = host_call.global orelse return error.TypeError;
         return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
-    }
-    if (accessorNameFromId(id) != null) {
-        const active_global = host_call.global orelse return error.TypeError;
-        return accessorCallById(ctx, output, active_global, this_value, function_object, id, caller_function, caller_frame);
     }
     const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
     // `compile` resolves the global through the function object's realm first
@@ -252,7 +309,7 @@ fn regexpCall(
     return switch (method_id) {
         1 => string_ops.qjsRegExpToString(ctx, output, active_global, this_value, caller_function, caller_frame),
         2 => (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
-        3 => (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        3 => try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame),
         4 => (try string_ops.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
         5 => (try string_ops.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
         6 => (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
@@ -260,6 +317,151 @@ fn regexpCall(
         8 => (try string_ops.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
         else => error.TypeError,
     };
+}
+
+fn regexpFlagsAccessorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, 0) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+
+    // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe the
+    // eight flag properties through ordinary [[Get]] in canonical order.
+    const flag_atoms = comptime [_]core.Atom{
+        core.atom.predefinedId("hasIndices", .string).?,
+        core.atom.predefinedId("global", .string).?,
+        core.atom.predefinedId("ignoreCase", .string).?,
+        core.atom.predefinedId("multiline", .string).?,
+        core.atom.predefinedId("dotAll", .string).?,
+        core.atom.predefinedId("unicode", .string).?,
+        core.atom.predefinedId("unicodeSets", .string).?,
+        core.atom.predefinedId("sticky", .string).?,
+    };
+    const flag_chars = [_]u8{ 'd', 'g', 'i', 'm', 's', 'u', 'v', 'y' };
+    var str: [flag_chars.len]u8 = undefined;
+    var count: usize = 0;
+    for (flag_atoms, flag_chars) |flag_atom, flag_char| {
+        const value = try object_ops.getValueProperty(
+            native_ctx,
+            host_call.output,
+            active_global,
+            native_this,
+            flag_atom,
+            host_call.caller_function,
+            host_call.caller_frame,
+        );
+        defer value.free(native_ctx.runtime);
+        if (coercion_ops.valueTruthy(value)) {
+            str[count] = flag_char;
+            count += 1;
+        }
+    }
+    return createStringValue(native_ctx.runtime, str[0..count]);
+}
+
+fn regexpSourceAccessorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, 0) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    const function_object = host_call.func_obj orelse return error.TypeError;
+    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+
+    const header = native_this.refHeader() orelse return error.TypeError;
+    const receiver: *core.Object = @fieldParentPtr("header", header);
+    if (receiver.class_id == core.class.ids.regexp and (regexpFlagBits(receiver) catch null) != null) {
+        return accessor(native_ctx.runtime, native_this, "source") catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |proto| {
+        if (receiver == proto) return createStringValue(native_ctx.runtime, "(?:)");
+    }
+    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
+    return error.TypeError;
+}
+
+fn regexpFlagAccessorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, native_magic) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    const function_object = host_call.func_obj orelse return error.TypeError;
+    if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
+
+    const header = native_this.refHeader() orelse return error.TypeError;
+    const receiver: *core.Object = @fieldParentPtr("header", header);
+    if (receiver.class_id == core.class.ids.regexp) {
+        if (regexpFlagBits(receiver) catch null) |bits| {
+            const mask: u16 = @intCast(native_magic);
+            return core.JSValue.boolean((bits & mask) != 0);
+        }
+    }
+    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |proto| {
+        if (receiver == proto) return core.JSValue.undefinedValue();
+    }
+    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
+    return error.TypeError;
+}
+
+fn regexpExecCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    return try regexp_fastpath.qjsRegExpExecMethod(
+        native_ctx,
+        host_call.output,
+        active_global,
+        native_this,
+        native_args,
+        host_call.caller_function,
+        host_call.caller_frame,
+    );
+}
+
+fn regexpSymbolMatchCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    return (try string_ops.qjsRegExpSymbolMatch(
+        native_ctx,
+        host_call.output,
+        active_global,
+        native_this,
+        native_args,
+        host_call.caller_function,
+        host_call.caller_frame,
+    )) orelse error.TypeError;
+}
+
+fn regexpSymbolSplitCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+    const active_global = host_call.global orelse return error.TypeError;
+    return (try string_ops.qjsRegExpSymbolSplit(
+        native_ctx,
+        host_call.output,
+        active_global,
+        native_this,
+        native_args,
+        host_call.caller_function,
+        host_call.caller_frame,
+    )) orelse error.TypeError;
 }
 
 /// QuickJS source map: narrow RegExp constructor payload used by transitional
@@ -290,7 +492,7 @@ pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const
 
     source_val = (try core.string.String.createUtf8(rt, pattern)).value();
 
-    return constructCompiled(rt, source_val, compiled.bytecode, prototype);
+    return constructCompiled(rt, null, source_val, compiled.bytecode, prototype);
 }
 
 pub fn constructLiteralWithValues(
@@ -307,17 +509,21 @@ pub fn constructLiteralWithValues(
         else => |other| return other,
     };
     defer compiled.deinit(rt.memory.allocator);
-    return constructCompiled(rt, source, compiled.bytecode, prototype);
+    return constructCompiled(rt, null, source, compiled.bytecode, prototype);
 }
 
 pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    return constructWithPrototypeInRealm(rt, null, pattern, flags, prototype);
+}
+
+fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Object, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (flags.isUndefined()) {
         if (regexpObjectFromValue(pattern)) |regexp_object| {
             const source_val = try getInternalSource(regexp_object);
             defer source_val.free(rt);
             const bytecode = regexp_object.regexpCompiledBytecode();
             if (bytecode.len == 0) return error.TypeError;
-            return constructCompiled(rt, source_val, bytecode, prototype);
+            return constructCompiled(rt, realm_global, source_val, bytecode, prototype);
         }
     }
 
@@ -355,7 +561,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags:
     var compiled = try compileSourceAndFlags(rt, source_val, flags_val);
     defer compiled.deinit(rt.memory.allocator);
 
-    return constructCompiled(rt, source_val, compiled.bytecode, prototype);
+    return constructCompiled(rt, realm_global, source_val, compiled.bytecode, prototype);
 }
 
 fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -371,21 +577,52 @@ fn compilePatternAndFlagsSyntax(rt: *core.JSRuntime, pattern: []const u8, flags:
 }
 
 fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.JSValue) !regexp_lib.Compiled {
-    var flag_bytes = std.ArrayList(u8).empty;
-    defer flag_bytes.deinit(rt.memory.allocator);
-    try appendValueString(rt, &flag_bytes, flags);
+    // QuickJS's js_compile_regexp passes both strings through
+    // JS_ToCStringLen2. ASCII strings keep a live reference and expose their
+    // inline bytes directly; only strings that need UTF-8 transcoding allocate
+    // a temporary buffer. `JSString.Utf8` has that same borrowed/owned
+    // contract, so do not unconditionally copy every source and flags string
+    // into separate ArrayLists before compiling.
+    var flag_bytes = try core.JSValue.String.Utf8.fromValue(rt.memory.allocator, flags);
+    defer flag_bytes.deinit();
+    // js_compile_regexp validates flags before converting the source, then
+    // passes `cesu8 = !unicode` to JS_ToCStringLen2. Besides preserving its
+    // exception/allocation order, this keeps non-Unicode patterns expressed
+    // in UTF-16 code units rather than merging surrogate pairs prematurely.
+    const flag_bits = regexp_lib.parseFlagBits(flag_bytes.slice()) catch |err| switch (err) {
+        error.InvalidPattern, error.Unsupported => return error.SyntaxError,
+        else => |other| return other,
+    };
+    const cesu8 = (flag_bits & (regexp_lib.flags.unicode | regexp_lib.flags.unicode_sets)) == 0;
+    var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.memory.allocator, source, cesu8);
+    defer source_bytes.deinit();
 
-    var source_bytes = std.ArrayList(u8).empty;
-    defer source_bytes.deinit(rt.memory.allocator);
-    try appendRegExpPatternString(rt, &source_bytes, source, flag_bytes.items);
-
-    return compilePatternAndFlagsSyntax(rt, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
+    return regexp_lib.compilePatternWithFlagBits(rt.memory.allocator, source_bytes.slice(), flag_bits) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         else => |other| return other,
     };
 }
 
-fn constructCompiled(rt: *core.JSRuntime, source: core.JSValue, bytecode: []const u8, prototype: ?*core.Object) !core.JSValue {
+fn createRegExpObject(rt: *core.JSRuntime, realm_global: ?*core.Object, prototype: ?*core.Object) !*core.Object {
+    if (realm_global) |global| {
+        if (global.cachedRealmValue(.regexp_instance_template)) |stored| {
+            const template = try core.Object.expect(stored);
+            if (template.getPrototype() == prototype) {
+                return core.Object.createRegExpFromPropertyTemplate(rt, template);
+            }
+        }
+    }
+
+    // Custom/null prototypes do not use the realm's intrinsic shape in QJS
+    // either (`js_create_from_ctor` followed by defining lastIndex). Reserve the
+    // slot and let the ordinary transition cache build the corresponding shape.
+    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, prototype, 1);
+    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    try object.initializeRegExpLastIndex(rt);
+    return object;
+}
+
+fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: core.JSValue, bytecode: []const u8, prototype: ?*core.Object) !core.JSValue {
     var source_val = source;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &source_val },
@@ -397,42 +634,37 @@ fn constructCompiled(rt: *core.JSRuntime, source: core.JSValue, bytecode: []cons
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(rt, core.class.ids.regexp, prototype);
+    const object = try createRegExpObject(rt, realm_global, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
-    try object.setOptionalValueSlot(rt, object.regexpSourceSlot(), source_val.dup());
+    try object.setRegexpSource(rt, source_val);
     try object.setRegexpCompiledBytecode(rt, bytecode);
-    try object.setOptionalValueSlot(rt, object.regexpLastIndexSlot(), core.JSValue.int32(0));
-    object.regexpLastIndexWritableSlot().* = true;
     return object.value();
 }
 
-test "constructCompiled roots source while creating regexp object" {
+test "constructCompiled roots string source while creating regexp object" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const source_atom = try rt.atoms.newValueSymbol("gc-regexp-source-symbol");
-    const source_value = try rt.symbolValue(source_atom);
+    const source = try core.string.String.createAscii(rt, "a");
+    const source_value = source.value();
     var compiled = try regexp_lib.compilePatternAndFlags(rt.memory.allocator, "a", "g");
     defer compiled.deinit(rt.memory.allocator);
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const regexp_value = try constructCompiled(rt, source_value, compiled.bytecode, null);
+    const regexp_value = try constructCompiled(rt, null, source_value, compiled.bytecode, null);
     var regexp_alive = true;
     defer if (regexp_alive) regexp_value.free(rt);
     const regexp = regexpObjectFromValue(regexp_value) orelse return error.TypeError;
 
-    try std.testing.expect(rt.atoms.name(source_atom) != null);
     try std.testing.expect(regexp.regexpSource().?.same(source_value));
     try std.testing.expect(regexp.regexpCompiledBytecode().len != 0);
 
     regexp_value.free(rt);
     regexp_alive = false;
     source_value.free(rt);
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(source_atom) == null);
 }
 
 /// Pattern/flags early-error validation lives in `libs/regexp.zig`
@@ -1278,99 +1510,6 @@ pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, 
     };
 }
 
-/// RegExp.prototype accessor bodies dispatched by the record id (the qjs
-/// magic int): js_regexp_get_flag (quickjs.c:47921) for the eight flag
-/// getters, js_regexp_get_flags (quickjs.c:47943) for `flags`, and the
-/// source getter. The receiver's compiled bytecode is read directly; a
-/// non-RegExp receiver resolves only when it is the realm's
-/// RegExp.prototype (undefined / "(?:)"), else TypeError — no name-string
-/// derivation and no per-call atom interning.
-fn accessorCallById(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    caller_function: ?*const builtin_dispatch.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
-    const rt = ctx.runtime;
-    // JS_ThrowTypeErrorNotAnObject (js_regexp_get_flag / js_regexp_get_flags).
-    if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
-
-    if (id == @intFromEnum(AccessorMethod.flags)) {
-        // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe
-        // the eight flag properties through ordinary [[Get]] in canonical
-        // order (compile-time atoms, qjs flag_atom[] analogue).
-        const flag_atoms = comptime [_]core.Atom{
-            core.atom.predefinedId("hasIndices", .string).?,
-            core.atom.predefinedId("global", .string).?,
-            core.atom.predefinedId("ignoreCase", .string).?,
-            core.atom.predefinedId("multiline", .string).?,
-            core.atom.predefinedId("dotAll", .string).?,
-            core.atom.predefinedId("unicode", .string).?,
-            core.atom.predefinedId("unicodeSets", .string).?,
-            core.atom.predefinedId("sticky", .string).?,
-        };
-        const flag_chars = [_]u8{ 'd', 'g', 'i', 'm', 's', 'u', 'v', 'y' };
-        var str: [flag_chars.len]u8 = undefined;
-        var count: usize = 0;
-        for (flag_atoms, flag_chars) |flag_atom, flag_char| {
-            const value = try object_ops.getValueProperty(ctx, output, global, this_value, flag_atom, caller_function, caller_frame);
-            defer value.free(rt);
-            if (coercion_ops.valueTruthy(value)) {
-                str[count] = flag_char;
-                count += 1;
-            }
-        }
-        return createStringValue(rt, str[0..count]);
-    }
-
-    const header = this_value.refHeader() orelse return error.TypeError;
-    const receiver: *core.Object = @fieldParentPtr("header", header);
-    const maybe_bits: ?u16 = if (receiver.class_id == core.class.ids.regexp)
-        (regexpFlagBits(receiver) catch null)
-    else
-        null;
-    if (maybe_bits) |bits| {
-        // js_get_regexp success: read the bit straight off the compiled
-        // bytecode (lre_get_flags), or escape the internal source.
-        if (id == @intFromEnum(AccessorMethod.source)) {
-            return accessor(rt, this_value, "source") catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        const mask = flagMaskFromAccessorId(id) orelse return error.TypeError;
-        return core.JSValue.boolean((bits & mask) != 0);
-    }
-    // js_regexp_get_flag !re branch: the realm's RegExp.prototype reads
-    // undefined (source: "(?:)"); any other receiver is invalid.
-    if (object_ops.regExpPrototypeFromGlobal(rt, global)) |proto| {
-        if (receiver == proto) {
-            if (id == @intFromEnum(AccessorMethod.source)) return createStringValue(rt, "(?:)");
-            return core.JSValue.undefinedValue();
-        }
-    }
-    _ = try array_ops.throwRegExpAccessorTypeError(ctx, global, function_object.value());
-    return error.TypeError;
-}
-
-fn flagMaskFromAccessorId(id: u32) ?u16 {
-    return switch (id) {
-        @intFromEnum(AccessorMethod.global) => regexp_adapter.flag_bits.global,
-        @intFromEnum(AccessorMethod.ignore_case) => regexp_adapter.flag_bits.ignore_case,
-        @intFromEnum(AccessorMethod.multiline) => regexp_adapter.flag_bits.multiline,
-        @intFromEnum(AccessorMethod.dot_all) => regexp_adapter.flag_bits.dot_all,
-        @intFromEnum(AccessorMethod.unicode) => regexp_adapter.flag_bits.unicode,
-        @intFromEnum(AccessorMethod.sticky) => regexp_adapter.flag_bits.sticky,
-        @intFromEnum(AccessorMethod.has_indices) => regexp_adapter.flag_bits.indices,
-        @intFromEnum(AccessorMethod.unicode_sets) => regexp_adapter.flag_bits.unicode_sets,
-        else => null,
-    };
-}
-
 pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u8) !core.JSValue {
     const object = try expectRegExpObject(object_value);
     if (std.mem.eql(u8, name, "source")) {
@@ -1531,6 +1670,11 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
 }
 
 fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+    // qjs `js_new_string8_len(..., 0)` returns the canonical empty atom
+    // string. RegExp `flags` reaches this case for every flagless receiver, so
+    // allocating a fresh zero-length body here adds an alloc/free pair to
+    // `@@split` before the sticky flag is appended.
+    if (bytes.len == 0) return (try rt.emptyString()).value().dup();
     const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
@@ -1623,11 +1767,6 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         },
         .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
     }
-}
-
-fn appendRegExpPatternString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue, flags: []const u8) !void {
-    _ = flags;
-    try appendValueString(rt, buffer, value);
 }
 
 fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {

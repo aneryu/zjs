@@ -1069,22 +1069,27 @@ pub const builtin_method_id_lookup = struct {
         }
 
         pub fn fastPrototypeMethodIdForClass(class_id: ClassId, name: []const u8) ?u32 {
-            const id = prototypeMethodId(name) orelse return null;
             return switch (class_id) {
-                class.ids.map, class.ids.weakmap => switch (id) {
-                    @intFromEnum(PrototypeMethod.set),
-                    @intFromEnum(PrototypeMethod.get),
-                    @intFromEnum(PrototypeMethod.has),
-                    @intFromEnum(PrototypeMethod.delete),
-                    => id,
-                    else => null,
+                class.ids.map, class.ids.weakmap => blk: {
+                    const id = prototypeMethodId(name) orelse break :blk null;
+                    break :blk switch (id) {
+                        @intFromEnum(PrototypeMethod.set),
+                        @intFromEnum(PrototypeMethod.get),
+                        @intFromEnum(PrototypeMethod.has),
+                        @intFromEnum(PrototypeMethod.delete),
+                        => id,
+                        else => null,
+                    };
                 },
-                class.ids.set, class.ids.weakset => switch (id) {
-                    @intFromEnum(PrototypeMethod.add),
-                    @intFromEnum(PrototypeMethod.has),
-                    @intFromEnum(PrototypeMethod.delete),
-                    => id,
-                    else => null,
+                class.ids.set, class.ids.weakset => blk: {
+                    const id = prototypeMethodId(name) orelse break :blk null;
+                    break :blk switch (id) {
+                        @intFromEnum(PrototypeMethod.add),
+                        @intFromEnum(PrototypeMethod.has),
+                        @intFromEnum(PrototypeMethod.delete),
+                        => id,
+                        else => null,
+                    };
                 },
                 else => null,
             };
@@ -1473,6 +1478,7 @@ test "builtin method-id helpers preserve load-bearing id values" {
     // collection: class-keyed fast-path filter.
     try testing.expectEqual(lookup.collection.prototypeMethodId("get"), lookup.collection.fastPrototypeMethodIdForClass(class.ids.map, "get"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.set, "get"));
+    try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.regexp, "get"));
     try testing.expect(lookup.collection.legacyClosureMethodId("set") != null);
 
     // date.

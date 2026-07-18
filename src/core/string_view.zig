@@ -20,12 +20,20 @@ pub fn JSString(comptime Value: type) type {
             allocator: ?std.mem.Allocator = null,
 
             pub fn init(allocator: std.mem.Allocator, string: Self) !Utf8 {
+                return initCesu8(allocator, string, false);
+            }
+
+            /// QuickJS `JS_ToCStringLen2` conversion. When `cesu8` is true,
+            /// encode each UTF-16 surrogate as its own three-byte WTF-8
+            /// sequence instead of combining a valid pair into one scalar.
+            /// Flat ASCII remains borrowed in either mode.
+            pub fn initCesu8(allocator: std.mem.Allocator, string: Self, cesu8: bool) !Utf8 {
                 switch (string.ptr.resolveData()) {
                     .latin1 => |latin1| {
                         if (string_mod.isAsciiBytes(latin1)) {
                             return .{ .bytes = latin1 };
                         }
-                        const owned = try string.toOwnedUtf8(allocator);
+                        const owned = try string.toOwnedUtf8Cesu8(allocator, cesu8);
                         return .{
                             .bytes = owned,
                             .owned = owned,
@@ -33,7 +41,7 @@ pub fn JSString(comptime Value: type) type {
                         };
                     },
                     .utf16 => {
-                        const owned = try string.toOwnedUtf8(allocator);
+                        const owned = try string.toOwnedUtf8Cesu8(allocator, cesu8);
                         return .{
                             .bytes = owned,
                             .owned = owned,
@@ -46,6 +54,11 @@ pub fn JSString(comptime Value: type) type {
             pub fn fromValue(allocator: std.mem.Allocator, js_value: Value) !Utf8 {
                 const string = Self.fromValue(js_value) orelse return error.TypeError;
                 return init(allocator, string);
+            }
+
+            pub fn fromValueCesu8(allocator: std.mem.Allocator, js_value: Value, cesu8: bool) !Utf8 {
+                const string = Self.fromValue(js_value) orelse return error.TypeError;
+                return initCesu8(allocator, string, cesu8);
             }
 
             pub fn slice(self: Utf8) []const u8 {
@@ -93,9 +106,13 @@ pub fn JSString(comptime Value: type) type {
         }
 
         pub fn toOwnedUtf8(self: Self, allocator: std.mem.Allocator) ![]u8 {
+            return toOwnedUtf8Cesu8(self, allocator, false);
+        }
+
+        pub fn toOwnedUtf8Cesu8(self: Self, allocator: std.mem.Allocator, cesu8: bool) ![]u8 {
             const len = switch (self.ptr.resolveData()) {
                 .latin1 => |latin1| utf8LenLatin1(latin1),
-                .utf16 => |utf16| utf8LenUtf16(utf16),
+                .utf16 => |utf16| utf8LenUtf16(utf16, cesu8),
             };
             const out = try allocator.alloc(u8, len);
             var offset: usize = 0;
@@ -107,7 +124,7 @@ pub fn JSString(comptime Value: type) type {
                     var index: usize = 0;
                     while (index < utf16.len) {
                         const unit = utf16[index];
-                        if (isHighSurrogate(unit) and index + 1 < utf16.len and isLowSurrogate(utf16[index + 1])) {
+                        if (!cesu8 and isHighSurrogate(unit) and index + 1 < utf16.len and isLowSurrogate(utf16[index + 1])) {
                             const cp = surrogatePairCodePoint(unit, utf16[index + 1]);
                             offset += writeUtf8CodePoint(out[offset..], cp);
                             index += 2;
@@ -130,12 +147,12 @@ fn utf8LenLatin1(bytes: []const u8) usize {
     return len;
 }
 
-fn utf8LenUtf16(units: []const u16) usize {
+fn utf8LenUtf16(units: []const u16, cesu8: bool) usize {
     var len: usize = 0;
     var index: usize = 0;
     while (index < units.len) {
         const unit = units[index];
-        if (isHighSurrogate(unit) and index + 1 < units.len and isLowSurrogate(units[index + 1])) {
+        if (!cesu8 and isHighSurrogate(unit) and index + 1 < units.len and isLowSurrogate(units[index + 1])) {
             len += 4;
             index += 2;
             continue;
@@ -248,6 +265,21 @@ test "JSString converts utf16 surrogate pairs to owned utf8" {
     const utf8 = try view.toOwnedUtf8(std.testing.allocator);
     defer std.testing.allocator.free(utf8);
     try std.testing.expectEqualSlices(u8, "\xf0\x9f\x98\x80", utf8);
+}
+
+test "JSString CString CESU-8 mode preserves surrogate code units" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const str = try core.string.String.createUtf16(rt, &.{ 0xd83d, 0xde00 });
+    const value = str.value();
+    defer value.free(rt);
+
+    var cesu8 = try core.JSValue.String.Utf8.fromValueCesu8(std.testing.allocator, value, true);
+    defer cesu8.deinit();
+    try std.testing.expect(!cesu8.isBorrowed());
+    try std.testing.expectEqualSlices(u8, "\xed\xa0\xbd\xed\xb8\x80", cesu8.slice());
 }
 
 test "JSString.Utf8 borrows latin1 ascii without allocation" {

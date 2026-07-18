@@ -1051,6 +1051,46 @@ test "F4: large bigint literal lowers to constant pool value" {
     try std.testing.expect(value.isBigInt());
 }
 
+test "F4: regexp literal stores parse-time compiled bytecode in the constant pool" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var parsed = try parser.compile(env.rt, "/a+/gi;", .{ .mode = .script, .filename = "regexp-literal.js" });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    const fn_bc = &parsed.function;
+
+    var previous_previous_pc: ?usize = null;
+    var previous_pc: ?usize = null;
+    var regexp_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < fn_bc.code.len) {
+        if (fn_bc.code[pc] == op.regexp) {
+            regexp_pc = pc;
+            break;
+        }
+        previous_previous_pc = previous_pc;
+        previous_pc = pc;
+        const opcode_size = engine.bytecode.opcode.sizeOf(fn_bc.code[pc]);
+        try std.testing.expect(opcode_size != 0);
+        pc += opcode_size;
+    }
+
+    try std.testing.expect(regexp_pc != null);
+    try std.testing.expectEqual(op.push_atom_value, fn_bc.code[previous_previous_pc.?]);
+    try std.testing.expectEqual(op.push_const8, fn_bc.code[previous_pc.?]);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.constants.values.len);
+
+    const constant_index = readConstIndexAtOpcode(fn_bc.code, previous_pc.?);
+    const compiled_value = fn_bc.constants.get(constant_index).?;
+    defer compiled_value.free(env.rt);
+    const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(!compiled_string.isWide());
+
+    var expected = try engine.libs.regexp.compilePatternAndFlags(std.testing.allocator, "a+", "gi");
+    defer expected.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, expected.bytecode, compiled_string.borrowLatin1().?);
+}
+
 test "F4: boolean and null literals" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

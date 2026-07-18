@@ -190,7 +190,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.regexp] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try regexp_vm.pushLiteral(vm.ctx, vm.stack, class_vm.constructorPrototypeFromGlobal(vm.ctx.runtime, vm.global, "RegExp"));
+            try regexp_vm.pushLiteral(vm.ctx, vm.stack, vm.global);
         }
     }.b);
     t[op.fclosure] = coldStd(struct {

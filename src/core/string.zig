@@ -473,6 +473,27 @@ pub const String = struct {
         return self;
     }
 
+    /// Append an ASCII literal to an already-resolved string with one final
+    /// allocation. This is the storage operation behind qjs
+    /// `JS_ConcatString3(ctx, "", value, suffix)`: a narrow input stays
+    /// narrow, while a wide input remains wide and receives widened ASCII code
+    /// units directly in its inline payload.
+    pub fn createAsciiSuffix(rt: *JSRuntime, source: ResolvedData, suffix: []const u8) !*String {
+        std.debug.assert(isAsciiBytes(suffix));
+        return switch (source) {
+            .latin1 => |bytes| createLatin1Concat(rt, bytes, suffix),
+            .utf16 => |units| blk: {
+                const total = try std.math.add(usize, units.len, suffix.len);
+                const self = try createUninitialized(rt, .utf16, total);
+                errdefer destroyFlat(rt, self);
+                const out = self.utf16Mut();
+                @memcpy(out[0..units.len], units);
+                for (suffix, units.len..) |byte, index| out[index] = byte;
+                break :blk self;
+            },
+        };
+    }
+
     pub fn createUtf16ConcatWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
         _ = seed;
         return createUtf16Concat(rt, a, b);

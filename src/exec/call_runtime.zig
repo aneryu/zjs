@@ -354,9 +354,15 @@ pub fn callNativeBuiltinRecordForVm(
     if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| {
         return value;
     }
-    // Standard-native domains are table-dispatched. A null result identifies a
-    // host-domain callable or an invalid/stale native id for the caller to
-    // classify; this generic VM call Module does not know domain bodies.
+    // Host builtins are exec-owned integer records too, but unlike standard
+    // builtins they do not live in rt.internal_builtins. Dispatch them by id
+    // here instead of falling through to the legacy function-name cascade.
+    if (native_ref.domain == .host) {
+        return try call_mod.callHostGlobalNativeFunctionRecord(ctx, global, this_value, function_object, native_ref.id, args);
+    }
+    // Standard-native domains are table-dispatched. A null result now only
+    // identifies an invalid or stale standard-native id for the caller to
+    // classify.
     return null;
 }
 
@@ -463,7 +469,7 @@ fn collectionPrototypeMethodByName(
 
 const VmNativeCallableDispatch = union(enum) {
     bound_function,
-    resolved_record: *const core.host_function.InternalRecord,
+    resolved_record: core.Object.NativeCallTarget,
     native_ref: core.function.NativeBuiltinRef,
     host_function,
     internal: core.host_function.InternalCallableTag,
@@ -474,8 +480,8 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
     return switch (function_object.class_id) {
         core.class.ids.bound_function => .bound_function,
         else => blk: {
-            if (function_object.nativeRecord()) |record| {
-                break :blk .{ .resolved_record = record };
+            if (function_object.nativeCallTarget()) |target| {
+                break :blk .{ .resolved_record = target };
             }
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
@@ -516,6 +522,136 @@ fn callInternalCallableByTag(
     };
 }
 
+noinline fn callRawFunctionBytecodeClassMode(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
+    const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
+    if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
+        const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+        if (result.isObject()) return result;
+        result.free(ctx.runtime);
+        return this_value.dup();
+    }
+    if (fb.flags.is_class_constructor) {
+        if (!allow_class_constructor_call) return error.TypeError;
+        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
+        const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
+        if (!fb.flags.is_derived_class_constructor) {
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
+        }
+        return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+    }
+    return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global);
+}
+
+noinline fn callFunctionObjectBytecodeClassMode(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
+    const function_value = function_object.functionBytecode() orelse return error.TypeError;
+    const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
+        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+        if (result.isObject()) return result;
+        result.free(ctx.runtime);
+        return this_value.dup();
+    }
+    if (fb.flags.is_class_constructor) {
+        if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
+        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
+        const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        if (!fb.flags.is_derived_class_constructor) {
+            try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
+        }
+        return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+    }
+    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+}
+
+noinline fn callNativeCallableObjectClassMode(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
+    switch (vmNativeCallableDispatch(function_object)) {
+        .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .resolved_record => |target| {
+            const function_global = target.realm_global_ptr orelse object_ops.objectRealmGlobal(function_object) orelse global;
+            const native_result = builtin_dispatch.callInternalRecordDirect(
+                ctx,
+                output,
+                function_global,
+                &.{},
+                function_object,
+                this_value,
+                target.record,
+                args,
+                caller_function,
+                caller_frame,
+            ) catch |err| {
+                try throwRuntimeErrorForGlobal(ctx, function_global, err);
+                return err;
+            };
+            return native_result;
+        },
+        .native_ref => |native_ref| {
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
+                try throwRuntimeErrorForGlobal(ctx, function_global, err);
+                return err;
+            };
+            if (native_result) |value| return value;
+        },
+        .host_function => {
+            if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
+        },
+        .internal => |tag| {
+            if (try callInternalCallableByTag(ctx, output, global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
+        },
+        .name_dispatch => {},
+    }
+    return callNativeCallableByName(
+        ctx,
+        output,
+        global,
+        this_value,
+        func,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+        allow_class_constructor_call,
+    );
+}
+
 fn callValueOrBytecodeClassModeDispatch(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -528,473 +664,425 @@ fn callValueOrBytecodeClassModeDispatch(
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
     if (func.isFunctionBytecode()) {
-        const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
-            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-            const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            if (result.isObject()) return result;
-            result.free(ctx.runtime);
-            return this_value.dup();
-        }
-        if (fb.flags.is_class_constructor) {
-            if (!allow_class_constructor_call) return error.TypeError;
-            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            if (!fb.flags.is_derived_class_constructor) {
-                try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
-            }
-            return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global);
-    }
-    if (object_ops.functionObjectFromValue(func)) |function_object| {
-        const function_value = function_object.functionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
-            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            if (result.isObject()) return result;
-            result.free(ctx.runtime);
-            return this_value.dup();
-        }
-        if (fb.flags.is_class_constructor) {
-            if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
-            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            if (!fb.flags.is_derived_class_constructor) {
-                try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
-            }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+        return callRawFunctionBytecodeClassMode(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
     }
     if (object_ops.objectFromValue(func)) |object| {
-        if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
-            return object_ops.callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
+        switch (object.class_id) {
+            core.class.ids.bytecode_function => {
+                return callFunctionObjectBytecodeClassMode(ctx, output, global, this_value, func, object, args, caller_function, caller_frame, allow_class_constructor_call);
+            },
+            core.class.ids.proxy => {
+                if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
+                    return object_ops.callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
+                }
+            },
+            core.class.ids.c_function,
+            core.class.ids.c_closure,
+            core.class.ids.bound_function,
+            => return callNativeCallableObjectClassMode(ctx, output, global, this_value, func, object, args, caller_function, caller_frame, allow_class_constructor_call),
+            else => {},
         }
     }
-    if (object_ops.callableObjectFromValue(func)) |function_object| {
-        switch (vmNativeCallableDispatch(function_object)) {
-            .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
-            .resolved_record => |record| {
-                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-                const native_result = builtin_dispatch.callInternalRecordDirect(
-                    ctx,
-                    output,
-                    function_global,
-                    &.{},
-                    function_object,
-                    this_value,
-                    record,
-                    args,
-                    caller_function,
-                    caller_frame,
-                ) catch |err| {
-                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
-                    return err;
-                };
-                return native_result;
-            },
-            .native_ref => |native_ref| {
-                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-                const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
-                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
-                    return err;
-                };
-                if (native_result) |value| return value;
-            },
-            .host_function => {
-                if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
-            },
-            .internal => |tag| {
-                if (try callInternalCallableByTag(ctx, output, global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
-            },
-            .name_dispatch => {},
+    if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+    return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
+}
+
+/// Compatibility fallback for callable objects which do not carry a stable
+/// native record or internal-callable tag. Keep this legacy name dispatch out
+/// of the normal call frame: QuickJS classifies the callable in
+/// `JS_CallInternal` and enters a class-specific call function, so a C/native
+/// call does not share a frame with bytecode and compatibility dispatch.
+noinline fn callNativeCallableByName(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
+    // Borrow the internal dispatch-name bytes instead of allocating a
+    // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
+    // times, and the previous round-trip alloc/free showed up clearly
+    // on the profile. Native dispatch names are atom-backed ASCII
+    // builtin names in practice; a `null` return here means there is
+    // no usable dispatch name.
+    const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
+        return core.JSValue.undefinedValue();
+    };
+    defer dispatch.name_value.free(ctx.runtime);
+    const name = dispatch.name;
+    if (name.len == 0) return core.JSValue.undefinedValue();
+    if (allow_class_constructor_call and isBuiltinConstructorName(name)) {
+        if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, null)) |constructed| {
+            return constructed;
         }
-        // Borrow the internal dispatch-name bytes instead of allocating a
-        // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
-        // times, and the previous round-trip alloc/free showed up clearly
-        // on the profile. Native dispatch names are atom-backed ASCII
-        // builtin names in practice; a `null` return here means there is
-        // no usable dispatch name.
-        const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
-            return core.JSValue.undefinedValue();
+        return this_value.dup();
+    }
+    if (allow_class_constructor_call and !(try isConstructorLike(ctx, func))) return error.TypeError;
+    if (std.mem.eql(u8, name, "raw")) {
+        return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
+        return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "sumPrecise")) {
+        return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "register")) {
+        return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
+    }
+    if (std.mem.eql(u8, name, "unregister")) {
+        return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
+    }
+    if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    // Hot-path dispatch: a small first-byte switch routes the common
+    // global builtins directly to their handlers, bypassing the long
+    // `std.mem.eql` chain below. The previous chain walked ~95 checks
+    // before reaching `qjsUriCallId` for `decodeURI` / `encodeURI`,
+    // which dominated tight-loop URI benchmarks.
+    if (name.len != 0) {
+        switch (name[0]) {
+            'A' => if (std.mem.eql(u8, name, "Array")) {
+                return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+            },
+            'B' => if (std.mem.eql(u8, name, "BigInt")) {
+                return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
+            },
+            'N' => if (std.mem.eql(u8, name, "Number")) {
+                return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
+            },
+            'O' => if (std.mem.eql(u8, name, "Object")) {
+                return construct_mod.constructValue(ctx, func, args, &.{});
+            },
+            'S' => if (std.mem.eql(u8, name, "String")) {
+                return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+            },
+            'd', 'e' => if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| {
+                const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+                const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = mode };
+                return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
+            },
+            'f' => if (std.mem.eql(u8, name, "fromCharCode")) {
+                // Skip the long `std.mem.eql` chain below for the
+                // canonical `String.fromCharCode` shape; routes
+                // straight to the same handler the slow path uses,
+                // so coercion semantics (e.g. string args, BigInt
+                // rejection) stay identical.
+                return string_ops.qjsStringFromCharCode(ctx, output, global, args);
+            },
+            'r' => if (std.mem.eql(u8, name, "raw")) {
+                return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+            },
+            else => {},
+        }
+    }
+    if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
+    if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
+    if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
+    if (std.mem.eql(u8, name, "Array")) return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
+    if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
+    if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
+    if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
+    if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
+        return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "RegExp")) {
+        var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+        native_scope.push();
+        defer native_scope.deinit();
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame) catch |err| {
+            try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+            return err;
         };
-        defer dispatch.name_value.free(ctx.runtime);
-        const name = dispatch.name;
-        if (name.len == 0) return core.JSValue.undefinedValue();
-        if (allow_class_constructor_call and isBuiltinConstructorName(name)) {
-            if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, null)) |constructed| {
-                return constructed;
-            }
-            return this_value.dup();
-        }
-        if (allow_class_constructor_call and !(try isConstructorLike(ctx, func))) return error.TypeError;
-        if (std.mem.eql(u8, name, "raw")) {
-            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
-            return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "sumPrecise")) {
-            return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "register")) {
-            return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
-        }
-        if (std.mem.eql(u8, name, "unregister")) {
-            return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
-        }
-        if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        // Hot-path dispatch: a small first-byte switch routes the common
-        // global builtins directly to their handlers, bypassing the long
-        // `std.mem.eql` chain below. The previous chain walked ~95 checks
-        // before reaching `qjsUriCallId` for `decodeURI` / `encodeURI`,
-        // which dominated tight-loop URI benchmarks.
-        if (name.len != 0) {
-            switch (name[0]) {
-                'A' => if (std.mem.eql(u8, name, "Array")) {
-                    return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
-                },
-                'B' => if (std.mem.eql(u8, name, "BigInt")) {
-                    return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
-                },
-                'N' => if (std.mem.eql(u8, name, "Number")) {
-                    return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
-                },
-                'O' => if (std.mem.eql(u8, name, "Object")) {
-                    return construct_mod.constructValue(ctx, func, args, &.{});
-                },
-                'S' => if (std.mem.eql(u8, name, "String")) {
-                    return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-                },
-                'd', 'e' => if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| {
-                    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = mode };
-                    return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
-                },
-                'f' => if (std.mem.eql(u8, name, "fromCharCode")) {
-                    // Skip the long `std.mem.eql` chain below for the
-                    // canonical `String.fromCharCode` shape; routes
-                    // straight to the same handler the slow path uses,
-                    // so coercion semantics (e.g. string args, BigInt
-                    // rejection) stay identical.
-                    return string_ops.qjsStringFromCharCode(ctx, output, global, args);
-                },
-                'r' => if (std.mem.eql(u8, name, "raw")) {
-                    return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-                },
-                else => {},
-            }
-        }
-        if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-        if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
-        if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
-        if (std.mem.eql(u8, name, "Array")) return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
-        if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
-        if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
-            return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "RegExp")) {
+    }
+    if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
+    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
+    if (std.mem.eql(u8, name, "AggregateError")) {
+        const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "SuppressedError")) {
+        const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+    }
+    if (exception_ops.isErrorConstructorName(name)) {
+        const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "isError")) return builtin_glue.qjsErrorIsError(args);
+    if (std.mem.eql(u8, name, "isView")) return array_ops.qjsArrayBufferIsView(args);
+    if (std.mem.eql(u8, name, "set")) {
+        if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+    if (std.mem.eql(u8, name, "next")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorWrapNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
+        {
+            // Array Iterator `next` is still marker/name-dispatched rather
+            // than table-dispatched. Give this legacy terminal the same
+            // native-frame/error-materialization boundary as a record call.
             var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
             native_scope.push();
             defer native_scope.deinit();
-            return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame) catch |err| {
+            const next_result = array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object) catch |err| {
                 try builtin_dispatch.materializeRuntimeError(ctx, global, err);
                 return err;
             };
+            if (next_result) |value| return value;
         }
-        if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
-        if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
-        if (std.mem.eql(u8, name, "AggregateError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "throw")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+    }
+    if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
+        if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
+        if (object_ops.objectFromValue(this_value)) |this_object| {
+            if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
         }
-        if (std.mem.eql(u8, name, "SuppressedError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
-        }
-        if (exception_ops.isErrorConstructorName(name)) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "isError")) return builtin_glue.qjsErrorIsError(args);
-        if (std.mem.eql(u8, name, "isView")) return array_ops.qjsArrayBufferIsView(args);
-        if (std.mem.eql(u8, name, "set")) {
-            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "next")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorWrapNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
-            {
-                // Array Iterator `next` is still marker/name-dispatched rather
-                // than table-dispatched. Give this legacy terminal the same
-                // native-frame/error-materialization boundary as a record call.
-                var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
-                native_scope.push();
-                defer native_scope.deinit();
-                const next_result = array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object) catch |err| {
-                    try builtin_dispatch.materializeRuntimeError(ctx, global, err);
-                    return err;
-                };
-                if (next_result) |value| return value;
-            }
-        }
-        if (std.mem.eql(u8, name, "throw")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-        }
-        if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-            if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
-            if (object_ops.objectFromValue(this_value)) |this_object| {
-                if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
-            }
-        }
-        if (std.mem.eql(u8, name, "[Symbol.asyncIterator]")) {
-            return this_value.dup();
-        }
-        if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
-            if (try promise_ops.qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "return")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorHelperReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorWrapReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorReturn(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-        }
-        if (std.mem.eql(u8, name, "fromCharCode")) {
-            return string_ops.qjsStringFromCharCode(ctx, output, global, args);
-        }
-        if (std.mem.eql(u8, name, "fromCodePoint")) {
-            return string_ops.qjsStringFromCodePoint(ctx, output, global, args);
-        }
-        if (std.mem.eql(u8, name, "raw")) {
-            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
-            if (object_ops.objectFromValue(this_value)) |receiver_object| {
-                if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
-                    if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
-                    // parse/now fall-through (utc was handled above with VM
-                    // coercion): route the static body through the record table.
-                    return date_vm.callDateStaticBody(ctx, method_id, args) catch |err| switch (err) {
-                        error.TypeError => error.TypeError,
-                        else => err,
-                    };
-                }
-            }
-        }
-        if (try array_ops.qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
-            return value;
-        }
-        if (std.mem.eql(u8, name, "apply")) {
-            return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "call")) {
-            return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "set __proto__")) {
-            const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return object_ops.qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "set")) {
-            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "deref")) {
-            return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
-        }
-        if (std.mem.eql(u8, name, "join")) {
-            if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "toString")) {
-            if (try string_ops.qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "toLocaleString")) {
-            if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
-        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
-        if (try string_ops.qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
-        if (try array_ops.qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
-            if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "eval")) {
-            const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
-                property_ops.expectObject(realm_value) catch global
-            else
-                global;
-            return indirectEval(ctx, output, eval_global, args);
-        }
-        if (std.mem.eql(u8, name, "throws")) return qjsAssertThrows(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "groupBy")) {
-            // `Map.groupBy` static: route through the collection record table's
-            // `group_by` handler instead of naming a JS-visible function body.
-            // The only native `groupBy` is `Map.groupBy`, so this slow-path
-            // fallback always carries the Map constructor as receiver. Exec keys
-            // the record by its stable value rather than importing the registry.
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = collection_group_by_static_id };
-            if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |grouped| return grouped;
-        }
-        if (std.mem.eql(u8, name, "getOrInsertComputed")) {
-            // `Map`/`WeakMap.prototype.getOrInsertComputed` reached by name
-            // without a baked id: gate on a Map/WeakMap receiver (the retired
-            // `qjsMapGetOrInsertComputed` returned null to continue the chain for
-            // any other receiver) and route the body through the record table.
-            if (object_ops.objectFromValue(this_value)) |receiver| {
-                if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.weakmap) {
-                    const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = @intFromEnum(method_ids.collection.PrototypeMethod.get_or_insert_computed) };
-                    if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
-                }
-            }
-        }
-        if (object_ops.getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return object_ops.qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "concat") and !array_ops.isArrayMethodReceiver(this_value)) {
-            return string_ops.qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "replace")) {
-            return string_ops.qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "exec")) {
-            if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "test")) {
-            if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "compile")) {
-            const compile_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            if (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.search]")) {
-            if (try string_ops.qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.match]")) {
-            if (try string_ops.qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.matchAll]")) {
-            if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.replace]")) {
-            if (try string_ops.qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.split]")) {
-            if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
-            if (native_ref.domain == .regexp and
-                core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
-            {
-                // The `.regexp` accessor record runs the same `qjsRegExpAccessor`
-                // fast path + primitive `accessor` fallback this site used to
-                // inline; route through the table by the function's own id.
-                return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
-            }
-        }
-        if (core.host_function.builtin_method_id_lookup.regexp.accessorIdFromGetterName(name)) |accessor_id| {
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = accessor_id };
-            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
-        }
-        if (core.host_function.builtin_method_id_lookup.buffer.dataViewGetMethodId(name)) |method_id| {
-            return builtin_glue.qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            };
-        }
-        if (core.host_function.builtin_method_id_lookup.buffer.dataViewSetMethodId(name)) |method_id| {
-            return builtin_glue.qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "charAt")) {
-            const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-            return string_ops.callStringCharAtBody(ctx, this_value, index) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-            return string_ops.qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
-        }
-        if (string_ops.getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (string_ops.isStringMethodReceiver(this_value)) {
-            if (string_ops.standardStringMethodId(name)) |method_id| {
-                return string_ops.callStringBody(ctx, this_value, method_id, args) catch |err| switch (err) {
+    }
+    if (std.mem.eql(u8, name, "[Symbol.asyncIterator]")) {
+        return this_value.dup();
+    }
+    if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
+        if (try promise_ops.qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "return")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorHelperReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorWrapReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorReturn(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+    }
+    if (std.mem.eql(u8, name, "fromCharCode")) {
+        return string_ops.qjsStringFromCharCode(ctx, output, global, args);
+    }
+    if (std.mem.eql(u8, name, "fromCodePoint")) {
+        return string_ops.qjsStringFromCodePoint(ctx, output, global, args);
+    }
+    if (std.mem.eql(u8, name, "raw")) {
+        return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
+        if (object_ops.objectFromValue(this_value)) |receiver_object| {
+            if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
+                if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
+                // parse/now fall-through (utc was handled above with VM
+                // coercion): route the static body through the record table.
+                return date_vm.callDateStaticBody(ctx, method_id, args) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
                 };
             }
         }
-        if (string_ops.annexBStringMethodId(name)) |method_id| {
-            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+    }
+    if (try array_ops.qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
+        return value;
+    }
+    if (std.mem.eql(u8, name, "apply")) {
+        return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "call")) {
+        return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "set __proto__")) {
+        const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        return object_ops.qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "set")) {
+        if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "deref")) {
+        return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
+    }
+    if (std.mem.eql(u8, name, "join")) {
+        if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "toString")) {
+        if (try string_ops.qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "toLocaleString")) {
+        if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
+    if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
+    if (try string_ops.qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
+    if (try array_ops.qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
+        if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "eval")) {
+        const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
+            property_ops.expectObject(realm_value) catch global
+        else
+            global;
+        return indirectEval(ctx, output, eval_global, args);
+    }
+    if (std.mem.eql(u8, name, "throws")) return qjsAssertThrows(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "groupBy")) {
+        // `Map.groupBy` static: route through the collection record table's
+        // `group_by` handler instead of naming a JS-visible function body.
+        // The only native `groupBy` is `Map.groupBy`, so this slow-path
+        // fallback always carries the Map constructor as receiver. Exec keys
+        // the record by its stable value rather than importing the registry.
+        const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = collection_group_by_static_id };
+        if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |grouped| return grouped;
+    }
+    if (std.mem.eql(u8, name, "getOrInsertComputed")) {
+        // `Map`/`WeakMap.prototype.getOrInsertComputed` reached by name
+        // without a baked id: gate on a Map/WeakMap receiver (the retired
+        // `qjsMapGetOrInsertComputed` returned null to continue the chain for
+        // any other receiver) and route the body through the record table.
+        if (object_ops.objectFromValue(this_value)) |receiver| {
+            if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.weakmap) {
+                const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = @intFromEnum(method_ids.collection.PrototypeMethod.get_or_insert_computed) };
+                if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
+            }
+        }
+    }
+    if (object_ops.getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+        return object_ops.qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "concat") and !array_ops.isArrayMethodReceiver(this_value)) {
+        return string_ops.qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "replace")) {
+        return string_ops.qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "exec")) {
+        return regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "test")) {
+        if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "compile")) {
+        const compile_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        if (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.search]")) {
+        if (try string_ops.qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.match]")) {
+        if (try string_ops.qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.matchAll]")) {
+        if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.replace]")) {
+        if (try string_ops.qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.split]")) {
+        if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
+        if (native_ref.domain == .regexp and
+            core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
+        {
+            // The `.regexp` accessor record runs the same `qjsRegExpAccessor`
+            // fast path + primitive `accessor` fallback this site used to
+            // inline; route through the table by the function's own id.
+            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+        }
+    }
+    if (core.host_function.builtin_method_id_lookup.regexp.accessorIdFromGetterName(name)) |accessor_id| {
+        const native_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = accessor_id };
+        return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+    }
+    if (core.host_function.builtin_method_id_lookup.buffer.dataViewGetMethodId(name)) |method_id| {
+        return builtin_glue.qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        };
+    }
+    if (core.host_function.builtin_method_id_lookup.buffer.dataViewSetMethodId(name)) |method_id| {
+        return builtin_glue.qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        };
+    }
+    if (std.mem.eql(u8, name, "charAt")) {
+        const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+        return string_ops.callStringCharAtBody(ctx, this_value, index) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
+        return string_ops.qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
+    }
+    if (string_ops.getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+        return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (string_ops.isStringMethodReceiver(this_value)) {
+        if (string_ops.standardStringMethodId(name)) |method_id| {
+            return string_ops.callStringBody(ctx, this_value, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
             };
         }
     }
-    if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
+    if (string_ops.annexBStringMethodId(name)) |method_id| {
+        return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
 }
 
