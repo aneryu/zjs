@@ -3786,6 +3786,58 @@ test "surviving local references reserve compact open VarRef storage" {
     try std.testing.expectEqual(@as(?u16, 0), view.localOpenBindingIndex(0));
 }
 
+test "sloppy function-name references lower to an uncaptured dummy object property" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("function-name-dummy-ref");
+    defer rt.atoms.free(function_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    fd.is_named_func_expr = true;
+    try std.testing.expectEqual(@as(i32, 0), try fd.ensureFuncExprSelfBinding());
+    // qjs add_func_var uses add_var: the special fallback is not linked into
+    // the ordinary lexical scope list.
+    try std.testing.expectEqual(@as(i32, -1), fd.scopes[0].first);
+
+    var code = [_]u8{0} ** 14;
+    code[0] = bytecode.opcode.op.scope_make_ref;
+    std.mem.writeInt(u32, code[1..5], function_name, .little);
+    std.mem.writeInt(u32, code[5..9], 0, .little);
+    std.mem.writeInt(u16, code[9..11], 0, .little);
+    code[11] = bytecode.opcode.op.get_ref_value;
+    code[12] = bytecode.opcode.op.drop;
+    code[13] = bytecode.opcode.op.return_undef;
+    try fd.appendByteCode(&code);
+    try fd.appendAtomOperand(function_name);
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    var expected = [_]u8{0} ** 18;
+    expected[0] = bytecode.opcode.op.special_object;
+    expected[1] = 2; // SPECIAL_OBJECT_THIS_FUNC
+    expected[2] = bytecode.opcode.op.put_loc0;
+    expected[3] = bytecode.opcode.op.object;
+    expected[4] = bytecode.opcode.op.get_loc0;
+    expected[5] = bytecode.opcode.op.define_field;
+    std.mem.writeInt(u32, expected[6..10], function_name, .little);
+    expected[10] = bytecode.opcode.op.push_atom_value;
+    std.mem.writeInt(u32, expected[11..15], function_name, .little);
+    expected[15] = bytecode.opcode.op.get_ref_value;
+    expected[16] = bytecode.opcode.op.drop;
+    expected[17] = bytecode.opcode.op.return_undef;
+
+    try std.testing.expectEqualSlices(u8, &expected, fb.byteCode());
+    try std.testing.expectEqual(@as(u16, 0), fb.open_var_ref_count);
+    try std.testing.expect(!fb.varDefs()[0].is_captured);
+    try std.testing.expect(!fd.vars[0].is_captured);
+}
+
 test "surviving argument references lower to make_arg_ref and reserve storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

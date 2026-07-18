@@ -2396,14 +2396,20 @@ pub const function_def = struct {
         /// Returns the index of the new var.
         /// Mirror qjs add_func_var (quickjs.c:24208-24219): create the named
         /// function expression's self-binding var on demand, idempotent via
-        /// `func_var_idx`. Argument shape matches the retired eager site
-        /// (scope 0, non-lexical, const) so resolution order and the
-        /// sloppy-mode silent-ignore write path are unchanged; zjs registers
-        /// is_const unconditionally (see closureVarWriteThrowsReadOnly note)
-        /// while qjs sets it only in strict mode.
+        /// `func_var_idx`. QuickJS marks the binding const only when the
+        /// defining function is strict; sloppy writes are discarded during
+        /// scope resolution instead of reaching the runtime cell.
         pub fn ensureFuncExprSelfBinding(self: *FunctionDefImpl) !i32 {
             if (self.func_var_idx < 0) {
-                self.func_var_idx = try self.addScopeVar(self.func_name, .function_name, 0, false, true);
+                // add_func_var uses add_var, not add_scope_var: the binding is
+                // a special fallback after ordinary scopes/vars/arguments and
+                // must not participate in the lexical scope linked list.
+                self.func_var_idx = try self.appendVar(.{
+                    .var_name = self.func_name,
+                    .scope_level = 0,
+                    .is_const = self.is_strict_mode,
+                    .var_kind = .function_name,
+                });
             }
             return self.func_var_idx;
         }
@@ -3446,29 +3452,16 @@ pub const pipeline_resolve_variables = struct {
     /// and their frame slot is a direct alias of the exporting module's cell
     /// (js_inner_module_linking quickjs.c:30765-30777) — the shared cell
     /// itself carries no const flag, so the write must never reach it.
-    ///
-    /// zjs adaptation: function-expression-name vars are registered is_const
-    /// unconditionally (parser addScopeVar `.function_name`), unlike qjs which
-    /// marks them const only in strict mode; the sloppy-mode silent-ignore
-    /// write lives in the runtime function-name cell flag, so function_name
-    /// kinds stay on that runtime path.
-    fn closureVarWriteThrowsReadOnly(ctx: *const JSContext, atom_id: u32) bool {
-        var maybe_fd: ?*const function_def_mod.FunctionDef = ctx.function_def;
-        while (maybe_fd) |fd| : (maybe_fd = fd.parent) {
-            for (fd.closure_var, 0..) |cv, idx| {
-                if (!closureVarIsRuntimeVarRef(cv)) continue;
-                if (cv.var_name != atom_id) continue;
-                return closureVarConstWriteThrows(fd, @intCast(idx));
-            }
-        }
-        return false;
+    fn closureVarWriteThrowsReadOnly(ctx: *const JSContext, ref_idx: u16) bool {
+        const fd = ctx.function_def orelse return false;
+        if (ref_idx >= fd.closure_var.len) return false;
+        return closureVarConstWriteThrows(fd, ref_idx);
     }
 
     fn closureVarConstWriteThrows(start_fd: *const function_def_mod.FunctionDef, start_idx: u16) bool {
         var fd = start_fd;
         var cv = fd.closure_var[start_idx];
         if (!cv.is_const) return false;
-        if (cv.var_kind == .function_name) return false;
         // Follow the capture chain to its base closure var: zjs propagates
         // top-level captures into descendants as plain `.ref` links
         // (retrofitForwardTopLevelModuleCapture / ensureClosureChain), while
@@ -3789,6 +3782,21 @@ pub const pipeline_resolve_variables = struct {
         return vd.is_lexical and vd.scope_level > 0;
     }
 
+    /// QuickJS checks the named function-expression binding after the current
+    /// scope/var/argument lookup, including while the argument scope is active
+    /// (resolve_scope_var quickjs.c:32975-32978). That scope deliberately does
+    /// not link to the body scope, so the ordinary scope walk cannot find the
+    /// lazily materialized function-name slot for a default initializer.
+    fn lookupCurrentFunctionName(ctx: *const JSContext, atom_id: u32) ?u16 {
+        const fd = ctx.function_def orelse return null;
+        if (fd.func_var_idx < 0) return null;
+        const idx: usize = @intCast(fd.func_var_idx);
+        if (idx >= fd.vars.len) return null;
+        const vd = fd.vars[idx];
+        if (vd.var_name != atom_id or vd.var_kind != .function_name) return null;
+        return @intCast(idx);
+    }
+
     fn lowerScopeVarOpArg(op_id: u8) ?u8 {
         return switch (op_id) {
             opcode.op.scope_get_var, opcode.op.scope_get_var_undef, opcode.op.scope_get_var_checkthis => opcode.op.get_arg,
@@ -3872,6 +3880,7 @@ pub const pipeline_resolve_variables = struct {
         }
         if (lookupArg(ctx, atom_id)) |arg_idx| return .{ .arg = arg_idx };
         if (local_idx) |idx| return .{ .local = idx };
+        if (lookupCurrentFunctionName(ctx, atom_id)) |idx| return .{ .local = idx };
         return null;
     }
 
@@ -4192,7 +4201,9 @@ pub const pipeline_resolve_variables = struct {
         if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
             return if (isEvalNonLexicalLocal(ctx, loc_idx)) 5 else 1;
         }
-        if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) return 1;
+        if (lookupArg(ctx, atom_id) != null or
+            lookupCurrentFunctionName(ctx, atom_id) != null or
+            lookupClosureVar(ctx, atom_id) != null) return 1;
         return 5;
     }
 
@@ -4219,13 +4230,39 @@ pub const pipeline_resolve_variables = struct {
                 5
             else if (localWriteThrowsReadOnly(ctx, loc_idx))
                 throw_error_instr_size
+            else if (localIsFunctionName(ctx, loc_idx))
+                1 + selectLocForm(ctx, opcode.op.get_loc, loc_idx).size + 5 + 5
             else
                 7,
         };
-        if (lookupClosureVar(ctx, atom_id) != null) {
-            return if (closureVarWriteThrowsReadOnly(ctx, atom_id)) throw_error_instr_size else 7;
+        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            if (closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
+            if (closureVarKind(ctx, ref_idx) == .function_name) {
+                return 1 + selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size + 5 + 5;
+            }
+            return 7;
         }
         return 5;
+    }
+
+    fn loweredScopeMakeRefAtomCount(ctx: *const JSContext, atom_id: u32, scope_level: i32) usize {
+        if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| return switch (binding) {
+            .local => |loc_idx| if (!isEvalNonLexicalLocal(ctx, loc_idx) and
+                !localWriteThrowsReadOnly(ctx, loc_idx) and
+                localIsFunctionName(ctx, loc_idx))
+                2
+            else
+                1,
+            .arg => 1,
+        };
+        if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+            return if (!closureVarWriteThrowsReadOnly(ctx, ref_idx) and
+                closureVarKind(ctx, ref_idx) == .function_name)
+                2
+            else
+                1;
+        }
+        return 1;
     }
 
     fn evalVarObjectProbeFallbackSize(ctx: *const JSContext, atom_id: u32, scope_level: i32, op_id: u8) Error!usize {
@@ -4236,16 +4273,19 @@ pub const pipeline_resolve_variables = struct {
                 if (op_id == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
                     return throw_error_instr_size;
                 }
+                if (op_id == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) return 1;
             },
             .arg => {},
         };
         if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) return throw_error_instr_size;
+            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
+            if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) return 1;
             const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
             return selectVarRefForm(ctx, ref_op, ref_idx).size;
         }
         if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) return throw_error_instr_size;
+            if (op_id == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) return throw_error_instr_size;
+            if (op_id == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) return 1;
             const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op_id);
             return selectVarRefForm(ctx, ref_op, ref_idx).size;
         }
@@ -4360,7 +4400,10 @@ pub const pipeline_resolve_variables = struct {
                 output[out_idx.*] = opcode.op.push_false;
                 out_idx.* += 1;
             }
-        } else if (lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
+        } else if (lookupArg(ctx, atom_id) != null or
+            lookupCurrentFunctionName(ctx, atom_id) != null or
+            lookupClosureVar(ctx, atom_id) != null)
+        {
             output[out_idx.*] = opcode.op.push_false;
             out_idx.* += 1;
         } else {
@@ -4425,6 +4468,37 @@ pub const pipeline_resolve_variables = struct {
         }
     }
 
+    /// QuickJS resolve_scope_var builds a disposable `{ name: binding }`
+    /// reference for sloppy function-expression names. Reference-form
+    /// assignments then update that object property, leaving the immutable
+    /// self-binding untouched (quickjs.c:33012-33024, 33310-33322).
+    fn writeFunctionNameDummyRef(
+        func: *bytecode_function.Bytecode,
+        output: []u8,
+        out_idx: *usize,
+        output_atoms: []atom.Atom,
+        out_atom_idx: *usize,
+        atom_id: u32,
+        get_form: ShortLocForm,
+        binding_idx: u16,
+    ) void {
+        output[out_idx.*] = opcode.op.object;
+        out_idx.* += 1;
+        writeSelectedLocForm(output, out_idx, get_form, binding_idx);
+
+        output[out_idx.*] = opcode.op.define_field;
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        out_idx.* += 5;
+        out_atom_idx.* += 1;
+
+        output[out_idx.*] = opcode.op.push_atom_value;
+        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
+        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
+        out_idx.* += 5;
+        out_atom_idx.* += 1;
+    }
+
     fn writeLoweredScopeMakeRef(
         ctx: *const JSContext,
         func: *bytecode_function.Bytecode,
@@ -4453,6 +4527,17 @@ pub const pipeline_resolve_variables = struct {
                     out_atom_idx.* += 1;
                 } else if (localWriteThrowsReadOnly(ctx, loc_idx)) {
                     writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+                } else if (localIsFunctionName(ctx, loc_idx)) {
+                    writeFunctionNameDummyRef(
+                        func,
+                        output,
+                        out_idx,
+                        output_atoms,
+                        out_atom_idx,
+                        atom_id,
+                        selectLocForm(ctx, opcode.op.get_loc, loc_idx),
+                        loc_idx,
+                    );
                 } else {
                     output[out_idx.*] = opcode.op.make_loc_ref;
                     std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
@@ -4463,8 +4548,19 @@ pub const pipeline_resolve_variables = struct {
                 }
             },
         } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-            if (closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+            if (closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
                 writeThrowVarReadOnly(func, output, out_idx, output_atoms, out_atom_idx, atom_id);
+            } else if (closureVarKind(ctx, ref_idx) == .function_name) {
+                writeFunctionNameDummyRef(
+                    func,
+                    output,
+                    out_idx,
+                    output_atoms,
+                    out_atom_idx,
+                    atom_id,
+                    selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx),
+                    ref_idx,
+                );
             } else {
                 output[out_idx.*] = opcode.op.make_var_ref_ref;
                 std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
@@ -4520,15 +4616,19 @@ pub const pipeline_resolve_variables = struct {
         return fd.vars[loc_idx].is_const;
     }
 
+    fn localIsFunctionName(ctx: *const JSContext, loc_idx: u16) bool {
+        const fd = ctx.function_def orelse return false;
+        return loc_idx < fd.vars.len and fd.vars[loc_idx].var_kind == .function_name;
+    }
+
     /// QuickJS resolves writes/references to const locals directly to
-    /// OP_throw_error. Function-expression names are the exception in zjs:
-    /// their sloppy silent-ignore / strict throw behavior is carried by the
-    /// runtime function-name cell (see closureVarWriteThrowsReadOnly).
+    /// OP_throw_error. Function-expression names are const exactly when their
+    /// defining function is strict; sloppy names are handled by the discard
+    /// and dummy-reference lowering paths above.
     fn localWriteThrowsReadOnly(ctx: *const JSContext, loc_idx: u16) bool {
         const fd = ctx.function_def orelse return false;
         if (loc_idx >= fd.vars.len) return false;
-        const vd = fd.vars[loc_idx];
-        return vd.is_const and vd.var_kind != .function_name;
+        return fd.vars[loc_idx].is_const;
     }
 
     /// Promote a Phase-1 var op to its TDZ-checked counterpart for
@@ -4763,7 +4863,11 @@ pub const pipeline_resolve_variables = struct {
         const binding = resolveLocalOrArg(ctx, atom_id, scope_level) orelse return;
         switch (binding) {
             .local => |idx| if (idx < fd.vars.len) {
-                fd.vars[idx].is_captured = true;
+                // QuickJS's function-name dummy-reference arm never calls
+                // capture_var: the temporary object owns the write target.
+                if (fd.vars[idx].var_kind != .function_name) {
+                    fd.vars[idx].is_captured = true;
+                }
             },
             .arg => |idx| if (idx < fd.args.len) {
                 fd.args[idx].is_captured = true;
@@ -4996,10 +5100,12 @@ pub const pipeline_resolve_variables = struct {
                 if (scope_level < 0) {
                     output_size += 3;
                 } else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
                         // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
                         output_size += throw_error_instr_size;
                         output_atom_count += 1;
+                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
+                        output_size += 1;
                     } else {
                         const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                         const form = selectVarRefForm(ctx, ref_op, ref_idx);
@@ -5021,6 +5127,8 @@ pub const pipeline_resolve_variables = struct {
                         } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
                             output_size += throw_error_instr_size;
                             output_atom_count += 1;
+                        } else if (op == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
+                            output_size += 1;
                         } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
                             // Lexical: 3-byte TDZ-check variant.
                             output_size += 3;
@@ -5032,10 +5140,12 @@ pub const pipeline_resolve_variables = struct {
                         }
                     },
                 } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
                         // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
                         output_size += throw_error_instr_size;
                         output_atom_count += 1;
+                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
+                        output_size += 1;
                     } else {
                         const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
                         const form = selectVarRefForm(ctx, ref_op, ref_idx);
@@ -5097,7 +5207,7 @@ pub const pipeline_resolve_variables = struct {
                     output_atom_count += probe.count;
                 }
                 output_size += loweredScopeMakeRefSize(ctx, atom_id, scope_level);
-                output_atom_count += 1;
+                output_atom_count += loweredScopeMakeRefAtomCount(ctx, atom_id, scope_level);
                 scan_atom_idx += 1;
                 i += 11;
             } else if (isScopeRefOp(op)) {
@@ -5357,9 +5467,13 @@ pub const pipeline_resolve_variables = struct {
                     try emitGlobalVarOp(ctx, output, &out_idx, lowerScopeVarOpGlobal(op), atom_id);
                     in_atom_idx += 1;
                 } else if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
                         // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
                         writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
+                        in_atom_idx += 1;
+                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
+                        output[out_idx] = opcode.op.drop;
+                        out_idx += 1;
                         in_atom_idx += 1;
                     } else {
                         const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);
@@ -5401,6 +5515,9 @@ pub const pipeline_resolve_variables = struct {
                             out_idx += form.size;
                         } else if (op == opcode.op.scope_put_var and localWriteThrowsReadOnly(ctx, loc_idx)) {
                             writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
+                        } else if (op == opcode.op.scope_put_var and localIsFunctionName(ctx, loc_idx)) {
+                            output[out_idx] = opcode.op.drop;
+                            out_idx += 1;
                         } else if (localLexicalAccessNeedsCheck(ctx, atom_id, loc_idx, op)) {
                             output[out_idx] = lowerScopeVarOpLexical(op);
                             std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
@@ -5420,9 +5537,13 @@ pub const pipeline_resolve_variables = struct {
                         in_atom_idx += 1;
                     },
                 } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
-                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, atom_id)) {
+                    if (op == opcode.op.scope_put_var and closureVarWriteThrowsReadOnly(ctx, ref_idx)) {
                         // qjs resolve_scope_var has_idx (quickjs.c:33301-33306).
                         writeThrowVarReadOnly(func, output, &out_idx, output_atoms, &out_atom_idx, atom_id);
+                        in_atom_idx += 1;
+                    } else if (op == opcode.op.scope_put_var and closureVarKind(ctx, ref_idx) == .function_name) {
+                        output[out_idx] = opcode.op.drop;
+                        out_idx += 1;
                         in_atom_idx += 1;
                     } else {
                         const ref_op = lowerScopeVarOpForClosure(ctx, atom_id, ref_idx, op);

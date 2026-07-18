@@ -5382,11 +5382,9 @@ pub const parser_core = struct {
             while (parent_index > 0) {
                 parent_index -= 1;
                 const parent = self.funcAtVirtualIndex(parent_index);
-                // Visibility check first: materializing under a chain-visible
-                // same-name binding would link the new scope-0 var *ahead* of
-                // it in the newest-first scope chain and flip resolution for
-                // the parent's own references. (An already-materialized
-                // self-binding is itself chain-visible and stops here too.)
+                // Visibility check first: a same-name lexical/var/argument
+                // binding wins before QuickJS's special function-name
+                // fallback, so this delete must resolve there instead.
                 if (hasVisibleCurrentBinding(parent, atom_id, visible_scope_level)) return;
                 for (parent.closure_var) |cv| {
                     if (cv.var_name == atom_id) return;
@@ -20915,12 +20913,11 @@ pub const parser_core = struct {
             // named function expression must conservatively materialize its
             // self-binding before the var scan below captures it. Mirrors
             // add_eval_variables' enclosing-function leg (quickjs.c:
-            // 33697-33698). Guard: a chain-visible same-name *var* means the
-            // eval resolves that binding anyway, and late materialization
-            // would link the self-binding ahead of it in the newest-first
-            // scope-0 chain and flip the parent's own references — skip.
-            // (Args deliberately do not block: the eager var coexisted with
-            // shadowing args, and finalize arg resolution is unaffected.)
+            // 33697-33698). Guard: a chain-visible same-name *var* wins before
+            // the special function-name fallback, so eval resolves it instead.
+            // (Args deliberately do not block: the function-name slot still
+            // has to exist for argument-scope eval and the argument lookup
+            // retains precedence.)
             if (parent.is_named_func_expr and
                 !hasVisibleSameNameVar(parent, parent.func_name, visible_scope_level))
             {
