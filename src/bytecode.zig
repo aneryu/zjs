@@ -8699,7 +8699,9 @@ const function_mod = struct {
         has_mapped_arguments: bool = false,
         /// Exact-zero-argument sloppy leaf whose frame cannot acquire cold
         /// state or value-bearing local/capture/open-ref windows. Published in
-        /// the previously reserved execution-view flag bit.
+        /// the previously reserved execution-view flag bit. The strict twin
+        /// lives in the `strict_inline_empty_leaf` view field (this packed
+        /// word is full) so this established sloppy test stays single-bit.
         simple_inline_empty_leaf: bool = false,
     };
 
@@ -8746,6 +8748,14 @@ const function_mod = struct {
         /// before mutable parameter slots can change them. Selected only when
         /// finalized bytecode materializes an arguments object.
         strict_simple_snapshot_inline_eligible: bool = false,
+        /// Strict twin of `flags.simple_inline_empty_leaf` (the packed flags
+        /// word is full): identical empty-leaf frame geometry, published for
+        /// strict-mode functions. Plain call sites select the undefined-`this`
+        /// arm; the method receiver arm is mode-independent. Kept as a
+        /// separate view byte so the established sloppy call arms retain
+        /// their exact single-bit test (see the empty_leaf_geometry note in
+        /// `makeBytecodeView`).
+        strict_inline_empty_leaf: bool = false,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -9131,6 +9141,21 @@ const function_mod = struct {
             fb.global_vars_len == 0;
         const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
         const rescues_implicit_arguments = functionRescuesImplicitArgumentsViaGetVar(fb);
+        // Mode-independent empty-leaf frame geometry: no argument/local/
+        // capture/open-ref windows, no arguments-object materialization or
+        // implicit get_var rescue, no direct eval. Strict shares every one of
+        // these conditions — its only plain-call semantic difference is
+        // preserving undefined `this` instead of substituting the sloppy
+        // global — but the two modes publish SEPARATE eligibility bits
+        // (`flags.simple_inline_empty_leaf` vs `strict_inline_empty_leaf`)
+        // so the established sloppy call arms keep their exact single-bit
+        // test; measured: folding both modes into one bit put a per-call
+        // strict-mode discrimination on the sloppy arm (+3 insn/call,
+        // +1.55% cycles on call-const-zero-arg).
+        const empty_leaf_geometry = fb.arg_count == 0 and fb.var_count == 0 and
+            fb.open_var_ref_count == 0 and fb.var_refs_len == 0 and
+            !materializes_arguments_object and !rescues_implicit_arguments and
+            !fb.flags.has_eval_call;
         return .{
             .memory = mem,
             .atoms = atoms,
@@ -9156,11 +9181,9 @@ const function_mod = struct {
                 .is_arrow_function = fb.flags.is_arrow_function,
                 .backtrace_barrier = fb.flags.backtrace_barrier,
                 .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
-                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and
-                    fb.arg_count == 0 and fb.var_count == 0 and fb.open_var_ref_count == 0 and
-                    fb.var_refs_len == 0 and !materializes_arguments_object and
-                    !rescues_implicit_arguments and !fb.flags.has_eval_call,
+                .simple_inline_empty_leaf = simple_inline_base and !strict_mode and empty_leaf_geometry,
             },
+            .strict_inline_empty_leaf = simple_inline_base and strict_mode and empty_leaf_geometry,
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
             .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,

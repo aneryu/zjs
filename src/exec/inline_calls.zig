@@ -37,6 +37,23 @@ pub const RegionLayout = enum {
     method,
 };
 
+/// Compile-time `this` arm of an empty-leaf frame constructor. The published
+/// leaf bit is mode-independent; the call adapter picks the arm from the call
+/// shape (plain vs method region) and the view's is_strict/runtime_strict
+/// bits, mirroring qjs JS_CallInternal where `this_obj` is the caller-supplied
+/// raw word and only OP_push_this consults the callee's strict flag
+/// (quickjs.c:17924-17944).
+pub const LeafThis = enum {
+    /// Sloppy plain call: borrow the realm global as the frame's `this`.
+    sloppy_global,
+    /// Strict plain call: preserve undefined `this` (no substitution).
+    strict_undefined,
+    /// Method call: move the raw receiver into the frame's owned `this`;
+    /// identical for strict and sloppy callees (coercion, when sloppy,
+    /// stays deferred to the this-reading opcodes).
+    receiver,
+};
+
 pub const InlineTarget = struct {
     /// qjs `p->u.func.var_refs`, resolved once while the callable Object is hot.
     /// The callable below roots the owning Object; the immutable count lives on
@@ -1102,23 +1119,26 @@ pub const Machine = struct {
     }
 
     /// Deep constructor for the published empty-leaf shape. Its adapter has
-    /// already proved a sloppy call with exact argc=0, no locals,
+    /// already proved a call with exact argc=0 and no locals,
     /// captures, open bindings, arguments materialization, or direct eval.
     /// Keeping that proof at this interface removes the general setup's
     /// geometry/capture selectors and initializes only the operand-stack arena
-    /// that executing the leaf can actually use. `method_receiver` selects the
-    /// region layout: `[callable]` for plain calls, `[receiver, callable]` for
-    /// method calls whose receiver becomes the callee's raw `this`.
+    /// that executing the leaf can actually use. `leaf_this` selects the
+    /// region layout and the frame's `this` arm: `[callable]` for plain calls
+    /// (sloppy borrows the realm global, strict preserves undefined),
+    /// `[receiver, callable]` for method calls whose receiver becomes the
+    /// callee's raw `this`.
     noinline fn pushEmptyLeafFrame(
         self: *Machine,
-        comptime method_receiver: bool,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
         function: *const bytecode.Bytecode,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
+        assertLeafEligible(leaf_this, function);
         std.debug.assert(function.arg_count == 0 and function.var_count == 0);
         std.debug.assert(function.open_var_ref_count == 0);
 
@@ -1151,7 +1171,25 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishEmptyLeafFrame(method_receiver, entry, global, function, region_start, stack_window, storage_on_heap, self.callerResumePc());
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
+    /// Debug-only proof that the comptime `this` arm matches the published
+    /// per-mode eligibility bit and the callee's strict mode (the same
+    /// is_strict|runtime_strict disjunction the view publication folds into
+    /// `strict_mode`). The receiver arm is mode-independent: both modes
+    /// transfer the raw receiver.
+    inline fn assertLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(function.flags.simple_inline_empty_leaf),
+            .strict_undefined => std.debug.assert(function.strict_inline_empty_leaf),
+            .receiver => std.debug.assert(function.flags.simple_inline_empty_leaf or
+                function.strict_inline_empty_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict) ==
+                (leaf_this == .strict_undefined));
+        }
     }
 
     /// Infallible publication tail shared by the cold authoritative
@@ -1161,13 +1199,15 @@ pub const Machine = struct {
     /// caller's operand top (`region_start`, asserted == topPtr by both
     /// constructors) as the empty-leaf resume record: the return arm restores
     /// both with one ldp instead of chasing prev→function→code.ptr→frame.pc.
-    /// The method instantiation moves the receiver into the frame's raw
+    /// The receiver instantiation moves the receiver into the frame's raw
     /// `this` exactly like `setupSimpleInlineEntryImpl`'s method arm
     /// (take + `.owned`; sloppy coercion stays deferred to the this-reading
-    /// opcodes); the plain instantiation keeps the borrowed sloppy global.
+    /// opcodes); the sloppy plain instantiation keeps the borrowed sloppy
+    /// global and the strict plain instantiation preserves undefined —
+    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm.
     inline fn finishEmptyLeafFrame(
         self: *Machine,
-        comptime method_receiver: bool,
+        comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
         function: *const bytecode.Bytecode,
@@ -1176,12 +1216,17 @@ pub const Machine = struct {
         storage_on_heap: bool,
         resume_pc: [*]const u8,
     ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
         const rt = self.ctx.runtime;
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
-            .this_value = if (method_receiver) takeSourceSlot(&region_start[0]) else global.value(),
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .strict_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
             .current_function = takeSourceSlot(callable_slot),
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
@@ -1223,7 +1268,7 @@ pub const Machine = struct {
     /// without reloading frame state.
     pub inline fn tryPushEmptyLeafCallFast(
         self: *Machine,
-        comptime method_receiver: bool,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.Bytecode,
@@ -1231,7 +1276,7 @@ pub const Machine = struct {
         resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
+        assertLeafEligible(leaf_this, function);
         const ctx = self.ctx;
         if (ctx.call_depth >= ctx.stack_limit) return null;
 
@@ -1250,7 +1295,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishEmptyLeafFrame(method_receiver, entry, global, function, region_start, carve.window, false, resume_pc);
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -1598,7 +1643,10 @@ pub const Machine = struct {
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         if (target.view.flags.simple_inline_empty_leaf and argc == 0) {
-            return self.pushEmptyLeafCall(false, global, caller_stack, target.view, region_start);
+            return self.pushEmptyLeafCall(.sloppy_global, global, caller_stack, target.view, region_start);
+        }
+        if (target.view.strict_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.strict_undefined, global, caller_stack, target.view, region_start);
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
@@ -1615,20 +1663,21 @@ pub const Machine = struct {
 
     /// Enter an argc=0 leaf after resolveInlineFunction published its
     /// eligibility proof. The bytecode flag carries the remaining static
-    /// facts (normal sloppy function, no captures/locals/arguments/eval).
-    /// `method_receiver` selects the `[callable]` / `[receiver, callable]`
-    /// region layout; the receiver rides into the frame's raw `this`.
+    /// facts (normal function, no captures/locals/arguments/eval).
+    /// `leaf_this` selects the `[callable]` / `[receiver, callable]` region
+    /// layout and the frame's `this` arm; the receiver instantiation rides
+    /// the receiver into the frame's raw `this`.
     pub inline fn pushEmptyLeafCall(
         self: *Machine,
-        comptime method_receiver: bool,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.Bytecode,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
-        return self.pushEmptyLeafFrame(method_receiver, global, function, region_start);
+        assertLeafEligible(leaf_this, function);
+        return self.pushEmptyLeafFrame(leaf_this, global, function, region_start);
     }
 
     /// Push a method inline call whose raw source is

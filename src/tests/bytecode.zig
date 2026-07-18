@@ -3231,6 +3231,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
         try std.testing.expect(view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!view.strict_inline_empty_leaf);
     }
 
     {
@@ -3248,7 +3249,12 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.simple_inline_eligible);
         try std.testing.expect(view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+        // The strict leaf publishes its own eligibility byte; the packed
+        // sloppy bit stays clear so the established sloppy call arms keep
+        // their single-bit test.
         try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(view.strict_inline_empty_leaf);
+        try std.testing.expect(view.flags.is_strict);
     }
 
     {
@@ -3272,6 +3278,9 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.strict_simple_inline_eligible);
         try std.testing.expect(view.strict_simple_snapshot_inline_eligible);
         try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        // Arguments materialization is excluded from the leaf geometry in
+        // both modes.
+        try std.testing.expect(!view.strict_inline_empty_leaf);
     }
 }
 

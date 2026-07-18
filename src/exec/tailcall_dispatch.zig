@@ -495,10 +495,12 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 /// constructor. `resume_pc` (the caller's register-resident post-operand pc)
 /// rides into the entry's resume record so the return arm restores pc/sp with
 /// one ldp. `code_ptr` is the FB-resident callee first pc (`fb.byte_code`),
-/// pre-folded by the resolving handler. The method instantiation's region is
+/// pre-folded by the resolving handler. The receiver instantiation's region is
 /// `[receiver, callable]`; the receiver becomes the frame's owned raw `this`.
-inline fn pushWarmEmptyLeafAndEnter(comptime method_receiver: bool, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.tryPushEmptyLeafCallFast(method_receiver, vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(method_receiver, vm, function, region_start)) {
+/// Plain instantiations split on the callee's strict mode: sloppy borrows the
+/// realm global, strict preserves undefined.
+inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -520,19 +522,21 @@ const EmptyLeafMiss = union(enum) {
     recovered,
 };
 
-noinline fn pushEmptyLeafMiss(comptime method_receiver: bool, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) EmptyLeafMiss {
-    const entry = vm.machine.pushEmptyLeafCall(method_receiver, vm.global, vm.stack, function, region_start) catch |err| {
+noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) EmptyLeafMiss {
+    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
     };
     return .{ .entry = entry };
 }
 
-/// Dynamic-argc empty-leaf entry. Keep its authoritative constructor out of
-/// the operand handler instead of duplicating the warm fixed-call0 body in a
-/// second large opcode instance.
-inline fn pushEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.pushEmptyLeafCall(false, vm.global, vm.stack, function, region_start) catch |err| {
+/// Out-of-line empty-leaf entry (dynamic-argc plain calls and the strict
+/// method arm). Keep the authoritative constructor out of the handler instead
+/// of duplicating the warm fixed-call0 body in another large opcode instance;
+/// the caller has already published the post-operand frame.pc, which the
+/// constructor captures as the resume record.
+inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
@@ -965,9 +969,25 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     vm.stack.setTopPtr(region_start);
                     if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(false, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                            return pushWarmEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
                         }
-                        return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+                        return pushEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+                    }
+                    // Strict twin of the sloppy leaf arm above. The strict
+                    // eligibility byte is separate from the packed flags word
+                    // (which is full) and is tested only after the sloppy bit
+                    // missed, so the established sloppy arm keeps its exact
+                    // single-bit check chain (folding both modes into one bit
+                    // measured +3 insn/call on call-const-zero-arg). The warm
+                    // instantiation is the sloppy body with `this = undefined`
+                    // in place of the realm-global load — distinct bodies, so
+                    // the two arms cannot tail-merge into a shared
+                    // discrimination head.
+                    if (argc == 0 and resolved.view.strict_inline_empty_leaf) {
+                        if (comptime argc_source == .zero) {
+                            return pushWarmEmptyLeafAndEnter(.strict_undefined, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                        }
+                        return pushEmptyLeafAndEnter(.strict_undefined, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
                     // Fixed nonzero arity only: the recursive/leaf-heavy call
@@ -1028,7 +1048,19 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // general method arm); `pc + 3` (opcode + 2-byte argc operand) is
             // the register-resident twin of the frame.pc advance above.
             if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
-                return pushWarmEmptyLeafAndEnter(true, vb, vm, resolved.view, region_start, pc + 3, resolved.fb.byte_code);
+                return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, pc + 3, resolved.fb.byte_code);
+            }
+            // Strict methods share the mode-independent receiver arm (the raw
+            // receiver transfers verbatim in both modes; sloppy coercion stays
+            // deferred to the this-reading opcodes) but enter through the
+            // authoritative out-of-line leaf constructor: a second inline warm
+            // body here would be instruction-identical to the sloppy one and
+            // could tail-merge back into a shared discrimination head on the
+            // established sloppy method arm. One bl still beats the retired
+            // pushFrame(.generic) three-deep chain, and the empty-leaf resume
+            // record and return epilogue are identical from there.
+            if (argc == 0 and resolved.view.strict_inline_empty_leaf) {
+                return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
             }
             const target = resolved.bind(receiver, method);
             return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
