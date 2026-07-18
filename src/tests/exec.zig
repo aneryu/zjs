@@ -7424,6 +7424,243 @@ test "leaf returns with leftover operands route through general teardown" {
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
 }
 
+test "padded-args leaf missing parameters read undefined across every entry arm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Q3 red lights, outcome side: the padded (`argc < arg_count`) call
+    // shape of a published exact-args leaf pads the missing tail with
+    // undefined IN PLACE above the supplied args. Every observable must be
+    // byte-identical to the generic padded constructor it replaces: missing
+    // params read undefined, writes to a padded slot stay frame-local
+    // (fresh undefined on the next call), the supplied prefix stays bound,
+    // and the sloppy/strict/arrow/method `this` arms keep their policies.
+    // The 256-iteration loops run every arm warm (first call may take the
+    // authoritative constructor; the rest take the warm fast path).
+    const setup = try js.eval(
+        \\globalThis.__padOne = function (value) { return value === undefined ? 1 : 0; };
+        \\globalThis.__padTwo = function (first, second) {
+        \\    return String(first) + "," + String(second);
+        \\};
+        \\globalThis.__padWrite = function (a, b) { b = 42; return b; };
+        \\globalThis.__padStrict = function (a, b) {
+        \\    "use strict";
+        \\    return String(this) + ":" + String(a) + ":" + String(b);
+        \\};
+        \\globalThis.__padStrictLeaf = function (a, b) {
+        \\    "use strict";
+        \\    return String(a) + "^" + String(b);
+        \\};
+        \\globalThis.__padArrow = (p, q) => String(p) + "&" + String(q);
+        \\const padRecv = { m: function (x, y) { return String(this === padRecv) + "|" + String(x) + "|" + String(y); } };
+        \\globalThis.__padRecv = padRecv;
+        \\function exercisePaddedLeafOutcomes() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__padOne() !== 1) throw new Error("missing-one read");
+        \\        if (__padTwo(i) !== i + ",undefined") throw new Error("missing-second read");
+        \\        if (__padTwo() !== "undefined,undefined") throw new Error("missing-both read");
+        \\        if (__padWrite(i) !== 42) throw new Error("pad write");
+        \\        if (__padWrite(i) !== 42) throw new Error("pad write not frame-local");
+        \\        if (__padStrict(i) !== "undefined:" + i + ":undefined") throw new Error("strict pad this");
+        \\        if (__padStrictLeaf(i) !== i + "^undefined") throw new Error("strict pad leaf");
+        \\        if (__padStrictLeaf() !== "undefined^undefined") throw new Error("strict pad leaf both");
+        \\        if (__padArrow(i) !== i + "&undefined") throw new Error("arrow pad");
+        \\        if (padRecv.m() !== "true|undefined|undefined") throw new Error("method pad receiver");
+        \\        if (padRecv.m(i) !== "true|" + i + "|undefined") throw new Error("method pad supplied");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafOutcomes();
+    );
+    setup.free(rt);
+
+    // Publication pins: the padded arms fire off the SAME O1 kind byte the
+    // exact family uses. The sloppy plain callee publishes `.sloppy`; the
+    // non-`this`-reading strict callee and the arrow publish `.raw_this`.
+    // The `this`-READING strict callee pins `.none`: `this` compiles to
+    // `push_this; put_loc` (a local), so `var_count > 0` refuses the whole
+    // leaf family by geometry and the raw frame `this` policy stays
+    // unobservable from a published plain body — its outcome line above
+    // covers the generic path instead. If a refactor stopped publishing the
+    // first three, the padded arm would silently never run and this test
+    // would only cover the generic path.
+    const one_name = try rt.internAtom("__padOne");
+    defer rt.atoms.free(one_name);
+    const strict_name = try rt.internAtom("__padStrict");
+    defer rt.atoms.free(strict_name);
+    const strict_leaf_name = try rt.internAtom("__padStrictLeaf");
+    defer rt.atoms.free(strict_leaf_name);
+    const arrow_name = try rt.internAtom("__padArrow");
+    defer rt.atoms.free(arrow_name);
+    const one_fn = global.getProperty(one_name);
+    defer one_fn.free(rt);
+    const strict_fn = global.getProperty(strict_name);
+    defer strict_fn.free(rt);
+    const strict_leaf_fn = global.getProperty(strict_leaf_name);
+    defer strict_leaf_fn.free(rt);
+    const arrow_fn = global.getProperty(arrow_name);
+    defer arrow_fn.free(rt);
+    const resolved_one = inline_calls.resolveInlineFunction(global, one_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_one.view.exact_args_leaf_kind == .sloppy);
+    const resolved_strict = inline_calls.resolveInlineFunction(global, strict_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_strict.view.exact_args_leaf_kind == .none);
+    const resolved_strict_leaf = inline_calls.resolveInlineFunction(global, strict_leaf_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_strict_leaf.view.exact_args_leaf_kind == .raw_this);
+    const resolved_arrow = inline_calls.resolveInlineFunction(global, arrow_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_arrow.view.exact_args_leaf_kind == .raw_this);
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafOutcomes()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "padded-args leaf excluded shapes keep generic-path outcomes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    // Q3 red lights, exclusion side: the shapes the padded arm must NEVER
+    // capture stay off the O1 kind byte at publication, so a missing-arg
+    // call keeps its authoritative semantics — `arguments` observes the
+    // real argc (not the padded window), default parameter initializers run
+    // (`has_simple_parameter_list` gate), rest parameters collect the real
+    // args, and a captured parameter reads through its cell
+    // (`open_var_ref_count` gate).
+    const setup = try js.eval(
+        \\globalThis.__exArguments = function (a, b) { return arguments.length; };
+        \\globalThis.__exDefault = function (a, b = 9) { return String(a) + ":" + String(b); };
+        \\globalThis.__exRest = function (a, ...rest) { return String(a) + "#" + rest.length; };
+        \\globalThis.__exCapture = function (a, b) { return function () { return String(b); }; };
+        \\function exercisePaddedExclusions() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__exArguments(1) !== 1) throw new Error("arguments.length");
+        \\        if (__exArguments() !== 0) throw new Error("arguments.length zero");
+        \\        if (__exDefault(3) !== "3:9") throw new Error("default init");
+        \\        if (__exRest(4) !== "4#0") throw new Error("rest collect");
+        \\        if (__exCapture(5)() !== "undefined") throw new Error("captured missing arg");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedExclusions();
+    );
+    setup.free(rt);
+
+    // Publication pins: every excluded shape must read `.none` — the padded
+    // arm shares the O1 byte, so `.none` here proves these calls can never
+    // enter the padded leaf constructors.
+    const names = [_][]const u8{ "__exArguments", "__exDefault", "__exRest", "__exCapture" };
+    for (names) |name| {
+        const atom_name = try rt.internAtom(name);
+        defer rt.atoms.free(atom_name);
+        const fn_value = global.getProperty(atom_name);
+        defer fn_value.free(rt);
+        const resolved = inline_calls.resolveInlineFunction(global, fn_value) orelse
+            return error.InvalidFunctionBytecode;
+        try std.testing.expect(resolved.view.exact_args_leaf_kind == .none);
+    }
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedExclusions()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
+}
+
+test "padded-args leaf abrupt teardown releases supplied args and pads exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Q3 red lights, release-balance side: a padded leaf that throws
+    // mid-body dies through general teardown, whose args release walks the
+    // FULL `arg_count` window — the supplied refcounted prefix exactly once
+    // (double free corrupts rc, missed free strands the object) and the
+    // undefined pads as tag-test no-ops. Covers supplied-prefix
+    // (argc=1 < 2), all-missing (argc=0 < 2), the plain/strict/method entry
+    // arms, and the deep-recursion overflow unwind through the padded
+    // authoritative constructor (every live padded frame's window released
+    // during the exception walk; the engine keeps running afterwards).
+    const setup = try js.eval(
+        \\function padThrow(a, b) { return a.x + null.missing + String(b); }
+        \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
+        \\const padThrowRecv = { m: function (a, b) { return a.x + null.missing + String(b); } };
+        \\function padOverflow(n, unused) { return padOverflow(n + 1) + (unused === undefined ? 1 : 0); }
+        \\function exercisePaddedLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { padThrow({ x: 1 }); } catch (error) {}
+        \\        try { padThrow(); } catch (error) {}
+        \\        try { strictPadThrow({ x: 2 }); } catch (error) {}
+        \\        try { padThrowRecv.m({ x: 3 }); } catch (error) {}
+        \\    }
+        \\    let overflow_caught = false;
+        \\    try { padOverflow(0); } catch (error) { overflow_caught = true; }
+        \\    if (!overflow_caught) throw new Error("overflow not raised");
+        \\    if (padThrowRecv.m !== padThrowRecv.m) throw new Error("machine wedged");
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "padded-args leaf leftover-carrying returns route through general teardown" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Q3 twin of the exact-args leftover coverage: the padded frame
+    // publishes the same `exact_args_leaf` teardown bit, so its return arm
+    // carries the same runtime len==0 operand-window guard. Parser-elided
+    // trailing drops and switch discriminants held across `return` must
+    // route to general teardown, which releases the leftovers AND the
+    // padded args window exactly once.
+    const setup = try js.eval(
+        \\function padLeftover(a, b) { ({ x: a, y: b }); }
+        \\function padSwitchLeftover(a, b) {
+        \\    switch (a) { case 1: return { x: String(b) }; }
+        \\}
+        \\function exercisePaddedLeafLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        padLeftover(i);
+        \\        padLeftover();
+        \\        if (padSwitchLeftover(1).x !== "undefined") throw new Error("switch pad");
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafLeftovers();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exercisePaddedLeafLeftovers()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
 test "zero-arg leaf leftover bodies are refused publication and balance rc" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
