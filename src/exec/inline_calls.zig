@@ -392,7 +392,12 @@ pub const Entry = struct {
 
     /// Return epilogue for a published empty leaf. The bytecode view proves
     /// this frame has no arguments/local/capture/open-ref windows and cannot
-    /// materialize FrameCold through arguments or direct eval. Exact argc=0 is
+    /// materialize FrameCold through arguments or direct eval — and, via the
+    /// static return-balance proof gating publication
+    /// (`codeProvesLeafReturnBalance`), that every return site completes with
+    /// an EMPTY operand window (parser-elided leftover shapes are refused the
+    /// flag), so the len==0 assert below holds without a runtime guard on the
+    /// hot return arm. Exact argc=0 is
     /// checked by the call adapter before setting the flag. The callable —
     /// plus, for the method shape, the moved-in receiver (`this` `.owned`,
     /// mirroring `setupSimpleInlineEntryImpl`'s method arm and `deinitSimple`'s

@@ -896,6 +896,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
     var sp2: [*]JSValue = undefined;
     var vb2: [*]JSValue = undefined;
     if (machine.topEntry().isEmptyLeaf()) {
+        // No operand-window guard on this arm: zero-arg empty-leaf
+        // publication requires the static return-balance proof
+        // (`codeProvesLeafReturnBalance`) — every return site of a published
+        // body completes with an empty callee operand window, so the narrow
+        // epilogue below never strands a leftover. The O1/O2/O3 arms below
+        // keep runtime len==0 guards instead (their families must stay
+        // eligible with leftover-carrying bodies; see each arm's comment).
         const dying = machine.topEntry();
         // One ldp: the caller's resume {pc, sp} stored by the empty-leaf
         // constructor. Read FIRST so the dispatch-feeding chain
@@ -957,12 +964,15 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // the general popReturnedFrame path below, whose teardown releases
         // the remaining window exactly once; balanced returns (every hot
         // call benchmark) pay only this one comparison. The zero-arg arm
-        // above intentionally keeps its unguarded established form: its
-        // published geometry (no free-name reads at all) makes leftover
-        // shapes far rarer, and the same latent exposure predates this knife
-        // at HEAD ec058eed (`function k(){ ({}); }` Debug-asserts / leaks
-        // one literal per call) — fixing it costs the measured +0.9 cyc on
-        // every zero-arg leaf return and belongs to its own commit.
+        // above keeps its unguarded established form because its publication
+        // is gated on the static return-balance proof instead
+        // (`codeProvesLeafReturnBalance`): a runtime guard here measured
+        // +0.9 cyc on every zero-arg leaf return, while unbalanced zero-arg
+        // bodies (`function k(){ ({}); }` — Debug assert / one leaked
+        // literal per call at HEAD ec058eed) are simply refused publication
+        // and ride the generic path. This family keeps the RUNTIME guard
+        // because its shapes (fib's `if` + recursion with args/captures)
+        // must stay leaf-eligible even when a body carries leftovers.
         const dying = machine.topEntry();
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();

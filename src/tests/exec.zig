@@ -7396,9 +7396,10 @@ test "leaf returns with leftover operands route through general teardown" {
     // in the done: local_buf..sp loop). The exact-args leaf return arm must
     // detect the non-empty callee window and fall back to general teardown;
     // the narrow epilogue would strand these object leftovers (rc leak, and
-    // a Debug assert abort). The zero-arg twin of this exposure PREDATES the
-    // exact-args family (HEAD ec058eed: `function k(){ ({}); }` trips the
-    // same assert) and stays out of this coverage until its own fix lands.
+    // a Debug assert abort). The zero-arg twin of this exposure (HEAD
+    // ec058eed: `function k(){ ({}); }` trips the same assert) is fixed on
+    // the publication side instead — the return-balance proof refuses those
+    // bodies the leaf flag; see "zero-arg leaf leftover bodies ..." below.
     const setup = try js.eval(
         \\function exactArgsLeftover(a) { ({ x: a }); }
         \\function switchLeftover(a) {
@@ -7421,6 +7422,84 @@ test "leaf returns with leftover operands route through general teardown" {
     _ = js.runtime.runObjectCycleRemoval();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "zero-arg leaf leftover bodies are refused publication and balance rc" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    // Zero-arg bodies that leave operands live at return: the parser-elided
+    // trailing expression-statement drop and the switch discriminant held
+    // across `return`. HEAD ec058eed published these as zero-arg empty
+    // leaves, and that family's return arm is the one leaf epilogue WITHOUT
+    // an operand-window guard — the leftover was stranded (Debug assert in
+    // deinitEmptyLeafInline; one leaked object per call in ReleaseFast).
+    // The static return-balance proof now refuses them publication, so they
+    // ride the generic simple-inline path whose teardown releases leftovers
+    // exactly once — across the direct sloppy, method-receiver, strict and
+    // arrow entry shapes.
+    const setup = try js.eval(
+        \\globalThis.__zeroTrailingDrop = function () { ({ z: 1 }); };
+        \\globalThis.__zeroSwitchLeftover = function () { switch ({ x: 7 }) { default: return 5; } };
+        \\globalThis.__zeroBalancedBranchy = function () { if ("a" < "b") return 1; return 2; };
+        \\const zeroRecv = {
+        \\    drop: function () { ({ z: 2 }); },
+        \\    strictDrop: function () { "use strict"; ({ z: 3 }); },
+        \\};
+        \\const zeroArrowDrop = () => { ({ z: 4 }); };
+        \\function exerciseZeroArgLeftovers() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        if (__zeroTrailingDrop() !== undefined) throw new Error("drop result");
+        \\        if (__zeroSwitchLeftover() !== 5) throw new Error("switch result");
+        \\        if (zeroRecv.drop() !== undefined) throw new Error("method drop result");
+        \\        if (zeroRecv.strictDrop() !== undefined) throw new Error("strict drop result");
+        \\        if (zeroArrowDrop() !== undefined) throw new Error("arrow drop result");
+        \\        if (__zeroBalancedBranchy() !== 1) throw new Error("branchy result");
+        \\    }
+        \\}
+        \\exerciseZeroArgLeftovers();
+    );
+    setup.free(rt);
+
+    // Publication pins: unbalanced bodies are refused BOTH zero-arg leaf
+    // bits; the branchy-but-balanced body keeps its publication (the
+    // BFS proof carries exact per-pc levels — it is not a conservative
+    // straight-line scan that would refuse every branch).
+    const drop_name = try rt.internAtom("__zeroTrailingDrop");
+    defer rt.atoms.free(drop_name);
+    const switch_name = try rt.internAtom("__zeroSwitchLeftover");
+    defer rt.atoms.free(switch_name);
+    const branchy_name = try rt.internAtom("__zeroBalancedBranchy");
+    defer rt.atoms.free(branchy_name);
+    const drop_fn = global.getProperty(drop_name);
+    defer drop_fn.free(rt);
+    const switch_fn = global.getProperty(switch_name);
+    defer switch_fn.free(rt);
+    const branchy_fn = global.getProperty(branchy_name);
+    defer branchy_fn.free(rt);
+    const resolved_drop = inline_calls.resolveInlineFunction(global, drop_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!resolved_drop.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(!resolved_drop.view.raw_this_inline_empty_leaf);
+    const resolved_switch = inline_calls.resolveInlineFunction(global, switch_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!resolved_switch.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(!resolved_switch.view.raw_this_inline_empty_leaf);
+    const resolved_branchy = inline_calls.resolveInlineFunction(global, branchy_fn) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved_branchy.view.flags.simple_inline_empty_leaf);
+
+    _ = rt.runObjectCycleRemoval();
+    const baseline_objects = rt.gc.liveCount();
+
+    const result = try js.eval("exerciseZeroArgLeftovers()");
+    result.free(rt);
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, rt.gc.liveCount());
 }
 
 test "capture leaf abrupt teardown releases operands and keeps borrowed cells" {
@@ -7641,7 +7720,8 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
 
     // Publication pins for the O3 forwarded-leaf shapes: the pivot body, a
     // throwing body (abrupt coverage really crosses the arm), and the
-    // leftover-operand body (the return-arm guard really routes it).
+    // leftover-operand body (refused publication by the return-balance
+    // proof, so it never reaches the forwarded arm).
     const setup = try js.eval(
         \\globalThis.__fwdLeaf = function () { return 1; };
         \\globalThis.__fwdLeafThrower = function () { return (void 0).x; };
@@ -7673,7 +7753,11 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     try std.testing.expect(resolved_thrower.view.flags.simple_inline_empty_leaf);
     const resolved_leftover = inline_calls.resolveInlineFunction(global, leftover) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_leftover.view.flags.simple_inline_empty_leaf);
+    // The leftover-operand body fails the static return-balance proof, so it
+    // is refused zero-arg leaf publication entirely: forwarded calls of it
+    // ride the authoritative forwarding path and the O3 arm's len==0 guard
+    // becomes a defensive backstop rather than the routing mechanism.
+    try std.testing.expect(!resolved_leftover.view.flags.simple_inline_empty_leaf);
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);

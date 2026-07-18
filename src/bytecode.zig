@@ -6792,12 +6792,33 @@ pub const pipeline_stack_size = struct {
     };
 
     /// Options for the BFS.
-    pub const Options = struct {};
+    pub const Options = struct {
+        /// When non-null, receives the return-balance proof: true iff every
+        /// reachable `return` / `return_undef` terminator — and any reachable
+        /// fall-off-the-end edge (executed as the hidden `return_undef`
+        /// sentinel, see `ensureTrailingReturnSentinel`) — completes with an
+        /// EMPTY operand stack once the return value is popped. The parser
+        /// elides trailing expression-statement drops and keeps switch
+        /// discriminants live across `return` (qjs releases both in the done:
+        /// local_buf..sp loop, quickjs.c:20701-20706), so this is a
+        /// per-return-site fact, not a validity check: `compute` still
+        /// succeeds for unbalanced functions. Sole consumer is the zero-arg
+        /// empty-leaf publication gate (`makeBytecodeView`), whose
+        /// normal-return arm runs a narrow epilogue with no operand-release
+        /// loop. Piggybacks on this BFS because the per-pc levels here are
+        /// exact (`seed` rejects any pc revisited at a different level), so
+        /// branchy-but-balanced bodies keep their proof — a linear scan would
+        /// have to refuse them conservatively.
+        returns_balanced_out: ?*bool = null,
+    };
 
     /// Compute the maximum stack size required to execute `bytecode`.
     ///
     /// Returns 0 for empty bytecode (no instructions to execute).
     pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
+        // Empty bytecode immediately falls off the end at level 0 (the hidden
+        // sentinel `return_undef`), which is a balanced return.
+        if (options.returns_balanced_out) |out| out.* = true;
         if (bytecode.len == 0) return 0;
 
         const allocator = std.heap.page_allocator;
@@ -6812,7 +6833,7 @@ pub const pipeline_stack_size = struct {
         defer pc_stack.deinit(allocator);
 
         // Seed: entry pc=0 with stack level 0.
-        try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, 0, 0, -1);
+        try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, 0, 0, -1, options.returns_balanced_out);
 
         var stack_len_max: u16 = 0;
 
@@ -6822,7 +6843,6 @@ pub const pipeline_stack_size = struct {
             var catch_pos = catch_pos_tab[pos];
             const op = bytecode[pos];
             if (op == 0) return error.InvalidOpcode;
-            _ = options;
             const meta = metadataFor(op) orelse return error.InvalidOpcode;
             const pos_next = pos + meta.size;
             if (pos_next > bytecode.len) return error.BytecodeOverflow;
@@ -6854,11 +6874,22 @@ pub const pipeline_stack_size = struct {
             // generically). Using name comparison is fine: the table is
             // small and this code runs once per function_mod.
             const name = meta.name;
-            if (eq(name, "return") or eq(name, "return_undef") or eq(name, "return_async") or
+            if (eq(name, "return") or eq(name, "return_undef")) {
+                // Normal-return terminator. `stack_len` already absorbed the
+                // return-value pop above, so any nonzero level here is a
+                // parser-elided leftover live across this return site.
+                if (stack_len != 0) {
+                    if (options.returns_balanced_out) |out| out.* = false;
+                }
+                continue; // terminator: no successors.
+            }
+            if (eq(name, "return_async") or
                 eq(name, "throw") or eq(name, "throw_error") or
                 eq(name, "tail_call") or eq(name, "tail_call_method") or
                 eq(name, "ret"))
             {
+                // Abrupt / tail-replacement terminators never reach the
+                // normal-return leaf epilogue, so they carry no balance fact.
                 continue; // terminator: no successors.
             }
 
@@ -6867,53 +6898,53 @@ pub const pipeline_stack_size = struct {
             if (eq(name, "goto")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "goto16")) {
                 const diff = std.mem.readInt(i16, bytecode[pos + 1 ..][0..2], .little);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "goto8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 continue;
             } else if (eq(name, "if_true") or eq(name, "if_false")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (eq(name, "if_true8") or eq(name, "if_false8")) {
                 const diff: i8 = @bitCast(bytecode[pos + 1]);
                 const target = relTarget(pos, 1, @intCast(diff));
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.gosub) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_get_var or op == opcode.op.with_delete_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_make_ref or op == opcode.op.with_get_ref) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len + 2, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (op == opcode.op.with_put_var) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 5 ..][0..4], .little);
                 const target = relTarget(pos, 5, diff);
                 if (stack_len == 0) return error.StackUnderflow;
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len - 1, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len - 1, catch_pos, options.returns_balanced_out);
                 // fall through.
             } else if (eq(name, "catch")) {
                 const diff = std.mem.readInt(i32, bytecode[pos + 1 ..][0..4], .little);
                 const target = relTarget(pos, 1, diff);
-                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos);
+                try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, target, stack_len, catch_pos, options.returns_balanced_out);
                 catch_pos = @intCast(pos);
             } else if (op == opcode.op.for_of_start or op == opcode.op.for_await_of_start) {
                 catch_pos = @intCast(pos);
@@ -6935,7 +6966,7 @@ pub const pipeline_stack_size = struct {
             }
 
             // Fall-through.
-            try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, pos_next, stack_len, catch_pos);
+            try seed(stack_level_tab, catch_pos_tab, &pc_stack, allocator, pos_next, stack_len, catch_pos, options.returns_balanced_out);
         }
 
         return stack_len_max;
@@ -6970,8 +7001,18 @@ pub const pipeline_stack_size = struct {
         pos: u32,
         stack_len: u16,
         catch_pos: i32,
+        returns_balanced_out: ?*bool,
     ) Error!void {
-        if (pos == stack_level_tab.len) return;
+        if (pos == stack_level_tab.len) {
+            // Reachable fall-off-the-end edge: executes the hidden
+            // `return_undef` sentinel at this incoming level, so it
+            // participates in the returns-balanced proof exactly like an
+            // explicit `return_undef` site.
+            if (stack_len != 0) {
+                if (returns_balanced_out) |out| out.* = false;
+            }
+            return;
+        }
         if (pos > stack_level_tab.len) return error.BytecodeOverflow;
         const existing = stack_level_tab[pos];
         if (existing == STACK_LEVEL_UNVISITED) {
@@ -9178,6 +9219,40 @@ const function_mod = struct {
         );
     }
 
+    /// Static operand-balance proof required before publishing the ZERO-ARG
+    /// empty-leaf family (`flags.simple_inline_empty_leaf` /
+    /// `raw_this_inline_empty_leaf`). The empty-leaf normal-return arm
+    /// (`popAndResume` / `deinitEmptyLeafInline`) is the one leaf epilogue
+    /// with NO operand-window guard and no release loop: it assumes the
+    /// callee operand stack is empty once the return value is popped. The
+    /// parser elides trailing expression-statement drops and keeps switch
+    /// discriminants live across `return` (qjs frees both in the done:
+    /// local_buf..sp loop, quickjs.c:20701-20706), so an unproven body —
+    /// `function k(){ ({}); }` — would strand its leftover on that arm
+    /// (Debug assert / one leaked object per call). Proving balance at
+    /// publication instead of guarding at runtime keeps the established
+    /// return arm check-free; refused bodies simply stay off the leaf family
+    /// and ride the generic simple-inline path, whose teardown releases
+    /// leftovers exactly once (semantics identical to the pre-leaf world).
+    ///
+    /// The proof rides the same BFS finalize already ran for stack sizing
+    /// (`pipeline_stack_size.compute` mirrors qjs compute_stack_size,
+    /// quickjs.c:35167): per-pc levels are exact — every pc has ONE level on
+    /// all paths — so branchy-but-balanced bodies (`if`/`&&`/try) keep their
+    /// leaf eligibility; only genuinely unbalanced return sites refuse. Runs
+    /// once per FB behind the cached execution view, and only for bodies
+    /// that already passed the rest of the zero-arg leaf geometry. Any BFS
+    /// failure (e.g. OOM in its scratch tables) refuses the proof —
+    /// fail-closed to the generic path. The exact-args (O1), capture (O2)
+    /// and forwarded (O3) families keep their runtime len==0 return guards
+    /// instead: their arity/capture shapes (fib's `if` + recursion) must
+    /// stay eligible with arbitrary leftover-carrying bodies.
+    fn codeProvesLeafReturnBalance(code: []const u8) bool {
+        var balanced = true;
+        _ = pipeline_stack_size.compute(code, .{ .returns_balanced_out = &balanced }) catch return false;
+        return balanced;
+    }
+
     /// Return a borrowed `BytecodeImpl` execution view for the current VM.
     ///
     /// The returned value does not own any slices and must not be deinitialized.
@@ -9226,8 +9301,13 @@ const function_mod = struct {
             fb.open_var_ref_count == 0 and
             !materializes_arguments_object and !rescues_implicit_arguments and
             !fb.flags.has_eval_call;
+        // The zero-arg family additionally requires the static return-balance
+        // proof (`codeProvesLeafReturnBalance`): its return arm is the only
+        // leaf epilogue without an operand-window guard. Ordered last so the
+        // body scan runs only for candidates that already passed the cheap
+        // geometry tests.
         const empty_leaf_geometry = fb.arg_count == 0 and fb.var_refs_len == 0 and
-            leaf_body_geometry;
+            leaf_body_geometry and codeProvesLeafReturnBalance(fb.byteCode());
         // Exact-args twin (O1): published only for `arg_count > 0` so the
         // zero-arg family keeps sole ownership of the argc==0 shapes and the
         // two families partition cleanly at every call arm. INHERITED
