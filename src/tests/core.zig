@@ -4003,6 +4003,37 @@ test "gc heap accounting verifier catches live byte drift" {
     try rt.gc.verifyHeapAccounting(rt);
 }
 
+test "gc collection entry is deferred while zero-ref teardown is in flight" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Mirror the mid-teardown state a force-GC-at-allocation poll observes: a
+    // zero-ref header queued during DECREF is unlinked from the gc object list
+    // (Registry.enqueueZeroRef) while its bytes stay in the space accounts
+    // until its destructor runs — the same shape as qjs gc_zero_ref_count_list
+    // (quickjs.c:6476-6483). Entering a collection here is structurally
+    // invalid (qjs JS_RunGC only ever runs with gc_phase == JS_GC_PHASE_NONE;
+    // its gc_decref asserts ref_count > 0 across gc_obj_list, quickjs.c:6741).
+    // Before the phase gate this tripped verifyHeapAccounting's
+    // HeapLiveBytesMismatch at collection entry.
+    const victim = try core.Object.create(rt, core.class.ids.object, null);
+
+    rt.gc.beginDecrefPhase();
+    victim.header.meta().rc = 0;
+    rt.gc.enqueueZeroRef(rt, &victim.header);
+
+    const direct = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), direct.freed_objects);
+    const forced = try rt.forceGC(null);
+    try std.testing.expectEqual(@as(usize, 0), forced.freed_objects);
+
+    // Draining the queue destroys the victim and restores the invariant; a
+    // collection from the clean phase must then run normally again.
+    rt.gc.endDecrefPhase(rt);
+    try rt.gc.verifyHeapAccounting(rt);
+    _ = try rt.tryRunObjectCycleRemoval();
+}
+
 test "gc heap accounting verifier catches missing allocation entries" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

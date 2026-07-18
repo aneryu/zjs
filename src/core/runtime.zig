@@ -1950,6 +1950,18 @@ pub const JSRuntime = struct {
         roots: ?*const ValueRootFrame,
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
+        // QuickJS only ever enters JS_RunGC with rt->gc_phase == JS_GC_PHASE_NONE:
+        // during DECREF teardown zero-ref objects sit on gc_zero_ref_count_list
+        // (unlinked from gc_obj_list but not yet freed, quickjs.c:6476-6483), and
+        // gc_decref asserts ref_count > 0 across the whole list (quickjs.c:6741),
+        // so a collection mid-DECREF would be structurally invalid there too. zjs
+        // mirrors that queue in Registry.zero_ref_* (headers unlinked from the
+        // object list while their space-account bytes are only released by their
+        // destructor), so an allocation made inside a destructor (deferred-free
+        // queue growth) must not re-enter the collector while phase == .decref —
+        // defer to the pending-request machinery instead, exactly like the
+        // gc_running guard above.
+        if (self.gc.phase != .none) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
         defer if (builtin.mode == .Debug) {
@@ -1994,6 +2006,12 @@ pub const JSRuntime = struct {
     ) gc.CollectionError!gc.CollectionResult {
         _ = roots;
         if (self.gc_running) return .{};
+        // Same phase gate as tryRunObjectCycleRemovalWithValueRoots: a poll
+        // fired from an allocation inside DECREF teardown (or runtime deinit)
+        // must not start a collection; the request stays pending and is
+        // serviced at the next poll from a clean phase (qjs JS_RunGC is only
+        // reachable with gc_phase == JS_GC_PHASE_NONE).
+        if (self.gc.phase != .none) return .{};
         const scheduler_point: gc.SchedulerPoint = switch (mode) {
             .normal => .allocation_slow_path,
             .callback_boundary => .callback_boundary,
