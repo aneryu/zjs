@@ -2240,6 +2240,15 @@ pub const function_def = struct {
         func_kind: FunctionKind = .normal,
         func_type: ParseFunctionKind = .statement,
         is_strict_mode: bool = false,
+        /// qjs `fd->is_func_expr && fd->func_name != JS_ATOM_NULL`: this def
+        /// is a *named* function expression. Its self-binding var
+        /// (`func_var_idx`, kind `.function_name`) and the matching
+        /// `special_object THIS_FUNC ; put_loc` prologue materialize lazily on
+        /// the first falling-through reference — mirroring qjs, where
+        /// add_func_var is only called from resolve_scope_var
+        /// (quickjs.c:32975-32978 / 33151-33155) and add_eval_variables
+        /// (quickjs.c:33649-33650 / 33697-33698), never unconditionally.
+        is_named_func_expr: bool = false,
         func_name: atom.Atom,
 
         // Variables
@@ -2385,6 +2394,20 @@ pub const function_def = struct {
         /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom
         /// is duplicated; the caller keeps ownership of its copy.
         /// Returns the index of the new var.
+        /// Mirror qjs add_func_var (quickjs.c:24208-24219): create the named
+        /// function expression's self-binding var on demand, idempotent via
+        /// `func_var_idx`. Argument shape matches the retired eager site
+        /// (scope 0, non-lexical, const) so resolution order and the
+        /// sloppy-mode silent-ignore write path are unchanged; zjs registers
+        /// is_const unconditionally (see closureVarWriteThrowsReadOnly note)
+        /// while qjs sets it only in strict mode.
+        pub fn ensureFuncExprSelfBinding(self: *FunctionDefImpl) !i32 {
+            if (self.func_var_idx < 0) {
+                self.func_var_idx = try self.addScopeVar(self.func_name, .function_name, 0, false, true);
+            }
+            return self.func_var_idx;
+        }
+
         pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
             const tail = try growSliceBy(VarDef, self.memory, &self.vars, &self.vars_capacity, 1);
             tail[0] = var_def;

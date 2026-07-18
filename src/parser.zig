@@ -5332,10 +5332,55 @@ pub const parser_core = struct {
         }
 
         fn emitScopeDeleteVar(self: *State, atom_id: Atom) Error!void {
+            try self.materializeFuncExprNameForDeleteVar(atom_id);
             if (self.emit_phase1_temp) {
                 try self.emitOpAtomU16(opcode.op.scope_delete_var, atom_id, @intCast(self.scope_level));
             } else {
                 try self.emitOpAtom(opcode.op.delete_var, atom_id);
+            }
+        }
+
+        /// `delete <name>` deliberately emits no ensureClosureVar (no capture
+        /// wiring), but finalize still resolves it against materialized vars
+        /// (writeLoweredScopeDeleteVar -> resolveScopeVar / lookupClosureVar,
+        /// where `.function_name` kinds are always visible). qjs routes
+        /// OP_scope_delete_var through the same resolve_scope_var that lazily
+        /// adds the func-expr self-binding and then lowers the delete to
+        /// push_false (quickjs.c:33086 / 33279-33281). Mirror only the
+        /// materialization decision here, capture-free: walk the same
+        /// visibility order ensureClosureVar uses and materialize when the
+        /// delete would otherwise fall through to a named function
+        /// expression's own name.
+        fn materializeFuncExprNameForDeleteVar(self: *State, atom_id: Atom) Error!void {
+            if (!self.emit_to_function_def) return;
+            const current = self.cur_func();
+            if (hasVisibleCurrentBinding(current, atom_id, self.scope_level)) return;
+            if (current.is_named_func_expr and atom_id == current.func_name) {
+                _ = try current.ensureFuncExprSelfBinding();
+                return;
+            }
+            for (current.closure_var) |cv| {
+                if (cv.var_name == atom_id) return;
+            }
+            var parent_index = self.cur_func_stack.len;
+            var visible_scope_level = current.parent_scope_level;
+            while (parent_index > 0) {
+                parent_index -= 1;
+                const parent = self.funcAtVirtualIndex(parent_index);
+                // Visibility check first: materializing under a chain-visible
+                // same-name binding would link the new scope-0 var *ahead* of
+                // it in the newest-first scope chain and flip resolution for
+                // the parent's own references. (An already-materialized
+                // self-binding is itself chain-visible and stops here too.)
+                if (hasVisibleCurrentBinding(parent, atom_id, visible_scope_level)) return;
+                for (parent.closure_var) |cv| {
+                    if (cv.var_name == atom_id) return;
+                }
+                if (parent.is_named_func_expr and atom_id == parent.func_name) {
+                    _ = try parent.ensureFuncExprSelfBinding();
+                    return;
+                }
+                visible_scope_level = parent.parent_scope_level;
             }
         }
 
@@ -5468,9 +5513,32 @@ pub const parser_core = struct {
                     }
                 }
             }
-            if (current.findVar(atom_id) >= 0 or current.findArg(atom_id) >= 0) return;
+            if (current.findVar(atom_id) >= 0 or current.findArg(atom_id) >= 0) {
+                // A flat name hit resolves locally with no capture needed. But
+                // zjs findVar is flat while qjs find_var is scope_level==0
+                // only: a block-scoped shadow that is *not* visible from this
+                // reference's scope chain must still materialize the lazy
+                // self-binding (`function rec(){ { let rec; } return rec; }`
+                // resolves to the self-binding — qjs falls through to
+                // add_func_var, quickjs.c:32975-32978).
+                if (current.is_named_func_expr and atom_id == current.func_name and
+                    !hasVisibleCurrentBinding(current, atom_id, self.scope_level))
+                {
+                    _ = try current.ensureFuncExprSelfBinding();
+                }
+                return;
+            }
             for (current.closure_var) |cv| {
                 if (cv.var_name == atom_id) return;
+            }
+            // Falling-through reference to the function expression's own
+            // name: materialize the self-binding on demand and resolve to it
+            // (resolve_scope_var quickjs.c:32975-32978). Sits after the
+            // `arguments` block and the local/arg/closure early-returns —
+            // the same precedence the eager var had.
+            if (current.is_named_func_expr and atom_id == current.func_name) {
+                _ = try current.ensureFuncExprSelfBinding();
+                return;
             }
             if (try self.ensureArrowSpecialCapture(atom_id)) return;
 
@@ -5619,7 +5687,7 @@ pub const parser_core = struct {
         fn findVisibleParentVarCapturingWith(
             self: *State,
             parent_index: usize,
-            parent: *const function_def_mod.FunctionDef,
+            parent: *function_def_mod.FunctionDef,
             atom_id: Atom,
             visible_scope_level: i32,
         ) Error!?i32 {
@@ -5651,6 +5719,14 @@ pub const parser_core = struct {
                 i -= 1;
                 const vd = parent.vars[i];
                 if (vd.var_name == atom_id and vd.var_kind == .function_name) return @intCast(i);
+            }
+            // Nested falling-through reference to an enclosing named function
+            // expression's own name: materialize the parent's self-binding at
+            // the exact fallback position the eager var used to occupy
+            // (resolve_scope_var enclosing-function leg, quickjs.c:
+            // 33151-33155), keeping capture order unchanged.
+            if (parent.is_named_func_expr and atom_id == parent.func_name) {
+                return try parent.ensureFuncExprSelfBinding();
             }
             return null;
         }
@@ -15758,8 +15834,15 @@ pub const parser_core = struct {
                 });
             }
             if (!s.pending_function_is_decl) {
-                if (s.pending_function_name) |name| {
-                    child_fd.func_var_idx = try child_fd.addScopeVar(name, .function_name, 0, false, true);
+                if (s.pending_function_name != null) {
+                    // qjs js_parse_function_decl2 records only is_func_expr +
+                    // func_name here; the self-binding var is added lazily by
+                    // resolve_scope_var / add_eval_variables when a reference
+                    // actually falls through (add_func_var quickjs.c:24208,
+                    // call sites 32977 / 33153 / 33650 / 33698). child_fd
+                    // carries the name already: FunctionDef.init received
+                    // `child_name == s.pending_function_name` above.
+                    child_fd.is_named_func_expr = true;
                 }
             }
             if (s.pending_function_is_decl) {
@@ -20804,10 +20887,42 @@ pub const parser_core = struct {
         var maybe_parent = fd.parent;
         var visible_scope_level = fd.parent_scope_level;
         while (maybe_parent) |parent| {
+            // eval source is unknown at compile time, so every enclosing
+            // named function expression must conservatively materialize its
+            // self-binding before the var scan below captures it. Mirrors
+            // add_eval_variables' enclosing-function leg (quickjs.c:
+            // 33697-33698). Guard: a chain-visible same-name *var* means the
+            // eval resolves that binding anyway, and late materialization
+            // would link the self-binding ahead of it in the newest-first
+            // scope-0 chain and flip the parent's own references — skip.
+            // (Args deliberately do not block: the eager var coexisted with
+            // shadowing args, and finalize arg resolution is unaffected.)
+            if (parent.is_named_func_expr and
+                !hasVisibleSameNameVar(parent, parent.func_name, visible_scope_level))
+            {
+                _ = try parent.ensureFuncExprSelfBinding();
+            }
             try captureVisibleParentVarsForDirectEval(fd, parent, visible_scope_level);
             visible_scope_level = parent.parent_scope_level;
             maybe_parent = parent.parent;
         }
+    }
+
+    /// Chain-visible same-name *var* scan (no args): the guard used before
+    /// lazily materializing a function-expression self-binding once parsing
+    /// has moved past the def (direct-eval conservative paths).
+    fn hasVisibleSameNameVar(
+        fd: *const function_def_mod.FunctionDef,
+        atom_id: Atom,
+        visible_scope_level: i32,
+    ) bool {
+        var index = fd.vars.len;
+        while (index > 0) {
+            index -= 1;
+            const vd = fd.vars[index];
+            if (vd.var_name == atom_id and State.scopeChainContains(fd, visible_scope_level, vd.scope_level)) return true;
+        }
+        return false;
     }
 
     fn localClosureVarForFunctionVar(fd: *function_def_mod.FunctionDef, var_idx: i32) function_def_mod.ClosureVar {
@@ -20905,7 +21020,7 @@ pub const parser_core = struct {
         }
     }
 
-    fn markDirectEvalVisibleOwnBindings(fd: *function_def_mod.FunctionDef) void {
+    fn markDirectEvalVisibleOwnBindings(fd: *function_def_mod.FunctionDef) Error!void {
         const eval_scope_mask: u16 = 0x3fff;
         var pc: usize = 0;
         var atom_index: usize = 0;
@@ -20931,6 +21046,17 @@ pub const parser_core = struct {
             };
             if (scope_level) |visible_scope| {
                 found_eval = true;
+                // The eval source may reference the enclosing named function
+                // expression's own name: materialize the self-binding for this
+                // eval site unless a chain-visible same-name var already
+                // resolves it (add_eval_variables quickjs.c:33649-33650).
+                // Materialize before the capture scan below so the new var is
+                // marked captured by its `.function_name` arm.
+                if (fd.is_named_func_expr and
+                    !hasVisibleSameNameVar(fd, fd.func_name, visible_scope))
+                {
+                    _ = try fd.ensureFuncExprSelfBinding();
+                }
                 for (fd.vars) |*vd| {
                     if (vd.var_kind == .eval_var_object) continue;
                     if (vd.var_kind == .function_name or State.scopeChainContains(fd, visible_scope, vd.scope_level)) {
@@ -20949,6 +21075,12 @@ pub const parser_core = struct {
         // conservative fallback for hand-built FunctionDefs so an understated
         // open-ref table can never turn into a dangling/boxed-slot mismatch.
         if (!found_eval or malformed) {
+            // Defensive arm (understated/hand-built streams): keep eval
+            // conservatism — materialize the self-binding too unless any
+            // same-name var exists at all (flat: visibility unknown here).
+            if (fd.is_named_func_expr and fd.findVar(fd.func_name) < 0) {
+                _ = try fd.ensureFuncExprSelfBinding();
+            }
             for (fd.vars) |*vd| if (vd.var_kind != .eval_var_object) {
                 vd.is_captured = true;
             };
@@ -20960,7 +21092,7 @@ pub const parser_core = struct {
         if (fd.has_eval_call) {
             // Reserve open references only for the union of bindings visible
             // at real eval call scopes. Sibling block lexicals remain bare.
-            markDirectEvalVisibleOwnBindings(fd);
+            try markDirectEvalVisibleOwnBindings(fd);
             try captureAllVisibleDirectEvalBindings(fd);
         }
         for (fd.child_list) |child| {
