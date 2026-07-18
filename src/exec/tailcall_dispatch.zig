@@ -489,14 +489,16 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     return enterEntry(vm, entry, target.fb.byte_code);
 }
 
-/// Warm OP_call0 entry after receiver-independent resolution has proved the
-/// published empty-leaf shape. Avoid both InlineTarget freight and the native
-/// frame of the authoritative fallible constructor. `resume_pc` (the caller's
-/// register-resident `pc + 1`) rides into the entry's resume record so the
-/// return arm restores pc/sp with one ldp. `code_ptr` is the FB-resident
-/// callee first pc (`fb.byte_code`), pre-folded by the resolving handler.
-inline fn pushWarmEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.tryPushEmptyLeafCallFast(vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(vm, function, region_start)) {
+/// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
+/// resolution has proved the published empty-leaf shape. Avoid both
+/// InlineTarget freight and the native frame of the authoritative fallible
+/// constructor. `resume_pc` (the caller's register-resident post-operand pc)
+/// rides into the entry's resume record so the return arm restores pc/sp with
+/// one ldp. `code_ptr` is the FB-resident callee first pc (`fb.byte_code`),
+/// pre-folded by the resolving handler. The method instantiation's region is
+/// `[receiver, callable]`; the receiver becomes the frame's owned raw `this`.
+inline fn pushWarmEmptyLeafAndEnter(comptime method_receiver: bool, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushEmptyLeafCallFast(method_receiver, vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(method_receiver, vm, function, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -518,8 +520,8 @@ const EmptyLeafMiss = union(enum) {
     recovered,
 };
 
-noinline fn pushEmptyLeafMiss(vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) EmptyLeafMiss {
-    const entry = vm.machine.pushEmptyLeafCall(vm.global, vm.stack, function, region_start) catch |err| {
+noinline fn pushEmptyLeafMiss(comptime method_receiver: bool, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) EmptyLeafMiss {
+    const entry = vm.machine.pushEmptyLeafCall(method_receiver, vm.global, vm.stack, function, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
     };
@@ -530,7 +532,7 @@ noinline fn pushEmptyLeafMiss(vm: *Vm, function: *const bytecode.Bytecode, regio
 /// the operand handler instead of duplicating the warm fixed-call0 body in a
 /// second large opcode instance.
 inline fn pushEmptyLeafAndEnter(vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.pushEmptyLeafCall(vm.global, vm.stack, function, region_start) catch |err| {
+    const entry = vm.machine.pushEmptyLeafCall(false, vm.global, vm.stack, function, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
@@ -963,7 +965,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     vm.stack.setTopPtr(region_start);
                     if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                            return pushWarmEmptyLeafAndEnter(false, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
                         }
                         return pushEmptyLeafAndEnter(vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
@@ -1016,9 +1018,19 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         const region_start = sp - total;
         const receiver = region_start[0];
         const method = region_start[1];
-        if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
+        if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
             vm.frame.pc += 2;
             vm.stack.setTopPtr(region_start);
+            // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
+            // published leaf skips InlineTarget freight and the three-deep
+            // pushFrame/fallback/setup constructor chain. The receiver rides
+            // into the frame's owned raw `this` (identical ownership to the
+            // general method arm); `pc + 3` (opcode + 2-byte argc operand) is
+            // the register-resident twin of the frame.pc advance above.
+            if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
+                return pushWarmEmptyLeafAndEnter(true, vb, vm, resolved.view, region_start, pc + 3, resolved.fb.byte_code);
+            }
+            const target = resolved.bind(receiver, method);
             return pushAndEnter(vb, vm, &target, region_start, argc, .method, false);
         }
         if (class_vm.functionObjectFromValue(receiver) != null and isForwardingCallRecord(vm.ctx, method)) {

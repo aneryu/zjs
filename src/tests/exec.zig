@@ -7386,11 +7386,11 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(false, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
-    const first = try machine.pushEmptyLeafCall(global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(false, global, &l0_stack, resolved.view, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
@@ -7403,7 +7403,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(false, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
@@ -7418,9 +7418,9 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(false, global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
-    const heap_entry = try machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    const heap_entry = try machine.pushEmptyLeafCall(false, global, &l0_stack, &oversized, region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
     continuation.deinit(rt);
@@ -7432,11 +7432,175 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const failed = machine.pushEmptyLeafCall(global, &l0_stack, &oversized, region_start);
+    const failed = machine.pushEmptyLeafCall(false, global, &l0_stack, &oversized, region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+}
+
+test "method call empty leaf binds receiver as this and balances refcounts" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\Object.defineProperty(String.prototype, "__leafThis", {
+        \\    value: function () { return this; },
+        \\    configurable: true,
+        \\});
+        \\function exerciseMethodEmptyLeaf() {
+        \\    const stable = { m() { return 1; }, self() { return this; } };
+        \\    let total = 0;
+        \\    for (let i = 0; i < 256; i++) {
+        \\        total += stable.m();
+        \\        if (stable.self() !== stable) throw new Error("stable this mismatch");
+        \\        const fresh = { self() { return this; } };
+        \\        if (fresh.self() !== fresh) throw new Error("fresh this mismatch");
+        \\        const boxed = "abc".__leafThis();
+        \\        if (typeof boxed !== "object" || String(boxed) !== "abc")
+        \\            throw new Error("primitive receiver coercion mismatch");
+        \\    }
+        \\    assert.sameValue(total, 256);
+        \\}
+        \\exerciseMethodEmptyLeaf();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseMethodEmptyLeaf()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "method call empty leaf abrupt teardown releases receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\function exerciseMethodEmptyLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        const recv = { boom() { return null.missing; } };
+        \\        try { recv.boom(); } catch (error) {}
+        \\    }
+        \\}
+        \\exerciseMethodEmptyLeafThrow();
+    );
+    setup.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    const result = try js.eval("exerciseMethodEmptyLeafThrow()");
+    result.free(js.runtime);
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "method empty leaf warm constructor moves receiver ownership" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const setup = try js.eval("globalThis.__warmMethodLeafRecv = { m() { return 1; } };");
+    setup.free(rt);
+    const holder_name = try rt.internAtom("__warmMethodLeafRecv");
+    defer rt.atoms.free(holder_name);
+    const receiver = global.getProperty(holder_name);
+    defer receiver.free(rt);
+    const receiver_object = object_ops.objectFromValue(receiver) orelse
+        return error.Unexpected;
+    const method_name = try rt.internAtom("m");
+    defer rt.atoms.free(method_name);
+    const callable = receiver_object.getProperty(method_name);
+    defer callable.free(rt);
+    const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+
+    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
+    defer l0_function.deinit(rt);
+    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    defer l0_frame.deinit(&rt.memory, rt);
+    var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
+    defer l0_stack.deinit(rt);
+    var catch_target: ?usize = null;
+    const l0 = inline_calls.L0State{ .level = .{
+        .frame = &l0_frame,
+        .stack = &l0_stack,
+        .catch_target = &catch_target,
+    } };
+    var machine = inline_calls.Machine.init(ctx, null, global, &l0);
+    defer machine.deinit();
+    const initial_call_depth = ctx.call_depth;
+    const baseline_rc = receiver_object.header.meta().rc;
+
+    // Fresh Machine: the speculative arm must miss without consuming either
+    // slot of the [receiver, callable] region or changing call depth.
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    var region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(true, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(!region_start[0].isUndefined());
+    try std.testing.expect(!region_start[1].isUndefined());
+
+    // Authoritative constructor: receiver moves into the frame's owned raw
+    // `this` (region slot cleared, no extra refcount), and the empty-leaf
+    // return epilogue releases exactly that moved reference.
+    const first = try machine.pushEmptyLeafCall(true, global, &l0_stack, resolved.view, region_start);
+    try std.testing.expect(first.isEmptyLeaf());
+    try std.testing.expect(first.frame.this_value.same(receiver));
+    try std.testing.expect(first.frame.ownership.this_value == .owned);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    const steady_bytes = rt.memory.allocated_bytes;
+
+    // Warm hit: same leaf shape, allocation-free, same ownership movement.
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    const warm = machine.tryPushEmptyLeafCallFast(true, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+        return error.Unexpected;
+    try std.testing.expect(warm.isEmptyLeaf());
+    try std.testing.expect(warm.frame.this_value.same(receiver));
+    try std.testing.expect(warm.frame.ownership.this_value == .owned);
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
+    machine.popReturnedEmptyLeaf();
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+
+    // Setup failure must restore depth/watermark and release BOTH region
+    // slots — receiver and callable — leaving the warmed Machine reusable.
+    var oversized = resolved.view.*;
+    oversized.stack_size = core.VmStackArena.chunk_slots;
+    try l0_stack.pushOwned(receiver.dup());
+    try l0_stack.pushOwned(callable.dup());
+    region_start = l0_stack.topPtr() - 2;
+    l0_stack.setTopPtr(region_start);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const failed = machine.pushEmptyLeafCall(true, global, &l0_stack, &oversized, region_start);
+    rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, failed);
+    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expect(region_start[1].isUndefined());
+    try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
