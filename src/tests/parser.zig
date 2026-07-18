@@ -4636,6 +4636,103 @@ test "script top-level lexical captured before declaration uses checked var ref"
     try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.get_var_ref_check) >= 1);
 }
 
+test "captured reads encode lexical TDZ in the final var-ref opcode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var plain = try parser.compile(
+        rt,
+        "function outer() { var captured = 1; return function inner() { return captured; }; }",
+        .{ .mode = .script, .filename = "closure-var-read.js" },
+    );
+    defer plain.deinit();
+    try std.testing.expect(plain.syntax_error == null);
+
+    const plain_reads = countOpcodeRecursive(&plain.function, qop.get_var_ref) +
+        countOpcodeRecursive(&plain.function, qop.get_var_ref0) +
+        countOpcodeRecursive(&plain.function, qop.get_var_ref1) +
+        countOpcodeRecursive(&plain.function, qop.get_var_ref2) +
+        countOpcodeRecursive(&plain.function, qop.get_var_ref3);
+    try std.testing.expect(plain_reads >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&plain.function, qop.get_var_ref_check));
+
+    var checked = try parser.compile(
+        rt,
+        "function outer() { let captured = 1; return function inner() { return captured; }; }",
+        .{ .mode = .script, .filename = "closure-let-read.js" },
+    );
+    defer checked.deinit();
+    try std.testing.expect(checked.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&checked.function, qop.get_var_ref_check) >= 1);
+}
+
+test "named function self-binding writes do not reach var-ref stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var sloppy = try parser.compile(
+        rt,
+        "(function named() { return function inner() { named = 0; named += 1; named++; ++named; }; });",
+        .{ .mode = .script, .filename = "function-name-write.js" },
+    );
+    defer sloppy.deinit();
+    try std.testing.expect(sloppy.syntax_error == null);
+
+    const var_ref_writes = countOpcodeRecursive(&sloppy.function, qop.put_var_ref) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref0) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref1) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref2) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref3) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref_check) +
+        countOpcodeRecursive(&sloppy.function, qop.put_var_ref_check_init) +
+        countOpcodeRecursive(&sloppy.function, qop.set_var_ref) +
+        countOpcodeRecursive(&sloppy.function, qop.set_var_ref0) +
+        countOpcodeRecursive(&sloppy.function, qop.set_var_ref1) +
+        countOpcodeRecursive(&sloppy.function, qop.set_var_ref2) +
+        countOpcodeRecursive(&sloppy.function, qop.set_var_ref3);
+    try std.testing.expectEqual(@as(usize, 0), var_ref_writes);
+
+    var dynamic = try parser.compile(
+        rt,
+        "(function named(scope) { with (scope) { named += 1; } return function inner(innerScope) { with (innerScope) { named += 1; } }; });",
+        .{ .mode = .script, .filename = "function-name-dynamic-write.js" },
+    );
+    defer dynamic.deinit();
+    try std.testing.expect(dynamic.syntax_error == null);
+    // qjs snapshots the selected with/reference before evaluating the RHS.
+    // zjs's equivalent transport is with_get_ref + selected-reference
+    // with_put_var; both the defining frame and captured self-binding must use
+    // it instead of re-resolving a plain var-ref store after the RHS.
+    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.with_get_ref) >= 2);
+    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.with_put_var) >= 2);
+
+    var strict = try parser.compile(
+        rt,
+        "(function named() { 'use strict'; return function inner() { named = 0; }; });",
+        .{ .mode = .script, .filename = "strict-function-name-write.js" },
+    );
+    defer strict.deinit();
+    try std.testing.expect(strict.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&strict.function, qop.throw_error) >= 1);
+
+    var parameter_default = try parser.compile(
+        rt,
+        "(function named(value = named) { return value; });",
+        .{ .mode = .script, .filename = "function-name-parameter-default.js" },
+    );
+    defer parameter_default.deinit();
+    try std.testing.expect(parameter_default.syntax_error == null);
+    // The argument environment is not linked to body scope 0. QuickJS still
+    // resolves the fallback name through func_var_idx, never as a global.
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&parameter_default.function, qop.get_var));
+    const local_reads = countOpcodeRecursive(&parameter_default.function, qop.get_loc) +
+        countOpcodeRecursive(&parameter_default.function, qop.get_loc0) +
+        countOpcodeRecursive(&parameter_default.function, qop.get_loc1) +
+        countOpcodeRecursive(&parameter_default.function, qop.get_loc2) +
+        countOpcodeRecursive(&parameter_default.function, qop.get_loc3);
+    try std.testing.expect(local_reads >= 1);
+}
+
 test "assignment target scan ignores atom operand bytes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

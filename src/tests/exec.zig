@@ -4617,6 +4617,131 @@ test "qjs alignment const local writes throw from resolved bytecode" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "qjs alignment named function self-binding ignores every sloppy write form" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let direct = (function named() {
+        \\  let original = named;
+        \\  named += 1;
+        \\  named++;
+        \\  ++named;
+        \\  [named] = [0];
+        \\  ({ value: named } = { value: 0 });
+        \\  return named === original;
+        \\})();
+        \\assert.sameValue(direct, true);
+        \\let nested = (function named() {
+        \\  let original = named;
+        \\  return function inner() {
+        \\    named = 0;
+        \\    named += 1;
+        \\    named++;
+        \\    ++named;
+        \\    [named] = [0];
+        \\    ({ value: named } = { value: 0 });
+        \\    return named === original;
+        \\  };
+        \\})()();
+        \\assert.sameValue(nested, true);
+        \\let strictOuterCaught = false;
+        \\try {
+        \\  (function named() { "use strict"; return function inner() { named = 0; }; })()();
+        \\} catch (error) {
+        \\  strictOuterCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictOuterCaught, true);
+        \\let strictInnerCaught = false;
+        \\try {
+        \\  (function named() { return function inner() { "use strict"; named = 0; }; })()();
+        \\} catch (error) {
+        \\  strictInnerCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictInnerCaught, false);
+        \\let emptyWith = {};
+        \\let emptyWithBinding = (function named() {
+        \\  with (emptyWith) { named += 1; }
+        \\  return typeof named;
+        \\})();
+        \\assert.sameValue(emptyWithBinding, "function");
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(emptyWith, "named"), false);
+        \\let hitWith = { named: 1 };
+        \\let hitWithBinding = (function named() {
+        \\  with (hitWith) { named += 1; }
+        \\  return typeof named;
+        \\})();
+        \\assert.sameValue(hitWithBinding, "function");
+        \\assert.sameValue(hitWith.named, 2);
+        \\let lateWith = {};
+        \\(function named() {
+        \\  with (lateWith) { named += (lateWith.named = 10, 1); }
+        \\})();
+        \\assert.sameValue(lateWith.named, 10);
+        \\let deletedWith = { named: 1 };
+        \\(function named() {
+        \\  with (deletedWith) { named += (delete deletedWith.named, 2); }
+        \\})();
+        \\assert.sameValue(deletedWith.named, 3);
+        \\let sloppyEvalBinding = (function named() {
+        \\  eval("named = 0; named += 1; named++; ++named;");
+        \\  return typeof named;
+        \\})();
+        \\assert.sameValue(sloppyEvalBinding, "function");
+        \\let strictEvalInSloppyCaught = false;
+        \\try {
+        \\  (function named() { eval('"use strict"; named = 0;'); })();
+        \\} catch (error) {
+        \\  strictEvalInSloppyCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictEvalInSloppyCaught, false);
+        \\let strictEvalCaught = false;
+        \\try {
+        \\  (function named() { "use strict"; eval("named = 0;"); })();
+        \\} catch (error) {
+        \\  strictEvalCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictEvalCaught, true);
+        \\let defaultRead = function named(value = named) { return value; };
+        \\assert.sameValue(defaultRead(), defaultRead);
+        \\let defaultWrites = function named(
+        \\  direct = (named = 0),
+        \\  compound = (named += 1),
+        \\  post = named++,
+        \\  pre = ++named,
+        \\  array = ([named] = [0]),
+        \\  object = ({ value: named } = { value: 0 }),
+        \\  deleted = delete named
+        \\) { return named === defaultWrites && deleted === false; };
+        \\assert.sameValue(defaultWrites(), true);
+        \\let strictDefaultCaught = false;
+        \\try {
+        \\  let strictDefault = (function() {
+        \\    "use strict";
+        \\    return function named(value = (named = 0)) {};
+        \\  })();
+        \\  strictDefault();
+        \\} catch (error) {
+        \\  strictDefaultCaught = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(strictDefaultCaught, true);
+        \\let sameParameterTdz = false;
+        \\try { (function named(named = named) {})(); } catch (error) {
+        \\  sameParameterTdz = error instanceof ReferenceError;
+        \\}
+        \\assert.sameValue(sameParameterTdz, true);
+        \\let nestedDefault = function named() {
+        \\  return ((value = named) => value)();
+        \\};
+        \\assert.sameValue(nestedDefault(), nestedDefault);
+        \\let generatorDefault = function* named(value = named) { yield value; };
+        \\assert.sameValue(generatorDefault().next().value, generatorDefault);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval executes test262 helpers through generic call paths" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
