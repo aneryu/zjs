@@ -7702,10 +7702,10 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     defer callable.free(rt);
     const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
         return error.InvalidFunctionBytecode;
-    // The strict leaf publishes its own eligibility byte (the packed sloppy
+    // The raw-this leaf publishes its own eligibility byte (the packed sloppy
     // bit stays clear); the call adapter selects the undefined-`this` arm.
     try std.testing.expect(!resolved.view.flags.simple_inline_empty_leaf);
-    try std.testing.expect(resolved.view.strict_inline_empty_leaf);
+    try std.testing.expect(resolved.view.raw_this_inline_empty_leaf);
     try std.testing.expect(resolved.view.flags.is_strict);
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
@@ -7729,7 +7729,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    const first = try machine.pushEmptyLeafCall(.strict_undefined, global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(.raw_undefined, global, &l0_stack, resolved.view, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.isUndefined());
     try std.testing.expect(first.frame.ownership.this_value == .borrowed);
@@ -7744,7 +7744,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.strict_undefined, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.isUndefined());

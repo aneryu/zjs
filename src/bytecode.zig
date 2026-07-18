@@ -8697,11 +8697,12 @@ const function_mod = struct {
         /// Runtime-created mapped Arguments objects open-alias every supplied
         /// argument slot in addition to the statically captured bindings.
         has_mapped_arguments: bool = false,
-        /// Exact-zero-argument sloppy leaf whose frame cannot acquire cold
-        /// state or value-bearing local/capture/open-ref windows. Published in
-        /// the previously reserved execution-view flag bit. The strict twin
-        /// lives in the `strict_inline_empty_leaf` view field (this packed
-        /// word is full) so this established sloppy test stays single-bit.
+        /// Exact-zero-argument sloppy plain-function leaf whose frame cannot
+        /// acquire cold state or value-bearing local/capture/open-ref windows.
+        /// Published in the previously reserved execution-view flag bit. The
+        /// raw-`this` twin (strict plain functions and arrows) lives in the
+        /// `raw_this_inline_empty_leaf` view field (this packed word is full)
+        /// so this established sloppy test stays single-bit.
         simple_inline_empty_leaf: bool = false,
     };
 
@@ -8748,14 +8749,19 @@ const function_mod = struct {
         /// before mutable parameter slots can change them. Selected only when
         /// finalized bytecode materializes an arguments object.
         strict_simple_snapshot_inline_eligible: bool = false,
-        /// Strict twin of `flags.simple_inline_empty_leaf` (the packed flags
-        /// word is full): identical empty-leaf frame geometry, published for
-        /// strict-mode functions. Plain call sites select the undefined-`this`
-        /// arm; the method receiver arm is mode-independent. Kept as a
-        /// separate view byte so the established sloppy call arms retain
-        /// their exact single-bit test (see the empty_leaf_geometry note in
-        /// `makeBytecodeView`).
-        strict_inline_empty_leaf: bool = false,
+        /// Raw-`this` twin of `flags.simple_inline_empty_leaf` (the packed
+        /// flags word is full): identical empty-leaf frame geometry, published
+        /// for the callees whose frame preserves the caller-supplied raw
+        /// `this` word instead of substituting the sloppy realm global —
+        /// strict-mode plain functions and arrows (either mode; arrow
+        /// bytecode reads lexical `this`/`new.target` through ordinary
+        /// closure cells, so a zero-capture arrow leaf never consults the
+        /// frame slot, mirroring qjs JS_CallInternal which has no arrow arm).
+        /// Plain call sites select the undefined-`this` arm; the method
+        /// receiver arm is mode-independent. Kept as a separate view byte so
+        /// the established sloppy call arms retain their exact single-bit
+        /// test (see the empty_leaf_geometry note in `makeBytecodeView`).
+        raw_this_inline_empty_leaf: bool = false,
         arg_count: u16 = 0,
         var_count: u16 = 0,
         stack_size: u16 = 0,
@@ -9139,15 +9145,27 @@ const function_mod = struct {
             !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
             !fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
             fb.global_vars_len == 0;
+        // Arrow polarity twin of `simple_inline_base`. Arrows are excluded
+        // from the simple-inline family only because their frame must keep
+        // the raw incoming `this` (lexical `this`/`new.target` are ordinary
+        // closure cells since the capture conversion; qjs JS_CallInternal has
+        // no arrow arm at all). Mode-independent: an arrow frame preserves
+        // the raw `this` word in both strict and sloppy callees, so it rides
+        // the raw-`this` leaf arms that already exist for strict functions.
+        const arrow_inline_base = fb.flags.func_kind == .normal and
+            !fb.flags.is_class_constructor and !fb.flags.is_derived_class_constructor and
+            fb.flags.is_arrow_function and fb.flags.has_simple_parameter_list and
+            fb.global_vars_len == 0;
         const materializes_arguments_object = functionMaterializesArgumentsObject(fb);
         const rescues_implicit_arguments = functionRescuesImplicitArgumentsViaGetVar(fb);
         // Mode-independent empty-leaf frame geometry: no argument/local/
         // capture/open-ref windows, no arguments-object materialization or
-        // implicit get_var rescue, no direct eval. Strict shares every one of
-        // these conditions — its only plain-call semantic difference is
-        // preserving undefined `this` instead of substituting the sloppy
-        // global — but the two modes publish SEPARATE eligibility bits
-        // (`flags.simple_inline_empty_leaf` vs `strict_inline_empty_leaf`)
+        // implicit get_var rescue, no direct eval. Strict plain functions and
+        // arrows share every one of these conditions — their only plain-call
+        // semantic difference from the sloppy arm is preserving the raw
+        // (undefined) `this` instead of substituting the sloppy global — but
+        // the two policies publish SEPARATE eligibility bits
+        // (`flags.simple_inline_empty_leaf` vs `raw_this_inline_empty_leaf`)
         // so the established sloppy call arms keep their exact single-bit
         // test; measured: folding both modes into one bit put a per-call
         // strict-mode discrimination on the sloppy arm (+3 insn/call,
@@ -9183,7 +9201,7 @@ const function_mod = struct {
                 .has_mapped_arguments = (materializes_arguments_object or rescues_implicit_arguments) and !strict_mode and fb.flags.has_simple_parameter_list,
                 .simple_inline_empty_leaf = simple_inline_base and !strict_mode and empty_leaf_geometry,
             },
-            .strict_inline_empty_leaf = simple_inline_base and strict_mode and empty_leaf_geometry,
+            .raw_this_inline_empty_leaf = ((simple_inline_base and strict_mode) or arrow_inline_base) and empty_leaf_geometry,
             .simple_inline_eligible = simple_inline_base and !strict_mode,
             .strict_simple_inline_eligible = simple_inline_base and strict_mode and !materializes_arguments_object,
             .strict_simple_snapshot_inline_eligible = simple_inline_base and strict_mode and materializes_arguments_object,

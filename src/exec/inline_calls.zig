@@ -46,8 +46,11 @@ pub const RegionLayout = enum {
 pub const LeafThis = enum {
     /// Sloppy plain call: borrow the realm global as the frame's `this`.
     sloppy_global,
-    /// Strict plain call: preserve undefined `this` (no substitution).
-    strict_undefined,
+    /// Raw-`this` plain call (strict function or arrow): preserve undefined
+    /// `this` (no substitution). Arrow bytecode never consults the frame
+    /// slot — lexical `this`/`new.target` are ordinary closure cells — so
+    /// both modes share this arm.
+    raw_undefined,
     /// Method call: move the raw receiver into the frame's owned `this`;
     /// identical for strict and sloppy callees (coercion, when sloppy,
     /// stays deferred to the this-reading opcodes).
@@ -1175,20 +1178,22 @@ pub const Machine = struct {
     }
 
     /// Debug-only proof that the comptime `this` arm matches the published
-    /// per-mode eligibility bit and the callee's strict mode (the same
+    /// per-policy eligibility bit and the callee's `this` policy: the sloppy
+    /// arm substitutes the realm global for non-arrow sloppy functions; the
+    /// raw arm preserves undefined for strict functions (the same
     /// is_strict|runtime_strict disjunction the view publication folds into
-    /// `strict_mode`). The receiver arm is mode-independent: both modes
-    /// transfer the raw receiver.
+    /// `strict_mode`) and for arrows in either mode. The receiver arm is
+    /// policy-independent: every leaf transfers the raw receiver.
     inline fn assertLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
         switch (comptime leaf_this) {
             .sloppy_global => std.debug.assert(function.flags.simple_inline_empty_leaf),
-            .strict_undefined => std.debug.assert(function.strict_inline_empty_leaf),
+            .raw_undefined => std.debug.assert(function.raw_this_inline_empty_leaf),
             .receiver => std.debug.assert(function.flags.simple_inline_empty_leaf or
-                function.strict_inline_empty_leaf),
+                function.raw_this_inline_empty_leaf),
         }
         if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict) ==
-                (leaf_this == .strict_undefined));
+            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
+                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
         }
     }
 
@@ -1203,8 +1208,9 @@ pub const Machine = struct {
     /// `this` exactly like `setupSimpleInlineEntryImpl`'s method arm
     /// (take + `.owned`; sloppy coercion stays deferred to the this-reading
     /// opcodes); the sloppy plain instantiation keeps the borrowed sloppy
-    /// global and the strict plain instantiation preserves undefined —
-    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm.
+    /// global and the raw plain instantiation preserves undefined —
+    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm and the
+    /// generic constructor's arrow this-preservation.
     inline fn finishEmptyLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
@@ -1224,7 +1230,7 @@ pub const Machine = struct {
             .function = function,
             .this_value = switch (comptime leaf_this) {
                 .receiver => takeSourceSlot(&region_start[0]),
-                .strict_undefined => core.JSValue.undefinedValue(),
+                .raw_undefined => core.JSValue.undefinedValue(),
                 .sloppy_global => global.value(),
             },
             .current_function = takeSourceSlot(callable_slot),
@@ -1645,8 +1651,8 @@ pub const Machine = struct {
         if (target.view.flags.simple_inline_empty_leaf and argc == 0) {
             return self.pushEmptyLeafCall(.sloppy_global, global, caller_stack, target.view, region_start);
         }
-        if (target.view.strict_inline_empty_leaf and argc == 0) {
-            return self.pushEmptyLeafCall(.strict_undefined, global, caller_stack, target.view, region_start);
+        if (target.view.raw_this_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.raw_undefined, global, caller_stack, target.view, region_start);
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {

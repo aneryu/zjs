@@ -973,21 +973,26 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         }
                         return pushEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
-                    // Strict twin of the sloppy leaf arm above. The strict
-                    // eligibility byte is separate from the packed flags word
-                    // (which is full) and is tested only after the sloppy bit
-                    // missed, so the established sloppy arm keeps its exact
-                    // single-bit check chain (folding both modes into one bit
-                    // measured +3 insn/call on call-const-zero-arg). The warm
+                    // Raw-`this` twin of the sloppy leaf arm above: strict
+                    // plain functions and arrows (either mode — arrow
+                    // bytecode reads lexical this/new.target through ordinary
+                    // closure cells, so the frame keeps the raw undefined
+                    // word, exactly like the generic constructor's arrow
+                    // preservation arm). The eligibility byte is separate
+                    // from the packed flags word (which is full) and is
+                    // tested only after the sloppy bit missed, so the
+                    // established sloppy arm keeps its exact single-bit check
+                    // chain (folding both modes into one bit measured
+                    // +3 insn/call on call-const-zero-arg). The warm
                     // instantiation is the sloppy body with `this = undefined`
                     // in place of the realm-global load — distinct bodies, so
                     // the two arms cannot tail-merge into a shared
                     // discrimination head.
-                    if (argc == 0 and resolved.view.strict_inline_empty_leaf) {
+                    if (argc == 0 and resolved.view.raw_this_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(.strict_undefined, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                            return pushWarmEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
                         }
-                        return pushEmptyLeafAndEnter(.strict_undefined, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+                        return pushEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
                     }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
                     // Fixed nonzero arity only: the recursive/leaf-heavy call
@@ -1050,16 +1055,18 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
                 return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, pc + 3, resolved.fb.byte_code);
             }
-            // Strict methods share the mode-independent receiver arm (the raw
-            // receiver transfers verbatim in both modes; sloppy coercion stays
-            // deferred to the this-reading opcodes) but enter through the
-            // authoritative out-of-line leaf constructor: a second inline warm
-            // body here would be instruction-identical to the sloppy one and
-            // could tail-merge back into a shared discrimination head on the
-            // established sloppy method arm. One bl still beats the retired
-            // pushFrame(.generic) three-deep chain, and the empty-leaf resume
-            // record and return epilogue are identical from there.
-            if (argc == 0 and resolved.view.strict_inline_empty_leaf) {
+            // Strict methods and arrow-valued properties share the
+            // policy-independent receiver arm (the raw receiver transfers
+            // verbatim in every case; sloppy coercion stays deferred to the
+            // this-reading opcodes, and an arrow never consults the slot) but
+            // enter through the authoritative out-of-line leaf constructor: a
+            // second inline warm body here would be instruction-identical to
+            // the sloppy one and could tail-merge back into a shared
+            // discrimination head on the established sloppy method arm. One
+            // bl still beats the retired pushFrame(.generic) three-deep
+            // chain, and the empty-leaf resume record and return epilogue are
+            // identical from there.
+            if (argc == 0 and resolved.view.raw_this_inline_empty_leaf) {
                 return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
             }
             const target = resolved.bind(receiver, method);

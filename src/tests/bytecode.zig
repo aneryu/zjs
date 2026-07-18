@@ -3231,7 +3231,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
         try std.testing.expect(view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.strict_inline_empty_leaf);
+        try std.testing.expect(!view.raw_this_inline_empty_leaf);
     }
 
     {
@@ -3249,12 +3249,37 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.simple_inline_eligible);
         try std.testing.expect(view.strict_simple_inline_eligible);
         try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
-        // The strict leaf publishes its own eligibility byte; the packed
+        // The raw-this leaf publishes its own eligibility byte; the packed
         // sloppy bit stays clear so the established sloppy call arms keep
         // their single-bit test.
         try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(view.strict_inline_empty_leaf);
+        try std.testing.expect(view.raw_this_inline_empty_leaf);
         try std.testing.expect(view.flags.is_strict);
+    }
+
+    {
+        // Arrow (either mode): rides the raw-this leaf byte — the frame
+        // preserves the raw incoming `this`; lexical this/new.target are
+        // ordinary closure cells, so the zero-capture leaf never consults
+        // the slot. The general simple-inline family stays closed to arrows
+        // (its sloppy arm substitutes the realm global).
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.func_type = .arrow;
+        fd.has_simple_parameter_list = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        const view = bytecode.asBytecodeView(fb, rt);
+        try std.testing.expect(!view.simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_inline_eligible);
+        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(view.raw_this_inline_empty_leaf);
+        try std.testing.expect(view.flags.is_arrow_function);
     }
 
     {
@@ -3280,7 +3305,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         try std.testing.expect(!view.flags.simple_inline_empty_leaf);
         // Arguments materialization is excluded from the leaf geometry in
         // both modes.
-        try std.testing.expect(!view.strict_inline_empty_leaf);
+        try std.testing.expect(!view.raw_this_inline_empty_leaf);
     }
 }
 
