@@ -10661,3 +10661,86 @@ test "get_var uninitialized-cell inline global-object leg preserves the cold wat
     // 11 probes, all green.
     try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
 }
+
+test "named function expression self-binding materializes lazily with unchanged semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const rt = js.runtime;
+
+    // Q2 red lights: the self-binding var (kind `.function_name`) and its
+    // `special_object THIS_FUNC ; put_loc` prologue materialize lazily now
+    // (qjs add_func_var call sites: resolve_scope_var quickjs.c:32977/33153,
+    // add_eval_variables quickjs.c:33650/33698) instead of unconditionally at
+    // function entry. Every observable of the eager model must hold:
+    //   * self-reference returns/recurses the binding, incl. nested
+    //     functions, arrows, and generators;
+    //   * direct eval materializes conservatively (own body and nested,
+    //     including through an invisible block shadow);
+    //   * `delete name` stays false (own body and nested arrow);
+    //   * strict assignment throws TypeError, sloppy write is ignored;
+    //   * `.name` stays intact and non-referencing bodies stay correct;
+    //   * shadows win: param, whole-body var, let TDZ, with-object;
+    //   * `function arguments(){...}` resolves the arguments object (qjs
+    //     parity: the retired eager var used to shadow it -> "function");
+    //   * eval under a whole-body var shadow reads the var (spec value 11;
+    //     qjs's add_eval_variables quirk yields undefined here, the retired
+    //     eager model yielded the function -- we lock the spec/var answer).
+    const setup = try js.eval(
+        \\globalThis.__q2 = (function () {
+        \\  var out = [];
+        \\  var f = function rec(){ return rec; };
+        \\  out.push(f() === f);                                        // [0] true
+        \\  var fact = function frec(n){ return n <= 1 ? 1 : n * frec(n - 1); };
+        \\  out.push(fact(6));                                          // [1] 720
+        \\  var e1 = function rec(){ return eval('rec'); };
+        \\  out.push(e1() === e1);                                      // [2] true
+        \\  var e2 = function rec(){ return (function inner(){ return eval('rec'); })(); };
+        \\  out.push(e2() === e2);                                      // [3] true
+        \\  var e3 = function rec(){ { let rec = 0; } return eval('typeof rec'); };
+        \\  out.push(e3());                                             // [4] "function"
+        \\  out.push(f.name);                                           // [5] "rec"
+        \\  var a1 = function rec(){ return () => rec; };
+        \\  out.push(a1()() === a1);                                    // [6] true
+        \\  var d1 = function rec(){ return function m1(){ return function m2(){ return rec; }; }; };
+        \\  out.push(d1()()() === d1);                                  // [7] true
+        \\  out.push((function rec(){ return delete rec; })());         // [8] false
+        \\  out.push((function rec(){ return (() => delete rec)(); })()); // [9] false
+        \\  var threw = 0;
+        \\  try { (function rec(){ "use strict"; rec = 1; })(); } catch (e) { threw = e instanceof TypeError ? 1 : 2; }
+        \\  out.push(threw);                                            // [10] 1
+        \\  out.push((function rec(){ rec = 1; return rec; })() instanceof Function); // [11] true
+        \\  var g1 = function* grec(){ yield grec; };
+        \\  out.push(g1().next().value === g1);                         // [12] true
+        \\  var noref = function nr(a, b){ return a + b; };
+        \\  out.push(noref(1, 2) === 3 && noref.name === "nr");         // [13] true
+        \\  out.push((function rec(rec){ return rec; })(7));            // [14] 7
+        \\  out.push((function rec(){ var rec = 3; return rec; })());   // [15] 3
+        \\  var tdz = 0;
+        \\  try { (function rec(){ rec; let rec = 1; })(); } catch (e) { tdz = e instanceof ReferenceError ? 1 : 2; }
+        \\  out.push(tdz);                                              // [16] 1
+        \\  out.push((function arguments(){ return typeof arguments; })()); // [17] "object"
+        \\  out.push((function rec(){ with ({ rec: 9 }) { return rec; } })()); // [18] 9
+        \\  var w1 = function rec(){ with ({}) { return rec; } };
+        \\  out.push(w1() === w1);                                      // [19] true
+        \\  out.push((function rec(){ var rec = 11; return eval('rec'); })()); // [20] 11
+        \\  out.push(typeof (function rec(){ { let rec; } return rec; })()); // [21] "function"
+        \\  return out.length * 1000 +
+        \\    ((out[0] === true && out[1] === 720 && out[2] === true && out[3] === true &&
+        \\      out[4] === "function" && out[5] === "rec" && out[6] === true && out[7] === true &&
+        \\      out[8] === false && out[9] === false && out[10] === 1 && out[11] === true &&
+        \\      out[12] === true && out[13] === true && out[14] === 7 && out[15] === 3 &&
+        \\      out[16] === 1 && out[17] === "object" && out[18] === 9 && out[19] === true &&
+        \\      out[20] === 11 && out[21] === "function") ? 1 : 0);
+        \\})();
+    );
+    setup.free(rt);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const q2_name = try rt.internAtom("__q2");
+    defer rt.atoms.free(q2_name);
+    const verdict = global.getProperty(q2_name);
+    defer verdict.free(rt);
+    // 22 probes, all green.
+    try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());
+}
