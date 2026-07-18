@@ -444,8 +444,30 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
-    // Just pushed, so depth > 0; the generator stop-boundary guard is L0-only.
-    vm.local_fast_blocked = false;
+    // Just pushed, so depth > 0; the generator stop-boundary cache is L0-only
+    // and must read false for the callee. Do NOT publish false unconditionally:
+    // the every-call `strb wzr` re-dirtied the Vm byte that the guarded
+    // loc/var handler heads immediately reload, so those guard loads paid a
+    // store-to-load forward off the still-draining store instead of a clean L1
+    // hit — per-call loop pollution with no qjs counterpart (qjs has no such
+    // per-op cache; its yield/return machinery is real opcodes, not a pc
+    // boundary checked in the dispatch hot path). The cache already reads
+    // false on every steady-state entry: run() derives it at L0 entry,
+    // reloadTop/reloadAfterPop re-derive it on every driver-loop frame switch,
+    // and depth>0 callees keep it false by this very invariant. The only true
+    // readers here are the blocked-L0 seams — generator parameter-init
+    // (runGeneratorParameterInit arms stop_before_pc = generatorBodyPc, and a
+    // param default like `function* g(a = leaf())` calls from that armed L0)
+    // and a `.return()`-driven finally resume whose finally body calls — so
+    // only that arm stores, and the matching re-arm on return is
+    // reloadAfterPop's L0 stop-seam publication.
+    if (vm.local_fast_blocked) {
+        @branchHint(.unlikely);
+        // Cache-coherence pin: a true cache at call entry means the CALLER was
+        // L0 with an armed stop — never a depth>0 frame.
+        std.debug.assert(entry.prev == null and vm.machine.l0.stop_before_pc != null);
+        vm.local_fast_blocked = false;
+    }
     const pc2: [*]const u8 = code_ptr; // fresh frame: frame.pc == 0
     const sp2: [*]JSValue = vm.stack.topPtr();
     const vb2: [*]JSValue = vm.frame.locals.ptr;
