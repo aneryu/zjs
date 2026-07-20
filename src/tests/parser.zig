@@ -2119,6 +2119,30 @@ test "F4: prefix --a[i] emits QuickJS indexed lvalue read ; dec ; insert3 ; put_
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_var, op.get_array_el3, op.dec, op.insert3, op.put_array_el });
 }
 
+test "F4: final bytecode applies QuickJS discarded lvalue and loop update peepholes" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(
+        &env,
+        "function f(a, i) { var x = 0; for (; x < a.length; x++) { a.b++; a[i]--; a.b = x; a[i] = x; } return x; }",
+    );
+    defer fn_bc.deinit(env.rt);
+
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    const code = child.byteCode();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(code, op.get_length));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(code, op.inc_loc));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(code, op.put_field));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(code, op.put_array_el));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.insert2));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.insert3));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.perm3));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.perm4));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.post_inc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.post_dec));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.drop));
+}
+
 test "F4: dotted assign value remains on stack via insert2 (chained)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2189,10 +2213,16 @@ test "F4: delete on a postfix update result evaluates and returns true" {
     var fn_bc = try parseExpr(&env, "delete (a.b++)");
     defer fn_bc.deinit(env.rt);
 
-    // Trailing op of a.b++ is put_field, which doesn't match any
-    // LhsShape; classifier returns .none → drop ; push_true.
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 2]);
-    try std.testing.expectEqual(op.push_true, fn_bc.code[fn_bc.code.len - 1]);
+    // The delete classifier still emits discard + true for the non-reference
+    // result. resolve_labels then applies QuickJS's
+    // `post_inc; perm3; put_field; drop -> inc; put_field` fold.
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.get_field2,
+        op.inc,
+        op.put_field,
+        op.push_true,
+    });
 }
 
 test "F4: optional chain a?.b emits inline chain_test + normal get_field" {

@@ -5898,6 +5898,39 @@ pub const pipeline_resolve_variables = struct {
         return labelOperandOffset(op_id);
     }
 
+    fn collectPhase1JumpTargets(func: *const bytecode_function.Bytecode, targets: []bool) Error!void {
+        if (targets.len != func.code.len + 1) return error.InvalidBytecode;
+        @memset(targets, false);
+
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < func.code.len) {
+            const op_id = func.code[pc];
+            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
+            if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
+                if (offset + 4 > size) return error.InvalidBytecode;
+                const target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
+                if (target <= func.code.len) targets[target] = true;
+            }
+            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        if (atom_index != func.atom_operands.len) return error.InvalidBytecode;
+    }
+
+    /// QuickJS `resolve_variables` discard fold (quickjs.c:34343): once the
+    /// assignment value is unused, the stack permutation itself can disappear.
+    fn discardedIndexedStoreOp(code: []const u8, jump_targets: []const bool, pc: usize) ?u8 {
+        if (pc + 3 > code.len or jump_targets.len != code.len + 1) return null;
+        if (code[pc] != opcode.op.insert3 or code[pc + 2] != opcode.op.drop) return null;
+        const put_op = code[pc + 1];
+        if (put_op != opcode.op.put_array_el and put_op != opcode.op.put_ref_value) return null;
+        if (jump_targets[pc + 1] or jump_targets[pc + 2]) return null;
+        return put_op;
+    }
+
     /// Bind the parser's tagged label identities to absolute phase-1 PCs.
     /// Optional chains can therefore share one label without retaining an
     /// exit vector or patching by byte-pattern scan. Validation and the only
@@ -6028,6 +6061,10 @@ pub const pipeline_resolve_variables = struct {
         try discoverClosureTopology(ctx);
         if (ctx.function_def) |fd| try resolveEvalGlobalVarTargets(fd);
 
+        const phase1_jump_targets = try ctx.memory.alloc(bool, func.code.len + 1);
+        defer ctx.memory.free(bool, phase1_jump_targets);
+        try collectPhase1JumpTargets(func, phase1_jump_targets);
+
         // First pass: compute output size (in bytes) and atom count.
         // Temporary scope-var opcodes shrink from 7 bytes to 5 bytes. The
         // enter_scope / leave_scope pair (3 bytes each) is dropped. All
@@ -6138,6 +6175,11 @@ pub const pipeline_resolve_variables = struct {
                     output_size += globalRefPutTailReplacementSize(kind);
                 }
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+                continue;
+            }
+            if (discardedIndexedStoreOp(func.code, phase1_jump_targets, i) != null) {
+                output_size += 1;
+                i += 3;
                 continue;
             }
             // Validate the parser-time OP_eval / OP_apply_eval scope index. The
@@ -6400,9 +6442,8 @@ pub const pipeline_resolve_variables = struct {
         // we don't pollute the MemoryAccount counters; these are freed
         // before `run` returns).
         const allocator = ctx.memory.allocator;
-        // `pc_map[old_pc + 1]` holds the new pc that the instruction
-        // previously at `old_pc` now starts at. Entry `pc_map[0]` is
-        // unused (0 maps to 0 trivially). Dropped instructions (the
+        // `pc_map[old_pc]` holds the new pc that the instruction previously at
+        // `old_pc` now starts at. Dropped instructions (the
         // enter/leave scope pair) map their old pc to the new pc of the
         // *next* kept instruction, so a jump that targets them still
         // lands on a valid instruction boundary.
@@ -6575,6 +6616,14 @@ pub const pipeline_resolve_variables = struct {
                     try emitGlobalVarOp(ctx, output, &out_idx, opcode.op.put_var, global_ref_tail_atoms[i]);
                 }
                 i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+                continue;
+            }
+            if (discardedIndexedStoreOp(func.code, phase1_jump_targets, i)) |put_op| {
+                pc_map[i + 1] = out_idx;
+                output[out_idx] = put_op;
+                out_idx += 1;
+                pc_map[i + 2] = out_idx;
+                i += 3;
                 continue;
             }
             // Convert OP_eval / OP_apply_eval's parser scope index to QuickJS's
@@ -7367,8 +7416,34 @@ pub const pipeline_resolve_labels = struct {
     }
 
     const DupPutPeephole = struct {
-        set_op: u8,
+        result_op: u8,
         idx: u16,
+        total_size: usize,
+    };
+
+    const DiscardedFieldStorePeephole = struct {
+        atom_id: atom.Atom,
+        total_size: usize,
+    };
+
+    const IncLocPeephole = struct {
+        update_op: u8,
+        idx: u16,
+        total_size: usize,
+    };
+
+    const PostUpdateStoreKind = enum {
+        slot,
+        field,
+        array,
+    };
+
+    const PostUpdatePeephole = struct {
+        kind: PostUpdateStoreKind,
+        update_op: u8,
+        store_op: u8,
+        idx: u16 = 0,
+        atom_id: atom.Atom = atom.null_atom,
         total_size: usize,
     };
 
@@ -7523,20 +7598,58 @@ pub const pipeline_resolve_labels = struct {
         return null;
     }
 
+    /// QuickJS `resolve_labels` begins this family at quickjs.c:35264. Atom
+    /// ownership is not changed by a matcher: when the emitted atom count
+    /// changes, `run` rebuilds the retained list transactionally before install.
+    fn matchGetLengthPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?usize {
+        if (!use_short_opcodes or pc + 5 > code.len or code[pc] != opcode.op.get_field) return null;
+        if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom.ids.length) return null;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 5)) return null;
+        return 5;
+    }
+
+    fn matchDiscardedFieldStorePeephole(code: []const u8, pc: usize) ?DiscardedFieldStorePeephole {
+        if (pc + 7 > code.len or code[pc] != opcode.op.insert2) return null;
+        if (code[pc + 1] != opcode.op.put_field or code[pc + 6] != opcode.op.drop) return null;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+        return .{
+            .atom_id = std.mem.readInt(u32, code[pc + 2 ..][0..4], .little),
+            .total_size = 7,
+        };
+    }
+
     fn matchDupPutPeephole(code: []const u8, pc: usize) ?DupPutPeephole {
         if (pc + 4 > code.len or code[pc] != opcode.op.dup) return null;
-        const set_op = switch (code[pc + 1]) {
-            opcode.op.put_loc => opcode.op.set_loc,
-            opcode.op.put_arg => opcode.op.set_arg,
-            opcode.op.put_var_ref => opcode.op.set_var_ref,
-            opcode.op.put_loc_check => opcode.op.set_loc_check,
+        const forms = switch (code[pc + 1]) {
+            opcode.op.put_loc => .{ opcode.op.get_loc, opcode.op.set_loc },
+            opcode.op.put_arg => .{ opcode.op.get_arg, opcode.op.set_arg },
+            opcode.op.put_var_ref => .{ opcode.op.get_var_ref, opcode.op.set_var_ref },
+            opcode.op.put_loc_check => .{ opcode.op.get_loc_check, opcode.op.set_loc_check },
             else => return null,
         };
         if (hasJumpTargetInRange(code, pc + 1, pc + 4)) return null;
+
+        const put_op = code[pc + 1];
+        const idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little);
+        var result_op = forms[1];
+        var total_size: usize = 4;
+        if (pc + 5 <= code.len and code[pc + 4] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 5))
+        {
+            result_op = put_op;
+            total_size = 5;
+            if (pc + 8 <= code.len and code[pc + 5] == forms[0] and
+                std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
+                !hasJumpTargetInRange(code, pc + 1, pc + 8))
+            {
+                result_op = forms[1];
+                total_size = 8;
+            }
+        }
         return .{
-            .set_op = set_op,
-            .idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little),
-            .total_size = 4,
+            .result_op = result_op,
+            .idx = idx,
+            .total_size = total_size,
         };
     }
 
@@ -7618,6 +7731,117 @@ pub const pipeline_resolve_labels = struct {
             .rhs_op = rhs_op,
             .rhs_size = rhs_size,
             .total_size = total_len,
+        };
+    }
+
+    /// Exact wide phase-2 shapes from quickjs.c:35395. The idx<256 condition is
+    /// part of the encoding contract for the two-byte inc_loc/dec_loc result.
+    fn matchIncLocPeephole(code: []const u8, pc: usize) ?IncLocPeephole {
+        if (pc + 3 > code.len or code[pc] != opcode.op.get_loc) return null;
+        const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+        if (idx >= 256) return null;
+
+        if (pc + 8 <= code.len and
+            (code[pc + 3] == opcode.op.post_inc or code[pc + 3] == opcode.op.post_dec) and
+            code[pc + 4] == opcode.op.put_loc and
+            std.mem.readInt(u16, code[pc + 5 ..][0..2], .little) == idx and
+            code[pc + 7] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 8))
+        {
+            return .{
+                .update_op = if (code[pc + 3] == opcode.op.post_inc) opcode.op.inc_loc else opcode.op.dec_loc,
+                .idx = idx,
+                .total_size = 8,
+            };
+        }
+
+        if (pc + 9 <= code.len and
+            (code[pc + 3] == opcode.op.inc or code[pc + 3] == opcode.op.dec) and
+            code[pc + 4] == opcode.op.dup and
+            code[pc + 5] == opcode.op.put_loc and
+            std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
+            code[pc + 8] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 9))
+        {
+            return .{
+                .update_op = if (code[pc + 3] == opcode.op.inc) opcode.op.inc_loc else opcode.op.dec_loc,
+                .idx = idx,
+                .total_size = 9,
+            };
+        }
+        return null;
+    }
+
+    /// Discarded postfix stores from quickjs.c:35501: replace `post_*` plus the
+    /// stack permutation/drop with an ordinary update followed by the store.
+    fn matchPostUpdatePeephole(code: []const u8, pc: usize) ?PostUpdatePeephole {
+        if (pc >= code.len or (code[pc] != opcode.op.post_inc and code[pc] != opcode.op.post_dec)) return null;
+        const update_op: u8 = if (code[pc] == opcode.op.post_inc) opcode.op.inc else opcode.op.dec;
+
+        if (pc + 5 <= code.len) {
+            const forms = switch (code[pc + 1]) {
+                opcode.op.put_loc => .{ opcode.op.get_loc, opcode.op.set_loc },
+                opcode.op.put_arg => .{ opcode.op.get_arg, opcode.op.set_arg },
+                opcode.op.put_var_ref => .{ opcode.op.get_var_ref, opcode.op.set_var_ref },
+                else => null,
+            };
+            if (forms) |slot_forms| {
+                const idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little);
+                if (code[pc + 4] == opcode.op.drop and
+                    !hasJumpTargetInRange(code, pc + 1, pc + 5))
+                {
+                    var store_op = code[pc + 1];
+                    var total_size: usize = 5;
+                    if (pc + 8 <= code.len and code[pc + 5] == slot_forms[0] and
+                        std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
+                        !hasJumpTargetInRange(code, pc + 1, pc + 8))
+                    {
+                        store_op = slot_forms[1];
+                        total_size = 8;
+                    }
+                    return .{
+                        .kind = .slot,
+                        .update_op = update_op,
+                        .store_op = store_op,
+                        .idx = idx,
+                        .total_size = total_size,
+                    };
+                }
+            }
+        }
+
+        if (pc + 8 <= code.len and code[pc + 1] == opcode.op.perm3 and
+            code[pc + 2] == opcode.op.put_field and code[pc + 7] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 8))
+        {
+            return .{
+                .kind = .field,
+                .update_op = update_op,
+                .store_op = opcode.op.put_field,
+                .atom_id = std.mem.readInt(u32, code[pc + 3 ..][0..4], .little),
+                .total_size = 8,
+            };
+        }
+
+        if (pc + 4 <= code.len and code[pc + 1] == opcode.op.perm4 and
+            code[pc + 2] == opcode.op.put_array_el and code[pc + 3] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 4))
+        {
+            return .{
+                .kind = .array,
+                .update_op = update_op,
+                .store_op = opcode.op.put_array_el,
+                .total_size = 4,
+            };
+        }
+        return null;
+    }
+
+    fn postUpdateOutputSize(p: PostUpdatePeephole, use_short_opcodes: bool) usize {
+        return 1 + switch (p.kind) {
+            .slot => loweredSlotInstructionSize(p.store_op, p.idx, use_short_opcodes),
+            .field => instrSize(opcode.op.put_field),
+            .array => instrSize(opcode.op.put_array_el),
         };
     }
 
@@ -7782,6 +8006,26 @@ pub const pipeline_resolve_labels = struct {
         out_idx.* += size;
     }
 
+    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) usize {
+        if (code[pc] == opcode.op.label) return in_size;
+        if (matchGetLengthPeephole(code, pc, use_short_opcodes)) |size| return size;
+        if (matchDiscardedFieldStorePeephole(code, pc)) |p| return p.total_size;
+        if (undefinedDropPairSize(code, pc)) |size| return size;
+        if (matchUndefinedReturnPeephole(code, pc)) |size| return size;
+        if (redundantReturnUndefSize(code, pc)) |size| return size;
+        if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
+        if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
+        if (matchLogicalChainPeephole(code, pc)) |p| return p.total_size;
+        if (matchDupPutPeephole(code, pc)) |p| return p.total_size;
+        if (matchPutGetPeephole(code, pc)) |p| return p.total_size;
+        if (matchIncLocPeephole(code, pc)) |p| return p.total_size;
+        if (matchAddLocPeephole(code, pc)) |p| return p.total_size;
+        if (matchPostUpdatePeephole(code, pc)) |p| return p.total_size;
+        if (matchConstantTestPeephole(code, pc)) |p| return p.total_size;
+        if (matchPushI32NegPeephole(code, pc)) |p| return p.total_size;
+        return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
+    }
+
     fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
         const code = ctx.function.code;
         @memset(positions, 0);
@@ -7807,6 +8051,10 @@ pub const pipeline_resolve_labels = struct {
 
                 const new_size: usize = if (op == opcode.op.label)
                     0
+                else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
+                    1
+                else if (matchDiscardedFieldStorePeephole(code, pc) != null)
+                    instrSize(opcode.op.put_field)
                 else if (undefinedDropPairSize(code, pc) != null)
                     0
                 else if (matchUndefinedReturnPeephole(code, pc) != null)
@@ -7828,11 +8076,15 @@ pub const pipeline_resolve_labels = struct {
                     const diff = relOffset(out_pc, target_pc);
                     break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
                 } else if (matchDupPutPeephole(code, pc)) |p|
-                    loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
+                    loweredSlotInstructionSize(p.result_op, p.idx, use_short_opcodes)
                 else if (matchPutGetPeephole(code, pc)) |p|
                     loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
+                else if (matchIncLocPeephole(code, pc) != null)
+                    2
                 else if (matchAddLocPeephole(code, pc)) |_|
                     loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
+                else if (matchPostUpdatePeephole(code, pc)) |p|
+                    postUpdateOutputSize(p, use_short_opcodes)
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
                     if (!p.taken) break :blk 0;
                     const target = try resolvedJumpTarget(code, p.jump_pc);
@@ -7852,7 +8104,7 @@ pub const pipeline_resolve_labels = struct {
 
                 sizes[pc] = new_size;
                 if (old_size != new_size) changed = true;
-                const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (matchUndefinedReturnPeephole(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| p.total_size else if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| p.total_size else if (matchLogicalChainPeephole(code, pc)) |p| p.total_size else if (matchDupPutPeephole(code, pc)) |p| p.total_size else if (matchPutGetPeephole(code, pc)) |p| p.total_size else if (matchAddLocPeephole(code, pc)) |p| p.total_size else if (matchConstantTestPeephole(code, pc)) |p| p.total_size else if (matchPushI32NegPeephole(code, pc)) |p| p.total_size else in_size + (deadCodePastTerminalSize(code, pc) orelse 0)))));
+                const next_pc = pc + optimizedInputSize(code, pc, use_short_opcodes, in_size);
                 var boundary_pc = pc + 1;
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
@@ -8044,6 +8296,15 @@ pub const pipeline_resolve_labels = struct {
             const op = func.code[i];
             if (op == opcode.op.label) {
                 i += 5;
+            } else if (matchGetLengthPeephole(func.code, i, use_short_opcodes)) |input_size| {
+                output[out_idx] = opcode.op.get_length;
+                out_idx += 1;
+                i += input_size;
+            } else if (matchDiscardedFieldStorePeephole(func.code, i)) |p| {
+                output[out_idx] = opcode.op.put_field;
+                std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], p.atom_id, .little);
+                out_idx += instrSize(opcode.op.put_field);
+                i += p.total_size;
             } else if (undefinedDropPairSize(func.code, i)) |pair_size| {
                 i += pair_size;
             } else if (matchUndefinedReturnPeephole(func.code, i)) |return_size| {
@@ -8073,16 +8334,37 @@ pub const pipeline_resolve_labels = struct {
                 try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, size);
                 i += p.total_size;
             } else if (matchDupPutPeephole(func.code, i)) |p| {
-                try emitSlotInstruction(p.set_op, p.idx, output, &out_idx, use_short_opcodes);
+                try emitSlotInstruction(p.result_op, p.idx, output, &out_idx, use_short_opcodes);
                 i += p.total_size;
             } else if (matchPutGetPeephole(func.code, i)) |p| {
                 try emitSlotInstruction(p.set_op, p.idx, output, &out_idx, use_short_opcodes);
+                i += p.total_size;
+            } else if (matchIncLocPeephole(func.code, i)) |p| {
+                output[out_idx] = p.update_op;
+                output[out_idx + 1] = @intCast(p.idx);
+                out_idx += 2;
                 i += p.total_size;
             } else if (matchAddLocPeephole(func.code, i)) |p| {
                 try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
                 output[out_idx] = opcode.op.add_loc;
                 output[out_idx + 1] = @intCast(p.idx);
                 out_idx += 2;
+                i += p.total_size;
+            } else if (matchPostUpdatePeephole(func.code, i)) |p| {
+                output[out_idx] = p.update_op;
+                out_idx += 1;
+                switch (p.kind) {
+                    .slot => try emitSlotInstruction(p.store_op, p.idx, output, &out_idx, use_short_opcodes),
+                    .field => {
+                        output[out_idx] = opcode.op.put_field;
+                        std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], p.atom_id, .little);
+                        out_idx += instrSize(opcode.op.put_field);
+                    },
+                    .array => {
+                        output[out_idx] = opcode.op.put_array_el;
+                        out_idx += instrSize(opcode.op.put_array_el);
+                    },
+                }
                 i += p.total_size;
             } else if (matchConstantTestPeephole(func.code, i)) |p| {
                 if (p.taken) {

@@ -2121,6 +2121,58 @@ test "resolve_variables: module class binding consumes one input atom before pro
     try std.testing.expect(saw_field);
 }
 
+test "resolve_variables folds discarded indexed and reference stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    const input = [_]u8{
+        op.insert3,      op.put_array_el,  op.drop,
+        op.insert3,      op.put_ref_value, op.drop,
+        op.return_undef,
+    };
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.put_array_el,
+        op.put_ref_value,
+        op.return_undef,
+    }, bc.code);
+}
+
+test "resolve_variables preserves discarded indexed store with an interior jump target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 9;
+    input[0] = op.goto;
+    std.mem.writeInt(u32, input[1..5], 6, .little);
+    input[5] = op.insert3;
+    input[6] = op.put_array_el;
+    input[7] = op.drop;
+    input[8] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
+}
+
 // ---- F10.2: short-form selection (`put_short_code` mirror) ----
 
 test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
@@ -2457,6 +2509,250 @@ test "resolve_labels folds dup put slot families to set" {
         0,
         op.@"return",
     }, bc.code);
+}
+
+test "resolve_labels folds length field access and remaps atom ownership" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    const keep_atom = try rt.internAtom("keep");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(keep_atom);
+    const keep_base = rt.atoms.refCount(keep_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 13;
+    input[0] = op.get_loc0;
+    input[1] = op.get_field;
+    std.mem.writeInt(u32, input[2..6], keep_atom, .little);
+    input[6] = op.drop;
+    input[7] = op.get_loc0;
+    input[8] = op.get_field;
+    std.mem.writeInt(u32, input[9..13], core.atom.ids.length, .little);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(keep_atom);
+    try bc.retainAtomOperand(core.atom.ids.length);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 9;
+    expected[0] = op.get_loc0;
+    expected[1] = op.get_field;
+    std.mem.writeInt(u32, expected[2..6], keep_atom, .little);
+    expected[6] = op.drop;
+    expected[7] = op.get_loc0;
+    expected[8] = op.get_length;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{keep_atom}, bc.atom_operands);
+    try std.testing.expectEqual(keep_base + 1, rt.atoms.refCount(keep_atom).?);
+}
+
+test "resolve_labels folds discarded slot and field stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    const field_atom = try rt.internAtom("field");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(field_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 35;
+    var i: usize = 0;
+    inline for (.{
+        .{ op.put_loc, @as(u16, 0) },
+        .{ op.put_arg, @as(u16, 1) },
+        .{ op.put_var_ref, @as(u16, 2) },
+        .{ op.put_loc_check, @as(u16, 3) },
+    }) |put| {
+        input[i] = op.dup;
+        input[i + 1] = put[0];
+        std.mem.writeInt(u16, input[i + 2 ..][0..2], put[1], .little);
+        input[i + 4] = op.drop;
+        i += 5;
+    }
+    input[i] = op.dup;
+    input[i + 1] = op.put_loc;
+    std.mem.writeInt(u16, input[i + 2 ..][0..2], 4, .little);
+    input[i + 4] = op.drop;
+    input[i + 5] = op.get_loc;
+    std.mem.writeInt(u16, input[i + 6 ..][0..2], 4, .little);
+    i += 8;
+    input[i] = op.insert2;
+    input[i + 1] = op.put_field;
+    std.mem.writeInt(u32, input[i + 2 ..][0..4], field_atom, .little);
+    input[i + 6] = op.drop;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(field_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 13;
+    expected[0] = op.put_loc0;
+    expected[1] = op.put_arg1;
+    expected[2] = op.put_var_ref2;
+    expected[3] = op.put_loc_check;
+    std.mem.writeInt(u16, expected[4..6], 3, .little);
+    expected[6] = op.set_loc8;
+    expected[7] = 4;
+    expected[8] = op.put_field;
+    std.mem.writeInt(u32, expected[9..13], field_atom, .little);
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{field_atom}, bc.atom_operands);
+}
+
+test "resolve_labels preserves discarded slot store with an interior jump target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 11;
+    input[0] = op.goto;
+    std.mem.writeInt(u32, input[1..5], 6, .little);
+    input[5] = op.dup;
+    input[6] = op.put_loc;
+    std.mem.writeInt(u16, input[7..9], 0, .little);
+    input[9] = op.drop;
+    input[10] = op.return_undef;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.goto8,        1,
+        op.put_loc0,     op.drop,
+        op.return_undef,
+    }, bc.code);
+}
+
+test "resolve_labels folds local update families to inc_loc" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 25;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.post_inc;
+    input[4] = op.put_loc;
+    std.mem.writeInt(u16, input[5..7], 4, .little);
+    input[7] = op.drop;
+    input[8] = op.get_loc;
+    std.mem.writeInt(u16, input[9..11], 5, .little);
+    input[11] = op.dec;
+    input[12] = op.dup;
+    input[13] = op.put_loc;
+    std.mem.writeInt(u16, input[14..16], 5, .little);
+    input[16] = op.drop;
+    input[17] = op.get_loc;
+    std.mem.writeInt(u16, input[18..20], 300, .little);
+    input[20] = op.post_inc;
+    input[21] = op.put_loc;
+    std.mem.writeInt(u16, input[22..24], 300, .little);
+    input[24] = op.drop;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.inc_loc, 4,
+        op.dec_loc, 5,
+        op.get_loc, 44,
+        1,          op.inc,
+        op.put_loc, 44,
+        1,
+    }, bc.code);
+}
+
+test "resolve_labels folds discarded post update stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    const field_atom = try rt.internAtom("field");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(field_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 25;
+    input[0] = op.post_inc;
+    input[1] = op.put_arg;
+    std.mem.writeInt(u16, input[2..4], 1, .little);
+    input[4] = op.drop;
+    input[5] = op.post_dec;
+    input[6] = op.put_var_ref;
+    std.mem.writeInt(u16, input[7..9], 2, .little);
+    input[9] = op.drop;
+    input[10] = op.get_var_ref;
+    std.mem.writeInt(u16, input[11..13], 2, .little);
+    input[13] = op.post_inc;
+    input[14] = op.perm3;
+    input[15] = op.put_field;
+    std.mem.writeInt(u32, input[16..20], field_atom, .little);
+    input[20] = op.drop;
+    input[21] = op.post_dec;
+    input[22] = op.perm4;
+    input[23] = op.put_array_el;
+    input[24] = op.drop;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(field_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 12;
+    expected[0] = op.inc;
+    expected[1] = op.put_arg1;
+    expected[2] = op.dec;
+    expected[3] = op.set_var_ref2;
+    expected[4] = op.inc;
+    expected[5] = op.put_field;
+    std.mem.writeInt(u32, expected[6..10], field_atom, .little);
+    expected[10] = op.dec;
+    expected[11] = op.put_array_el;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{field_atom}, bc.atom_operands);
 }
 
 test "resolve_labels collapses chained logical branch prefix" {
