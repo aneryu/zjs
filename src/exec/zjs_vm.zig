@@ -102,6 +102,32 @@ pub fn runWithOutputAndVarRefs(
     return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false);
 }
 
+/// QuickJS module linking invokes the same module bytecode used for normal
+/// evaluation, but with `this === true`. The compiler-emitted entry gate runs
+/// only declaration instantiation and returns before the module body.
+pub fn runModuleInstantiationWithVarRefs(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    var_refs: []const *core.VarRef,
+) !core.JSValue {
+    if (!function.flags.is_module) return error.InvalidBytecode;
+    const global_object = try contextGlobal(ctx);
+    return runWithArgs(
+        ctx,
+        stack,
+        function,
+        core.JSValue.boolean(true),
+        &.{},
+        var_refs,
+        null,
+        global_object,
+        false,
+        false,
+        false,
+    );
+}
+
 pub fn runModuleWithOutputAndVarRefsState(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -245,6 +271,9 @@ pub const CallEnv = struct {
     constructor_this_value: core.JSValue = core.JSValue.undefinedValue(),
     eval_global_var_bindings: bool = false,
     is_eval_code: bool = false,
+    /// Direct eval must validate before it builds the externally-owned capture
+    /// array. Other entries validate inside runWithArgsState.
+    global_declarations_prevalidated: bool = false,
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
     prepared_entry_frame: ?*const PreparedEntryFrame = null,
@@ -271,6 +300,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
         env.constructor_this_value,
         env.eval_global_var_bindings,
         env.is_eval_code,
+        env.global_declarations_prevalidated,
         env.suspend_on_module_await,
         env.initial_pc,
         env.prepared_entry_frame,
@@ -297,6 +327,7 @@ fn runWithArgsState(
     constructor_this_value: core.JSValue,
     entry_eval_global_var_bindings: bool,
     entry_is_eval_code: bool,
+    entry_global_declarations_prevalidated: bool,
     entry_suspend_on_module_await: bool,
     entry_initial_pc: usize,
     entry_prepared_frame: ?*const PreparedEntryFrame,
@@ -305,6 +336,13 @@ fn runWithArgsState(
     defer call_depth_guard.deinit();
     const call_profile_guard = call_vm.enterCallProfile(ctx.runtime);
     defer call_profile_guard.deinit();
+
+    // qjs js_closure2 PASS1 (quickjs.c:17280-17296): validate the complete
+    // GLOBAL_DECL table before creating a single declaration cell. Direct eval
+    // already ran this pass before constructing its caller-capture array.
+    if (entry_function.flags.is_global_var and !entry_global_declarations_prevalidated) {
+        try vm_property_globals.validateGlobalVarDeclarations(ctx, global, entry_function, entry_is_eval_code);
+    }
 
     // Frame storage (locals/args/var_refs) may be carved from the VM stack
     // arena; reclaim the watermark after the frame has released its values.
@@ -398,8 +436,8 @@ fn runWithArgsState(
     if (!skip_resume_slab) {
         try initFreshEntryFrame(ctx, entry_stack, entry_function, &frame_storage, global, args, var_refs, entry_generator_state, entry_prepared_frame);
     }
-    if (entry_generator_state == null) {
-        try vm_property_globals.instantiateGlobalVarDeclarations(ctx, global, entry_function, &frame_storage, entry_is_eval_code, entry_eval_global_var_bindings);
+    if (entry_generator_state == null and entry_function.flags.is_global_var) {
+        try vm_property_globals.instantiateGlobalVarDeclarationCells(ctx, global, entry_function, &frame_storage, entry_is_eval_code);
     }
 
     frame_storage.pc = entry_initial_pc;

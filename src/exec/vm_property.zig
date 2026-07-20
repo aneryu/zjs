@@ -212,8 +212,8 @@ pub fn localPutNextPc(put: LocalPut) usize {
 pub fn localCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, put: LocalPut) bool {
     if (put.idx >= frame.locals.len) return false;
     if (put.checked) return false;
-    if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_lexical) return false;
-    if (put.idx < function.vardefs.len and function.vardefs[put.idx].is_const) return false;
+    if (put.idx < function.vardefs.len and function.vardefs[put.idx].isLexical()) return false;
+    if (put.idx < function.vardefs.len and function.vardefs[put.idx].isConst()) return false;
     return true;
 }
 
@@ -331,7 +331,7 @@ pub fn bindingStoreWritableForFastPath(
     if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
         if (frame.locals[binding.idx].isUninitialized()) return false;
-        if (binding.idx < function.vardefs.len and function.vardefs[binding.idx].is_const) return false;
+        if (binding.idx < function.vardefs.len and function.vardefs[binding.idx].isConst()) return false;
     }
     return true;
 }
@@ -637,7 +637,7 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, global)) return null;
-    if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
+    if (function.entry_contract.var_environment != .global and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
@@ -874,7 +874,7 @@ pub fn decodeStringSliceConstLocalStore(
     const store = decodeLocalPut(code, call_pc + 3) orelse return null;
     if (store.idx >= frame.locals.len) return null;
     if (frame.locals[store.idx].isUninitialized()) return null;
-    if (store.idx < function.vardefs.len and function.vardefs[store.idx].is_const) return null;
+    if (store.idx < function.vardefs.len and function.vardefs[store.idx].isConst()) return null;
 
     const input_len = string_value.len();
     const input_len_i64 = std.math.cast(i64, input_len) orelse return null;
@@ -975,7 +975,7 @@ pub fn canUseFastGlobalVarLookup(
     frame: *const frame_mod.Frame,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (!frame.current_function.isUndefined()) return false;
+    if (function.entry_contract.var_environment != .global) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     return true;
 }
@@ -1011,9 +1011,9 @@ fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *c
 }
 
 fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const arg_count = @min(function.arg_names.len, frame.args.len);
-    for (function.arg_names[0..arg_count]) |name| {
-        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
+    const arg_count = @min(function.argdefs.len, frame.args.len);
+    for (function.argdefs[0..arg_count]) |arg| {
+        if (call_runtime.atomIdOrNameEql(rt, arg.var_name, atom_id)) return true;
     }
     const local_count = @min(function.vardefs.len, frame.locals.len);
     for (function.vardefs[0..local_count]) |vd| {

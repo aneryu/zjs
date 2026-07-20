@@ -11384,6 +11384,48 @@ pub const Object = extern struct {
         return self.propFlagsAt(index).isVarRef();
     }
 
+    /// Replace an existing ordinary property with the supplied VarRef cell.
+    /// The property takes its own cell ref; the caller keeps its ref.  This is
+    /// the object-side half of QuickJS `js_closure_define_global_var`: global
+    /// declaration construction fixes the slot identity and descriptor before
+    /// hoist bytecode writes the declaration value through the cell.
+    pub fn replaceOwnPropertyWithVarRefCell(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        index: usize,
+        next_flags: property.Flags,
+        cell: *var_ref_mod.VarRef,
+    ) !void {
+        if (index >= self.shape_ref.prop_count or
+            self.propAtomAt(index) != atom_id or
+            self.propFlagsAt(index).deleted or
+            next_flags.kind != .var_ref or
+            next_flags.deleted or
+            self.propFlagsAt(index).kind == .auto_init)
+        {
+            return error.IncompatibleDescriptor;
+        }
+
+        // Clone first: after this succeeds, refcount changes and slot teardown
+        // are non-failing, so an OOM leaves the old property and parked cell
+        // untouched.
+        try self.ensureUniqueShapeForMutation(rt);
+        const old_flags = self.propFlagsAt(index);
+        const old_slot = self.prop_values[index].slot;
+        if (old_flags.kind == .data) {
+            cell.setVarRefValue(rt, old_slot.data.dup());
+        }
+        cell.is_lexical = false;
+        cell.varRefIsConstSlot().* = !next_flags.writable;
+        cell.varRefIsDeletableSlot().* = next_flags.configurable;
+
+        self.prop_values[index].slot = .{ .var_ref = cell.dupCell() };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+    }
+
     /// The single paired mutator for an EXISTING property entry: writes the
     /// new slot arm AND the shape `Flags.kind` in lockstep, then releases the
     /// old slot using the OLD flags. The caller must have ensured a unique

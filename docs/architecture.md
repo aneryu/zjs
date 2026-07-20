@@ -121,6 +121,11 @@ stack-map 系统。
 p3-pipeline / p4-fb-compact 的对照结论（语义已由 test262 门禁 0 失败 +
 行为探针验证；下表记录结构差异及其成本评估，消除「未知偏差」）：
 
+> **2026-07-20 复审更正：** 下表这八项仍可用于识别历史 transport，但其中“按构造等价”“无实质成本”与
+> “不实施/既定设计”的裁决已被新的 QuickJS bytecode、parser-topology、cell-identity 和 OOM 证据推翻，不能再作为优化前置。
+> 当前裁决与执行顺序以 [`qjs-align/OPT-ROADMAP-2026-07-19.md`](qjs-align/OPT-ROADMAP-2026-07-19.md) 的
+> W1b2.5（parser/finalizer/body）及后续 canonical root/direct-FB 阶段为准；实现完成后再逐行重写本表的终态描述。
+
 | QuickJS pass / 机制 | zjs 等价机制 | 差异点 | 实质成本 |
 | --- | --- | --- | --- |
 | `js_create_function` scope 重链（quickjs.c:36120-36144：重算 `scope_next`/`scopes[].first`，空 scope 继承父链） | `FunctionDef.addScopeVar` 在解析时增量维护 `scope_next`/`scopes[].first`；`resolveScopeVar`（resolve_variables.zig）显式沿 `scopes[].parent` 上溯 | zjs 链接关系自构造起即正确且只含本 scope 变量，无需收尾重链 pass；QuickJS 的「空 scope 继承父链」由查找方上溯替代 | 无。按构造等价 |

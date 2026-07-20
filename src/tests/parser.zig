@@ -16,6 +16,23 @@ const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
 
+fn configureScriptRoot(state: *ParseState) void {
+    state.function_def.is_eval = true;
+    state.function_def.is_global_var = true;
+    state.top_level_functions_as_children = true;
+    state.top_level_lexical_as_global_ref = true;
+}
+
+fn configureModuleRoot(state: *ParseState) void {
+    state.function_def.is_eval = true;
+    state.function_def.is_module = true;
+    state.function_def.is_global_var = true;
+    state.function_def.is_strict_mode = true;
+    state.is_strict = true;
+    state.top_level_functions_as_children = true;
+    state.top_level_lexical_as_module_ref = true;
+}
+
 // ================== LEXER TESTS ==================
 
 const LexerTestEnv = struct {
@@ -637,6 +654,7 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     try parser_core.parseExpr(&state);
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -649,8 +667,10 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseExpr(&state);
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -664,9 +684,11 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     lex.is_strict_mode = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
     try parser_core.parseExpr(&state);
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -681,7 +703,9 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -696,7 +720,9 @@ fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -711,9 +737,11 @@ fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     try lex.enableTypeScript();
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -726,8 +754,10 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
     state.top_level_functions_as_children = true;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -742,7 +772,9 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureModuleRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -757,10 +789,25 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    state.top_level_lexical_as_module_ref = true;
-    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    configureModuleRoot(&state);
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
+}
+
+fn moduleBodyStart(code: []const u8) !usize {
+    if (code.len < 3 or code[0] != op.push_this) return error.TestExpectedEqual;
+    const target: isize = switch (code[1]) {
+        op.if_false8 => 2 + @as(i8, @bitCast(code[2])),
+        op.if_false => blk: {
+            if (code.len < 6) return error.TestExpectedEqual;
+            break :blk 2 + std.mem.readInt(i32, code[2..6], .little);
+        },
+        else => return error.TestExpectedEqual,
+    };
+    if (target < 0 or target > code.len) return error.TestExpectedEqual;
+    return @intCast(target);
 }
 
 fn moduleRecord(function: *const engine.bytecode.Bytecode) !*const engine.bytecode.module.Record {
@@ -783,6 +830,84 @@ fn functionBytecodeFromValue(value: engine.core.JSValue) ?*const engine.bytecode
 fn expectFunctionConstant(function: *const engine.bytecode.Bytecode, index: usize) !*const engine.bytecode.FunctionBytecode {
     try std.testing.expect(index < function.constants.values.len);
     return functionBytecodeFromValue(function.constants.values[index]) orelse error.TestExpectedEqual;
+}
+
+fn findFunctionConstantNamed(
+    function: *const engine.bytecode.Bytecode,
+    rt: *core.JSRuntime,
+    expected_name: []const u8,
+) ?*const engine.bytecode.FunctionBytecode {
+    for (function.constants.values) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", expected_name)) return child;
+    }
+    return null;
+}
+
+fn countFunctionConstantsNamed(
+    function: *const engine.bytecode.Bytecode,
+    rt: *core.JSRuntime,
+    expected_name: []const u8,
+) usize {
+    var count: usize = 0;
+    for (function.constants.values) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", expected_name)) count += 1;
+    }
+    return count;
+}
+
+fn globalDeclarationClosureNamed(
+    function: *const engine.bytecode.Bytecode,
+    rt: *core.JSRuntime,
+    expected_name: []const u8,
+) ?*const engine.bytecode.function_bytecode.BytecodeClosureVar {
+    for (function.closure_var, 0..) |cv, idx| {
+        if (cv.closureType() != .global_decl) continue;
+        if (std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", expected_name)) return &function.closure_var[idx];
+    }
+    return null;
+}
+
+fn declarationClosureNamed(
+    function: *const engine.bytecode.Bytecode,
+    rt: *core.JSRuntime,
+    expected_name: []const u8,
+) ?*const engine.bytecode.function_bytecode.BytecodeClosureVar {
+    for (function.closure_var, 0..) |cv, idx| {
+        if (cv.closureType() != .global_decl and cv.closureType() != .module_decl) continue;
+        if (std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", expected_name)) return &function.closure_var[idx];
+    }
+    return null;
+}
+
+fn globalDeclarationClosureCount(function: *const engine.bytecode.Bytecode) usize {
+    var count: usize = 0;
+    for (function.closure_var) |cv| {
+        if (cv.closureType() == .global_decl) count += 1;
+    }
+    return count;
+}
+
+fn varDefNamed(
+    function: *const engine.bytecode.Bytecode,
+    rt: *core.JSRuntime,
+    expected_name: []const u8,
+) ?*const engine.bytecode.function_bytecode.BytecodeVarDef {
+    for (function.vardefs, 0..) |vd, idx| {
+        if (std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", expected_name)) {
+            return &function.vardefs[idx];
+        }
+    }
+    return null;
+}
+
+fn countPutVarRefStores(code: []const u8) usize {
+    return countOpcode(code, op.put_var_ref) +
+        countOpcode(code, op.put_var_ref0) +
+        countOpcode(code, op.put_var_ref1) +
+        countOpcode(code, op.put_var_ref2) +
+        countOpcode(code, op.put_var_ref3);
 }
 
 fn countOpcodeInFunctionBytecode(fb: *const engine.bytecode.FunctionBytecode, opcode: u8) usize {
@@ -1638,6 +1763,7 @@ test "M3.1 F4: parser emits QuickJS line_num temp and finalize strips it" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "x;");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -1869,6 +1995,16 @@ test "F4: delete a.b emits get_var a ; push_atom_value b ; delete" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_atom_value, op.delete });
+}
+
+test "F4: delete of a private field is rejected after ordinary-field transport" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        parseExpr(&env, "class { #x; m() { return delete this.#x; } }"),
+    );
 }
 
 test "F4: delete a.b.length rewrites optimized length load" {
@@ -2143,9 +2279,12 @@ test "F4: parenthesized optional member call preserves receiver" {
         op.if_false8,
         op.drop,
         op.undefined,
-        op.undefined,
         op.goto8,
         op.get_field2,
+        // QJS's closed-chain method bridge skips the short-circuit-only
+        // receiver slot on the successful getter path.
+        op.goto8,
+        op.undefined,
         op.call_method,
     });
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, fn_bc.code.len - 3));
@@ -2164,9 +2303,10 @@ test "F4: optional call after parenthesized optional member keeps balanced exits
         op.if_false8,
         op.drop,
         op.undefined,
-        op.undefined,
         op.goto8,
         op.get_field2,
+        op.goto8,
+        op.undefined,
         op.dup,
         op.is_undefined_or_null,
         op.if_false8,
@@ -2672,8 +2812,8 @@ test "F5: var declaration without initializer" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
-    try std.testing.expect(!fn_bc.global_vars[0].is_lexical);
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&fn_bc));
+    try std.testing.expect(!globalDeclarationClosureNamed(&fn_bc, env.rt, "x").?.isLexical());
 }
 
 test "F5: var declaration with initializer" {
@@ -2682,11 +2822,11 @@ test "F5: var declaration with initializer" {
     var fn_bc = try parseStatement(&env, "var x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // Top-level `var` declaration metadata lives on FunctionBytecode; only the
-    // initializer write remains in the QuickJS-format code stream.
+    // Top-level declaration metadata lives in the finalized closure table;
+    // only the initializer write remains in the QuickJS-format code stream.
     try std.testing.expectEqual(@as(usize, 4), fn_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
-    try std.testing.expect(!fn_bc.global_vars[0].is_lexical);
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&fn_bc));
+    try std.testing.expect(!globalDeclarationClosureNamed(&fn_bc, env.rt, "x").?.isLexical());
     try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
     try std.testing.expectEqual(op.put_var, fn_bc.code[fn_bc.code.len - 3]);
 }
@@ -2732,6 +2872,10 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
 
     try std.testing.expect((make_ref_pc orelse return error.TestExpectedEqual) < (rhs_pc orelse return error.TestExpectedEqual));
     try std.testing.expect(rhs_pc.? < (put_ref_pc orelse return error.TestExpectedEqual));
+    const label_target: usize = @intCast(std.mem.readInt(u32, function.code[make_ref_pc.? + 5 ..][0..4], .little));
+    try std.testing.expect(label_target != 0);
+    try std.testing.expectEqual(put_ref_pc.? - 1, label_target);
+    try std.testing.expectEqual(op.nop, function.code[label_target]);
 }
 
 test "F5: module-ref var initializer consumes value unless next statement reuses binding" {
@@ -2740,8 +2884,9 @@ test "F5: module-ref var initializer consumes value unless next statement reuses
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; y;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
-    try std.testing.expectEqual(op.put_var_ref0, fn_bc.code[1]);
+    const body_pc = try moduleBodyStart(fn_bc.code);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[body_pc]);
+    try std.testing.expectEqual(op.put_var_ref0, fn_bc.code[body_pc + 1]);
 }
 
 test "F5: module-ref var initializer preserves value for immediate same-name expression" {
@@ -2750,8 +2895,9 @@ test "F5: module-ref var initializer preserves value for immediate same-name exp
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; x;");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
-    try std.testing.expectEqual(op.set_var_ref0, fn_bc.code[1]);
+    const body_pc = try moduleBodyStart(fn_bc.code);
+    try std.testing.expectEqual(op.push_1, fn_bc.code[body_pc]);
+    try std.testing.expectEqual(op.set_var_ref0, fn_bc.code[body_pc + 1]);
 }
 
 test "F5: let declaration" {
@@ -2760,16 +2906,14 @@ test "F5: let declaration" {
     var fn_bc = try parseStatement(&env, "let x;");
     defer fn_bc.deinit(env.rt);
 
-    // F10.1c + TDZ: top-level `let x;` records declaration metadata on
-    // FunctionBytecode, then initializes its local lexical slot:
-    //   set_loc_uninitialized 0  (3 bytes - TDZ prologue)
-    //   undefined                 (1 byte)
-    //   put_loc0                  (QuickJS uses bare put_loc for ordinary init)
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
-    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc0, fn_bc.code[4]);
+    // Script top-level `let` is a GLOBAL_DECL cell. Construction installs the
+    // uninitialized lexical cell; executable code performs only the source
+    // initialization through that declaration carrier.
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&fn_bc));
+    try std.testing.expect(globalDeclarationClosureNamed(&fn_bc, env.rt, "x").?.isLexical());
+    // QuickJS final bytecode keeps the declaration carrier in closure
+    // metadata but emits the source initializer as put_var_init.
+    try expectOpcodeSequence(fn_bc.code, &.{ op.undefined, op.put_var_init });
 }
 
 test "F5: let declaration with initializer" {
@@ -2778,15 +2922,11 @@ test "F5: let declaration with initializer" {
     var fn_bc = try parseStatement(&env, "let x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // F10.1c + TDZ: `let x = 1;` lowers to declaration metadata plus:
-    //   set_loc_uninitialized 0  (TDZ prologue)
-    //   push_i32 1
-    //   put_loc0
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
-    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc0, fn_bc.code[fn_bc.code.len - 1]);
+    // The initializer writes the GLOBAL_DECL cell directly; its TDZ state was
+    // established during global-declaration construction.
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&fn_bc));
+    try std.testing.expect(globalDeclarationClosureNamed(&fn_bc, env.rt, "x").?.isLexical());
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.put_var_init });
 }
 
 test "F5: const declaration without initializer should fail" {
@@ -2801,14 +2941,13 @@ test "F5: const declaration with initializer" {
     var fn_bc = try parseStatement(&env, "const x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // F10.1c + TDZ: const lowers same as let with init, except the
-    // Ordinary lexical initialization matches QuickJS's bare put_loc form.
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.global_vars.len);
-    try std.testing.expect(fn_bc.global_vars[0].is_lexical);
-    try std.testing.expect(fn_bc.global_vars[0].is_const);
-    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
-    try std.testing.expectEqual(op.push_1, fn_bc.code[3]);
-    try std.testing.expectEqual(op.put_loc0, fn_bc.code[fn_bc.code.len - 1]);
+    // Const uses the same GLOBAL_DECL initialization shape; immutability is
+    // carried by ClosureVar.is_const for later writes.
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&fn_bc));
+    const x_decl = globalDeclarationClosureNamed(&fn_bc, env.rt, "x").?;
+    try std.testing.expect(x_decl.isLexical());
+    try std.testing.expect(x_decl.isConst());
+    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.put_var_init });
 }
 
 test "F5: multiple var declarations" {
@@ -2818,7 +2957,9 @@ test "F5: multiple var declarations" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expectEqual(@as(usize, 8), fn_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 2), fn_bc.global_vars.len);
+    try std.testing.expectEqual(@as(usize, 2), globalDeclarationClosureCount(&fn_bc));
+    try std.testing.expect(globalDeclarationClosureNamed(&fn_bc, env.rt, "x") != null);
+    try std.testing.expect(globalDeclarationClosureNamed(&fn_bc, env.rt, "y") != null);
     try std.testing.expectEqual(op.push_1, fn_bc.code[0]);
     try std.testing.expectEqual(op.put_var, fn_bc.code[1]);
     try std.testing.expectEqual(op.push_2, fn_bc.code[4]);
@@ -2828,36 +2969,42 @@ test "F5: multiple var declarations" {
 test "F5: directive prologue with 'use strict'" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseStatement(&env, "{ \"use strict\"; x; }");
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function f(){ \"use strict\"; x; }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    try std.testing.expect(child.flags.is_strict_mode);
+    try expectOpcode(child.byteCode(), op.get_var);
 }
 
 test "M3.1 F4: strict object setter rejects eval and arguments parameters" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
-    try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "{ \"use strict\"; var obj = { set x(eval) {} }; }"));
-    try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "{ \"use strict\"; var obj = { set x(arguments) {} }; }"));
+    try std.testing.expectError(error.UnexpectedToken, parseStatementWithTopLevelChildren(&env, "function f(){ \"use strict\"; var obj = { set x(eval) {} }; }"));
+    try std.testing.expectError(error.UnexpectedToken, parseStatementWithTopLevelChildren(&env, "function f(){ \"use strict\"; var obj = { set x(arguments) {} }; }"));
 }
 
 test "F5: directive prologue with multiple directives" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseStatement(&env, "{ \"use strict\"; \"other directive\"; x; }");
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function f(){ \"use strict\"; \"other directive\"; x; }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    try std.testing.expect(child.flags.is_strict_mode);
+    try expectOpcode(child.byteCode(), op.get_var);
 }
 
 test "F5: directive prologue with ASI" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseStatement(&env, "{ \"use strict\"\n x; }");
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function f(){ \"use strict\"\n x; }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    try std.testing.expect(child.flags.is_strict_mode);
+    try expectOpcode(child.byteCode(), op.get_var);
 }
 
 // ---- F6 function parsing tests -----------------------------------------
@@ -2873,7 +3020,7 @@ test "F6: simple function declaration" {
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.has_prototype);
     try std.testing.expect(!child.flags.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try std.testing.expectEqual(@as(usize, 0), child.argVarDefs().len);
     try expectOpcode(child.byteCode(), op.return_undef);
 }
 
@@ -2902,9 +3049,9 @@ test "F6: function declaration with parameters" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "foo");
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
-    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "x");
-    try expectAtomName(&env, child.argNames()[1], "y");
+    try std.testing.expectEqual(@as(usize, 2), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
+    try expectAtomName(&env, child.argVarDefs()[1].var_name, "y");
     try expectOpcode(child.byteCode(), op.return_undef);
 }
 
@@ -2927,8 +3074,8 @@ test "F6: function declaration with rest parameter" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     try expectAtomName(&env, child.func_name, "foo");
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
-    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "args");
+    try std.testing.expectEqual(@as(usize, 1), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "args");
     try expectOpcode(child.byteCode(), op.rest);
     try expectOpcode(child.byteCode(), op.return_undef);
 }
@@ -2943,7 +3090,7 @@ test "F6: arrow function with block body" {
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.is_arrow_function);
     try std.testing.expect(!child.flags.has_prototype);
-    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try std.testing.expectEqual(@as(usize, 0), child.argVarDefs().len);
     try expectOpcode(child.byteCode(), op.return_undef);
 }
 
@@ -2957,7 +3104,7 @@ test "F6: arrow function with expression body" {
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.is_arrow_function);
     try std.testing.expect(!child.flags.has_prototype);
-    try std.testing.expectEqual(@as(usize, 0), child.argNames().len);
+    try std.testing.expectEqual(@as(usize, 0), child.argVarDefs().len);
     try expectOpcode(child.byteCode(), op.push_i8);
     try expectOpcode(child.byteCode(), op.@"return");
 }
@@ -2971,8 +3118,8 @@ test "F6: arrow function with single parameter" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "x");
+    try std.testing.expectEqual(@as(usize, 1), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
     try expectOpcode(child.byteCode(), op.get_arg0);
     try expectOpcode(child.byteCode(), op.@"return");
 }
@@ -2986,9 +3133,9 @@ test "F6: arrow function with multiple parameters" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "x");
-    try expectAtomName(&env, child.argNames()[1], "y");
+    try std.testing.expectEqual(@as(usize, 2), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
+    try expectAtomName(&env, child.argVarDefs()[1].var_name, "y");
     try expectOpcode(child.byteCode(), op.get_arg0);
     try expectOpcode(child.byteCode(), op.get_arg1);
     try expectOpcode(child.byteCode(), op.add);
@@ -3004,8 +3151,8 @@ test "F6: arrow function with rest parameter" {
     const child = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, child.flags.func_kind);
     try std.testing.expect(child.flags.is_arrow_function);
-    try std.testing.expectEqual(@as(usize, 1), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "args");
+    try std.testing.expectEqual(@as(usize, 1), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "args");
     try expectOpcode(child.byteCode(), op.rest);
     try expectOpcode(child.byteCode(), op.@"return");
 }
@@ -3077,8 +3224,8 @@ test "F7: class with constructor" {
     const ctor = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expect(ctor.flags.is_class_constructor);
     try std.testing.expect(!ctor.flags.is_derived_class_constructor);
-    try std.testing.expectEqual(@as(usize, 1), ctor.argNames().len);
-    try expectAtomName(&env, ctor.argNames()[0], "x");
+    try std.testing.expectEqual(@as(usize, 1), ctor.argVarDefs().len);
+    try expectAtomName(&env, ctor.argVarDefs()[0].var_name, "x");
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(ctor.byteCode(), op.put_field);
 }
@@ -3091,7 +3238,7 @@ test "F7: class with getter" {
 
     const getter = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, getter.flags.func_kind);
-    try std.testing.expectEqual(@as(usize, 0), getter.argNames().len);
+    try std.testing.expectEqual(@as(usize, 0), getter.argVarDefs().len);
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(fn_bc.code, op.define_method);
     try expectOpcode(getter.byteCode(), op.get_field);
@@ -3106,8 +3253,8 @@ test "F7: class with setter" {
 
     const setter = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.normal, setter.flags.func_kind);
-    try std.testing.expectEqual(@as(usize, 1), setter.argNames().len);
-    try expectAtomName(&env, setter.argNames()[0], "value");
+    try std.testing.expectEqual(@as(usize, 1), setter.argVarDefs().len);
+    try expectAtomName(&env, setter.argVarDefs()[0].var_name, "value");
     try expectOpcode(fn_bc.code, op.define_class);
     try expectOpcode(fn_bc.code, op.define_method);
     try expectOpcode(setter.byteCode(), op.put_field);
@@ -3324,7 +3471,7 @@ test "F7: private name in uses scope temp before resolver" {
     try expectOpcodeRecursive(&function, op.private_in);
 }
 
-test "direct eval pseudo var objects propagate to descendants inside-out" {
+test "unresolved descendant lookup threads direct eval var objects inside-out" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
@@ -3347,6 +3494,12 @@ test "direct eval pseudo var objects propagate to descendants inside-out" {
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try parser_core.prepareDirectEvalFunctionDefs(&state.function_def);
+    // QuickJS does not blanket-copy every ancestor <var> object during
+    // add_eval_variables. The ordinary inner function acquires them only when
+    // resolve_scope_var proves that `missing` crosses those dynamic
+    // environments. Run the real finalization pass before asserting that
+    // resolution-time chain.
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const outer = state.function_def.child_list[0];
@@ -3359,7 +3512,7 @@ test "direct eval pseudo var objects propagate to descendants inside-out" {
 
     var middle_var_capture_idx: ?u16 = null;
     for (middle.closure_var, 0..) |cv, idx| {
-        if (cv.var_name == atom.ids.var_object and cv.closure_type == .local and cv.var_idx == @as(u16, @intCast(outer.var_object_idx))) {
+        if (cv.var_name == atom.ids.var_object and cv.closureType() == .local and cv.var_idx == @as(u16, @intCast(outer.var_object_idx))) {
             middle_var_capture_idx = @intCast(idx);
             break;
         }
@@ -3372,13 +3525,11 @@ test "direct eval pseudo var objects propagate to descendants inside-out" {
     }
     try std.testing.expectEqual(@as(usize, 2), object_capture_count);
     try std.testing.expectEqual(atom.ids.var_object, inner.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def_mod.ClosureType.local, inner.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def_mod.ClosureType.local, inner.closure_var[0].closureType());
     try std.testing.expectEqual(@as(u16, @intCast(middle.var_object_idx)), inner.closure_var[0].var_idx);
-    try std.testing.expectEqual(@as(u16, 1), inner.closure_var[0].source_depth);
     try std.testing.expectEqual(atom.ids.var_object, inner.closure_var[1].var_name);
-    try std.testing.expectEqual(function_def_mod.ClosureType.ref, inner.closure_var[1].closure_type);
+    try std.testing.expectEqual(function_def_mod.ClosureType.ref, inner.closure_var[1].closureType());
     try std.testing.expectEqual(outer_ref_idx, inner.closure_var[1].var_idx);
-    try std.testing.expectEqual(@as(u16, 2), inner.closure_var[1].source_depth);
 }
 
 test "direct eval pseudo var objects follow eval and parameter-expression gates" {
@@ -3434,7 +3585,7 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expectEqual(@as(i32, -1), eval_state.function_def.arg_var_object_idx);
 }
 
-test "parameter initializer direct eval emits active var object hoist metadata" {
+test "parameter initializer direct eval emits active global-declaration carriers" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3456,22 +3607,46 @@ test "parameter initializer direct eval emits active var object hoist metadata" 
         });
         defer parsed.deinit();
 
-        var hoist: ?engine.bytecode.function_def.GlobalVar = null;
-        for (parsed.function.global_vars) |global_var| {
-            if (global_var.var_name == x_atom) {
-                hoist = global_var;
-                break;
-            }
-        }
-        const metadata = hoist orelse return error.TestExpectedEqual;
-        try std.testing.expect(metadata.force_init);
-        try std.testing.expect(metadata.is_configurable);
-        try std.testing.expect(!metadata.is_lexical);
+        const metadata = globalDeclarationClosureNamed(&parsed.function, rt, "parameterEvalHoist") orelse
+            return error.TestExpectedEqual;
+        try std.testing.expectEqual(x_atom, metadata.var_name);
+        try std.testing.expect(!metadata.isLexical());
+        try std.testing.expect(parsed.function.flags.is_global_var);
         if (case.function_declaration) {
-            try std.testing.expect(metadata.cpool_idx >= 0);
+            try std.testing.expectEqual(function_def.VarKind.global_function_decl, metadata.varKind());
+            try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(parsed.function.code));
         } else {
-            try std.testing.expectEqual(@as(i32, -1), metadata.cpool_idx);
+            try std.testing.expectEqual(function_def.VarKind.normal, metadata.varKind());
+            // `force_init` is compile-only. QuickJS clears the effective force
+            // bit when the first matching GLOBAL_DECL carrier is found, so no
+            // redundant prologue store survives; only the source initializer's
+            // ordinary dynamic-global store remains.
+            try std.testing.expectEqual(@as(usize, 0), countPutVarRefStores(parsed.function.code));
+            try std.testing.expect(countOpcode(parsed.function.code, op.put_var) >= 1);
         }
+    }
+}
+
+test "nested direct eval does not capture a parent global declaration carrier" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "let parentGlobal = 1; function readsByEval() { return eval('parentGlobal'); }",
+        .{ .mode = .script, .filename = "direct-eval-global-carrier.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    const child = findFunctionConstantNamed(&parsed.function, rt, "readsByEval") orelse
+        return error.TestExpectedEqual;
+    for (child.closureVar()) |cv| {
+        const name = rt.atoms.name(cv.var_name) orelse continue;
+        // qjs add_closure_variables skips GLOBAL, GLOBAL_REF, and GLOBAL_DECL:
+        // eval resolves this name through its global environment instead of
+        // turning the parent's declaration carrier into an ordinary REF.
+        try std.testing.expect(!std.mem.eql(u8, name, "parentGlobal"));
     }
 }
 
@@ -3602,6 +3777,9 @@ test "F8: export default expression" {
     const record = try moduleRecord(&fn_bc);
     try expectModuleRecordCounts(record, 0, 0, 1, 0, 0);
     try expectModuleExport(&env, record, 0, "default", "*default*");
+    const carrier = declarationClosureNamed(&fn_bc, env.rt, "*default*") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.ClosureType.module_decl, carrier.closureType());
+    try std.testing.expect(carrier.isLexical());
 }
 
 test "F8: export default function" {
@@ -3615,6 +3793,43 @@ test "F8: export default function" {
     try expectModuleExport(&env, record, 0, "default", "f");
 }
 
+test "anonymous default function uses a star-default global function carrier" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var parsed = try parser.compile(
+        env.rt,
+        "export default function() {}",
+        .{ .mode = .module, .filename = "anonymous-default-function.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    const fn_bc = &parsed.function;
+
+    const record = try moduleRecord(fn_bc);
+    try expectModuleRecordCounts(record, 0, 0, 1, 0, 0);
+    try expectModuleExport(&env, record, 0, "default", "*default*");
+    var found_function_constant = false;
+    for (fn_bc.constants.values) |value| {
+        if (functionBytecodeFromValue(value) != null) {
+            found_function_constant = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_function_constant);
+
+    const carrier = carrier: {
+        for (fn_bc.closure_var, 0..) |cv, idx| {
+            if (std.mem.eql(u8, env.rt.atoms.name(cv.var_name) orelse "", "*default*")) {
+                break :carrier &fn_bc.closure_var[idx];
+            }
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqual(function_def.ClosureType.module_decl, carrier.closureType());
+    try std.testing.expectEqual(function_def.VarKind.global_function_decl, carrier.varKind());
+    try std.testing.expect(!carrier.isLexical());
+}
+
 test "F8: export default class" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3623,7 +3838,24 @@ test "F8: export default class" {
 
     const record = try moduleRecord(&fn_bc);
     try expectModuleRecordCounts(record, 0, 0, 1, 0, 0);
+    try expectModuleExport(&env, record, 0, "default", "C");
+    const carrier = declarationClosureNamed(&fn_bc, env.rt, "C") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.ClosureType.module_decl, carrier.closureType());
+    try std.testing.expect(carrier.isLexical());
+}
+
+test "anonymous default class uses the lexical star-default carrier" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseModuleStatement(&env, "export default class {}");
+    defer fn_bc.deinit(env.rt);
+
+    const record = try moduleRecord(&fn_bc);
+    try expectModuleRecordCounts(record, 0, 0, 1, 0, 0);
     try expectModuleExport(&env, record, 0, "default", "*default*");
+    const carrier = declarationClosureNamed(&fn_bc, env.rt, "*default*") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.ClosureType.module_decl, carrier.closureType());
+    try std.testing.expect(carrier.isLexical());
 }
 
 test "F8: export star" {
@@ -3743,9 +3975,9 @@ test "F9: async function declaration with parameters" {
 
     const child = try expectFunctionConstant(&fn_bc, 0);
     try std.testing.expectEqual(function_def_mod.FunctionKind.async, child.flags.func_kind);
-    try std.testing.expectEqual(@as(usize, 2), child.argNames().len);
-    try expectAtomName(&env, child.argNames()[0], "x");
-    try expectAtomName(&env, child.argNames()[1], "y");
+    try std.testing.expectEqual(@as(usize, 2), child.argVarDefs().len);
+    try expectAtomName(&env, child.argVarDefs()[0].var_name, "x");
+    try expectAtomName(&env, child.argVarDefs()[1].var_name, "y");
 }
 
 test "F9: async function declaration with body" {
@@ -3832,7 +4064,7 @@ test "Object literal: spread" {
 // These tests cover the FunctionDef-side data that the finalize pipeline
 // consumes, without depending on full bytecode emission.
 
-test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
+test "F10.1a FunctionDef: program root has var scope 0 and body scope 1" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
@@ -3844,16 +4076,166 @@ test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0 created
-    // with parent = -1, first = -1.
-    try std.testing.expectEqual(@as(usize, 1), state.function_def.scopes.len);
+    // js_new_function_def creates scope 0; JS_Eval immediately pushes the
+    // program body before directives and declarations.
+    try std.testing.expectEqual(@as(usize, 2), state.function_def.scopes.len);
     try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].parent);
     try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].first);
-    try std.testing.expectEqual(@as(i32, 0), state.function_def.scope_level);
-    try std.testing.expectEqual(@as(i32, 1), state.function_def.scope_count);
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[1].parent);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.body_scope);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scope_level);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.scope_count);
 }
 
-test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
+test "F10.1a FunctionDef: QuickJS root declaration rows keep body and block origins" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const a_atom = try env.rt.internAtom("a");
+    defer env.rt.atoms.free(a_atom);
+    const b_atom = try env.rt.internAtom("b");
+    defer env.rt.atoms.free(b_atom);
+    const c_atom = try env.rt.internAtom("c");
+    defer env.rt.atoms.free(c_atom);
+    const d_atom = try env.rt.internAtom("d");
+    defer env.rt.atoms.free(d_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "var a; let b; { var c; let d; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    // Pinned QuickJS diagnostic dump: a/b/c are GLOBAL_DECL rows with the
+    // exact declaration scope; only block-local d is a VarDef.
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.global_vars.len);
+    try std.testing.expectEqual(a_atom, state.function_def.global_vars[0].var_name);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.global_vars[0].scope_level);
+    try std.testing.expectEqual(b_atom, state.function_def.global_vars[1].var_name);
+    try std.testing.expect(state.function_def.global_vars[1].is_lexical);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.global_vars[1].scope_level);
+    try std.testing.expectEqual(c_atom, state.function_def.global_vars[2].var_name);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.global_vars[2].scope_level);
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
+    try std.testing.expectEqual(d_atom, state.function_def.vars[0].var_name);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.vars[0].scope_level);
+}
+
+test "F10.1a FunctionDef: function vars retain parser origins without entering lexical chains" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "function f(p){ var x; { var y; let z; } let w; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+    state.top_level_functions_as_children = true;
+
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
+    const child = state.function_def.child_list[0];
+    try std.testing.expectEqual(@as(i32, 1), child.body_scope);
+    try std.testing.expectEqual(@as(usize, 3), child.scopes.len);
+    try std.testing.expectEqual(@as(usize, 4), child.vars.len);
+
+    const expected_names = [_][]const u8{ "x", "y", "z", "w" };
+    for (child.vars, expected_names) |vd, expected| {
+        try std.testing.expectEqualStrings(expected, env.rt.atoms.name(vd.var_name).?);
+    }
+    // VAR rows are scope-0 locals, but parser-time scope_next is their source
+    // declaration scope. They are absent from scopes[0].first; z/w alone own
+    // lexical links. Finalization later rebuilds runtime scope_next.
+    try std.testing.expectEqual(@as(i32, 0), child.vars[0].scope_level);
+    try std.testing.expectEqual(@as(i32, 1), child.vars[0].scope_next);
+    try std.testing.expectEqual(@as(i32, 0), child.vars[1].scope_level);
+    try std.testing.expectEqual(@as(i32, 2), child.vars[1].scope_next);
+    try std.testing.expectEqual(@as(i32, -1), child.scopes[0].first);
+    try std.testing.expectEqual(@as(i32, 2), child.vars[2].scope_level);
+    try std.testing.expectEqual(@as(i32, 1), child.vars[3].scope_level);
+}
+
+test "F10.1a FunctionDef: every parsed function body has identity except class fields aggregator" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "const arrow = () => 1; class C { x = 1; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+    state.top_level_functions_as_children = true;
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var arrow: ?*function_def_mod.FunctionDef = null;
+    var ctor: ?*function_def_mod.FunctionDef = null;
+    var fields: ?*function_def_mod.FunctionDef = null;
+    for (state.function_def.child_list) |child| {
+        if (child.func_type == .arrow) arrow = child;
+        if (child.func_type == .class_constructor or child.func_type == .derived_class_constructor) ctor = child;
+        if (child.func_name == core.atom.ids.class_fields_init) fields = child;
+    }
+    const arrow_fd = arrow orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(i32, 1), arrow_fd.body_scope);
+    try std.testing.expectEqual(@as(usize, 2), arrow_fd.scopes.len);
+    const ctor_fd = ctor orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(i32, 1), ctor_fd.body_scope);
+    try std.testing.expectEqual(@as(usize, 2), ctor_fd.scopes.len);
+    const fields_fd = fields orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(i32, -1), fields_fd.body_scope);
+    try std.testing.expectEqual(@as(usize, 1), fields_fd.scopes.len);
+}
+
+test "defineVar core matches pinned QuickJS declaration collision matrix" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct { source: []const u8, fails: bool }{
+        .{ .source = "function f(p){ let p; }", .fails = true },
+        .{ .source = "function f(p){ { let p; } }", .fails = false },
+        .{ .source = "function f(){ { var x; } let x; }", .fails = true },
+        .{ .source = "function f(){ let x; { var x; } }", .fails = true },
+        .{ .source = "function f(p){ var p; }", .fails = false },
+        .{ .source = "function f(){ var x; var x; }", .fails = false },
+        // QuickJS source-order behavior for global source elements: the
+        // earlier lexical is accepted, while a later lexical sees the global
+        // function row and rejects it.
+        .{ .source = "let x; function x(){}", .fails = false },
+        .{ .source = "function x(){}; let x;", .fails = true },
+        .{ .source = "try{}catch(e){let e;}", .fails = true },
+        .{ .source = "function f(){ try{}catch(e){ const e = 1; } }", .fails = true },
+        .{ .source = "function f(){ try{}catch(e){ class e {} } }", .fails = true },
+        .{ .source = "function f(){ try{}catch(e){ function e(){} } }", .fails = true },
+        .{ .source = "function f(){ try{}catch(e){ var e; } }", .fails = false },
+        .{ .source = "function f(){ try{}catch(e){ { let e; } } }", .fails = false },
+        .{ .source = "function f(){ for (let x;;) { var x; } }", .fails = true },
+        .{ .source = "function f(){ for (let x of []) { var x; } }", .fails = true },
+        .{ .source = "function f(){ for (let x in {}) { var x; } }", .fails = true },
+        .{ .source = "function f(){ for (let x;;) { { var x; } } }", .fails = true },
+        .{ .source = "function f(){ for (let x;;) { { let x; } } }", .fails = false },
+        .{ .source = "for (var x of []); let x;", .fails = true },
+        .{ .source = "{ var x; } let x;", .fails = true },
+        .{ .source = "var x; { let x; }", .fails = false },
+    };
+    for (cases) |case| {
+        var parsed = try parser.compile(rt, case.source, .{ .mode = .script, .filename = "define-var-matrix.js" });
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.fails, parsed.syntax_error != null);
+    }
+}
+
+test "F10.1a FunctionDef: empty ordinary block does not create a scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
@@ -3867,11 +4249,29 @@ test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
-    // After parsing: scope_level back to 0, but a new scope was
-    // appended (push then pop, the structure is retained for §F10.1
-    // Outstanding closure analysis to walk later).
-    try std.testing.expectEqual(@as(i32, 0), state.scope_level);
+    // QuickJS js_parse_block returns immediately for `{}` and does not call
+    // push_scope/pop_scope. Empty ordinary blocks must not perturb scope
+    // topology or later scope indices.
+    try std.testing.expectEqual(@as(i32, 1), state.scope_level);
     try std.testing.expectEqual(@as(usize, 2), state.function_def.scopes.len);
+}
+
+test "F10.1a FunctionDef: non-empty ordinary block pushes and pops one scope" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ 0; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(i32, 1), state.scope_level);
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
 }
 
 test "F10.1a FunctionDef: nested blocks build parent chain" {
@@ -3888,14 +4288,40 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
-    // After parsing: 3 scopes (initial 0 + outer block + inner block).
-    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
-    // Scope 0 has parent -1, scope 1's parent is 0, scope 2's parent is 1.
+    // After parsing: var scope 0 + body 1 + outer block 2 + inner block 3.
+    try std.testing.expectEqual(@as(usize, 4), state.function_def.scopes.len);
     try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].parent);
     try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[1].parent);
     try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
-    // After popping back, current scope level is 0 again.
-    try std.testing.expectEqual(@as(i32, 0), state.scope_level);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.scopes[3].parent);
+    // Ordinary blocks pop back to the still-active program body.
+    try std.testing.expectEqual(@as(i32, 1), state.scope_level);
+}
+
+test "F10.1a FunctionDef: nested scope inherits the visible lexical head" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const outer_atom = try env.rt.internAtom("outer");
+    defer env.rt.atoms.free(outer_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let outer; { 0; } }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 4), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
+    try std.testing.expectEqual(outer_atom, state.function_def.vars[0].var_name);
+    // QuickJS push_scope copies fd->scope_first into the new scope. The inner
+    // scope therefore starts at the outer lexical declaration even though it
+    // declares no bindings of its own.
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[3].first);
 }
 
 test "F10.1a FunctionDef: let registers as lexical, non-const" {
@@ -3921,8 +4347,9 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
     try std.testing.expectEqual(true, v.is_lexical);
     try std.testing.expectEqual(false, v.is_const);
     try std.testing.expectEqual(function_def_mod.VarKind.normal, v.var_kind);
-    // `let` at top level is at scope 0 (no enclosing block).
-    try std.testing.expectEqual(@as(i32, 0), v.scope_level);
+    // The standalone low-level state is local, but its program body is still
+    // the real scope 1 identity used by define_var.
+    try std.testing.expectEqual(@as(i32, 1), v.scope_level);
 }
 
 test "F10.1a FunctionDef: const registers as lexical + const" {
@@ -3955,6 +4382,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ var v = 1; }");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
+    configureScriptRoot(&state);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -3962,6 +4390,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     try std.testing.expectEqual(@as(usize, 1), state.function_def.global_vars.len);
     const v = state.function_def.global_vars[0];
     try std.testing.expectEqual(false, v.is_lexical);
+    try std.testing.expectEqual(@as(i32, 2), v.scope_level);
 }
 
 test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
@@ -3979,10 +4408,10 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 2), state.function_def.vars.len);
-    // `a` is registered in the outer block scope (1), `b` in the
-    // inner block scope (2).
-    try std.testing.expectEqual(@as(i32, 1), state.function_def.vars[0].scope_level);
-    try std.testing.expectEqual(@as(i32, 2), state.function_def.vars[1].scope_level);
+    // Body scope is 1; `a` is in outer block 2 and `b` in inner block 3.
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.vars[0].scope_level);
+    try std.testing.expectEqual(@as(i32, 3), state.function_def.vars[1].scope_level);
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.vars[1].scope_next);
 }
 
 test "F10.1a FunctionDef: simple catch binding keeps catch provenance" {
@@ -4011,7 +4440,201 @@ test "F10.1a FunctionDef: simple catch binding keeps catch provenance" {
     try std.testing.expectEqual(function_def_mod.VarKind.catch_, vd.var_kind);
     try std.testing.expect(!vd.is_lexical);
     try std.testing.expect(vd.scope_level > 0);
-    try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[@intCast(vd.scope_level)].parent);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[@intCast(vd.scope_level)].parent);
+}
+
+test "F10.1a FunctionDef: catch has binding wrapper and body scopes" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const caught_atom = try env.rt.internAtom("caught");
+    defer env.rt.atoms.free(caught_atom);
+    const body_atom = try env.rt.internAtom("body");
+    defer env.rt.atoms.free(body_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) { let body; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var catch_scope: ?i32 = null;
+    var body_scope: ?i32 = null;
+    for (state.function_def.vars) |vd| {
+        if (vd.var_name == caught_atom) catch_scope = vd.scope_level;
+        if (vd.var_name == body_atom) body_scope = vd.scope_level;
+    }
+    try std.testing.expect(catch_scope != null);
+    try std.testing.expect(body_scope != null);
+    const wrapper_scope = state.function_def.scopes[@intCast(body_scope.?)].parent;
+    try std.testing.expect(wrapper_scope >= 0);
+    try std.testing.expectEqual(catch_scope.?, state.function_def.scopes[@intCast(wrapper_scope)].parent);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[@intCast(catch_scope.?)].parent);
+}
+
+test "F10.1a FunctionDef: for-of lexical head owns one binding" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const x_atom = try env.rt.internAtom("x");
+    defer env.rt.atoms.free(x_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (let x of [1]) { x; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var x_count: usize = 0;
+    for (state.function_def.vars) |vd| {
+        if (vd.var_name == x_atom) x_count += 1;
+    }
+    // QuickJS creates the head scope once and closes it between phases; it
+    // never manufactures a second VarDef after evaluating the iterable.
+    try std.testing.expectEqual(@as(usize, 1), x_count);
+
+    const x_scope = state.function_def.vars[0].scope_level;
+    var enter_count: usize = 0;
+    var leave_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
+        try std.testing.expect(size != 0);
+        if ((opcode_id == op.enter_scope or opcode_id == op.leave_scope) and
+            std.mem.readInt(u16, function.code[pc + 1 ..][0..2], .little) == x_scope)
+        {
+            if (opcode_id == op.enter_scope) enter_count += 1 else leave_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, 1), enter_count);
+    try std.testing.expectEqual(@as(usize, 3), leave_count);
+}
+
+test "F10.1a FunctionDef: assignment for-of still owns a head scope" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (x of [1]) { x; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    // Scope 2 is the unconditional enumeration head beneath body scope 1;
+    // the non-empty ordinary body is scope 3.
+    try std.testing.expectEqual(@as(usize, 4), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.scopes[3].parent);
+}
+
+test "F10.1a FunctionDef: if statement owns one wrapper scope" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "if (true) 0; else 1;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+}
+
+test "F10.1a FunctionDef: classic for always owns a head scope" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (;;) break;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+}
+
+test "F10.1a FunctionDef: with scope emits its enter event" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "with ({}) 0;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var enter_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        const size = engine.bytecode.opcode.sizeOfPhase1(opcode_id);
+        try std.testing.expect(size != 0);
+        if (opcode_id == op.enter_scope and
+            std.mem.readInt(u16, function.code[pc + 1 ..][0..2], .little) == 2)
+        {
+            enter_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(@as(usize, 1), enter_count);
+}
+
+test "F10.1a FunctionDef: class has name and private scopes" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const class_atom = try env.rt.internAtom("C");
+    defer env.rt.atoms.free(class_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C {}");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try parser_core.parseExpr(&state);
+
+    try std.testing.expectEqual(@as(usize, 4), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.scopes[3].parent);
+    var class_scope: ?i32 = null;
+    var fields_scope: ?i32 = null;
+    for (state.function_def.vars) |vd| {
+        if (vd.var_name == class_atom) class_scope = vd.scope_level;
+        if (vd.var_name == core.atom.ids.class_fields_init) fields_scope = vd.scope_level;
+    }
+    try std.testing.expectEqual(@as(i32, 2), class_scope orelse return error.TestExpectedEqual);
+    try std.testing.expectEqual(@as(i32, 3), fields_scope orelse return error.TestExpectedEqual);
 }
 
 test "F10.1a FunctionDef: findVar locates by name" {
@@ -4124,6 +4747,1135 @@ test "function expressions widen closure operands after constant index 255" {
     }
     try std.testing.expect(saw_short_255);
     try std.testing.expect(saw_wide_256);
+}
+
+test "QuickJS hoist metadata keeps only the final body local function initializer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer(){ function f(){ return 1; } function f(){ return 2; } return f(); }",
+        .{ .mode = .script, .filename = "duplicate-local-function.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(outer.byteCode()));
+
+    var pc: usize = 0;
+    while (pc < outer.byteCode().len) {
+        const opcode_id = outer.byteCode()[pc];
+        if (opcode_id == op.fclosure or opcode_id == op.fclosure8) {
+            try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(outer.byteCode(), pc));
+            return;
+        }
+        pc += engine.bytecode.opcode.sizeOf(opcode_id);
+    }
+    return error.TestExpectedEqual;
+}
+
+test "QuickJS hoist metadata keeps only the final parameter function initializer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer(f){ function f(){ return 1; } function f(){ return 2; } return f(); }",
+        .{ .mode = .script, .filename = "duplicate-parameter-function.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(outer.byteCode()));
+
+    var pc: usize = 0;
+    while (pc < outer.byteCode().len) {
+        const opcode_id = outer.byteCode()[pc];
+        if (opcode_id == op.fclosure or opcode_id == op.fclosure8) {
+            try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(outer.byteCode(), pc));
+            return;
+        }
+        pc += engine.bytecode.opcode.sizeOf(opcode_id);
+    }
+    return error.TestExpectedEqual;
+}
+
+test "QuickJS block function metadata does not also use the body prologue fallback" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // The parameter collision suppresses Annex B's outer var mirror, leaving
+    // a lexical block function. QuickJS constructs it once at OP_enter_scope
+    // and retains the declaration-position fclosure/drop pair; it does not
+    // also initialize the block binding in instantiate_hoisted_definitions.
+    var parsed = try parser.compile(
+        rt,
+        "function outer(f){ { function f(){} } }",
+        .{ .mode = .script, .filename = "block-function-parameter-collision.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), countFunctionClosures(outer.byteCode()));
+}
+
+test "QuickJS final linkage rebuild includes implicit arguments by scope level" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer(){ var prior; return arguments; }",
+        .{ .mode = .script, .filename = "arguments-pseudo-binding.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    for (outer.varDefs()) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "arguments")) continue;
+        // add_arguments_var is outside the parser's ordinary scope list, but
+        // js_create_function rebuilds final scope_next from every VarDef's
+        // scope_level. The later arguments row therefore links to `prior`.
+        try std.testing.expectEqual(@as(i32, 0), vd.scope_next);
+        return;
+    }
+    return error.TestExpectedEqual;
+}
+
+test "QuickJS add_eval_variables stages pseudo locals in VarDef append order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "(function named(a = eval('')) { eval(''); return () => [this, new.target, arguments, named]; });",
+        .{ .mode = .script, .filename = "eval-pseudo-vardef-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const named = findFunctionConstantNamed(&parsed.function, rt, "named") orelse
+        return error.TestExpectedEqual;
+    const expected_names = [_][]const u8{
+        "a",
+        "<var>",
+        "<arg_var>",
+        "this",
+        "new.target",
+        "arguments",
+        "arguments",
+        "named",
+    };
+    try std.testing.expectEqual(expected_names.len, named.varDefs().len);
+    for (expected_names, named.varDefs()) |expected, vd| {
+        try std.testing.expectEqualStrings(expected, rt.atoms.name(vd.var_name) orelse "");
+    }
+
+    // Parser-time add_var pseudo bindings stay outside scopes[].first. Final
+    // creation deliberately rebuilds the table from scope_level, producing a
+    // scope-zero chain and a separate parameter chain ending at ARG_SCOPE_END.
+    try std.testing.expectEqualSlices(i32, &.{ -1, 1, 2, 3, 4 }, &.{
+        named.varDefs()[1].scope_next,
+        named.varDefs()[2].scope_next,
+        named.varDefs()[3].scope_next,
+        named.varDefs()[4].scope_next,
+        named.varDefs()[5].scope_next,
+    });
+    try std.testing.expect(named.varDefs()[6].hasScope());
+    try std.testing.expectEqual(@as(i32, 0), named.varDefs()[6].scope_next);
+    try std.testing.expect(named.varDefs()[6].isLexical());
+    try std.testing.expectEqual(function_def.VarKind.function_name, named.varDefs()[7].varKind());
+
+    // VarDef append order is intentionally different from resolve_labels'
+    // prologue order. Preserve QuickJS's home/active/new-target/this/arguments/
+    // function-name/var-object ordering contract instead of replaying VarDefs.
+    var special_subtypes: [5]u8 = undefined;
+    var special_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < named.byteCode().len) {
+        const opcode_id = named.byteCode()[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size > 0 and pc + size <= named.byteCode().len);
+        if (opcode_id == op.special_object) {
+            try std.testing.expect(special_count < special_subtypes.len);
+            special_subtypes[special_count] = named.byteCode()[pc + 1];
+            special_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(special_subtypes.len, special_count);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 0, 2, 5, 5 }, &special_subtypes);
+}
+
+test "QuickJS direct eval arguments pseudo is distinct from a simple formal" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "(function shadow(arguments) { eval(''); return arguments; });",
+        .{ .mode = .script, .filename = "eval-arguments-formal.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const shadow = findFunctionConstantNamed(&parsed.function, rt, "shadow") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), shadow.argVarDefs().len);
+    try std.testing.expectEqualStrings(
+        "arguments",
+        rt.atoms.name(shadow.argVarDefs()[0].var_name) orelse "",
+    );
+
+    const expected_names = [_][]const u8{
+        "<var>",
+        "this",
+        "new.target",
+        "arguments",
+        "shadow",
+    };
+    try std.testing.expectEqual(expected_names.len, shadow.varDefs().len);
+    for (expected_names, shadow.varDefs(), 0..) |expected, vd, index| {
+        try std.testing.expectEqualStrings(expected, rt.atoms.name(vd.var_name) orelse "");
+        try std.testing.expectEqual(if (index == 0) @as(i32, -1) else @as(i32, @intCast(index - 1)), vd.scope_next);
+    }
+}
+
+test "QuickJS entry contract separates eval environment grammar and bindings" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var script = try parser.compile(
+        rt,
+        "function ordinary() { return arguments; }",
+        .{ .mode = .script, .filename = "entry-contract-script.js" },
+    );
+    defer script.deinit();
+    try std.testing.expect(script.syntax_error == null);
+    try std.testing.expectEqual(engine.bytecode.VarEnvironment.global, script.function.entry_contract.var_environment);
+    try std.testing.expect(script.function.entry_contract.arguments_allowed);
+    try std.testing.expect(!script.function.entry_contract.has_arguments_binding);
+    try std.testing.expect(script.function.entry_contract.has_this_binding);
+
+    const ordinary = findFunctionConstantNamed(&script.function, rt, "ordinary") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(engine.bytecode.VarEnvironment.local, ordinary.flags.var_environment);
+    try std.testing.expect(ordinary.flags.arguments_allowed);
+    try std.testing.expect(ordinary.flags.has_arguments_binding);
+    try std.testing.expect(ordinary.flags.has_this_binding);
+
+    var global_eval = try parser.compile(
+        rt,
+        "",
+        .{
+            .mode = .eval_direct,
+            .filename = "entry-contract-global-eval.js",
+            .eval_global_var_bindings = true,
+            .eval_allows_new_target = true,
+            .eval_allows_super_call = true,
+            .eval_allows_super_property = true,
+            .eval_arguments_allowed = true,
+        },
+    );
+    defer global_eval.deinit();
+    try std.testing.expect(global_eval.syntax_error == null);
+    const entry = global_eval.function.entry_contract;
+    try std.testing.expectEqual(engine.bytecode.VarEnvironment.global, entry.var_environment);
+    try std.testing.expect(entry.new_target_allowed);
+    try std.testing.expect(entry.super_call_allowed);
+    try std.testing.expect(entry.super_allowed);
+    try std.testing.expect(entry.arguments_allowed);
+    try std.testing.expect(!entry.has_arguments_binding);
+    try std.testing.expect(!entry.has_this_binding);
+
+    var strict_eval = try parser.compile(
+        rt,
+        "'use strict';",
+        .{
+            .mode = .eval_direct,
+            .filename = "entry-contract-strict-eval.js",
+            .eval_global_var_bindings = true,
+        },
+    );
+    defer strict_eval.deinit();
+    try std.testing.expect(strict_eval.syntax_error == null);
+    try std.testing.expectEqual(engine.bytecode.VarEnvironment.local, strict_eval.function.entry_contract.var_environment);
+
+    var module = try parser.compile(
+        rt,
+        "",
+        .{ .mode = .module, .filename = "entry-contract-module.js" },
+    );
+    defer module.deinit();
+    try std.testing.expect(module.syntax_error == null);
+    try std.testing.expectEqual(engine.bytecode.VarEnvironment.module, module.function.entry_contract.var_environment);
+}
+
+test "QuickJS parameter expression scope initializes lexical TDZ on entry" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function later(a = eval(\"b\"), b = 1) {}",
+        .{ .mode = .script, .filename = "parameter-scope-entry.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const later = findFunctionConstantNamed(&parsed.function, rt, "later") orelse
+        return error.TestExpectedEqual;
+    // qjs OP_enter_scope(ARG_SCOPE_INDEX) lowers both parameter lexical
+    // bindings before evaluating the first default. The synthetic lexical
+    // `arguments` cell is deliberately excluded from this initialization.
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOpcode(later.byteCode(), op.set_loc_uninitialized),
+    );
+}
+
+test "QuickJS global declaration carriers precede child finalization" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "var x = 1; function read(){ return x; }",
+        .{ .mode = .script, .filename = "global-carrier-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var x_ref: ?u16 = null;
+    for (parsed.function.closure_var, 0..) |cv, idx| {
+        const name = rt.atoms.name(cv.var_name) orelse "";
+        if (std.mem.eql(u8, name, "x")) {
+            try std.testing.expectEqual(function_def.ClosureType.global_decl, cv.closureType());
+            try std.testing.expect(!cv.isLexical());
+            x_ref = @intCast(idx);
+        }
+    }
+    const read = findFunctionConstantNamed(&parsed.function, rt, "read") orelse return error.TestExpectedEqual;
+    var found_child_carrier = false;
+    for (read.closureVar()) |cv| {
+        if (!std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", "x")) continue;
+        try std.testing.expectEqual(function_def.ClosureType.global_ref, cv.closureType());
+        try std.testing.expectEqual(x_ref orelse return error.TestExpectedEqual, cv.var_idx);
+        found_child_carrier = true;
+    }
+    try std.testing.expect(found_child_carrier);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(read.byteCode(), op.get_var));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(read.byteCode(), op.get_var_ref));
+}
+
+test "QuickJS open binding indices follow child capture demand order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // The child resolves `arg` before `local`. qjs finalizes the child first;
+    // its two get_closure_var/capture_var events therefore assign arg=0 and
+    // local=1 in the parent. This deliberately distinguishes provenance from
+    // both locals-first grouping and an unconditional args-first policy.
+    var parsed = try parser.compile(
+        rt,
+        \\function outerArgFirst(arg) { let local = 1; return function inner() { return arg + local; }; }
+        \\function outerLocalFirst(arg) { let local = 1; return function inner() { return local + arg; }; }
+    ,
+        .{ .mode = .script, .filename = "capture-event-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outerArgFirst") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u16, 2), outer.open_var_ref_count);
+    try std.testing.expectEqual(@as(usize, 1), outer.argVarDefs().len);
+    try std.testing.expectEqual(@as(u16, 0), outer.argVarDefs()[0].var_ref_idx);
+
+    var found_local = false;
+    for (outer.varDefs()) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "local")) continue;
+        try std.testing.expect(vd.isCaptured());
+        try std.testing.expectEqual(@as(u16, 1), vd.var_ref_idx);
+        found_local = true;
+    }
+    try std.testing.expect(found_local);
+
+    // Reverse only the child's first-use order. A fixed args-first policy
+    // would keep the previous indices and fail this half.
+    const local_first = findFunctionConstantNamed(&parsed.function, rt, "outerLocalFirst") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u16, 2), local_first.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 1), local_first.argVarDefs()[0].var_ref_idx);
+    var found_local_first = false;
+    for (local_first.varDefs()) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "local")) continue;
+        try std.testing.expect(vd.isCaptured());
+        try std.testing.expectEqual(@as(u16, 0), vd.var_ref_idx);
+        found_local_first = true;
+    }
+    try std.testing.expect(found_local_first);
+}
+
+test "QuickJS postorder capture topology records exact forwarding rows" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function outer(x) { return function middle() { return function inner() { return x; }; }; }",
+        .{ .mode = .script, .filename = "postorder-capture-forwarding.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const middle = middle: {
+        for (outer.cpoolSlice()) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "middle")) break :middle child;
+        }
+        return error.TestExpectedEqual;
+    };
+    const inner = inner: {
+        for (middle.cpoolSlice()) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "inner")) break :inner child;
+        }
+        return error.TestExpectedEqual;
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), middle.closureVar().len);
+    try std.testing.expectEqual(function_def.ClosureType.arg, middle.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 0), middle.closureVar()[0].var_idx);
+    try std.testing.expectEqual(@as(usize, 1), inner.closureVar().len);
+    try std.testing.expectEqual(function_def.ClosureType.ref, inner.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 0), inner.closureVar()[0].var_idx);
+    try std.testing.expect(!@hasField(engine.bytecode.function_bytecode.BytecodeClosureVar, "source_depth"));
+}
+
+test "QuickJS postorder capture topology follows lexical scope order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\function outer() {
+        \\  let target;
+        \\  { let x = 1; target = function inner() { return x; }; }
+        \\  let x = 2;
+        \\  return target;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "postorder-lexical-capture-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const inner = inner: {
+        for (outer.cpoolSlice()) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "inner")) break :inner child;
+        }
+        return error.TestExpectedEqual;
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), inner.closureVar().len);
+    try std.testing.expectEqualStrings("x", rt.atoms.name(inner.closureVar()[0].var_name) orelse "");
+    try std.testing.expectEqual(function_def.ClosureType.local, inner.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 1), inner.closureVar()[0].var_idx);
+}
+
+test "QuickJS direct eval capture prefix preserves shadowed binding identities" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\function outer(x) {
+        \\  { let x = 1; function middle() { eval(""); return x; } return middle; }
+        \\}
+    ,
+        .{ .mode = .script, .filename = "direct-eval-shadowed-prefix.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const middle = middle: {
+        for (outer.cpoolSlice()) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "middle")) break :middle child;
+        }
+        return error.TestExpectedEqual;
+    };
+
+    // qjs get_closure_var deduplicates by (closure_type,var_idx), never by
+    // name. The block lexical `x` is the first visible row and the outer
+    // parameter `x` remains a distinct later row for direct-eval seeding.
+    var x_count: usize = 0;
+    var x_types: [2]function_def.ClosureType = undefined;
+    for (middle.closureVar()) |cv| {
+        if (!std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", "x")) continue;
+        if (x_count >= x_types.len) return error.TestExpectedEqual;
+        x_types[x_count] = cv.closureType();
+        x_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), x_count);
+    try std.testing.expectEqual(function_def.ClosureType.local, x_types[0]);
+    try std.testing.expectEqual(function_def.ClosureType.arg, x_types[1]);
+}
+
+test "QuickJS direct eval capture prefix follows lexical scope order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\function outer() {
+        \\  let target;
+        \\  { let x = 1; target = function inner() { return eval("x"); }; }
+        \\  let x = 2;
+        \\  return target;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "direct-eval-lexical-capture-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const inner = inner: {
+        for (outer.cpoolSlice()) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "inner")) break :inner child;
+        }
+        return error.TestExpectedEqual;
+    };
+
+    // qjs rebuilds scope_next before add_eval_variables. The inner block's x
+    // must precede the later-declared outer x even though its VarDef index is
+    // smaller (quickjs.c:36034-36059, 33699-33729).
+    try std.testing.expect(inner.closureVar().len >= 2);
+    for (inner.closureVar()[0..2]) |cv| {
+        try std.testing.expectEqualStrings("x", rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(function_def.ClosureType.local, cv.closureType());
+    }
+    try std.testing.expectEqual(@as(u16, 1), inner.closureVar()[0].var_idx);
+    try std.testing.expectEqual(@as(u16, 2), inner.closureVar()[1].var_idx);
+}
+
+test "QuickJS eval prefix is stable before descendant capture demand" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\function outer(a, b) {
+        \\  return function () { eval(""); return function () { return b; }; };
+        \\}
+    ,
+        .{ .mode = .script, .filename = "eval-prefix-before-child-demand.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const middle = middle: {
+        for (outer.cpoolSlice()) |value| {
+            if (functionBytecodeFromValue(value)) |child| break :middle child;
+        }
+        return error.TestExpectedEqual;
+    };
+
+    // add_eval_variables constructs this fixed prefix before any child is
+    // finalized. The inner function's first use of `b` therefore cannot move
+    // that row ahead of `a` (quickjs.c:33610-33776, 36064-36079).
+    const expected = [_][]const u8{ "a", "b", "eval" };
+    try std.testing.expectEqual(expected.len, middle.closureVar().len);
+    for (middle.closureVar(), expected) |cv, expected_name| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+    }
+}
+
+test "QuickJS eval root appends child and own ordinary globals after declarations" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "var declared; (() => childOnly); print; rootOnly;",
+        .{ .mode = .script, .filename = "postorder-global-topology.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const expected_names = [_][]const u8{ "declared", "childOnly", "print", "rootOnly" };
+    const expected_types = [_]function_def.ClosureType{ .global_decl, .global, .global, .global };
+    try std.testing.expectEqual(expected_names.len, parsed.function.closure_var.len);
+    for (parsed.function.closure_var, expected_names, expected_types) |cv, expected_name, expected_type| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(expected_type, cv.closureType());
+    }
+
+    const child = child: {
+        for (parsed.function.constants.values) |value| {
+            if (functionBytecodeFromValue(value)) |candidate| break :child candidate;
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqual(@as(usize, 1), child.closureVar().len);
+    try std.testing.expectEqual(function_def.ClosureType.global_ref, child.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 1), child.closureVar()[0].var_idx);
+}
+
+test "final eval operands address compact vardef chains" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "(function scoped(a = eval('')) { { let inner = 1; eval('inner'); } });",
+        .{ .mode = .script, .filename = "eval-vardef-chain.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const function = findFunctionConstantNamed(&parsed.function, rt, "scoped") orelse
+        return error.TestExpectedEqual;
+    var operands: [2]u16 = undefined;
+    var operand_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.byteCode().len) {
+        const opcode_id = function.byteCode()[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size > 0 and pc + size <= function.byteCode().len);
+        if (opcode_id == op.eval) {
+            try std.testing.expect(operand_count < operands.len);
+            operands[operand_count] = std.mem.readInt(u16, function.byteCode()[pc + 3 ..][0..2], .little);
+            operand_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(operands.len, operand_count);
+
+    const Chain = struct {
+        fn end(vardefs: []const engine.bytecode.function_bytecode.BytecodeVarDef, head: i32) !i32 {
+            var index = head;
+            var visited: usize = 0;
+            while (index >= 0) {
+                if (@as(usize, @intCast(index)) >= vardefs.len or visited >= vardefs.len) return error.TestUnexpectedResult;
+                visited += 1;
+                index = vardefs[@intCast(index)].scope_next;
+            }
+            return index;
+        }
+
+        fn containsName(
+            runtime: *core.JSRuntime,
+            vardefs: []const engine.bytecode.function_bytecode.BytecodeVarDef,
+            head: i32,
+            expected: []const u8,
+        ) !bool {
+            var index = head;
+            var visited: usize = 0;
+            while (index >= 0) {
+                if (@as(usize, @intCast(index)) >= vardefs.len or visited >= vardefs.len) return error.TestUnexpectedResult;
+                visited += 1;
+                const vd = vardefs[@intCast(index)];
+                if (std.mem.eql(u8, runtime.atoms.name(vd.var_name) orelse "", expected)) return true;
+                index = vd.scope_next;
+            }
+            return false;
+        }
+    };
+
+    const parameter_head = @as(i32, operands[0] & 0x7fff) + engine.bytecode.function_bytecode.arg_scope_end;
+    const body_head = @as(i32, operands[1] & 0x7fff) + engine.bytecode.function_bytecode.arg_scope_end;
+    try std.testing.expectEqual(engine.bytecode.function_bytecode.arg_scope_end, try Chain.end(function.varDefs(), parameter_head));
+    try std.testing.expectEqual(@as(i32, -1), try Chain.end(function.varDefs(), body_head));
+    try std.testing.expect(!(try Chain.containsName(rt, function.varDefs(), parameter_head, "inner")));
+    try std.testing.expect(try Chain.containsName(rt, function.varDefs(), body_head, "inner"));
+    // The former zjs-only parameter flag occupied 0x4000. Parameter scope is
+    // now represented solely by the ARG_SCOPE_END chain terminator.
+    try std.testing.expectEqual(@as(u16, 0), operands[0] & 0x4000);
+}
+
+test "final eval marker is combined and belongs only to the eval unit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var script = try parser.compile(rt, "1;", .{ .mode = .script, .filename = "script.js" });
+    defer script.deinit();
+    try std.testing.expect(script.syntax_error == null);
+    try std.testing.expect(!script.function.flags.is_direct_or_indirect_eval);
+
+    var direct = try parser.compile(rt, "1;", .{ .mode = .eval_direct, .filename = "<eval>" });
+    defer direct.deinit();
+    try std.testing.expect(direct.syntax_error == null);
+    try std.testing.expect(direct.function.flags.is_direct_or_indirect_eval);
+
+    var indirect = try parser.compile(
+        rt,
+        "function nested() {}",
+        .{ .mode = .eval_indirect, .filename = "<eval>" },
+    );
+    defer indirect.deinit();
+    try std.testing.expect(indirect.syntax_error == null);
+    try std.testing.expect(indirect.function.flags.is_direct_or_indirect_eval);
+    const nested = findFunctionConstantNamed(&indirect.function, rt, "nested") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(!nested.flags.is_direct_or_indirect_eval);
+}
+
+test "direct eval capture hints preserve the former parameter flag bit as scope data" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    for (0..0x4000) |_| try source.appendSlice(std.testing.allocator, "{}");
+    try source.appendSlice(
+        std.testing.allocator,
+        "{ let highScopeEvalBinding = 1; eval('highScopeEvalBinding'); }",
+    );
+
+    var parsed = try parser.compile(
+        rt,
+        source.items,
+        .{ .mode = .script, .filename = "high-scope-eval.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var binding_index: ?u16 = null;
+    for (parsed.function.vardefs, 0..) |vd, idx| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "highScopeEvalBinding")) continue;
+        try std.testing.expect(vd.isCaptured());
+        binding_index = @intCast(idx);
+        break;
+    }
+    const expected_index = binding_index orelse return error.TestExpectedEqual;
+
+    var found_refresh = false;
+    var pc: usize = 0;
+    while (pc < parsed.function.code.len) {
+        const opcode_id = parsed.function.code[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size > 0 and pc + size <= parsed.function.code.len);
+        if (opcode_id == op.close_loc and
+            std.mem.readInt(u16, parsed.function.code[pc + 1 ..][0..2], .little) == expected_index)
+        {
+            found_refresh = true;
+            break;
+        }
+        pc += size;
+    }
+    try std.testing.expect(found_refresh);
+}
+
+test "QuickJS direct eval captures only loop bindings live at the call site" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var after_loop = try parser.compile(
+        rt,
+        "for (let i = 0; i < 1; i++) {} eval('typeof i');",
+        .{ .mode = .script, .filename = "eval-after-loop.js" },
+    );
+    defer after_loop.deinit();
+    try std.testing.expect(after_loop.syntax_error == null);
+    for (after_loop.function.vardefs) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "i")) continue;
+        try std.testing.expect(!vd.isCaptured());
+        try std.testing.expectEqual(@as(u16, 0), vd.var_ref_idx);
+    }
+
+    var in_loop = try parser.compile(
+        rt,
+        "for (let i = 0; i < 1; i++) { eval('i'); }",
+        .{ .mode = .script, .filename = "eval-in-loop.js" },
+    );
+    defer in_loop.deinit();
+    try std.testing.expect(in_loop.syntax_error == null);
+    var found_captured_i = false;
+    for (in_loop.function.vardefs) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "i")) continue;
+        try std.testing.expect(vd.isCaptured());
+        try std.testing.expect(vd.var_ref_idx < in_loop.function.open_var_ref_count);
+        found_captured_i = true;
+    }
+    try std.testing.expect(found_captured_i);
+}
+
+test "QuickJS class private direct eval has complete capture events" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\class C {
+        \\  #x = 7;
+        \\  good() { return eval("this.#x"); }
+        \\}
+    ,
+        .{ .mode = .script, .filename = "private-direct-eval.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "QuickJS module closure order keeps all imports before global declarations" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "import * as a from 'a'; let y; import * as b from 'b'; var w;",
+        .{ .mode = .module, .filename = "module-closure-order.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const expected_names = [_][]const u8{ "a", "b", "y", "w" };
+    const expected_types = [_]function_def.ClosureType{ .module_decl, .module_decl, .module_decl, .module_decl };
+    try std.testing.expectEqual(expected_names.len, parsed.function.closure_var.len);
+    for (parsed.function.closure_var, expected_names, expected_types) |cv, expected_name, expected_type| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(expected_type, cv.closureType());
+    }
+    try std.testing.expect(parsed.function.closure_var[0].isConst());
+    try std.testing.expect(parsed.function.closure_var[1].isConst());
+    try std.testing.expect(parsed.function.closure_var[2].isLexical());
+    try std.testing.expect(!parsed.function.closure_var[3].isLexical());
+}
+
+test "QuickJS module declarations append without parser closure remapping" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "import * as ns from 'm'; const {a: aa, b} = {}; let [c] = []; class C {} export default function() {} (() => aa); root;",
+        .{ .mode = .module, .filename = "module-declaration-construction.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    // qjs add_import creates the fixed prefix, add_global_variables appends
+    // GlobalVar rows in declaration order, and only then post-order lookup
+    // appends the unresolved ordinary global.
+    const expected_names = [_][]const u8{ "ns", "aa", "b", "c", "C", "*default*", "root" };
+    const expected_types = [_]function_def.ClosureType{
+        .module_decl,
+        .module_decl,
+        .module_decl,
+        .module_decl,
+        .module_decl,
+        .module_decl,
+        .global,
+    };
+    try std.testing.expectEqual(expected_names.len, parsed.function.closure_var.len);
+    for (parsed.function.closure_var, expected_names, expected_types) |cv, expected_name, expected_type| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(expected_type, cv.closureType());
+    }
+    try std.testing.expect(parsed.function.closure_var[0].isConst());
+    try std.testing.expect(parsed.function.closure_var[1].isConst());
+    try std.testing.expect(parsed.function.closure_var[2].isConst());
+    try std.testing.expect(!parsed.function.closure_var[3].isConst());
+    try std.testing.expect(parsed.function.closure_var[4].isLexical());
+    try std.testing.expect(!parsed.function.closure_var[5].isLexical());
+    try std.testing.expectEqual(function_def.VarKind.global_function_decl, parsed.function.closure_var[5].varKind());
+
+    // Top-level destructuring targets are declaration cells, not same-name
+    // staging locals that later need synchronizing into a closure placeholder.
+    for (parsed.function.vardefs) |vd| {
+        const name = rt.atoms.name(vd.var_name) orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, name, "aa"));
+        try std.testing.expect(!std.mem.eql(u8, name, "b"));
+        try std.testing.expect(!std.mem.eql(u8, name, "c"));
+    }
+
+    const arrow = arrow: {
+        for (parsed.function.constants.values) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (child.closureVar().len != 1) continue;
+            if (std.mem.eql(u8, rt.atoms.name(child.closureVar()[0].var_name) orelse "", "aa")) break :arrow child;
+        }
+        return error.TestExpectedEqual;
+    };
+    try std.testing.expectEqual(function_def.ClosureType.ref, arrow.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 1), arrow.closureVar()[0].var_idx);
+
+    // The anonymous default function carries GlobalVar row 5 until
+    // add_global_variables assigns its final closure index.
+    var found_default_init = false;
+    var pc: usize = 0;
+    while (pc < parsed.function.code.len) {
+        const op_id = parsed.function.code[pc];
+        const size = engine.bytecode.opcode.sizeOf(op_id);
+        try std.testing.expect(size != 0 and pc + size <= parsed.function.code.len);
+        if (op_id == op.put_var_ref and readU16AtOpcode(parsed.function.code, pc) == 5) {
+            found_default_init = true;
+        }
+        pc += size;
+    }
+    try std.testing.expect(found_default_init);
+}
+
+test "QuickJS parent module declarations exist before child direct-eval seeding" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        \\export let moduleDirectEvalBinding = 37;
+        \\export function readModuleBindingByEval() {
+        \\  return eval("moduleDirectEvalBinding");
+        \\}
+    ,
+        .{ .mode = .module, .filename = "module-direct-eval-capture-order.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const child = findFunctionConstantNamed(&parsed.function, rt, "readModuleBindingByEval") orelse
+        return error.TestExpectedEqual;
+
+    // js_create_function constructs the parent's MODULE_DECL rows before it
+    // recursively creates children. add_eval_variables in the child therefore
+    // seeds both live module cells, in parent-table order, before resolving the
+    // explicit `eval` lookup (quickjs.c:33610-33776, 35954-36079).
+    try std.testing.expect(child.closureVar().len >= 3);
+    const expected_names = [_][]const u8{ "moduleDirectEvalBinding", "readModuleBindingByEval", "eval" };
+    const expected_types = [_]function_def.ClosureType{ .ref, .ref, .global_ref };
+    const expected_indices = [_]u16{ 0, 1, 2 };
+    for (child.closureVar()[0..3], expected_names, expected_types, expected_indices) |cv, expected_name, expected_type, expected_index| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(expected_type, cv.closureType());
+        try std.testing.expectEqual(expected_index, cv.var_idx);
+    }
+}
+
+test "QuickJS module instantiation guard separates function hoists from the body" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function f() {} f();",
+        .{ .mode = .module, .filename = "module-instantiation-guard.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    // qjs instantiate_hoisted_definitions emits this exact control boundary:
+    // link calls the module function with `this === true`, while evaluation
+    // calls it with undefined and branches directly to the body. Besides
+    // sharing one construction path, the return is a hard boundary that keeps
+    // put_var_ref + body-leading get_var_ref from folding into set_var_ref.
+    try std.testing.expect(parsed.function.code.len >= 8);
+    try std.testing.expectEqual(op.push_this, parsed.function.code[0]);
+    try std.testing.expectEqual(op.if_false8, parsed.function.code[1]);
+    const body_pc: isize = 2 + @as(i8, @bitCast(parsed.function.code[2]));
+    try std.testing.expectEqual(@as(isize, 7), body_pc);
+    try std.testing.expectEqual(op.fclosure8, parsed.function.code[3]);
+    try std.testing.expectEqual(@as(u8, 0), parsed.function.code[4]);
+    try std.testing.expectEqual(op.put_var_ref0, parsed.function.code[5]);
+    try std.testing.expectEqual(op.return_undef, parsed.function.code[6]);
+    try std.testing.expectEqual(op.get_var_ref0, parsed.function.code[7]);
+}
+
+test "QuickJS module instantiation guard excludes frame lexical preparation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "0; { let blockLocal = 1; blockLocal; }",
+        .{ .mode = .module, .filename = "module-instantiation-lexical-boundary.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    // instantiate_hoisted_definitions closes its link-only branch before the
+    // body OP_enter_scope processing.  Link execution with `this === true`
+    // must therefore never prepare a frame-local TDZ slot belonging to the
+    // evaluation invocation.
+    const body_pc = try moduleBodyStart(parsed.function.code);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code[0..body_pc], op.set_loc_uninitialized));
+    try std.testing.expect(countOpcode(parsed.function.code[body_pc..], op.set_loc_uninitialized) > 0);
+}
+
+test "QuickJS module callback captures keep parent declaration indices" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(rt,
+        \\let resolveAwaited;
+        \\const awaited = new Promise((resolve) => resolveAwaited = resolve);
+        \\const actual = [];
+        \\awaited.then(() => actual.push("before"));
+        \\Promise.resolve().then(() => {
+        \\  awaited.then(() => actual.push("after"));
+        \\  resolveAwaited();
+        \\});
+        \\await awaited;
+        \\actual.push("module");
+        \\Promise.resolve().then(() => print(actual.join(",")));
+    , .{ .mode = .module, .filename = "module-callback-captures.mjs" });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const callback = callback: {
+        for (parsed.function.constants.values) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (child.closureVar().len == 3) break :callback child;
+        }
+        return error.TestExpectedEqual;
+    };
+    const expected_names = [_][]const u8{ "actual", "awaited", "resolveAwaited" };
+    const expected_parent_indices = [_]u16{ 2, 1, 0 };
+    try std.testing.expectEqual(expected_names.len, callback.closureVar().len);
+    for (callback.closureVar(), expected_names, expected_parent_indices) |cv, expected_name, expected_parent_idx| {
+        try std.testing.expectEqualStrings(expected_name, rt.atoms.name(cv.var_name) orelse "");
+        try std.testing.expectEqual(function_def.ClosureType.ref, cv.closureType());
+        try std.testing.expectEqual(expected_parent_idx, cv.var_idx);
+    }
+}
+
+test "QuickJS global eval capture stays distinct from appended declaration carrier" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(x_atom);
+    const seed = [_]parser.EvalClosureSeed{.{
+        .var_name = x_atom,
+        .closure_type = .global,
+        .var_idx = 0,
+    }};
+    var parsed = try parser.compile(rt, "var x;", .{
+        .mode = .eval_indirect,
+        .filename = "<eval>",
+        .eval_closure_seed = &seed,
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.function.closure_var.len);
+    try std.testing.expectEqual(function_def.ClosureType.global, parsed.function.closure_var[0].closureType());
+    try std.testing.expectEqual(function_def.ClosureType.global_decl, parsed.function.closure_var[1].closureType());
+    try std.testing.expectEqual(x_atom, parsed.function.closure_var[0].var_name);
+    try std.testing.expectEqual(x_atom, parsed.function.closure_var[1].var_name);
+}
+
+test "QuickJS script global functions publish from bytecode through the first declaration carrier" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function f(){ return 1; } function f(){ return 2; } f;",
+        .{ .mode = .script, .filename = "duplicate-global-function.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var f_decl_count: usize = 0;
+    var first_f_ref: ?u16 = null;
+    for (parsed.function.closure_var, 0..) |cv, idx| {
+        if (!std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", "f")) continue;
+        try std.testing.expectEqual(function_def.ClosureType.global_decl, cv.closureType());
+        try std.testing.expect(!cv.isLexical());
+        if (first_f_ref == null) first_f_ref = @intCast(idx);
+        f_decl_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), f_decl_count);
+
+    var pc: usize = 0;
+    for (0..2) |constant_index| {
+        try std.testing.expect(pc < parsed.function.code.len);
+        try std.testing.expect(parsed.function.code[pc] == op.fclosure8 or parsed.function.code[pc] == op.fclosure);
+        try std.testing.expectEqual(@as(u32, @intCast(constant_index)), readConstIndexAtOpcode(parsed.function.code, pc));
+        pc += engine.bytecode.opcode.sizeOf(parsed.function.code[pc]);
+        const put_opcode = parsed.function.code[pc];
+        const expected_ref = first_f_ref orelse return error.TestExpectedEqual;
+        if (expected_ref < 4) {
+            try std.testing.expectEqual(op.put_var_ref0 + @as(u8, @intCast(expected_ref)), put_opcode);
+        } else {
+            try std.testing.expectEqual(op.put_var_ref, put_opcode);
+            try std.testing.expectEqual(expected_ref, readU16AtOpcode(parsed.function.code, pc));
+        }
+        pc += engine.bytecode.opcode.sizeOf(put_opcode);
+    }
+    try std.testing.expect(countVarOpcodeForAtom(&parsed.function, op.get_var, parsed.function.closure_var[first_f_ref.?].var_name) > 0);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code[pc..], op.get_var_ref));
+}
+
+test "QuickJS direct eval hoist target walk distinguishes closure var-object and lexical conflict" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const f_atom = try rt.internAtom("f");
+    defer rt.atoms.free(f_atom);
+    const closure_seed = [_]parser.EvalClosureSeed{
+        .{ .var_name = f_atom, .closure_type = .arg, .var_idx = 0, .var_kind = .normal },
+        .{ .var_name = atom.ids.var_object, .closure_type = .local, .var_idx = 1, .var_kind = .normal },
+    };
+    var closure_target = try parser.compile(rt, "function f(){ return 1; }", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &closure_seed,
+    });
+    defer closure_target.deinit();
+    try std.testing.expect(closure_target.syntax_error == null);
+    try std.testing.expect(closure_target.function.code[0] == op.fclosure8 or closure_target.function.code[0] == op.fclosure);
+    const closure_put_pc = engine.bytecode.opcode.sizeOf(closure_target.function.code[0]);
+    try std.testing.expectEqual(op.put_var_ref0, closure_target.function.code[closure_put_pc]);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(closure_target.function.code, op.define_field));
+
+    const var_object_seed = [_]parser.EvalClosureSeed{
+        .{ .var_name = atom.ids.var_object, .closure_type = .local, .var_idx = 0, .var_kind = .normal },
+    };
+    var var_object_target = try parser.compile(rt, "function f(){ return 1; }", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &var_object_seed,
+    });
+    defer var_object_target.deinit();
+    try std.testing.expect(var_object_target.syntax_error == null);
+    try std.testing.expectEqual(op.get_var_ref0, var_object_target.function.code[0]);
+    try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(var_object_target.function.code));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(var_object_target.function.code, op.define_field));
+
+    const lexical_seed = [_]parser.EvalClosureSeed{
+        .{ .var_name = f_atom, .closure_type = .local, .var_idx = 0, .is_lexical = true, .var_kind = .normal },
+        .{ .var_name = atom.ids.var_object, .closure_type = .local, .var_idx = 1, .var_kind = .normal },
+    };
+    var lexical_conflict = try parser.compile(rt, "function f(){}", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &lexical_seed,
+    });
+    defer lexical_conflict.deinit();
+    try std.testing.expect(lexical_conflict.syntax_error == null);
+    try std.testing.expectEqual(op.throw_error, lexical_conflict.function.code[0]);
+    try std.testing.expectEqual(@as(usize, 0), countFunctionClosures(lexical_conflict.function.code));
 }
 
 test "F10.1c Nested function: bytecode dual-buffering" {
@@ -4241,11 +5993,13 @@ test "TS: Function Overload Signatures Are Skipped" {
         \\function g(x: any): any { return x; }
     );
     defer bytecode.deinit(env.rt);
-    try std.testing.expectEqual(@as(usize, 0), bytecode.code.len);
-    try std.testing.expectEqual(@as(usize, 1), bytecode.global_vars.len);
-    try std.testing.expect(bytecode.global_vars[0].cpool_idx >= 0);
+    try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(bytecode.code));
+    try std.testing.expectEqual(@as(usize, 1), countPutVarRefStores(bytecode.code));
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&bytecode));
+    const g_decl = globalDeclarationClosureNamed(&bytecode, env.rt, "g") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(function_def.VarKind.global_function_decl, g_decl.varKind());
     try std.testing.expectEqual(@as(usize, 1), bytecode.constants.values.len);
-    const child = try expectFunctionConstant(&bytecode, @intCast(bytecode.global_vars[0].cpool_idx));
+    const child = findFunctionConstantNamed(&bytecode, env.rt, "g") orelse return error.TestExpectedEqual;
     try expectAtomName(&env, child.func_name, "g");
 }
 
@@ -4441,7 +6195,7 @@ fn functionBytecodeHasClosure(
     closure_type: function_def.ClosureType,
 ) bool {
     for (fb.closureVar()) |cv| {
-        if (cv.closure_type == closure_type and std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", name)) return true;
+        if (cv.closureType() == closure_type and std.mem.eql(u8, rt.atoms.name(cv.var_name) orelse "", name)) return true;
     }
     for (fb.cpoolSlice()) |value| {
         if (functionBytecodeFromValue(value)) |child| {
@@ -4654,7 +6408,227 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expectEqual(@as(usize, 0), parsed.function.constants.values.len);
 }
 
-test "script top-level lexical captured before declaration uses checked var ref" {
+test "root strictness comes from directives or host options, never source comments" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var commented = try parser.compile(
+        rt,
+        "/*---\nflags: [onlyStrict]\n---*/\nfunction acceptsEval(eval) { return eval; }",
+        .{ .mode = .script, .filename = "commented-metadata.js" },
+    );
+    defer commented.deinit();
+    try std.testing.expect(commented.syntax_error == null);
+    try std.testing.expect(!commented.function.flags.is_strict);
+
+    var directive = try parser.compile(
+        rt,
+        "\"other directive\"; \"use strict\"; var local = 1;",
+        .{ .mode = .eval_direct, .filename = "directive-eval.js" },
+    );
+    defer directive.deinit();
+    try std.testing.expect(directive.syntax_error == null);
+    try std.testing.expect(directive.function.flags.is_strict);
+    try std.testing.expect(!directive.function.flags.is_global_var);
+
+    var host_strict = try parser.compile(
+        rt,
+        "/* ordinary comment */ function rejectsEval(eval) { return eval; }",
+        .{ .mode = .script, .filename = "host-strict.js", .strict = true },
+    );
+    defer host_strict.deinit();
+    try std.testing.expect(host_strict.syntax_error != null);
+}
+
+test "eval type owns var and lexical declaration carriers like pinned QuickJS" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var indirect_sloppy = try parser.compile(
+        rt,
+        "var indirectVar; let indirectLet; class IndirectClass {} function indirectFn() {}",
+        .{ .mode = .eval_indirect, .filename = "<eval>" },
+    );
+    defer indirect_sloppy.deinit();
+    try std.testing.expect(indirect_sloppy.syntax_error == null);
+    try std.testing.expect(indirect_sloppy.function.flags.is_global_var);
+    try std.testing.expect(globalDeclarationClosureNamed(&indirect_sloppy.function, rt, "indirectVar") != null);
+    try std.testing.expect(globalDeclarationClosureNamed(&indirect_sloppy.function, rt, "indirectLet") == null);
+    try std.testing.expect(globalDeclarationClosureNamed(&indirect_sloppy.function, rt, "IndirectClass") == null);
+    try std.testing.expectEqual(
+        function_def.VarKind.global_function_decl,
+        globalDeclarationClosureNamed(&indirect_sloppy.function, rt, "indirectFn").?.varKind(),
+    );
+    try std.testing.expect(varDefNamed(&indirect_sloppy.function, rt, "indirectVar") == null);
+    const indirect_let = varDefNamed(&indirect_sloppy.function, rt, "indirectLet") orelse return error.TestExpectedEqual;
+    const indirect_class = varDefNamed(&indirect_sloppy.function, rt, "IndirectClass") orelse return error.TestExpectedEqual;
+    try std.testing.expect(indirect_let.isLexical() and indirect_let.hasScope());
+    try std.testing.expect(indirect_class.isLexical() and indirect_class.hasScope());
+
+    var indirect_strict = try parser.compile(
+        rt,
+        "'use strict'; var strictVar; let strictLet; class StrictClass {} function strictFn() {}",
+        .{ .mode = .eval_indirect, .filename = "<eval>" },
+    );
+    defer indirect_strict.deinit();
+    try std.testing.expect(indirect_strict.syntax_error == null);
+    try std.testing.expect(!indirect_strict.function.flags.is_global_var);
+    try std.testing.expectEqual(@as(usize, 0), globalDeclarationClosureCount(&indirect_strict.function));
+    const strict_var = varDefNamed(&indirect_strict.function, rt, "strictVar") orelse return error.TestExpectedEqual;
+    const strict_let = varDefNamed(&indirect_strict.function, rt, "strictLet") orelse return error.TestExpectedEqual;
+    const strict_class = varDefNamed(&indirect_strict.function, rt, "StrictClass") orelse return error.TestExpectedEqual;
+    const strict_function = varDefNamed(&indirect_strict.function, rt, "strictFn") orelse return error.TestExpectedEqual;
+    try std.testing.expect(!strict_var.isLexical() and !strict_var.hasScope());
+    try std.testing.expect(strict_let.isLexical() and strict_let.hasScope());
+    try std.testing.expect(strict_class.isLexical() and strict_class.hasScope());
+    try std.testing.expect(!strict_function.isLexical() and !strict_function.hasScope());
+
+    // JS_EVAL_TYPE_GLOBAL is different from indirect eval: strictness does
+    // not move its program declarations out of the global declaration table.
+    var global_strict = try parser.compile(
+        rt,
+        "'use strict'; var globalVar; let globalLet; class GlobalClass {} function globalFn() {}",
+        .{ .mode = .script, .filename = "script.js" },
+    );
+    defer global_strict.deinit();
+    try std.testing.expect(global_strict.syntax_error == null);
+    try std.testing.expect(global_strict.function.flags.is_global_var);
+    try std.testing.expect(!globalDeclarationClosureNamed(&global_strict.function, rt, "globalVar").?.isLexical());
+    try std.testing.expect(globalDeclarationClosureNamed(&global_strict.function, rt, "globalLet").?.isLexical());
+    try std.testing.expect(globalDeclarationClosureNamed(&global_strict.function, rt, "GlobalClass").?.isLexical());
+    try std.testing.expectEqual(
+        function_def.VarKind.global_function_decl,
+        globalDeclarationClosureNamed(&global_strict.function, rt, "globalFn").?.varKind(),
+    );
+}
+
+test "ordinary block string literal is not a function-body directive" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function f(){ { 'use strict'; } return this; }",
+        .{ .mode = .script, .filename = "ordinary-block-directive.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const f = findFunctionConstantNamed(&parsed.function, rt, "f") orelse return error.TestExpectedEqual;
+    try std.testing.expect(!f.flags.is_strict_mode);
+}
+
+test "function body declarations preserve QuickJS source VarDef order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function f(){ let a = 1; var b = 2; return a + b; }",
+        .{ .mode = .script, .filename = "function-body-vardef-order.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const f = findFunctionConstantNamed(&parsed.function, rt, "f") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), f.varDefs().len);
+    try std.testing.expectEqualStrings("a", rt.atoms.name(f.varDefs()[0].var_name) orelse "");
+    try std.testing.expectEqualStrings("b", rt.atoms.name(f.varDefs()[1].var_name) orelse "");
+}
+
+test "body var discovery does not cross arrow or class method boundaries" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "var x; var y; function outer(){ (()=>{ var x; })(); class C { m(){ var y; } } x = 1; y = 1; }",
+        .{ .mode = .script, .filename = "nested-function-var-boundary.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse return error.TestExpectedEqual;
+    for (outer.varDefs()) |vd| {
+        const name = rt.atoms.name(vd.var_name) orelse "";
+        try std.testing.expect(!std.mem.eql(u8, name, "x"));
+        try std.testing.expect(!std.mem.eql(u8, name, "y"));
+    }
+}
+
+test "generic for-of accepts complete parenthesized and indexed member targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "let a = {}; for ((a).p of []) { break; }",
+        "let a = {}; for (a['p'] of []) { break; }",
+    };
+    for (cases, 0..) |source, index| {
+        var parsed = try parser.compile(
+            rt,
+            source,
+            .{ .mode = .script, .filename = if (index == 0) "for-parenthesized-member.js" else "for-indexed-member.js" },
+        );
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "generic for-of parses computed target exactly once in source order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "let a = {}; for ((a[function x(){}]) of [function y(){}]) { break; }",
+        .{ .mode = .script, .filename = "for-computed-target-once.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    try std.testing.expectEqual(@as(usize, 1), countFunctionConstantsNamed(&parsed.function, rt, "x"));
+    try std.testing.expectEqual(@as(usize, 1), countFunctionConstantsNamed(&parsed.function, rt, "y"));
+    try std.testing.expectEqual(@as(usize, 2), parsed.function.constants.values.len);
+}
+
+test "for statement dispatch only scans top-level semicolons" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "for (let i = (function(){ return 0; })(); i < 1; i++) {}",
+        "let value; for (value of [function(){ return 1; }]) { break; }",
+        "let value; for (value of [`x${function(){ return ';'; }()}`]) { break; }",
+        "let value; for (value of [/;/]) { break; }",
+    };
+    for (cases, 0..) |source, index| {
+        var parsed = try parser.compile(
+            rt,
+            source,
+            .{ .mode = .script, .filename = if (index == 0) "for-c-style.js" else "for-in-of-no-top-level-semi.js" },
+        );
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "for-in-of rejects call and optional-chain assignment targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "function f(){}; for (f() of []) {}",
+        "let value = {}; for (value?.x in {}) {}",
+    };
+    for (cases) |source| {
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "invalid-for-lvalue.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
+test "script top-level lexical captured before declaration uses QuickJS global op" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4666,12 +6640,13 @@ test "script top-level lexical captured before declaration uses checked var ref"
 
     try std.testing.expect(parsed.syntax_error == null);
     try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
-    // Top-level script `let x` is a single global VarRef cell (.global_decl,
-    // top_level_lexical_as_global_ref); the inner `f` forward-captures it as a
-    // `.ref` closure var aliasing that cell (was `.local` under the pre-single-cell
-    // frame-slot model). The capture still lowers to the TDZ-checked var-ref op.
-    try expectFunctionClosureRecursive(rt, &parsed.function, "x", function_def.ClosureType.ref);
-    try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.get_var_ref_check) >= 1);
+    // The inner function carries `.global_ref`, but QuickJS resolves every
+    // global-family access to OP_get_var. That opcode reads the cell first and
+    // performs the lexical-uninitialized check before any global-object
+    // fallback; OP_get_var_ref_check is reserved for non-global closures.
+    try expectFunctionClosureRecursive(rt, &parsed.function, "x", function_def.ClosureType.global_ref);
+    try std.testing.expect(countOpcodeRecursive(&parsed.function, qop.get_var) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&parsed.function, qop.get_var_ref_check));
 }
 
 test "captured reads encode lexical TDZ in the final var-ref opcode" {
@@ -4737,12 +6712,12 @@ test "named function self-binding writes do not reach var-ref stores" {
     );
     defer dynamic.deinit();
     try std.testing.expect(dynamic.syntax_error == null);
-    // qjs snapshots the selected with/reference before evaluating the RHS.
-    // zjs's equivalent transport is with_get_ref + selected-reference
-    // with_put_var; both the defining frame and captured self-binding must use
-    // it instead of re-resolving a plain var-ref store after the RHS.
-    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.with_get_ref) >= 2);
-    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.with_put_var) >= 2);
+    // qjs get_lvalue snapshots the selected reference with scope_make_ref;
+    // resolve_variables lowers the dynamic probe to with_make_ref, followed
+    // by get_ref_value/put_ref_value. Both the defining frame and captured
+    // self-binding must use that transport rather than re-resolving a store.
+    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.with_make_ref) >= 2);
+    try std.testing.expect(countOpcodeRecursive(&dynamic.function, qop.put_ref_value) >= 2);
 
     var strict = try parser.compile(
         rt,
@@ -4847,8 +6822,8 @@ test "simple variable assignments emit var bytecode" {
         if (op_val == engine.bytecode.opcode.op.get_var) get_var_count += 1;
     }
     try std.testing.expect(get_var_count >= 1);
-    try std.testing.expectEqual(@as(usize, 1), parsed.function.global_vars.len);
-    try std.testing.expect(parsed.function.global_vars[0].is_lexical);
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&parsed.function));
+    try std.testing.expect(globalDeclarationClosureNamed(&parsed.function, rt, "value").?.isLexical());
 }
 
 test "quick parser emits compound assignment and update statements" {
@@ -4862,8 +6837,8 @@ test "quick parser emits compound assignment and update statements" {
 
     const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add) + countOpcode(parsed.function.code, engine.bytecode.opcode.op.add_loc);
     try std.testing.expect(add_count >= 1);
-    try std.testing.expectEqual(@as(usize, 1), parsed.function.global_vars.len);
-    try std.testing.expect(parsed.function.global_vars[0].is_lexical);
+    try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&parsed.function));
+    try std.testing.expect(globalDeclarationClosureNamed(&parsed.function, rt, "x").?.isLexical());
 }
 
 test "quick parser emits arithmetic compound assignment operators" {
@@ -5016,6 +6991,64 @@ test "quick parser still promotes unconditional parenthesized member calls" {
     try std.testing.expect(parsed.syntax_error == null);
     try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+}
+
+test "call consumers use final-op provenance for eval with super and comma tags" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var eval_calls = try parser.compile(
+        rt,
+        \\function probe() {
+        \\  const local = 1;
+        \\  const holder = { get() { return eval; } };
+        \\  holder.get()("typeof local");
+        \\  (eval)("local");
+        \\  (0, eval)("typeof local");
+        \\  eval?.("typeof local");
+        \\}
+    ,
+        .{ .mode = .script, .filename = "call-consumer-eval.js" },
+    );
+    defer eval_calls.deinit();
+    try std.testing.expect(eval_calls.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 1), countOpcodeRecursive(&eval_calls.function, qop.eval));
+
+    var with_calls = try parser.compile(
+        rt,
+        \\var scope = { method() {}, tag() {} };
+        \\with (scope) { (method)(); tag``; }
+    ,
+        .{ .mode = .script, .filename = "call-consumer-with.js" },
+    );
+    defer with_calls.deinit();
+    try std.testing.expect(with_calls.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 2), countOpcodeRecursive(&with_calls.function, qop.call_method));
+
+    var super_calls = try parser.compile(
+        rt,
+        \\class Base { method() {} tag() {} }
+        \\class Derived extends Base {
+        \\  probe() { return [(super.method)(), (super.tag)``]; }
+        \\}
+    ,
+        .{ .mode = .script, .filename = "call-consumer-super.js" },
+    );
+    defer super_calls.deinit();
+    try std.testing.expect(super_calls.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&super_calls.function, qop.call_method) >= 2);
+
+    var comma_tag = try parser.compile(
+        rt,
+        \\var receiver = { tag() {} };
+        \\(0, receiver.tag)``;
+    ,
+        .{ .mode = .script, .filename = "call-consumer-comma-tag.js" },
+    );
+    defer comma_tag.deinit();
+    try std.testing.expect(comma_tag.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&comma_tag.function, qop.call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcodeRecursive(&comma_tag.function, qop.call1));
 }
 
 test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
@@ -5399,6 +7432,19 @@ test "assignment destructuring early errors reject invalid rest forms" {
         "0, { bre\\u0061k } = {};",
         "0, { def\\u{61}ult } = {};",
         "(function*() { 0, { yield } = {}; });",
+    };
+
+    for (cases) |source| {
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+
+    // The test262 runner, not the JavaScript parser, interprets onlyStrict
+    // metadata. Pass the resulting host option explicitly while retaining the
+    // original source comment as an inert comment.
+    const only_strict_cases = [_][]const u8{
         "/*---\nflags: [generated, onlyStrict]\n---*/\n0, { eval } = {};",
         "/*---\nflags: [generated, onlyStrict]\n---*/\n0, [arguments] = [];",
         "/*---\nflags: [generated, onlyStrict]\n---*/\n(eval) = 20;",
@@ -5406,9 +7452,8 @@ test "assignment destructuring early errors reject invalid rest forms" {
         "/*---\nflags: [generated, onlyStrict]\n---*/\n0, [ x = yield ] = [];",
         "/*---\nflags: [generated, onlyStrict]\n---*/\n0, { x: x[yield] } = {};",
     };
-
-    for (cases) |source| {
-        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js" });
+    for (only_strict_cases) |source| {
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js", .strict = true });
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error != null);
         try std.testing.expect(parsed.syntax_error.?.message.len > 0);
@@ -5805,8 +7850,8 @@ test "module parser hoists block var declarations to module var refs" {
     for (parsed.function.closure_var) |cv| {
         const name = rt.atoms.name(cv.var_name) orelse continue;
         if (std.mem.eql(u8, name, "proto")) {
-            try std.testing.expectEqual(function_def.ClosureType.module_decl, cv.closure_type);
-            try std.testing.expect(!cv.is_lexical);
+            try std.testing.expectEqual(function_def.ClosureType.module_decl, cv.closureType());
+            try std.testing.expect(!cv.isLexical());
             found = true;
         }
     }
@@ -5826,21 +7871,19 @@ test "direct eval closure seed lowers unresolved read to var ref" {
         .is_lexical = true,
         .is_const = false,
         .var_kind = .normal,
-        .source_depth = 5,
     }};
     var parsed = try parser.compile(rt, "x", .{ .mode = .eval_direct, .filename = "<eval>", .eval_closure_seed = &seed });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    var x_cv: ?function_def.ClosureVar = null;
+    var x_cv: ?engine.bytecode.function_bytecode.BytecodeClosureVar = null;
     for (parsed.function.closure_var) |cv| {
         if (cv.var_name == x_atom) x_cv = cv;
         try std.testing.expect(cv.var_name != atom.ids.ret);
     }
     const resolved_x = x_cv orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(function_def.ClosureType.arg, resolved_x.closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.arg, resolved_x.closureType());
     try std.testing.expectEqual(@as(u16, 7), resolved_x.var_idx);
-    try std.testing.expectEqual(@as(u16, 1), resolved_x.source_depth);
     const var_ref_reads =
         countOpcode(parsed.function.code, op.get_var_ref) +
         countOpcode(parsed.function.code, op.get_var_ref_check) +
@@ -5852,7 +7895,7 @@ test "direct eval closure seed lowers unresolved read to var ref" {
     try std.testing.expectEqual(@as(usize, 0), countVarOpcodeForAtom(&parsed.function, op.get_var, x_atom));
 }
 
-test "direct eval ref closure seed preserves source depth" {
+test "direct eval ref closure seed preserves table identity only" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -5865,7 +7908,6 @@ test "direct eval ref closure seed preserves source depth" {
         .is_lexical = false,
         .is_const = false,
         .var_kind = .normal,
-        .source_depth = 5,
     }};
     var parsed = try parser.compile(rt, "", .{ .mode = .eval_direct, .filename = "<eval>", .eval_closure_seed = &seed });
     defer parsed.deinit();
@@ -5873,12 +7915,101 @@ test "direct eval ref closure seed preserves source depth" {
     try std.testing.expect(parsed.syntax_error == null);
     for (parsed.function.closure_var) |cv| {
         if (cv.var_name != x_atom) continue;
-        try std.testing.expectEqual(function_def.ClosureType.ref, cv.closure_type);
+        try std.testing.expectEqual(function_def.ClosureType.ref, cv.closureType());
         try std.testing.expectEqual(@as(u16, 8), cv.var_idx);
-        try std.testing.expectEqual(@as(u16, 5), cv.source_depth);
+        try std.testing.expect(!@hasField(engine.bytecode.function_bytecode.BytecodeClosureVar, "source_depth"));
         return;
     }
     return error.TestExpectedEqual;
+}
+
+test "parameter direct eval keeps arg var object ahead of declaration globals" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const seed = [_]parser.EvalClosureSeed{.{
+        .var_name = atom.ids.arg_var_object,
+        .closure_type = .local,
+        .var_idx = 5,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    }};
+    var parsed = try parser.compile(
+        rt,
+        "var x = 'arg'; delete x; typeof x;",
+        .{
+            .mode = .eval_direct,
+            .filename = "<eval>",
+            .eval_in_parameter_initializer = true,
+            .eval_closure_seed = &seed,
+        },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expect(parsed.function.closure_var.len >= 2);
+    try std.testing.expectEqual(atom.ids.arg_var_object, parsed.function.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.local, parsed.function.closure_var[0].closureType());
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, op.with_delete_var));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, op.define_field));
+}
+
+test "QuickJS direct eval destructuring declares through the variable object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const binding_atom = try rt.internAtom("evalDestructFallback");
+    defer rt.atoms.free(binding_atom);
+    const seed = [_]parser.EvalClosureSeed{.{
+        .var_name = atom.ids.var_object,
+        .closure_type = .local,
+        .var_idx = 7,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    }};
+    var parsed = try parser.compile(
+        rt,
+        "var { evalDestructFallback } = { evalDestructFallback: 1 }; (() => evalDestructFallback);",
+        .{
+            .mode = .eval_direct,
+            .filename = "<eval>",
+            .eval_closure_seed = &seed,
+        },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+
+    // qjs define_var(JS_VAR_DEF_VAR) records the declaration as a
+    // JSGlobalVar. It does not manufacture a same-name VarDef beside the
+    // captured <var> object (quickjs.c:24395-24415).
+    for (parsed.function.vardefs) |vd| {
+        try std.testing.expect(vd.var_name != binding_atom);
+    }
+    try std.testing.expectEqual(@as(usize, 2), parsed.function.closure_var.len);
+    try std.testing.expectEqual(atom.ids.var_object, parsed.function.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.local, parsed.function.closure_var[0].closureType());
+    try std.testing.expectEqual(binding_atom, parsed.function.closure_var[1].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global, parsed.function.closure_var[1].closureType());
+
+    const arrow = arrow: {
+        for (parsed.function.constants.values) |value| {
+            const child = functionBytecodeFromValue(value) orelse continue;
+            if (child.closureVar().len == 2) break :arrow child;
+        }
+        return error.TestExpectedEqual;
+    };
+    // The escaping arrow first captures the dynamic variable environment,
+    // then keeps the ordinary global fallback. This is the exact qjs lookup
+    // chain: get_var_ref(<var>), with_get_var(name), get_var(name).
+    try std.testing.expectEqual(atom.ids.var_object, arrow.closureVar()[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.ref, arrow.closureVar()[0].closureType());
+    try std.testing.expectEqual(@as(u16, 0), arrow.closureVar()[0].var_idx);
+    try std.testing.expectEqual(binding_atom, arrow.closureVar()[1].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global_ref, arrow.closureVar()[1].closureType());
+    try std.testing.expectEqual(@as(u16, 1), arrow.closureVar()[1].var_idx);
 }
 
 test "parser accepts dynamic import call expressions" {

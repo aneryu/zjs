@@ -86,6 +86,28 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
+        .name = "emitter-lvalue-call-optional",
+        .source =
+        \\const object = { value: 2 };
+        \\const scope = {
+        \\  value: 5,
+        \\  method() { return this.value; },
+        \\  tag(parts) { return this.value + parts[0]; },
+        \\};
+        \\object.value += 3;
+        \\with (scope) {
+        \\  value += 2;
+        \\  if ((method)() !== 7 || tag`!` !== "7!") throw new Error("call");
+        \\}
+        \\if (scope.method?.() !== 7) throw new Error("optional-call");
+        \\const nil = null;
+        \\const optional = nil?.a?.b?.c;
+        \\const deleted = delete nil?.a?.b?.c;
+        \\object.value === 5 && scope.value === 7 && optional === undefined && deleted ? "emitter-ok" : "emitter-bad"
+        ,
+        .expect = .{ .string = "emitter-ok" },
+    },
+    .{
         .name = "properties-literals",
         .source =
         \\const o = { a: 1, b: "two", ["c" + 1]: 3 };

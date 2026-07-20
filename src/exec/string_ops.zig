@@ -4167,53 +4167,18 @@ pub const KeywordMatch = struct {
 };
 
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return error.TypeError;
-    try string_value.ensureFlat(rt);
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| {
-                if (byte < 0x80) {
-                    try buffer.append(rt.memory.allocator, byte);
-                } else {
-                    try appendCodepointUtf8(rt, buffer, byte);
-                }
-            }
-        },
-        .utf16 => |units| {
-            for (units) |unit| try appendCodepointUtf8(rt, buffer, unit);
-        },
-    }
+    // Eval and Function constructor source conversion use
+    // JS_ToCStringLen's non-CESU-8 mode in QuickJS: a valid UTF-16 surrogate
+    // pair becomes one four-byte UTF-8 scalar, while an unmatched surrogate is
+    // preserved as its three-byte WTF-8 encoding. Reuse the canonical string
+    // view instead of encoding each code unit independently.
+    var utf8 = try core.JSValue.String.Utf8.fromValue(rt.memory.allocator, value);
+    defer utf8.deinit();
+    try buffer.appendSlice(rt.memory.allocator, utf8.slice());
 }
 
 pub fn appendCodepointUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), codepoint: u21) !void {
     return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, codepoint);
-}
-
-pub fn simpleEvalStringLiteral(rt: *core.JSRuntime, source: []const u8) ?core.JSValue {
-    if (source.len < 2 or source[0] != '"' or source[source.len - 1] != '"') return null;
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    var index: usize = 1;
-    while (index + 1 < source.len) : (index += 1) {
-        const ch = source[index];
-        if (ch == '\\') {
-            index += 1;
-            if (index + 1 >= source.len) return null;
-            const escaped = switch (source[index]) {
-                '"', '\\', '/' => source[index],
-                'b' => 0x08,
-                'f' => 0x0c,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                else => return null,
-            };
-            bytes.append(rt.memory.allocator, escaped) catch return null;
-            continue;
-        }
-        bytes.append(rt.memory.allocator, ch) catch return null;
-    }
-    return value_ops.createStringValue(rt, bytes.items) catch null;
 }
 
 pub fn qjsIteratorConcatCall(

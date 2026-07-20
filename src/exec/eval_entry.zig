@@ -9,7 +9,6 @@ const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const module_graph = @import("module_graph.zig");
 const property_ops = @import("property_ops.zig");
-const call_runtime = @import("call_runtime.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const zjs_vm = @import("zjs_vm.zig");
@@ -48,7 +47,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
     defer compiled.deinit();
     if (compiled.syntax_error) |*err| {
-        if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return core.JSValue.undefinedValue();
         const global = try zjs_vm.contextGlobal(ctx);
         // Compile-error surface: message is the bare parse diagnostic and the
         // error carries own fileName/lineNumber/columnNumber plus the leading
@@ -77,6 +75,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             try module_graph.throwModuleLinkError(rt, ctx, options.filename, err);
             return moduleResolutionError(err);
         };
+        // js_inner_module_linking invokes the module function once with
+        // `this === true` after import/export cells are linked. The compiler's
+        // entry guard performs declaration instantiation and returns before
+        // the body. Keep the in-memory eval entry on the same mechanism as the
+        // file-module graph instead of relying on evaluation-time fallbacks.
+        try module_graph.initializeModuleFunctionDeclarations(rt, ctx, module_name, &compiled.function);
     }
 
     var module_var_refs: []*core.VarRef = &.{};
@@ -84,10 +88,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, &compiled.function);
     }
     defer module_exec.freeModuleVarRefs(rt, module_var_refs);
-
-    if (!has_module_record and canReturnUndefinedWithoutVm(&compiled.function)) {
-        return core.JSValue.undefinedValue();
-    }
 
     const result = if (has_module_record) blk: {
         // Track the record through the evaluation status machine (mirrors
@@ -145,19 +145,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         return core.JSValue.undefinedValue();
     }
     return result;
-}
-
-fn canReturnUndefinedWithoutVm(function: *const bytecode.Bytecode) bool {
-    if (function.flags.is_module or function.module_record != null) return false;
-    if (function.code.len != 1 or function.code[0] != bytecode.opcode.op.return_undef) return false;
-    return function.var_count == 0 and
-        function.arg_count == 0 and
-        function.vardefs.len == 0 and
-        function.varRefNamesLen() == 0 and
-        function.closure_var.len == 0 and
-        function.global_vars.len == 0 and
-        function.private_bound_names.len == 0 and
-        function.constants.values.len == 0;
 }
 
 fn runEvalModuleWithVarRefs(
@@ -254,32 +241,6 @@ fn forceFunctionBytecodeRuntimeStrict(rt: *core.JSRuntime, value: core.JSValue) 
     // before the script's first execution, so the lazy cached view observes
     // this flag when it is materialized for the first call.
     for (function_bytecode.cpoolSlice()) |child| forceFunctionBytecodeRuntimeStrict(rt, child);
-}
-
-fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
-    var saw_digit = false;
-    var saw_space_after_digit = false;
-    for (source_text) |ch| {
-        if (string_ops.isAsciiDigitByte(ch)) {
-            if (saw_space_after_digit) return true;
-            saw_digit = true;
-        } else if (call_runtime.isAsciiWhitespace(ch)) {
-            if (saw_digit) saw_space_after_digit = true;
-        } else {
-            return false;
-        }
-    }
-    return false;
-}
-
-test "eval numeric script fallback uses shared ASCII classifiers" {
-    try std.testing.expect(isWhitespaceSeparatedNumericScript("1 2"));
-    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\t2"));
-    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0b2"));
-    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0c2"));
-    try std.testing.expect(!isWhitespaceSeparatedNumericScript("12"));
-    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1a2"));
-    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1  "));
 }
 
 fn elapsedNanosSince(start: u64) u64 {

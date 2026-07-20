@@ -1512,30 +1512,6 @@ pub fn addCollectionEntriesFromArray(
     }
 }
 
-pub fn nativeTypedArraySubclassBase(source: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, source, "class ") == null or std.mem.indexOf(u8, source, " extends ") == null) return null;
-    const names = [_][]const u8{
-        "Uint8Array",
-        "Int8Array",
-        "Uint8ClampedArray",
-        "Uint16Array",
-        "Int16Array",
-        "Uint32Array",
-        "Int32Array",
-        "Float16Array",
-        "Float32Array",
-        "Float64Array",
-        "BigUint64Array",
-        "BigInt64Array",
-    };
-    for (names) |name| {
-        var pattern_buf: [32]u8 = undefined;
-        const pattern = std.fmt.bufPrint(&pattern_buf, " extends {s}", .{name}) catch unreachable;
-        if (std.mem.indexOf(u8, source, pattern) != null) return name;
-    }
-    return null;
-}
-
 pub fn qjsArrayForEachCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,

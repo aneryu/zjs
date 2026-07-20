@@ -36,7 +36,7 @@ const vm_property_private = @import("vm_property_private.zig");
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target, td.evalGlobalVarBindings(vm), td.isEvalCode(vm));
+        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
     }
 }.b);
 pub const h_checkedloc = coldStd(struct {
@@ -495,7 +495,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.put_var_init] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, undefined);
+            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), undefined);
         }
     }.b);
     t[op.put_var_init] = h_putvarinit(op.put_var_init);
@@ -703,7 +703,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.apply_eval] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try eval_module_vm.applyEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, 0x8000, 0x4000);
+            _ = try eval_module_vm.applyEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, 0x8000);
         }
     }.b);
     t[op.import] = h(struct {
@@ -928,7 +928,7 @@ fn h_putvarinit(comptime o: u8) Handler {
     return coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {
             _ = pc;
-            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, o);
+            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), o);
         }
     }.b);
 }

@@ -314,12 +314,12 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
 // that a later declaration (js_closure_define_global_var) will reuse. The shared
 // table cell carries no per-capture flags; is_lexical/is_const are stamped only
 // at definition time (add_var_ref, 17210-17223).
-fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !*core.VarRef {
+fn createGlobalClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_bytecode.BytecodeClosureVar) !*core.VarRef {
     if (call_runtime.globalLexicalCell(ctx, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
     if (call_runtime.globalObjectVarRefCell(global, cv.var_name)) |cell_value| return core.VarRef.fromValue(cell_value) orelse error.InvalidBytecode;
     const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
     const cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
-    if (cv.var_kind == .function_name) cell.varRefIsFunctionNameSlot().* = true;
+    if (cv.varKind() == .function_name) cell.varRefIsFunctionNameSlot().* = true;
     return cell;
 }
 
@@ -426,7 +426,7 @@ pub fn createBytecodeFunctionObject(
             rooted_captures = &.{};
         };
         for (fb.closureVar(), 0..) |cv, idx| {
-            const cell: *core.VarRef = switch (cv.closure_type) {
+            const cell: *core.VarRef = switch (cv.closureType()) {
                 .local => blk: {
                     if (cv.var_idx >= frame.locals.len) return error.InvalidBytecode;
                     break :blk try frame.captureLocal(ctx.runtime, cv.var_idx);
@@ -466,13 +466,13 @@ pub fn createBytecodeFunctionObject(
                 // capture merely borrows: a module import slot is the EXPORTING
                 // module's live cell (phase C de-nesting), and marking it const
                 // would make the exporter's own writes throw.
-                switch (cv.closure_type) {
+                switch (cv.closureType()) {
                     .ref, .global_ref, .module_decl, .module_import => {},
                     .local, .arg, .global, .global_decl => {
-                        const captured_const = cv.is_const or (cv.closure_type == .local and
-                            cv.var_idx < caller_function.vardefs.len and caller_function.vardefs[cv.var_idx].is_const);
-                        cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or captured_const or cv.var_kind == .function_name;
-                        cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.var_kind == .function_name;
+                        const captured_const = cv.isConst() or (cv.closureType() == .local and
+                            cv.var_idx < caller_function.vardefs.len and caller_function.vardefs[cv.var_idx].isConst());
+                        cell.varRefIsConstSlot().* = cell.varRefIsConstSlot().* or captured_const or cv.varKind() == .function_name;
+                        cell.varRefIsFunctionNameSlot().* = cell.varRefIsFunctionNameSlot().* or cv.varKind() == .function_name;
                     },
                 }
             }
@@ -2126,19 +2126,6 @@ pub fn importMetaObject(
     const value = object.value();
     record.import_meta = value.dup();
     return value;
-}
-
-pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval_in_class_field_initializer: bool) bool {
-    if (eval_in_class_field_initializer) return true;
-    const outer_frame = caller_frame orelse return false;
-    if (outer_frame.current_function.isUndefined()) return false;
-    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.super_allowed;
-    if (objectFromValue(outer_frame.current_function)) |function_object| {
-        const stored = function_object.functionBytecode() orelse return false;
-        const fb = functionBytecodeFromValue(stored) orelse return false;
-        return fb.flags.super_allowed;
-    }
-    return false;
 }
 
 pub fn createGeneratorObject(

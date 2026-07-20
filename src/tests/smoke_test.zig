@@ -65,6 +65,24 @@ test "zjs CLI behavior" {
         try std.testing.expect(std.mem.indexOf(u8, result.stderr, "boom") != null);
     }
 
+    // 2b. Parser errors must not be converted into source-shaped completion
+    // values by the engine entrypoint.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{ zjs_path, "-e", "1 2" },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 1), exit_code);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "SyntaxError") != null);
+    }
+
     // 3. No arguments usage error
     {
         const result = try std.process.run(allocator, std.testing.io, .{

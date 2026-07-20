@@ -91,11 +91,11 @@ pub const ModuleRecord = struct {
     import_meta_main: bool = false,
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
-    /// ModuleDeclarationInstantiation creates top-level function objects before
-    /// evaluation. Once installed, the evaluator must skip the matching
-    /// compiler-counted fclosure/put_var_ref bytecode prefix so cyclic importers
-    /// and the module body observe the same function identity (QuickJS
-    /// js_create_module_function).
+    /// The module function's `this === true` entry has executed its guarded
+    /// declaration-instantiation branch. Later evaluation invokes the body
+    /// branch of compiled bytecode, so cyclic importers and the module body
+    /// observe the same installed function identity (QuickJS
+    /// js_inner_module_linking calling the module function).
     function_declarations_initialized: bool = false,
     /// Cached evaluation exception: a module whose evaluation threw stays
     /// `.errored` and every later import rethrows this value instead of

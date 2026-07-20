@@ -1,7 +1,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const parser = @import("../parser.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -2630,17 +2629,6 @@ pub fn constructAsyncGeneratorFunctionFromSource(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .async_generator, caller_function, caller_frame);
-}
-
-pub fn parameterSourceContainsAwait(rt: *core.JSRuntime, source: []const u8) !bool {
-    var lexer = parser.lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
-    lexer.is_strict_mode = true;
-    while (true) {
-        var token = try lexer.next();
-        defer lexer.freeToken(&token);
-        if (token.val == parser.token.TOK_AWAIT) return true;
-        if (token.val == parser.token.TOK_EOF) return false;
-    }
 }
 
 pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {

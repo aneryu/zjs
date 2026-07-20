@@ -52,6 +52,83 @@ test "var-ref growth promotes borrowed captures to owned cells" {
     try std.testing.expectEqual(frame_mod.Ownership.owned, exec_frame.ownership.var_refs);
 }
 
+test "global declaration construction rebinds duplicate carriers one slot at a time" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+
+    const binding_name = try rt.internAtom("qjs-ordered-global-decl-slots");
+    defer rt.atoms.free(binding_name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    function.closure_var = try rt.memory.alloc(bytecode.function_bytecode.BytecodeClosureVar, 2);
+    for (function.closure_var, 0..) |*cv, idx| {
+        cv.* = bytecode.function_bytecode.BytecodeClosureVar.init(.{
+            .closure_type = .global_decl,
+            .var_idx = @intCast(idx),
+            .var_name = rt.atoms.dup(binding_name),
+        });
+    }
+
+    var refs = [_]*core.VarRef{
+        try core.VarRef.createClosed(rt, core.JSValue.uninitialized()),
+        try core.VarRef.createClosed(rt, core.JSValue.uninitialized()),
+    };
+    defer {
+        refs[0].freeCell(rt);
+        refs[1].freeCell(rt);
+    }
+    const second_placeholder = refs[1];
+    var frame = frame_mod.Frame.init(&function);
+    defer frame.deinit(&rt.memory, rt);
+    frame.var_refs = &refs;
+    frame.ownership.var_refs = .borrowed;
+
+    try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
+        ctx,
+        global,
+        &function,
+        &frame,
+        0,
+        binding_name,
+        false,
+        false,
+    ));
+    try std.testing.expect(refs[0] != refs[1]);
+    try std.testing.expectEqual(second_placeholder, refs[1]);
+
+    try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
+        ctx,
+        global,
+        &function,
+        &frame,
+        1,
+        binding_name,
+        false,
+        false,
+    ));
+    try std.testing.expectEqual(refs[0], refs[1]);
+}
+
+test "runtime-strict script still constructs its global function declaration" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [8]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileWithOutputModeStrict(
+        \\function __qjsRuntimeStrictGlobalFunction() {}
+        \\print(Object.prototype.hasOwnProperty.call(globalThis, "__qjsRuntimeStrictGlobalFunction"));
+    , &output, .script, "runtime-strict-global-function.js", true);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\n", output.buffered());
+}
+
 test "var-ref growth rejects an owned composite frame slab" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -114,8 +191,8 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
     function.flags.has_mapped_arguments = true;
     function.arg_count = 1;
     function.open_var_ref_count = 1;
-    function.arg_open_binding_indices = try js.runtime.memory.alloc(u16, 1);
-    @constCast(function.arg_open_binding_indices)[0] = 0;
+    function.argdefs = try js.runtime.memory.alloc(bytecode.function_bytecode.BytecodeVarDef, 1);
+    function.argdefs[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{ .var_name = core.atom.null_atom, .is_captured = true, .var_ref_idx = 0 });
 
     var args = [_]core.JSValue{core.JSValue.int32(41)};
     var no_open_refs = [_]?*core.VarRef{};
@@ -935,13 +1012,20 @@ pub const vm_helpers = struct {
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
+        state.top_level_lexical_as_global_ref = true;
+        state.function_def.is_eval = true;
+        state.function_def.is_global_var = true;
 
-        try state.enableEvalReturn();
+        // This helper executes global script code and only needs completion
+        // capture; enableEvalReturn would incorrectly switch declarations to
+        // direct-eval placement. Mirror compileQjsProgram's script setup.
+        try state.enableReturnCompletion();
         while (state.token.val != engine.parser.token.TOK_EOF) {
             try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
         try state.finalizeEvalReturn();
 
+        try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
         helpers.registerStandardGlobalsBare(rt);
@@ -1053,13 +1137,12 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     function.flags.is_derived_class_constructor = true;
     function.var_count = 1;
     function.stack_size = 1;
-    function.vardefs = try rt.memory.alloc(function_def.VarDef, 1);
-    function.vardefs[0] = .{
+    function.vardefs = try rt.memory.alloc(engine.bytecode.function_bytecode.BytecodeVarDef, 1);
+    function.vardefs[0] = engine.bytecode.function_bytecode.BytecodeVarDef.init(.{
         .var_name = rt.atoms.dup(this_name),
-        .scope_level = 0,
         .is_captured = true,
-        .open_binding_idx = 0,
-    };
+        .var_ref_idx = 0,
+    });
     function.open_var_ref_count = 1;
     try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
 
@@ -1487,6 +1570,35 @@ test "Annex B block function updates existing global function binding" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("inner declaration\n", output.buffered());
+}
+
+test "block function declarations instantiate at scope entry" {
+    engine.exec.standard_globals.registerStandardGlobalsDefault();
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function strictProbe() {
+        \\  "use strict";
+        \\  {
+        \\    print(typeof strictScoped);
+        \\    function strictScoped() {}
+        \\    print(typeof strictScoped);
+        \\  }
+        \\}
+        \\strictProbe();
+        \\{
+        \\  print(typeof annexScoped);
+        \\  function annexScoped() {}
+        \\}
+        \\print(typeof annexScoped);
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("function\nfunction\nfunction\nfunction\n", output.buffered());
 }
 
 test "Annex B eval block function updates global function binding mirrors" {
@@ -2699,8 +2811,8 @@ test "surviving var references keep resident local slots bare" {
     const state = generator.generatorExecutionState();
 
     try std.testing.expect(function.open_var_ref_count > 0);
-    try std.testing.expect(function.varDefs()[target_idx].is_captured);
-    try std.testing.expect(!function.varDefs()[target_idx].is_lexical);
+    try std.testing.expect(function.varDefs()[target_idx].isCaptured());
+    try std.testing.expect(!function.varDefs()[target_idx].isLexical());
     try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].asInt32());
     try std.testing.expect(core.VarRef.fromValue(state.storage.frame.locals[target_idx]) == null);
     var found_open_alias = false;
@@ -2745,9 +2857,9 @@ test "direct eval captures only bindings visible at its call scope" {
     const visible_idx = localIndexNamed(js.runtime, function, "visible") orelse return error.TypeError;
     const active_idx = localIndexNamed(js.runtime, function, "active") orelse return error.TypeError;
 
-    try std.testing.expect(!function.varDefs()[sibling_idx].is_captured);
-    try std.testing.expect(function.varDefs()[visible_idx].is_captured);
-    try std.testing.expect(function.varDefs()[active_idx].is_captured);
+    try std.testing.expect(!function.varDefs()[sibling_idx].isCaptured());
+    try std.testing.expect(function.varDefs()[visible_idx].isCaptured());
+    try std.testing.expect(function.varDefs()[active_idx].isCaptured());
     const view = bytecode.asBytecodeView(function, js.runtime);
     try std.testing.expect(view.localOpenBindingIndex(sibling_idx) == null);
     try std.testing.expect(view.localOpenBindingIndex(visible_idx) != null);
@@ -5268,7 +5380,7 @@ test "Engine runtime-strict file eval matches QuickJS CLI script surface" {
         \\print(this === undefined);
         \\print(strictThis());
         \\var desc = Object.getOwnPropertyDescriptor(globalThis, "cliLocalFunction");
-        \\print(desc === undefined);
+        \\print(desc !== undefined);
         \\print(cliLocalFunction.name);
         \\var roProto = {};
         \\Object.defineProperty(roProto, "locked", { value: 1, writable: false, configurable: true });
@@ -5513,7 +5625,10 @@ test "Engine API eval and job queue are wired" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.eval("1 2");
+    try std.testing.expectError(error.SyntaxError, js.eval("1 2"));
+    if (js.context.hasException()) js.context.clearException();
+
+    const result = try js.eval("1; 2");
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 
@@ -6005,7 +6120,7 @@ test "Engine with destructuring assignment reaches const fallback at runtime" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "Engine eval preserves assignment references across direct eval" {
+test "Engine eval assignments follow QuickJS dynamic var-object resolution" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -6053,12 +6168,12 @@ test "Engine eval preserves assignment references across direct eval" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        "1 0\n12 3\n1 1 0\n3undefined 3\n",
         stream.buffered(),
     );
 }
 
-test "Engine arrow eval preserves assignment references across direct eval" {
+test "Engine arrow eval assignments follow QuickJS dynamic var-object resolution" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -6099,7 +6214,7 @@ test "Engine arrow eval preserves assignment references across direct eval" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings(
-        "undefined 1\n2 12\nundefined 1 1\n2 3undefined\n",
+        "1 0\n12 3\n1 1 0\n3undefined 3\n",
         stream.buffered(),
     );
 }
@@ -6156,8 +6271,14 @@ test "Engine direct eval captures the caller arguments binding" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+    // QuickJS add_eval_variables appends a body `arguments` pseudo local even
+    // when a simple formal parameter has the same spelling. Its reverse
+    // scope-zero lookup therefore makes parameterShadow observe the mapped
+    // Arguments object, whose index 0 is updated by the eval assignment. The
+    // final row also pins QuickJS's separate parameter/body environment
+    // topology; it must not depend on a source pre-scan of the function body.
     try std.testing.expectEqualStrings(
-        "41 42\n41 replaced false updated\ninside inside inside\ninside inside\nfalse false true false\n",
+        "41 42\n41 replaced false [object Object]\ninside inside inside\ninside inside\ntrue false true true\n",
         stream.buffered(),
     );
 }
@@ -6245,7 +6366,11 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\n1\n", stream.buffered());
+    // Annex B creates the eval `var` in the caller variable environment while
+    // its initializer still resolves the catch cell, so the post-catch write is
+    // local. A later plain `var saved` eval follows pinned QuickJS and
+    // force-initializes the variable-object property to undefined.
+    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\nundefined\n", stream.buffered());
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {
@@ -9537,6 +9662,56 @@ test "for-of bytecode next continuation preserves result and abrupt semantics" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "for-in-of generic lvalues use QuickJS bottom-stack evaluation order" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let events = [];
+        \\let target = { length: 0 };
+        \\function targetBase() { events.push("base"); return target; }
+        \\function targetKey() { events.push("key"); return "value"; }
+        \\function iterable() { events.push("iterable"); return [7]; }
+        \\for ((targetBase()[targetKey()]) of iterable()) {}
+        \\assert.sameValue(events.join(","), "iterable,base,key");
+        \\assert.sameValue(target.value, 7);
+        \\
+        \\events = [];
+        \\for ((targetBase()[targetKey()]) of []) {}
+        \\assert.sameValue(events.length, 0);
+        \\
+        \\for (target.length of [3]) {}
+        \\assert.sameValue(target.length, 3);
+        \\for (target.name in { only: true }) {}
+        \\assert.sameValue(target.name, "only");
+        \\
+        \\var outside = 0;
+        \\var environment = { outside: 1 };
+        \\with (environment) {
+        \\    for (outside of [4]) {}
+        \\}
+        \\assert.sameValue(environment.outside, 4);
+        \\assert.sameValue(outside, 0);
+        \\
+        \\class Base {}
+        \\Object.defineProperty(Base.prototype, "slot", {
+        \\    set(value) { this.superValue = value; },
+        \\});
+        \\class Derived extends Base {
+        \\    #privateValue = 0;
+        \\    assign() {
+        \\        for (super.slot of [5]) {}
+        \\        for (this.#privateValue of [6]) {}
+        \\        return this.superValue + this.#privateValue;
+        \\    }
+        \\}
+        \\assert.sameValue(new Derived().assign(), 11);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "computed proxy bytecode trap continuations preserve nested calls throws and invariants" {
     engine.exec.standard_globals.registerStandardGlobalsDefault();
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -9816,6 +9991,58 @@ test "arrow direct eval reads captured this and new.target" {
         \\const observed = read.call({ ignored: true });
         \\assert.sameValue(observed[0], true);
         \\assert.sameValue(observed[1], Replacement);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "direct eval inherits QuickJS entry capabilities and var environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\class Base { constructor(value) { this.value = value; } }
+        \\class Derived extends Base { constructor() { eval("super(7)"); } }
+        \\assert.sameValue(new Derived().value, 7);
+        \\let staticArgumentsSyntaxError = false;
+        \\try { class StaticEval { static { eval("arguments"); } } }
+        \\catch (error) { staticArgumentsSyntaxError = error instanceof SyntaxError; }
+        \\assert.sameValue(staticArgumentsSyntaxError, true);
+        \\eval("eval('var nestedGlobal = 3')");
+        \\assert.sameValue(nestedGlobal, 3);
+        \\function localEval() {
+        \\  eval("eval('var nestedLocal = 4')");
+        \\  return nestedLocal;
+        \\}
+        \\assert.sameValue(localEval(), 4);
+        \\assert.sameValue(typeof nestedLocal, "undefined");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    // An ordinary nested function does not inherit a method's Super grammar
+    // capability. QuickJS rejects the complete source during parsing; the
+    // surrounding runtime try/catch cannot intercept that early error.
+    try std.testing.expectError(error.SyntaxError, js.eval(
+        \\class Parent { method() {} }
+        \\class Child extends Parent {
+        \\  method() { function nested() { return super.method(); } }
+        \\}
+    ));
+}
+
+test "class field direct eval keeps QuickJS field initializer capabilities" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\class FieldBase { get value() { return 41; } }
+        \\class FieldDerived extends FieldBase { field = eval("super.value + 1"); }
+        \\assert.sameValue(new FieldDerived().field, 42);
+        \\let argumentsSyntaxError = false;
+        \\try { class ArgumentsField { field = eval("arguments"); } new ArgumentsField(); }
+        \\catch (error) { argumentsSyntaxError = error instanceof SyntaxError; }
+        \\assert.sameValue(argumentsSyntaxError, true);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -11375,6 +11602,118 @@ test "module top-level branch-to-end gets a terminator (no fall-off)" {
     defer result.free(js.runtime);
 }
 
+test "module function declaration cells do not leak onto the global object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const module_result = try js.evalModule(
+        \\function __moduleLocalHoist() {}
+        \\export function __moduleExportHoist() {}
+        \\export default function __moduleDefaultHoist() {}
+    );
+    defer module_result.free(js.runtime);
+
+    const probe_result = try js.eval(
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(globalThis, "__moduleLocalHoist"), false);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(globalThis, "__moduleExportHoist"), false);
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(globalThis, "__moduleDefaultHoist"), false);
+    );
+    defer probe_result.free(js.runtime);
+}
+
+test "call consumers derive receiver and direct-eval provenance from the final opcode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\  const __call_consumer_local = 17;
+        \\  const holder = { get() { return eval; } };
+        \\  assert.sameValue(holder.get()("typeof __call_consumer_local"), "undefined");
+        \\  assert.sameValue((eval)("__call_consumer_local"), 17);
+        \\  assert.sameValue((0, eval)("typeof __call_consumer_local"), "undefined");
+        \\  assert.sameValue(eval?.("typeof __call_consumer_local"), "undefined");
+        \\  const withScope = {
+        \\  value: 23,
+        \\  method() { return this.value; },
+        \\  tag(parts) { return this.value + parts[0]; },
+        \\  };
+        \\  with (withScope) {
+        \\  assert.sameValue((method)(), 23);
+        \\  assert.sameValue(tag`!`, "23!");
+        \\  assert.sameValue(({ value }).value, 23);
+        \\  }
+        \\  assert.sameValue(withScope.method?.(), 23);
+        \\  class CallBase {
+        \\  method() { return this.value; }
+        \\  tag(parts) { return this.value + parts[0]; }
+        \\  }
+        \\  class CallDerived extends CallBase {
+        \\  constructor() { super(); this.value = 31; }
+        \\  probe() { return [(super.method)(), (super.tag)`?`]; }
+        \\  }
+        \\  const superResults = new CallDerived().probe();
+        \\  assert.sameValue(superResults[0], 31);
+        \\  assert.sameValue(superResults[1], "31?");
+        \\  const commaReceiver = {
+        \\  tag(parts) { "use strict"; void parts; return this; },
+        \\  };
+        \\  assert.sameValue((0, commaReceiver.tag)`x`, undefined);
+        \\})();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    // Pinned QuickJS currently rejects this exact optional-with reference
+    // during stack verification (`InternalError: inconsistent stack size`).
+    // Keep it separate from the positive receiver matrix so a future
+    // reference upgrade makes the intentional divergence explicit.
+    try std.testing.expectError(error.SyntaxError, js.eval(
+        \\const optionalWithScope = { method() { return this; } };
+        \\with (optionalWithScope) method?.();
+    ));
+    if (js.context.hasException()) js.context.clearException();
+}
+
+test "optional chains use one unbounded shared label and preserve closed-chain calls" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+
+    try source.appendSlice(std.testing.allocator, "const nil = null;\nassert.sameValue(");
+    try source.appendSlice(std.testing.allocator, "nil");
+    for (0..257) |_| try source.appendSlice(std.testing.allocator, "?.x");
+    try source.appendSlice(std.testing.allocator, ", undefined);\nassert.sameValue(delete nil");
+    for (0..257) |_| try source.appendSlice(std.testing.allocator, "?.x");
+    try source.appendSlice(std.testing.allocator, ", true);\nlet closedThrew = false;\ntry { (nil");
+    for (0..32) |_| try source.appendSlice(std.testing.allocator, "?.x");
+    try source.appendSlice(std.testing.allocator, "?.method)(); } catch (error) { closedThrew = error instanceof TypeError; }\nassert.sameValue(closedThrew, true);\nassert.sameValue((nil");
+    for (0..32) |_| try source.appendSlice(std.testing.allocator, "?.x");
+    try source.appendSlice(std.testing.allocator, "?.method)?.(), undefined);\nconst live = {};\nlive.x = live;\nlive.method = function () { \"use strict\"; return this === live; };\nassert.sameValue((live");
+    for (0..32) |_| try source.appendSlice(std.testing.allocator, "?.x");
+    try source.appendSlice(std.testing.allocator, "?.method)(), true);\n");
+
+    const result = try js.eval(source.items);
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "direct eval inside a module function forwards module live bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\export let moduleDirectEvalBinding = 37;
+        \\export function readModuleBindingByEval() {
+        \\  return eval("moduleDirectEvalBinding");
+        \\}
+        \\assert.sameValue(readModuleBindingByEval(), 37);
+    );
+    defer result.free(js.runtime);
+}
+
 test "get_var uninitialized-cell inline global-object leg preserves the cold waterfall semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -11445,7 +11784,7 @@ test "get_var uninitialized-cell inline global-object leg preserves the cold wat
     try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
 }
 
-test "named function expression self-binding materializes lazily with unchanged semantics" {
+test "named function expression self-binding materializes lazily with pinned QuickJS semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
     const rt = js.runtime;
@@ -11465,9 +11804,9 @@ test "named function expression self-binding materializes lazily with unchanged 
     //   * shadows win: param, whole-body var, let TDZ, with-object;
     //   * `function arguments(){...}` resolves the arguments object (qjs
     //     parity: the retired eager var used to shadow it -> "function");
-    //   * eval under a whole-body var shadow reads the var (spec value 11;
-    //     qjs's add_eval_variables quirk yields undefined here, the retired
-    //     eager model yielded the function -- we lock the spec/var answer).
+    //   * eval under a whole-body var shadow follows pinned QuickJS's
+    //     add_eval_variables ordering: the lazily appended function-name row
+    //     wins find_var's newest-first scan, so eval reads undefined here.
     const setup = try js.eval(
         \\globalThis.__q2 = (function () {
         \\  var out = [];
@@ -11505,7 +11844,7 @@ test "named function expression self-binding materializes lazily with unchanged 
         \\  out.push((function rec(){ with ({ rec: 9 }) { return rec; } })()); // [18] 9
         \\  var w1 = function rec(){ with ({}) { return rec; } };
         \\  out.push(w1() === w1);                                      // [19] true
-        \\  out.push((function rec(){ var rec = 11; return eval('rec'); })()); // [20] 11
+        \\  out.push((function rec(){ var rec = 11; return eval('rec'); })()); // [20] undefined (pinned qjs)
         \\  out.push(typeof (function rec(){ { let rec; } return rec; })()); // [21] "function"
         \\  return out.length * 1000 +
         \\    ((out[0] === true && out[1] === 720 && out[2] === true && out[3] === true &&
@@ -11513,7 +11852,7 @@ test "named function expression self-binding materializes lazily with unchanged 
         \\      out[8] === false && out[9] === false && out[10] === 1 && out[11] === true &&
         \\      out[12] === true && out[13] === true && out[14] === 7 && out[15] === 3 &&
         \\      out[16] === 1 && out[17] === "object" && out[18] === 9 && out[19] === true &&
-        \\      out[20] === 11 && out[21] === "function") ? 1 : 0);
+        \\      out[20] === undefined && out[21] === "function") ? 1 : 0);
         \\})();
     );
     setup.free(rt);

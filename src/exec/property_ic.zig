@@ -420,8 +420,8 @@ pub fn ordinaryDataPropertyIsUndefinedForFastPath(rt: *core.JSRuntime, value: co
 }
 
 fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.Bytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
-    for (function.global_vars) |gv| {
-        if (gv.var_name != atom_id) continue;
+    for (function.closure_var) |cv| {
+        if (cv.closureType() != .global_decl or cv.var_name != atom_id) continue;
         return globalOwnDataPropertyBorrowedLookup(global, atom_id);
     }
     return null;
@@ -700,8 +700,12 @@ test "global own data slot helpers preserve lookup and write ownership" {
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
-    function.global_vars = try rt.memory.alloc(bytecode.function_def.GlobalVar, 1);
-    function.global_vars[0] = .{ .cpool_idx = -1, .scope_level = 0, .var_name = rt.atoms.dup(key) };
+    function.closure_var = try rt.memory.alloc(bytecode.function_bytecode.BytecodeClosureVar, 1);
+    function.closure_var[0] = bytecode.function_bytecode.BytecodeClosureVar.init(.{
+        .closure_type = .global_decl,
+        .var_idx = 0,
+        .var_name = rt.atoms.dup(key),
+    });
 
     const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
     try std.testing.expectEqual(@as(usize, 0), lookup.index);

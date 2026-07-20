@@ -4,7 +4,6 @@ const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_mod = @import("call.zig");
 const core = @import("../core/root.zig");
-const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
@@ -196,9 +195,9 @@ pub fn buildModuleVarRefs(
     } else {
         for (function.closure_var, 0..) |cv, idx| {
             if (idx >= function.varRefNamesLen()) return error.InvalidBytecode;
-            if (cv.closure_type != .module_decl) continue;
+            if (cv.closureType() != .module_decl) continue;
             const name = function.varRefName(idx);
-            const cell = try moduleLocalCell(ctx, record, name, cv.is_lexical, cv.is_const);
+            const cell = try moduleLocalCell(ctx, record, name, cv.isLexical(), cv.isConst());
             cell.free(ctx.runtime);
         }
     }
@@ -221,9 +220,12 @@ pub fn buildModuleVarRefs(
     var idx: usize = 0;
     while (idx < function.varRefNamesLen()) : (idx += 1) {
         const name = function.varRefName(idx);
-        const cell_value = if (idx < function.closure_var.len) switch (function.closure_var[idx].closure_type) {
+        const cell_value = if (idx < function.closure_var.len) switch (function.closure_var[idx].closureType()) {
             .module_import => try moduleImportCell(ctx, record, name),
-            .module_decl => try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
+            .module_decl => if (moduleHasResolvedImport(record, name))
+                try moduleImportCell(ctx, record, name)
+            else
+                try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
             .global, .global_ref, .global_decl => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
             .local, .arg, .ref => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
         } else if (moduleHasResolvedImport(record, name))
@@ -237,10 +239,10 @@ pub fn buildModuleVarRefs(
     return refs;
 }
 
-fn createGlobalModuleVarRef(ctx: *core.JSContext, cv: bytecode.function_def.ClosureVar) !core.JSValue {
+fn createGlobalModuleVarRef(ctx: *core.JSContext, cv: bytecode.function_bytecode.BytecodeClosureVar) !core.JSValue {
     const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
-    cell.varRefIsConstSlot().* = cv.is_const;
-    cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
+    cell.varRefIsConstSlot().* = cv.isConst();
+    cell.varRefIsFunctionNameSlot().* = cv.varKind() == .function_name;
     return cell.valueRef();
 }
 
@@ -257,153 +259,11 @@ pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []*core.VarRef) void {
     if (refs.len != 0) runtime.memory.free(*core.VarRef, refs);
 }
 
-const ModuleFunctionDeclaration = struct {
-    constant_index: usize,
-    ref_index: usize,
-    closure_opcode: u8,
-    next_pc: usize,
-};
-
-/// Decode one function-declaration instantiation pair emitted by the bytecode
-/// finalizer. QuickJS keeps `fclosure` wide until label resolution and only
-/// shortens indices below 256, so both closure forms are valid here. The
-/// compiler-published declaration count owns the prefix boundary; this decoder
-/// validates exactly those pairs and never infers a boundary from body opcodes.
-fn decodeModuleFunctionDeclaration(
-    function: *const bytecode.Bytecode,
-    pc: usize,
-) !?ModuleFunctionDeclaration {
-    if (pc >= function.code.len) return null;
-
-    var cursor = pc;
-    const closure_opcode = function.code[cursor];
-    const constant_index: usize = switch (closure_opcode) {
-        op.fclosure8 => blk: {
-            if (cursor + 2 > function.code.len) return error.InvalidBytecode;
-            const index = function.code[cursor + 1];
-            cursor += 2;
-            break :blk index;
-        },
-        op.fclosure => blk: {
-            if (cursor + 5 > function.code.len) return error.InvalidBytecode;
-            const index = std.mem.readInt(u32, function.code[cursor + 1 ..][0..4], .little);
-            cursor += 5;
-            break :blk @intCast(index);
-        },
-        else => return null,
-    };
-
-    if (cursor >= function.code.len) return error.InvalidBytecode;
-    const ref_index: usize = switch (function.code[cursor]) {
-        op.put_var_ref0 => blk: {
-            cursor += 1;
-            break :blk 0;
-        },
-        op.put_var_ref1 => blk: {
-            cursor += 1;
-            break :blk 1;
-        },
-        op.put_var_ref2 => blk: {
-            cursor += 1;
-            break :blk 2;
-        },
-        op.put_var_ref3 => blk: {
-            cursor += 1;
-            break :blk 3;
-        },
-        op.put_var_ref => blk: {
-            if (cursor + 3 > function.code.len) return error.InvalidBytecode;
-            const index = std.mem.readInt(u16, function.code[cursor + 1 ..][0..2], .little);
-            cursor += 3;
-            break :blk @intCast(index);
-        },
-        else => return null,
-    };
-
-    return .{
-        .constant_index = constant_index,
-        .ref_index = ref_index,
-        .closure_opcode = closure_opcode,
-        .next_pc = cursor,
-    };
-}
-
 pub fn moduleNamespaceValue(ctx: *core.JSContext, module_name: core.Atom) !core.JSValue {
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     const cell = try moduleNamespaceCell(ctx, record);
     defer cell.free(ctx.runtime);
     return moduleBindingCellValue(cell);
-}
-
-pub fn initializeModuleFunctionDeclarations(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    module_name: core.Atom,
-    function: *const bytecode.Bytecode,
-) !void {
-    if (!function.flags.is_module) return;
-    const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
-
-    var module_var_refs = try buildModuleVarRefs(ctx, module_name, function);
-    defer freeModuleVarRefs(ctx.runtime, module_var_refs);
-    var module_var_refs_root = CellSliceRoot{};
-    module_var_refs_root.init(ctx.runtime, &module_var_refs);
-    defer module_var_refs_root.deinit();
-
-    var frame = frame_mod.Frame.init(function);
-    defer frame.deinit(&ctx.runtime.memory, ctx.runtime);
-    var rooted_frame_var_refs: []*core.VarRef = &.{};
-    var frame_var_refs_root = CellSliceRoot{};
-    frame_var_refs_root.init(ctx.runtime, &rooted_frame_var_refs);
-    defer frame_var_refs_root.deinit();
-    if (module_var_refs.len != 0) {
-        // Typed window inside a []JSValue storage allocation, so the frame's
-        // uniform storage teardown owns the memory (same layout as the
-        // FrameSlab carve).
-        const ptr_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), module_var_refs.len);
-        const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
-        const storage = try ctx.runtime.memory.alloc(core.JSValue, value_slots);
-        frame.var_refs = std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(storage)[0..ptr_bytes]);
-        frame.installOwnedStorage(storage);
-        for (module_var_refs, 0..) |cell, idx| frame.var_refs[idx] = cell.dupCell();
-        rooted_frame_var_refs = frame.var_refs;
-    }
-
-    var pc: usize = 0;
-    var declarations_remaining = function.module_function_declaration_count;
-    while (declarations_remaining != 0) : (declarations_remaining -= 1) {
-        const declaration = try decodeModuleFunctionDeclaration(function, pc) orelse return error.InvalidBytecode;
-        pc = declaration.next_pc;
-        if (declaration.ref_index >= frame.var_refs.len) return error.InvalidBytecode;
-
-        const value = function.constants.get(declaration.constant_index) orelse return error.InvalidBytecode;
-        defer value.free(ctx.runtime);
-        const function_value = try object_ops.createBytecodeFunctionObject(
-            ctx,
-            &frame,
-            function,
-            global,
-            value,
-            function.name,
-            declaration.closure_opcode,
-            true,
-        );
-        slot_ops.replaceVarRefValueOwned(ctx, &frame, declaration.ref_index, function_value);
-    }
-    record.function_declarations_initialized = true;
-}
-
-/// First byte after the module function-declaration instantiation prefix.
-/// `initializeModuleFunctionDeclarations` has already executed these pairs;
-/// evaluating them again would replace the live-binding function identity.
-pub fn moduleFunctionDeclarationBodyStart(function: *const bytecode.Bytecode) !usize {
-    var pc: usize = 0;
-    var declarations_remaining = function.module_function_declaration_count;
-    while (declarations_remaining != 0) : (declarations_remaining -= 1) {
-        const declaration = try decodeModuleFunctionDeclaration(function, pc) orelse return error.InvalidBytecode;
-        pc = declaration.next_pc;
-    }
-    return pc;
 }
 
 fn requestName(record: bytecode.module.Record, request_index: u32) !bytecode.module.Request {

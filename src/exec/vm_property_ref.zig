@@ -187,18 +187,31 @@ pub fn makeVarRef(
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const global_value = global.value();
-    const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
-    const object_value = if (call_runtime.existingGlobalLexicalEnv(ctx)) |env|
-        if (env.hasOwnProperty(atom_id))
-            env.value()
-        else if (has_global_binding)
-            global_value
-        else
-            core.JSValue.undefinedValue()
-    else if (has_global_binding)
-        global_value
-    else
-        core.JSValue.undefinedValue();
+    const object_value = object_value: {
+        // QuickJS JS_GetGlobalVarRef checks global_var_obj before touching the
+        // global object. Its readonly/TDZ checks happen while the reference is
+        // created, including the non-optimized scope_make_ref fallback.
+        if (call_runtime.existingGlobalLexicalEnv(ctx)) |env| {
+            if (env.findProperty(atom_id)) |index| {
+                const flags = env.propFlagsAt(index);
+                if (!flags.deleted) {
+                    const is_uninitialized = switch (flags.kind) {
+                        .data => env.prop_values[index].slot.data.isUninitialized(),
+                        .var_ref => env.prop_values[index].slot.var_ref.varRefValue().isUninitialized(),
+                        .accessor, .auto_init => return error.InvalidBytecode,
+                    };
+                    if (is_uninitialized) return exception_ops.throwTdzReference(ctx);
+                    if (!flags.writable) {
+                        _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+                        return error.TypeError;
+                    }
+                    break :object_value env.value();
+                }
+            }
+        }
+        const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
+        break :object_value if (has_global_binding) global_value else core.JSValue.undefinedValue();
+    };
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     try stack.push(object_value);

@@ -246,13 +246,14 @@ const pc2line = pipeline.pc2line;
 const stack_size = pipeline.stack_size;
 const function_def = bytecode.function_def;
 
-fn resolveEvalDeclarationTarget(
+fn resolveEvalDeclarationPlan(
     rt: *core.JSRuntime,
     name: core.Atom,
     declaration_name: core.Atom,
     is_eval: bool,
-    closure_vars: []const function_def.ClosureVar,
-) !function_def.EvalBindingTarget {
+    cpool_idx: i32,
+    closure_vars: []const function_def.ClosureVar.Init,
+) !function_def.GlobalVar {
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -261,7 +262,7 @@ fn resolveEvalDeclarationTarget(
     _ = try fd.appendScope(-1);
     for (closure_vars) |cv| _ = try fd.addClosureVar(cv);
     try fd.appendGlobalVar(.{
-        .cpool_idx = -1,
+        .cpool_idx = cpool_idx,
         .scope_level = 0,
         .var_name = declaration_name,
     });
@@ -270,7 +271,17 @@ fn resolveEvalDeclarationTarget(
     try bc.setCode(&input);
     var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
-    return fd.global_vars[0].eval_target;
+    return fd.global_vars[0];
+}
+
+fn resolveEvalDeclarationTarget(
+    rt: *core.JSRuntime,
+    name: core.Atom,
+    declaration_name: core.Atom,
+    is_eval: bool,
+    closure_vars: []const function_def.ClosureVar.Init,
+) !function_def.EvalBindingTarget {
+    return (try resolveEvalDeclarationPlan(rt, name, declaration_name, is_eval, -1, closure_vars)).eval_target;
 }
 
 test "FunctionDef: init/deinit" {
@@ -445,7 +456,7 @@ test "FunctionDef: closure_var" {
     });
 
     try std.testing.expectEqual(@as(i32, 1), fd.closure_var_count);
-    try std.testing.expectEqual(function_def.ClosureType.local, fd.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.local, fd.closure_var[0].closureType());
     try std.testing.expectEqual(@as(atom_module.Atom, cv_name), fd.closure_var[0].var_name);
 }
 
@@ -523,7 +534,7 @@ test "resolve_variables: scope_get_var → get_var" {
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closureType());
 }
 
 test "resolve_variables preserves three-byte apply_eval with nonzero scope high byte" {
@@ -560,7 +571,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
     defer rt.atoms.free(name);
     defer rt.atoms.free(x_atom);
 
-    const exact_then_var = [_]function_def.ClosureVar{
+    const exact_then_var = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .ref, .var_idx = 0, .var_name = x_atom },
         .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
     };
@@ -569,16 +580,18 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
         else => try std.testing.expect(false),
     }
 
-    const global_then_var = [_]function_def.ClosureVar{
+    const global_then_var = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .global, .var_idx = 0, .var_name = x_atom },
         .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
     };
     switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &global_then_var)) {
-        .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
+        // QuickJS instantiate_hoisted_definitions stops at the first
+        // same-name closure, including GLOBAL, before considering _var_.
+        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
         else => try std.testing.expect(false),
     }
 
-    const with_then_var = [_]function_def.ClosureVar{
+    const with_then_var = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.with_object },
         .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
     };
@@ -586,7 +599,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
         .var_object => |idx| try std.testing.expectEqual(@as(u16, 1), idx),
         else => try std.testing.expect(false),
     }
-    const with_only = [_]function_def.ClosureVar{
+    const with_only = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.with_object },
     };
     switch (try resolveEvalDeclarationTarget(rt, name, x_atom, true, &with_only)) {
@@ -594,7 +607,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
         else => try std.testing.expect(false),
     }
 
-    const arg_then_body = [_]function_def.ClosureVar{
+    const arg_then_body = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.arg_var_object },
         .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
     };
@@ -602,7 +615,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
         .var_object => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
         else => try std.testing.expect(false),
     }
-    const body_then_arg = [_]function_def.ClosureVar{
+    const body_then_arg = [_]function_def.ClosureVar.Init{
         .{ .closure_type = .ref, .var_idx = 0, .var_name = core.atom.ids.var_object },
         .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.arg_var_object },
     };
@@ -615,6 +628,36 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
         .global => {},
         else => try std.testing.expect(false),
     }
+}
+
+test "resolve_variables: catch var keeps initializer target and plans outer binding" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("eval-catch-var-plan");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    const catch_then_var_object = [_]function_def.ClosureVar.Init{
+        .{ .closure_type = .ref, .var_kind = .catch_, .var_idx = 0, .var_name = x_atom },
+        .{ .closure_type = .ref, .var_idx = 1, .var_name = core.atom.ids.var_object },
+    };
+    const var_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, -1, &catch_then_var_object);
+    switch (var_plan.eval_target) {
+        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        else => try std.testing.expect(false),
+    }
+    try std.testing.expectEqual(@as(?u16, 1), var_plan.eval_var_object_fallback);
+
+    // Function declarations retain the pinned-QuickJS first-match behavior;
+    // the Annex B exception above is intentionally scoped to `var`.
+    const function_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, 0, &catch_then_var_object);
+    switch (function_plan.eval_target) {
+        .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
+        else => try std.testing.expect(false),
+    }
+    try std.testing.expectEqual(@as(?u16, null), function_plan.eval_var_object_fallback);
 }
 
 test "resolve_variables: direct eval var object probes unresolved reads" {
@@ -661,7 +704,7 @@ test "resolve_variables: direct eval var object probes unresolved reads" {
     try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closureType());
 }
 
 test "resolve_variables: direct eval var object probes before arg var object" {
@@ -912,7 +955,7 @@ test "resolve_variables: direct eval var object probes unresolved writes" {
     try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closureType());
 }
 
 test "resolve_variables: scope put operand preserves global sentinel and no-dynamic flag" {
@@ -1035,7 +1078,7 @@ test "resolve_variables: direct eval var object probes unresolved get refs" {
     try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(x_atom, fd.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closure_type);
+    try std.testing.expectEqual(function_def.ClosureType.global, fd.closure_var[0].closureType());
 }
 
 test "resolve_variables: direct eval var object probes unresolved make refs" {
@@ -1941,13 +1984,16 @@ test "resolve_variables: const local write lowers to throw_error" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    _ = try fd.addScopeVar(x_atom, .normal, 0, true, true);
+    const body_scope = try fd.appendScope(0);
+    fd.body_scope = body_scope;
+    fd.scope_level = body_scope;
+    _ = try fd.addScopeVar(x_atom, .normal, body_scope, true, true);
 
     const op = bytecode.opcode.op;
     var input = [_]u8{0} ** 8;
     input[0] = op.scope_put_var;
     std.mem.writeInt(u32, input[1..5], x_atom, .little);
-    std.mem.writeInt(u16, input[5..7], 0, .little);
+    std.mem.writeInt(u16, input[5..7], @intCast(body_scope), .little);
     input[7] = op.return_undef;
 
     try bc.setCode(&input);
@@ -2915,13 +2961,11 @@ test "M1.1: resolve_variables covers every ClosureType classification" {
         try pipeline.resolve_variables.run(&ctx);
 
         switch (closure_type) {
-            // `.global` / `.global_ref` are codex's index-based global atom
-            // carriers (no runtime cell) → get_var_undef. `.global_decl` is the
-            // cell-backed top-level let/const VarRef (ours' single-cell model:
-            // frame.var_refs[idx] aliases the ctx.lexicals cell), so it resolves
-            // as a runtime var-ref (get_var_ref0) — matching the make_var_ref_ref
-            // write path and ours' 322af2f classification.
-            .global_ref, .global => {
+            // QuickJS routes every global-family carrier through get_var_undef:
+            // the referenced cell is consulted first and non-lexical
+            // uninitialized cells fall back to the global object. Module and
+            // ordinary closure carriers use get_var_ref.
+            .global_ref, .global_decl, .global => {
                 try std.testing.expectEqual(@as(usize, 4), bc.code.len);
                 try std.testing.expectEqual(op.get_var_undef, bc.code[0]);
                 try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
@@ -3141,7 +3185,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expect(fb.flags.has_prototype);
     try std.testing.expect(!fb.flags.has_simple_parameter_list);
     try std.testing.expect(fb.flags.is_derived_class_constructor);
-    try std.testing.expect(fb.flags.is_indirect_eval);
+    try std.testing.expect(fb.flags.is_direct_or_indirect_eval);
     try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.flags.func_kind);
     try std.testing.expectEqual(@as(usize, 11), fb.byteCode().len);
     try std.testing.expectEqual(@as(i32, 11), fb.byte_code_len);
@@ -3150,19 +3194,19 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(op.get_var, fb.byteCode()[6]);
     try std.testing.expectEqual(op.drop, fb.byteCode()[9]);
     try std.testing.expectEqual(op.return_undef, fb.byteCode()[10]);
-    try std.testing.expectEqual(@as(usize, 1), fb.argNames().len);
-    try std.testing.expectEqual(arg_name, fb.argNames()[0]);
+    try std.testing.expectEqual(@as(usize, 1), fb.argVarDefs().len);
+    try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
     try std.testing.expectEqual(@as(usize, 1), fb.varDefs().len);
     try std.testing.expectEqual(name, fb.varDefs()[0].var_name);
-    try std.testing.expect(fb.varDefs()[0].is_const);
+    try std.testing.expect(fb.varDefs()[0].isConst());
     // Var-ref names are derived from `closure_var[i].var_name` (the former
     // parallel `var_ref_names` atom array was removed to shrink the FB struct).
     try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
     try std.testing.expectEqual(captured_name, fb.closureVar()[0].var_name);
     // is_lexical / is_const now derived from closure_var[i] (parallel `[]bool`
     // arrays removed to match qjs JSClosureVar).
-    try std.testing.expect(fb.closureVar()[0].is_lexical);
-    try std.testing.expect(fb.closureVar()[0].is_const);
+    try std.testing.expect(fb.closureVar()[0].isLexical());
+    try std.testing.expect(fb.closureVar()[0].isConst());
     try std.testing.expectEqual(@as(usize, 1), fb.privateBoundNames().len);
     try std.testing.expectEqual(private_name, fb.privateBoundNames()[0]);
     try std.testing.expectEqual(@as(u16, 1), fb.var_count);
@@ -3189,24 +3233,118 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expect(view.flags.is_async);
     try std.testing.expect(view.flags.is_generator);
     try std.testing.expect(view.flags.is_derived_class_constructor);
-    try std.testing.expect(view.flags.is_indirect_eval);
+    try std.testing.expect(view.flags.is_direct_or_indirect_eval);
     try std.testing.expectEqualSlices(u8, fb.byteCode(), view.code);
     // The finalized FB no longer exposes a standalone atom-operand array; the
     // view's `atom_operands` is empty and its atoms are read inline from `code`.
     try std.testing.expectEqual(@as(usize, 0), view.atom_operands.len);
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.argNames(), view.arg_names);
-    try std.testing.expectEqualSlices(bytecode.function_def.VarDef, fb.varDefs(), view.vardefs);
+    try std.testing.expectEqualSlices(bytecode.function_bytecode.BytecodeVarDef, fb.argVarDefs(), view.argdefs);
+    try std.testing.expectEqualSlices(bytecode.function_bytecode.BytecodeVarDef, fb.varDefs(), view.vardefs);
     // The finalized FB no longer keeps a standalone `var_ref_names` array; the
     // view leaves `var_ref_names` empty for normal (non-eval) functions and
     // derives names from `closure_var[i].var_name` via `varRefName`.
     try std.testing.expectEqual(@as(usize, 0), view.var_ref_names.len);
     try std.testing.expectEqual(fb.closureVar().len, view.varRefNamesLen());
     try std.testing.expectEqual(fb.closureVar()[0].var_name, view.varRefName(0));
-    try std.testing.expectEqual(fb.closureVar()[0].is_const, view.varRefIsConstAt(0));
-    try std.testing.expectEqual(fb.closureVar()[0].is_lexical, view.varRefIsLexicalAt(0));
+    try std.testing.expectEqual(fb.closureVar()[0].isConst(), view.varRefIsConstAt(0));
+    try std.testing.expectEqual(fb.closureVar()[0].isLexical(), view.varRefIsLexicalAt(0));
     try std.testing.expectEqualSlices(atom_module.Atom, fb.privateBoundNames(), view.private_bound_names);
     try std.testing.expectEqualSlices(core.JSValue, fb.cpoolSlice(), view.constants.values);
     try std.testing.expectEqual(fb.stack_size, view.stack_size);
+}
+
+test "final bytecode vardefs are compact arguments plus locals" {
+    const FinalVarDef = bytecode.function_bytecode.BytecodeVarDef;
+    const FinalClosureVar = bytecode.function_bytecode.BytecodeClosureVar;
+    const CompileClosureVar = bytecode.function_def.ClosureVar;
+    try std.testing.expect(!@hasField(FinalVarDef, "scope_level"));
+    try std.testing.expect(!@hasField(FinalVarDef, "func_pool_idx"));
+    try std.testing.expect(!@hasField(FinalVarDef, "tdz_emitted_at_decl"));
+    try std.testing.expect(@hasField(FinalVarDef, "flags"));
+    try std.testing.expect(!@hasField(FinalVarDef, "has_scope"));
+    try std.testing.expect(!@hasField(FinalVarDef, "is_captured"));
+    try std.testing.expect(@hasField(FinalVarDef, "var_ref_idx"));
+    try std.testing.expect(!@hasField(FinalClosureVar, "source_depth"));
+    try std.testing.expect(!@hasField(CompileClosureVar, "source_depth"));
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("compact-vardefs");
+    defer rt.atoms.free(function_name);
+    const arg_name = try rt.internAtom("arg");
+    defer rt.atoms.free(arg_name);
+    const local_name = try rt.internAtom("local");
+    defer rt.atoms.free(local_name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.appendArg(.{ .var_name = arg_name, .scope_level = 0 });
+    _ = try fd.appendVar(.{ .var_name = local_name, .scope_level = 0 });
+    try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
+
+    try std.testing.expectEqual(@as(usize, 2), fb.allVarDefs().len);
+    try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
+    try std.testing.expectEqual(local_name, fb.localVarDefs()[0].var_name);
+}
+
+test "final variable metadata matches pinned QuickJS physical ABI" {
+    const VarKind = bytecode.function_bytecode.VarKind;
+    const CompileClosureVar = bytecode.function_def.ClosureVar;
+    const FinalClosureVar = bytecode.function_bytecode.BytecodeClosureVar;
+    const FinalVarDef = bytecode.function_bytecode.BytecodeVarDef;
+
+    // Keep the upstream values stable. zjs-only kinds must extend, rather
+    // than split, the QuickJS enum because both final row types store 4 bits.
+    try std.testing.expectEqual(@as(u4, 5), @intFromEnum(VarKind.private_field));
+    try std.testing.expectEqual(@as(u4, 10), @intFromEnum(VarKind.global_function_decl));
+    try std.testing.expectEqual(@as(u4, 11), @intFromEnum(VarKind.class_static_this));
+
+    // LP64 QuickJS: sizeof/alignof(JSClosureVar) == 8/4 and
+    // sizeof/alignof(JSBytecodeVarDef) == 12/4.
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(CompileClosureVar));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(CompileClosureVar));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(FinalClosureVar));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(FinalClosureVar));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(FinalVarDef));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(FinalVarDef));
+
+    var closure = CompileClosureVar.init(.{
+        .closure_type = .ref,
+        .is_lexical = true,
+        .is_const = true,
+        .var_kind = .private_setter,
+        .var_idx = 0x1234,
+        .var_name = 0x55667788,
+    });
+    const expected_closure = [_]u8{ 0x1a, 0x08, 0x34, 0x12, 0x88, 0x77, 0x66, 0x55 };
+    try std.testing.expectEqualSlices(u8, &expected_closure, std.mem.asBytes(&closure));
+
+    const compile_vd = function_def.VarDef{
+        .var_name = 0x11223344,
+        .scope_level = 2,
+        .is_const = true,
+        .is_lexical = true,
+        .is_captured = true,
+        .var_kind = .private_setter,
+        .open_binding_idx = 0x1234,
+    };
+    var final_vd = FinalVarDef.fromCompile(compile_vd, 0x01020304);
+    const expected_vardef = [_]u8{ 0x44, 0x33, 0x22, 0x11, 0x04, 0x03, 0x02, 0x01, 0x8f, 0x00, 0x34, 0x12 };
+    try std.testing.expectEqualSlices(u8, &expected_vardef, std.mem.asBytes(&final_vd));
+
+    var uncaptured = FinalVarDef.fromCompile(.{
+        .var_name = 0x10203040,
+        .scope_level = 0,
+    }, -1);
+    try std.testing.expect(!uncaptured.isCaptured());
+    try std.testing.expectEqual(@as(u16, 0), uncaptured.var_ref_idx);
+    try std.testing.expectEqual(@as(u8, 0), std.mem.asBytes(&uncaptured)[9]);
 }
 
 test "bytecode view separates strict and sloppy simple inline eligibility" {
@@ -3338,8 +3476,13 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
             .is_lexical = false,
         });
         // A captured PARAMETER opens a cell window at frame setup, which the
-        // leaf constructor cannot build — publication must reject it.
-        if (mode.captured_arg) fd.args[0].is_captured = true;
+        // leaf constructor cannot build — publication must reject it. Record
+        // a real capture event; parser-era boolean hints are deliberately not
+        // an index-allocation source anymore.
+        if (mode.captured_arg) {
+            fd.open_binding_resolution_started = true;
+            try fd.captureArg(0);
+        }
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
         const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
@@ -3513,8 +3656,8 @@ test "stack_size compute reports the return-balance proof" {
         // return 2; } }`, exact parser output): the discriminant is live
         // across BOTH return sites.
         const bc = [_]u8{
-            op.push_1,    op.dup,       op.push_1, op.strict_eq,
-            op.if_false8, 3,            op.push_2, op.@"return",
+            op.push_1,       op.dup, op.push_1, op.strict_eq,
+            op.if_false8,    3,      op.push_2, op.@"return",
             op.return_undef,
         };
         var balanced = true;
@@ -3526,7 +3669,7 @@ test "stack_size compute reports the return-balance proof" {
         // The per-pc BFS levels are exact, so branches do not refuse the
         // proof (a conservative linear scan would).
         const bc = [_]u8{
-            op.push_1,    op.if_false8, 3, op.push_1,
+            op.push_1,    op.if_false8, 3,            op.push_1,
             op.@"return", op.push_2,    op.@"return",
         };
         var balanced = false;
@@ -3741,11 +3884,14 @@ test "direct eval reserves identity for visible function-scope locals and argume
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(u16, 2), fb.open_var_ref_count);
-    try std.testing.expect(fb.varDefs()[0].is_captured);
-    try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].open_binding_idx);
+    try std.testing.expect(fb.varDefs()[0].isCaptured());
+    // qjs add_eval_variables calls capture_var for own arguments before
+    // scope-zero locals. The open-cell index records that event order; it is
+    // not a grouped locals-then-arguments frame layout.
+    try std.testing.expectEqual(@as(u16, 1), fb.varDefs()[0].var_ref_idx);
     try std.testing.expect(fd.args[0].is_captured);
-    try std.testing.expectEqual(@as(u16, 1), fd.args[0].open_binding_idx);
-    try std.testing.expectEqual(@as(u16, 1), fb.argOpenBindingIndices()[0]);
+    try std.testing.expectEqual(@as(u16, 0), fd.args[0].open_binding_idx);
+    try std.testing.expectEqual(@as(u16, 0), fb.argVarDefs()[0].var_ref_idx);
 }
 
 test "surviving local references reserve compact open VarRef storage" {
@@ -3778,8 +3924,8 @@ test "surviving local references reserve compact open VarRef storage" {
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
-    try std.testing.expect(fb.varDefs()[0].is_captured);
-    try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].open_binding_idx);
+    try std.testing.expect(fb.varDefs()[0].isCaptured());
+    try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].var_ref_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, fb.byteCode()[0]);
     const view = bytecode.asBytecodeView(fb, rt);
     try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
@@ -3834,7 +3980,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
 
     try std.testing.expectEqualSlices(u8, &expected, fb.byteCode());
     try std.testing.expectEqual(@as(u16, 0), fb.open_var_ref_count);
-    try std.testing.expect(!fb.varDefs()[0].is_captured);
+    try std.testing.expect(!fb.varDefs()[0].isCaptured());
     try std.testing.expect(!fd.vars[0].is_captured);
 }
 
@@ -3874,7 +4020,7 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
     try std.testing.expect(fd.args[0].is_captured);
     try std.testing.expectEqual(@as(u16, 0), fd.args[0].open_binding_idx);
-    try std.testing.expectEqual(@as(u16, 0), fb.argOpenBindingIndices()[0]);
+    try std.testing.expectEqual(@as(u16, 0), fb.argVarDefs()[0].var_ref_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_arg_ref, fb.byteCode()[0]);
     try std.testing.expectEqual(arg_name, std.mem.readInt(u32, fb.byteCode()[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[5..7], .little));
@@ -3949,7 +4095,7 @@ test "mapped frames use the exact compile-time open-binding count for every fram
     for (slab.open_var_refs) |entry| try std.testing.expect(entry == null);
 }
 
-test "createFunctionBytecode: copies global var records from FunctionDef" {
+test "createFunctionBytecode: final declaration metadata lives only in ClosureVar" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3971,23 +4117,28 @@ test "createFunctionBytecode: copies global var records from FunctionDef" {
         .scope_level = 0,
         .var_name = global_name,
     });
+    _ = try fd.addClosureVar(.{
+        .closure_type = .global_decl,
+        .is_lexical = true,
+        .is_const = true,
+        .var_idx = 0,
+        .var_name = global_name,
+    });
 
     const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expectEqual(@as(usize, 1), fb.globalVars().len);
-    try std.testing.expectEqual(global_name, fb.globalVars()[0].var_name);
-    try std.testing.expect(fb.globalVars()[0].force_init);
-    try std.testing.expect(fb.globalVars()[0].is_configurable);
-    try std.testing.expect(fb.globalVars()[0].is_lexical);
-    try std.testing.expect(fb.globalVars()[0].is_const);
-    try std.testing.expectEqual(@as(i32, 0), fb.globalVars()[0].scope_level);
+    try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
+    try std.testing.expectEqual(global_name, fb.closureVar()[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global_decl, fb.closureVar()[0].closureType());
+    try std.testing.expect(fb.closureVar()[0].isLexical());
+    try std.testing.expect(fb.closureVar()[0].isConst());
 
     const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(@as(usize, 1), view.global_vars.len);
-    try std.testing.expectEqual(global_name, view.global_vars[0].var_name);
-    try std.testing.expect(view.global_vars[0].force_init);
+    try std.testing.expectEqual(@as(usize, 1), view.closure_var.len);
+    try std.testing.expectEqual(global_name, view.closure_var[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global_decl, view.closure_var[0].closureType());
 }
 
 test "createFunctionBytecode accounts large finalized payload in large space" {

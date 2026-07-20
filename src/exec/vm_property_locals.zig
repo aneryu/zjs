@@ -200,7 +200,7 @@ pub noinline fn checkedLocVm(
                 return err;
             }
             const value = try stack.pop();
-            if (idx < function.vardefs.len and function.vardefs[idx].is_const) {
+            if (idx < function.vardefs.len and function.vardefs[idx].isConst()) {
                 value.free(ctx.runtime);
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
@@ -248,8 +248,6 @@ pub fn varRef(
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !Step {
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
@@ -261,7 +259,7 @@ pub fn varRef(
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
-            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc, eval_global_var_bindings, is_eval_code);
+            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc);
         },
         op.set_var_ref => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
@@ -284,10 +282,10 @@ pub fn varRef(
             if (try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
             if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
-        op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref2 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref3 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc),
+        op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc),
+        op.put_var_ref2 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc),
+        op.put_var_ref3 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc),
         op.set_var_ref0 => try slot_ops.execSetVarRef(ctx, frame, stack, 0, 0, opc),
         op.set_var_ref1 => try slot_ops.execSetVarRef(ctx, frame, stack, 1, 0, opc),
         op.set_var_ref2 => try slot_ops.execSetVarRef(ctx, frame, stack, 2, 0, opc),
@@ -305,10 +303,8 @@ pub noinline fn varRefVm(
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code) catch |err| {
+    return varRef(ctx, function, global, frame, stack, opc, catch_target) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

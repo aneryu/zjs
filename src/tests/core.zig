@@ -2766,12 +2766,12 @@ test "bytecode function state uses the inline qjs function arm" {
     const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    const closure_vars = try rt.memory.alloc(engine.bytecode.function_def.ClosureVar, 1);
-    closure_vars[0] = .{
+    const closure_vars = try rt.memory.alloc(engine.bytecode.function_bytecode.BytecodeClosureVar, 1);
+    closure_vars[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
         .var_name = rt.atoms.dup(core.atom.ids.empty_string),
-    };
+    });
     fb.closure_var = closure_vars.ptr;
     fb.var_refs_len = 1;
     try rt.gc.add(&fb.header);
@@ -4870,12 +4870,12 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
     const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    const closure_vars = try rt.memory.alloc(engine.bytecode.function_def.ClosureVar, 1);
-    closure_vars[0] = .{
+    const closure_vars = try rt.memory.alloc(engine.bytecode.function_bytecode.BytecodeClosureVar, 1);
+    closure_vars[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
         .var_name = rt.atoms.dup(core.atom.ids.empty_string),
-    };
+    });
     fb.closure_var = closure_vars.ptr;
     fb.var_refs_len = 1;
     try rt.gc.add(&fb.header);

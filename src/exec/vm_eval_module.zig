@@ -30,14 +30,13 @@ pub noinline fn directEval(
     output: ?*std.Io.Writer,
     global: *core.Object,
     class_field_initializer_flag: u16,
-    parameter_initializer_flag: u16,
     allow_tail_inline: bool,
 ) !EvalStep {
     const eval_operands = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
-    const eval_scope_index = eval_scope & ~(class_field_initializer_flag | parameter_initializer_flag);
+    const eval_scope_head = @as(i32, eval_scope & ~class_field_initializer_flag) + bytecode.function_bytecode.arg_scope_end;
     return switch (try eval_ops.execDirectEval(
         ctx,
         stack,
@@ -47,9 +46,8 @@ pub noinline fn directEval(
         argc,
         output,
         global,
-        eval_scope_index,
+        eval_scope_head,
         (eval_scope & class_field_initializer_flag) != 0,
-        (eval_scope & parameter_initializer_flag) != 0,
         allow_tail_inline,
     )) {
         .done => .done,
@@ -67,11 +65,10 @@ pub noinline fn applyEval(
     output: ?*std.Io.Writer,
     global: *core.Object,
     class_field_initializer_flag: u16,
-    parameter_initializer_flag: u16,
 ) !Step {
     const eval_scope = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    const eval_scope_index = eval_scope & ~(class_field_initializer_flag | parameter_initializer_flag);
+    const eval_scope_head = @as(i32, eval_scope & ~class_field_initializer_flag) + bytecode.function_bytecode.arg_scope_end;
     return switch (try eval_ops.execApplyEval(
         ctx,
         stack,
@@ -80,9 +77,8 @@ pub noinline fn applyEval(
         catch_target,
         output,
         global,
-        eval_scope_index,
+        eval_scope_head,
         (eval_scope & class_field_initializer_flag) != 0,
-        (eval_scope & parameter_initializer_flag) != 0,
     )) {
         .done => .done,
         .continue_loop => .continue_loop,

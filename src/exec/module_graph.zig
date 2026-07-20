@@ -879,6 +879,38 @@ fn preloadedModuleNeedsEvaluation(runtime: *core.JSRuntime, path: []const u8) bo
     return moduleNeedsEvaluation(record);
 }
 
+/// QuickJS links a module by invoking its ordinary bytecode function with
+/// `this === true`. The compiler's entry gate runs only the declaration
+/// instantiation branch and returns; later evaluation invokes the same code
+/// with undefined and branches to the body.
+pub fn initializeModuleFunctionDeclarations(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    module_name: core.Atom,
+    function: *const bytecode.Bytecode,
+) !void {
+    if (!function.flags.is_module) return error.InvalidBytecode;
+    const record = runtime.modules.find(module_name) orelse return error.ModuleNotFound;
+    if (record.function_declarations_initialized) return;
+
+    var module_var_refs = try exec.module.buildModuleVarRefs(context, module_name, function);
+    defer exec.module.freeModuleVarRefs(runtime, module_var_refs);
+    var module_var_refs_root = exec.array_ops.CellSliceRoot{};
+    module_var_refs_root.init(runtime, &module_var_refs);
+    defer module_var_refs_root.deinit();
+
+    var stack = exec.stack.Stack.init(&runtime.memory, context.stack_limit);
+    defer stack.deinit(runtime);
+    const result = try exec.zjs_vm.runModuleInstantiationWithVarRefs(
+        context,
+        &stack,
+        function,
+        module_var_refs,
+    );
+    result.free(runtime);
+    record.function_declarations_initialized = true;
+}
+
 pub fn evalFileModuleGraphWithHostHooks(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
@@ -941,7 +973,7 @@ pub fn evalFileModuleGraphWithHostHooks(
         }
         const module_name = try runtime.internAtom(path);
         defer runtime.atoms.free(module_name);
-        try exec.module.initializeModuleFunctionDeclarations(context, global_object, module_name, &compiled.function);
+        try initializeModuleFunctionDeclarations(runtime, context, module_name, &compiled.function);
     }
 
     var dynamic_import_state = DynamicImportHostState{
@@ -1034,7 +1066,6 @@ fn initializePreloadedModuleFunctionDeclarations(
     max_source_size: usize,
     postorder_paths: []const []const u8,
 ) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
     for (postorder_paths) |path| {
         const is_root = std.mem.eql(u8, path, root_path);
         const source = if (is_root)
@@ -1049,7 +1080,7 @@ fn initializePreloadedModuleFunctionDeclarations(
         if (compiled.syntax_error != null) return error.SyntaxError;
         const module_name = try runtime.internAtom(path);
         defer runtime.atoms.free(module_name);
-        try exec.module.initializeModuleFunctionDeclarations(context, global_object, module_name, &compiled.function);
+        try initializeModuleFunctionDeclarations(runtime, context, module_name, &compiled.function);
     }
 }
 
@@ -1081,7 +1112,6 @@ fn evalPreloadedFileModuleStep(
 
     const module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(module_name);
-    const module_record = runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     runtime.modules.linkModule(runtime, module_name) catch |err| {
         try throwModuleLinkError(runtime, context, filename, err);
         return moduleResolutionError(err);
@@ -1121,11 +1151,7 @@ fn evalPreloadedFileModuleStep(
     const continuation = try exec.property_ops.expectObject(owned_continuation);
     var stack = exec.stack.Stack.init(&runtime.memory, context.stack_limit);
     defer stack.deinit(runtime);
-    const initial_pc = if (continuation_value == null and module_record.function_declarations_initialized)
-        try exec.module.moduleFunctionDeclarationBodyStart(&compiled.function)
-    else
-        0;
-    const result = exec.zjs_vm.runModuleWithOutputAndVarRefsStateAtPc(context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value, initial_pc) catch |err| return moduleResolutionError(err);
+    const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return moduleResolutionError(err);
     if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
         return .{ .suspended = .{
             .continuation = owned_continuation,

@@ -208,7 +208,7 @@ test "host output Number static literal fast path materializes lazy constructor"
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.call1]);
 }
 
-test "empty script eval skips VM frame startup" {
+test "empty script eval uses root entry without user call opcodes" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -220,6 +220,8 @@ test "empty script eval skips VM frame startup" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+    // The root evaluator is not a bytecode `call` instruction, so entering its
+    // generic VM path does not increment the user-call profile counters.
     try std.testing.expectEqual(@as(u64, 0), profile.totalOpcodeCount());
     try std.testing.expectEqual(@as(u64, 0), profile.call_frame_count);
 }
@@ -892,6 +894,88 @@ test "Engine eval executes simple direct eval strings" {
     try std.testing.expectEqualStrings("2\n4\n", stream.buffered());
 }
 
+test "Engine script parse errors are never converted to source-shaped completions" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [1]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    try std.testing.expectError(error.SyntaxError, js.evalWithOutput("1 2", &stream));
+    try std.testing.expectEqualStrings("", stream.buffered());
+}
+
+test "direct and indirect eval regexp literals share the generic parser semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function checkPair(exact, terminated) {
+        \\  assert.sameValue(exact.source, terminated.source);
+        \\  assert.sameValue(exact.flags, terminated.flags);
+        \\  assert.sameValue(exact !== terminated, true);
+        \\  assert.sameValue(Object.getPrototypeOf(exact), Object.getPrototypeOf(terminated));
+        \\}
+        \\checkPair(eval("/a/gi"), eval("/a/gi;"));
+        \\const indirect = (0, eval);
+        \\checkPair(indirect("/b/m"), indirect("/b/m;"));
+        \\for (const source of ["/(/", "/(/;"]) {
+        \\  let syntax = false;
+        \\  try { eval(source); } catch (error) { syntax = error instanceof SyntaxError; }
+        \\  assert.sameValue(syntax, true);
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "direct eval expression completion does not depend on a source terminator" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function probe() {
+        \\  assert.sameValue(eval('"value"'), eval('"value";'));
+        \\  assert.sameValue(eval("this"), eval("this;"));
+        \\}
+        \\probe.call({ marker: 1 });
+        \\const sloppy = (function named() {
+        \\  const exact = eval("named = 0");
+        \\  const terminated = eval("named = 0;");
+        \\  return [exact, terminated, typeof named];
+        \\})();
+        \\assert.sameValue(sloppy[0], 0);
+        \\assert.sameValue(sloppy[1], 0);
+        \\assert.sameValue(sloppy[2], "function");
+        \\for (const source of ["named = 0", "named = 0;"]) {
+        \\  let typeError = false;
+        \\  try { (function named() { "use strict"; eval(source); })(); }
+        \\  catch (error) { typeError = error instanceof TypeError; }
+        \\  assert.sameValue(typeError, true);
+        \\}
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "test262 frontmatter comments do not change engine strict mode" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [8]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\/*---
+        \\flags: [onlyStrict]
+        \\---*/
+        \\function acceptsEval(eval) { return eval; }
+        \\print(acceptsEval(1));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", stream.buffered());
+}
+
 test "Engine eval executes declaration-only side effects" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -1014,7 +1098,7 @@ test "Engine parenthesized eval preserves only grouping directness" {
     try std.testing.expectEqualStrings("local\nglobal\nglobal\nglobal\nglobal\nglobal\nglobal\n", stream.buffered());
 }
 
-test "Engine direct eval RHS preserves the pre-eval identifier reference" {
+test "Engine direct eval assignment reference timing matches QuickJS" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -1052,7 +1136,9 @@ test "Engine direct eval RHS preserves the pre-eval identifier reference" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("undefined 1\n2 12\nundefined 1\n", stream.buffered());
+    // Pinned QuickJS resolves these dynamic references to the binding created
+    // by the direct eval: `1 0`, `12 3`, and `1 0`, respectively.
+    try std.testing.expectEqualStrings("1 0\n12 3\n1 0\n", stream.buffered());
 }
 
 test "Engine assignment RHS regexp and division follow eval reference timing" {
@@ -1084,7 +1170,9 @@ test "Engine assignment RHS regexp and division follow eval reference timing" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\ntest262\nabc\n2 10\n", stream.buffered());
+    // Pinned QuickJS prints `10 10`: the assignment updates eval's local `x`,
+    // while the outer function binding remains unchanged.
+    try std.testing.expectEqualStrings("true\ntest262\nabc\n10 10\n", stream.buffered());
 }
 
 test "Engine eval inherits caller scope through nested direct eval" {
@@ -1162,6 +1250,48 @@ test "Engine direct eval captures outer names only mentioned in eval source" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("9\n", stream.buffered());
+}
+
+test "Engine direct eval prefers an inner lexical declared before a later outer shadow" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [32]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer() {
+        \\  let target;
+        \\  { let x = 1; target = function() { return eval("x"); }; }
+        \\  let x = 2;
+        \\  return target();
+        \\}
+        \\print(outer());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", stream.buffered());
+}
+
+test "Engine closure prefers an inner lexical declared before a later outer shadow" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [32]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function outer() {
+        \\  let target;
+        \\  { let x = 1; target = function() { return x; }; }
+        \\  let x = 2;
+        \\  return target();
+        \\}
+        \\print(outer());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", stream.buffered());
 }
 
 test "Engine direct eval closures bind visible caller metadata" {
@@ -1662,6 +1792,39 @@ test "Engine dynamic environment eval var object yields to nearer lexical closur
     try std.testing.expectEqualStrings("eval\nlexical\n", stream.buffered());
 }
 
+test "Engine nested direct eval preserves immutable named function bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var sloppyRef = function SloppyName() {
+        \\  return function() {
+        \\    eval("SloppyName = 1");
+        \\    return SloppyName;
+        \\  };
+        \\};
+        \\print(sloppyRef()() === sloppyRef);
+        \\var strictRef = function StrictName() {
+        \\  "use strict";
+        \\  return function() {
+        \\    try {
+        \\      eval("StrictName = 1");
+        \\    } catch (err) {
+        \\      print(err.name);
+        \\    }
+        \\    return StrictName;
+        \\  };
+        \\};
+        \\print(strictRef()() === strictRef);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\nTypeError\ntrue\n", stream.buffered());
+}
+
 test "Engine dynamic environment nested no-op eval preserves function binding" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -1797,6 +1960,121 @@ test "Engine direct eval catch bindings do not escape their scopes" {
     try std.testing.expectEqualStrings("undefined\nundefined\nundefined\n2\n3\nundefined\n5\n2\nfunction\n", stream.buffered());
 }
 
+test "Engine direct eval function targeting a catch binding does not create a fallback var binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function scenario() {
+        \\  try { throw 1; } catch (caughtFunction) {
+        \\    eval("function caughtFunction(){ return 2; }");
+        \\    print("inside", caughtFunction());
+        \\  }
+        \\  try { caughtFunction(); } catch (error) { print("outside", error.name); }
+        \\}
+        \\scenario();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("inside 2\noutside ReferenceError\n", stream.buffered());
+}
+
+test "Engine direct eval catch var also instantiates the caller variable environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var catchEvalGlobal = "global";
+        \\var catchEvalLog = "";
+        \\function catchEvalScenario() {
+        \\  try { throw 8; } catch (catchEvalGlobal) {
+        \\    eval("var catchEvalGlobal = 42;");
+        \\    catchEvalLog += catchEvalGlobal;
+        \\  }
+        \\  catchEvalGlobal = "local";
+        \\  catchEvalLog += catchEvalGlobal;
+        \\}
+        \\catchEvalScenario();
+        \\print(catchEvalGlobal, catchEvalLog);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("global 42local\n", stream.buffered());
+}
+
+test "Engine direct eval catch var creation is idempotent and checks outer lexicals" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function preserveCatchEvalVar() {
+        \\  try { throw 1; } catch (x) { eval("var x = 2"); }
+        \\  x = 7;
+        \\  try { throw 2; } catch (x) { eval("var x = 3"); }
+        \\  return x;
+        \\}
+        \\function rejectCatchEvalVarPastLexical() {
+        \\  let x = 1;
+        \\  try { throw 2; } catch (x) {
+        \\    try { eval("var x"); } catch (error) { return error.name; }
+        \\  }
+        \\  return "no error";
+        \\}
+        \\print(preserveCatchEvalVar(), rejectCatchEvalVarPastLexical());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("7 SyntaxError\n", stream.buffered());
+}
+
+test "Engine direct eval var-object force initialization mirrors QuickJS" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function scenario() {
+        \\  eval("var dynamicEvalVar = 1");
+        \\  print(dynamicEvalVar);
+        \\  eval("var dynamicEvalVar");
+        \\  print(dynamicEvalVar);
+        \\}
+        \\scenario();
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\nundefined\n", stream.buffered());
+}
+
+test "Engine Annex B var copy does not use global function declaration validation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\(0, eval)('Object.defineProperty(globalThis, "annexFalseDescriptor", { value: 9, writable: false, enumerable: false, configurable: false })');
+        \\try { (0, eval)('if (false) { function annexFalseDescriptor() {} }'); print("false", annexFalseDescriptor); } catch (error) { print("false", error.name); }
+        \\(0, eval)('Object.defineProperty(globalThis, "annexTrueDescriptor", { value: 9, writable: false, enumerable: false, configurable: false })');
+        \\try { (0, eval)('if (true) { function annexTrueDescriptor() {} }'); print("true", annexTrueDescriptor); } catch (error) { print("true", error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("false 9\ntrue 9\n", stream.buffered());
+}
+
 test "Engine strict eval declarations stay inside the eval environment" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -1821,6 +2099,24 @@ test "Engine strict eval declarations stay inside the eval environment" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("undefined\nundefined\nundefined\nundefined\n1\n3\nundefined undefined\nundefined undefined\n", stream.buffered());
+}
+
+test "Engine indirect eval lexical declarations stay in each eval environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print((0, eval)('let isolatedIndirectLet = 1; class IsolatedIndirectClass {}; isolatedIndirectLet + (typeof IsolatedIndirectClass === "function")'));
+        \\print(typeof isolatedIndirectLet, typeof IsolatedIndirectClass);
+        \\print((0, eval)('"use strict"; let isolatedStrictLet = 2; class IsolatedStrictClass {}; isolatedStrictLet + (typeof IsolatedStrictClass === "function")'));
+        \\print(typeof isolatedStrictLet, typeof IsolatedStrictClass);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2\nundefined undefined\n3\nundefined undefined\n", stream.buffered());
 }
 
 test "Engine direct eval ignores popped shadows when capturing outer bindings" {
@@ -2121,6 +2417,72 @@ test "Engine direct eval in parameter initializer observes parameter TDZ" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("ReferenceError\nReferenceError\n", stream.buffered());
+}
+
+test "Engine parameter initializer TDZ uses the real parameter bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function later(a = b, b = 1) {}
+        \\function self(a = a) {}
+        \\try { later(); } catch (error) { print(error.name); }
+        \\try { self(); } catch (error) { print(error.name); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ReferenceError\nReferenceError\n", stream.buffered());
+}
+
+test "Engine async parameter grammar parses await only as an expression" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\async function propertyName(a = ({ await: 1 }).await) { return a; }
+        \\async function nestedFunction(a = async () => await 1) { return a; }
+        \\assert.sameValue(typeof propertyName, "function");
+        \\assert.sameValue(typeof nestedFunction, "function");
+        \\const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        \\const dynamicProperty = AsyncFunction("a = ({ await: 1 }).await", "return a;");
+        \\const dynamicNested = AsyncFunction("a = async () => await 1", "return a;");
+        \\assert.sameValue(typeof dynamicProperty, "function");
+        \\assert.sameValue(typeof dynamicNested, "function");
+        \\let declarationSyntax = false;
+        \\try { eval("async function invalid(a = await 1) {}"); }
+        \\catch (error) { declarationSyntax = error instanceof SyntaxError; }
+        \\assert.sameValue(declarationSyntax, true);
+        \\let constructorSyntax = false;
+        \\try { AsyncFunction("a = await 1", "return a;"); }
+        \\catch (error) { constructorSyntax = error instanceof SyntaxError; }
+        \\assert.sameValue(constructorSyntax, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine Dynamic Function preserves typed array subclass source" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let dynamicBodyEffects = 0;
+        \\const X = Function("dynamicBodyEffects++; return class X extends Uint8Array {}")();
+        \\const value = new X(2);
+        \\assert.sameValue(dynamicBodyEffects, 1);
+        \\assert.sameValue(X === Uint8Array, false);
+        \\assert.sameValue(X.name, "X");
+        \\assert.sameValue(value instanceof X, true);
+        \\assert.sameValue(value instanceof Uint8Array, true);
+        \\assert.sameValue(value.length, 2);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine direct eval callback passed to assert.throws keeps eval var scope" {
@@ -2459,6 +2821,50 @@ test "Engine top-level var probes preserve QuickJS global object semantics" {
         "desc true false 1\nwrite 2\nglobalWrite 5\nredefineData 9\ndelete false 9\nlexical 4 undefined\nwith 11 1\nevalInside 8 8\nevalAfter 8 8 true undefined\nstrictAssign TypeError 1\naccessorEvalInside 1 1\naccessorEvalAfter 1 1\ninherited true undefined undefined\nnonExtensible TypeError\n",
         stream.buffered(),
     );
+}
+
+test "Engine global function declarations publish through construction-time VarRef cells" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const indirect_result = try js.eval(
+        \\(0, eval)('Object.defineProperty(globalThis, "__qjsFunctionData", { value: 1, writable: false, enumerable: false, configurable: true })');
+        \\(0, eval)('function __qjsFunctionData(){ return 11; }');
+        \\var dataDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsFunctionData");
+        \\assert.sameValue(__qjsFunctionData(), 11);
+        \\assert.sameValue(dataDesc.writable, true);
+        \\assert.sameValue(dataDesc.enumerable, true);
+        \\assert.sameValue(dataDesc.configurable, true);
+        \\(0, eval)('Object.defineProperty(globalThis, "__qjsFunctionAccessor", { get: function(){ return 1; }, configurable: true })');
+        \\(0, eval)('function __qjsFunctionAccessor(){ return 12; }');
+        \\var accessorDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsFunctionAccessor");
+        \\assert.sameValue(__qjsFunctionAccessor(), 12);
+        \\assert.sameValue(accessorDesc.writable, true);
+        \\assert.sameValue(accessorDesc.enumerable, true);
+        \\assert.sameValue(accessorDesc.configurable, true);
+        \\(0, eval)('Object.defineProperty(globalThis, "__qjsFunctionFixed", { value: 1, writable: true, enumerable: true, configurable: false })');
+        \\(0, eval)('function __qjsFunctionFixed(){ return 13; }');
+        \\var fixedDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsFunctionFixed");
+        \\assert.sameValue(__qjsFunctionFixed(), 13);
+        \\assert.sameValue(fixedDesc.writable, true);
+        \\assert.sameValue(fixedDesc.enumerable, true);
+        \\assert.sameValue(fixedDesc.configurable, false);
+    );
+    defer indirect_result.free(js.runtime);
+
+    const setup_result = try js.eval(
+        \\Object.defineProperty(globalThis, "__qjsScriptFunction", { value: 1, writable: false, enumerable: false, configurable: true });
+    );
+    defer setup_result.free(js.runtime);
+    const script_result = try js.eval(
+        \\function __qjsScriptFunction(){ return 14; }
+        \\var scriptDesc = Object.getOwnPropertyDescriptor(globalThis, "__qjsScriptFunction");
+        \\assert.sameValue(__qjsScriptFunction(), 14);
+        \\assert.sameValue(scriptDesc.writable, true);
+        \\assert.sameValue(scriptDesc.enumerable, true);
+        \\assert.sameValue(scriptDesc.configurable, false);
+    );
+    defer script_result.free(js.runtime);
 }
 
 test "Engine top-level var probes preserve cross-realm global identity" {
@@ -4335,6 +4741,226 @@ test "Engine eval closures inherit direct eval function declarations" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("4\ntrue\nfalse\ntrue\n", stream.buffered());
+}
+
+test "destructured parameter default class keeps initialized parameter bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let f = ([cls = class {}, named = class Named {}]) => {
+        \\  assert.sameValue(cls.name, "cls");
+        \\  assert.sameValue(named.name, "Named");
+        \\};
+        \\f([]);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "top-level lexical destructuring reuses its predeclared global cells" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let { first } = { first: 1 };
+        \\const [second] = [2];
+        \\assert.sameValue(first, 1);
+        \\assert.sameValue(second, 2);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "for-of var destructuring predeclares generic binding patterns" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var seen = 0;
+        \\for (var [first = 23] of [[undefined]]) seen += first;
+        \\for (var { value: second } of [{ value: 19 }]) seen += second;
+        \\assert.sameValue(seen, 42);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "block function closures keep the current lexical binding cells" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function outer() {
+        \\  {
+        \\    let z = 4;
+        \\    const v = 6;
+        \\    function read() { return z + v; }
+        \\    assert.sameValue(read(), 10);
+        \\  }
+        \\}
+        \\outer();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "nested assignment patterns preserve yield identifier and expression grammar" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var yield = "key";
+        \\var direct = {};
+        \\[[direct[yield]]] = [[22]];
+        \\assert.sameValue(direct.key, 22);
+        \\var suspended = {};
+        \\var iterator = (function* () {
+        \\  [[suspended[yield]]] = [[23]];
+        \\})();
+        \\assert.sameValue(iterator.next().done, false);
+        \\assert.sameValue(suspended.key, undefined);
+        \\assert.sameValue(iterator.next("key").done, true);
+        \\assert.sameValue(suspended.key, 23);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "class field initializers inherit QuickJS arguments grammar" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\for (const source of [
+        \\  "class C { static value = arguments; }",
+        \\  "class C { static value = () => arguments; }",
+        \\  "class C { value = arguments; }",
+        \\]) {
+        \\  let syntax = false;
+        \\  try { eval(source); } catch (error) { syntax = error instanceof SyntaxError; }
+        \\  assert.sameValue(syntax, true);
+        \\}
+        \\class Allowed { static method() { return arguments.length; } }
+        \\assert.sameValue(Allowed.method(1, 2), 2);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "captured derived this binding can only be initialized once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let callSuperAgain;
+        \\class Base {}
+        \\class Derived extends Base {
+        \\  constructor() {
+        \\    super();
+        \\    callSuperAgain = () => super();
+        \\  }
+        \\}
+        \\new Derived();
+        \\assert.throws(ReferenceError, callSuperAgain);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "class name binding is in TDZ throughout its heritage expression" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\for (const source of [
+        \\  "class Inner extends Inner {}",
+        \\  "class Inner extends (Inner) {}",
+        \\  "var Outer = class Inner extends Inner {}",
+        \\]) {
+        \\  assert.throws(ReferenceError, () => eval(source));
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "class static blocks use their installed receiver as the super home object" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function Parent() {}
+        \\Parent.inherited = 42;
+        \\let observed;
+        \\class Child extends Parent {
+        \\  static { observed = super.inherited; }
+        \\}
+        \\assert.sameValue(observed, 42);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "body function declarations reuse same-name parameter bindings" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function declarationWins(x) {
+        \\  assert.sameValue(typeof x, "function");
+        \\  assert.sameValue(x(), 42);
+        \\  function x() { return 42; }
+        \\}
+        \\declarationWins();
+        \\function declarationWinsArguments(arguments) {
+        \\  assert.sameValue(typeof arguments, "function");
+        \\  function arguments() {}
+        \\}
+        \\declarationWinsArguments(1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "parameter-expression and body environments classify body functions by recorded scope" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const f = (p = eval("var arguments = 'parameter'"), read = () => arguments) => {
+        \\  function arguments() { return "body"; }
+        \\  assert.sameValue(arguments(), "body");
+        \\  assert.sameValue(read(), "parameter");
+        \\};
+        \\f();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "eval source conversion combines valid UTF-16 surrogate pairs" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const rawUnicodePattern = eval(`/\uD83D\uDC38/u`);
+        \\assert.sameValue(rawUnicodePattern.test("\u{1F438}"), true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "invalid opcode reports invalid bytecode without context exception" {

@@ -267,8 +267,8 @@ fn allocFrameVarRefWindow(ctx: *core.JSContext, frame: *frame_mod.Frame, count: 
     return std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(values)[0..ptr_bytes]);
 }
 
-fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_def.ClosureVar) !*core.VarRef {
-    switch (cv.closure_type) {
+fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_bytecode.BytecodeClosureVar) !*core.VarRef {
+    switch (cv.closureType()) {
         .global, .global_ref, .global_decl => {
             // qjs js_closure_global_var (quickjs.c:17228-17260): lexical env
             // VARREF -> global object VARREF property -> shared side-table
@@ -282,22 +282,22 @@ fn initialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode
             }
             const cell_value = try call_runtime.globalObjectGetUninitializedVar(ctx, global, cv.var_name);
             const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
-            if (cv.var_kind == .function_name) {
+            if (cv.varKind() == .function_name) {
                 cell.varRefIsFunctionNameSlot().* = true;
             }
             return cell;
         },
         else => {},
     }
-    const initial_value = switch (cv.closure_type) {
+    const initial_value = switch (cv.closureType()) {
         .global, .global_ref, .global_decl => core.JSValue.uninitialized(),
         .module_decl, .module_import => core.JSValue.uninitialized(),
         .local, .arg, .ref => call_runtime.globalLexicalValueForGlobal(ctx, global, cv.var_name) orelse global.getProperty(cv.var_name),
     };
     const cell = try core.VarRef.createClosed(ctx.runtime, initial_value);
-    cell.varRefIsConstSlot().* = cv.is_const;
-    cell.is_lexical = cv.is_lexical;
-    cell.varRefIsFunctionNameSlot().* = cv.var_kind == .function_name;
+    cell.varRefIsConstSlot().* = cv.isConst();
+    cell.is_lexical = cv.isLexical();
+    cell.varRefIsFunctionNameSlot().* = cv.varKind() == .function_name;
     return cell;
 }
 

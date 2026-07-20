@@ -372,7 +372,6 @@ fn op_invalid(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) cal
 const vm_property_locals = @import("vm_property_locals.zig");
 
 const eval_class_field_initializer_flag: u16 = 0x8000;
-const eval_parameter_initializer_flag: u16 = 0x4000;
 
 // ---- SPECIAL handlers (call / return / tail / drop / throw / eval / generator) ----
 
@@ -1532,7 +1531,7 @@ fn op_tail_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
 }
 fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, vm.machine.depth > 0) catch |e| return vm.fail(e)) {
+    switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, eval_class_field_initializer_flag, vm.machine.depth > 0) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .tail_inline => |request| {
             vm.tail_request = request;
@@ -3065,7 +3064,7 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
         const function = vm.function;
         if (idx < function.closure_var.len) {
             const cv = function.closure_var[idx];
-            if (!cv.is_lexical and cv.var_name != core.atom.ids.arguments and
+            if (!cv.isLexical() and cv.var_name != core.atom.ids.arguments and
                 !function.flags.runtime_strict)
             {
                 const global = vm.global;

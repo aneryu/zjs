@@ -679,9 +679,9 @@ pub const Frame = struct {
         const vd = self.function.vardefs[local_idx];
         var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
         return table.acquire(rt, binding_idx, &self.locals[local_idx], .{
-            .is_const = vd.is_const,
-            .is_lexical = vd.is_lexical,
-            .is_function_name = vd.var_kind == .function_name,
+            .is_const = vd.isConst(),
+            .is_lexical = vd.isLexical(),
+            .is_function_name = vd.varKind() == .function_name,
         });
     }
 
@@ -705,8 +705,8 @@ pub const Frame = struct {
     pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) !void {
         var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
         for (self.function.vardefs) |vd| {
-            if (vd.open_binding_idx == bytecode.function_bytecode.no_open_binding) continue;
-            try table.close(rt, vd.open_binding_idx);
+            if (!vd.isCaptured()) continue;
+            try table.close(rt, vd.var_ref_idx);
         }
     }
 
