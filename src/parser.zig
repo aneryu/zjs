@@ -3585,7 +3585,6 @@ pub const parser_core = struct {
         label_frames: std.ArrayList(LabelFrame),
         pending_label_atom: ?Atom,
         active_catch_marker_depth: u32,
-        droppable_rethrow_marker_count: u32,
         using_block_frames: std.ArrayList(UsingBlockFrame),
     };
 
@@ -3893,9 +3892,6 @@ pub const parser_core = struct {
         class_constructor_cpool_idx: ?u16 = null,
         last_anonymous_function_expr: bool = false,
         last_primary_was_arrow_function: bool = false,
-        return_expr_mode: bool = false,
-        return_expr_emitted_return: bool = false,
-        return_expr_cond_depth: u32 = 0,
         last_var_decl_atom: ?Atom = null,
         last_class_decl_atom: ?Atom = null,
         destructuring_binding_is_lexical: bool = false,
@@ -3912,12 +3908,6 @@ pub const parser_core = struct {
         active_with_atom: ?Atom = null,
         with_scope_id: u32 = 0,
         active_catch_marker_depth: u32 = 0,
-        /// How many of the active catch markers are pure rethrow markers of
-        /// finally-less `catch` bodies. When ALL active markers are such
-        /// markers, a `return <expr>` may drop them before evaluating the
-        /// expression (catch-and-rethrow equals plain propagation), putting a
-        /// trailing call into tail position per HasCallInTailPosition.
-        droppable_rethrow_marker_count: u32 = 0,
         emit_lexical_tdz_at_decl: bool = false,
         break_fixups: std.ArrayList(usize) = .empty,
         break_frame_lens: std.ArrayList(usize) = .empty,
@@ -4902,7 +4892,6 @@ pub const parser_core = struct {
                 .label_frames = s.label_frames,
                 .pending_label_atom = s.pending_label_atom,
                 .active_catch_marker_depth = s.active_catch_marker_depth,
-                .droppable_rethrow_marker_count = s.droppable_rethrow_marker_count,
                 .using_block_frames = s.using_block_frames,
             };
             s.break_fixups = .empty;
@@ -4918,7 +4907,6 @@ pub const parser_core = struct {
             s.label_frames = .empty;
             s.pending_label_atom = null;
             s.active_catch_marker_depth = 0;
-            s.droppable_rethrow_marker_count = 0;
             s.using_block_frames = .empty;
             return saved;
         }
@@ -4938,7 +4926,6 @@ pub const parser_core = struct {
             s.label_frames = saved.label_frames;
             s.pending_label_atom = saved.pending_label_atom;
             s.active_catch_marker_depth = saved.active_catch_marker_depth;
-            s.droppable_rethrow_marker_count = saved.droppable_rethrow_marker_count;
             s.using_block_frames = saved.using_block_frames;
         }
 
@@ -6425,7 +6412,7 @@ pub const parser_core = struct {
     pub fn parseExpr2(s: *State, flags: ParseFlags) Error!void {
         s.features.insert(.expression);
         var operand_flags = flags;
-        try parseExpr2Operand(s, operand_flags);
+        try parseAssignExpr2(s, operand_flags);
         var saw_comma = false;
         while (s.isPunct(',')) {
             saw_comma = true;
@@ -6433,7 +6420,7 @@ pub const parser_core = struct {
             // Discard left-hand side; `a, b` evaluates to b.
             try s.emitOp(opcode.op.drop);
             operand_flags.result_needed = flags.result_needed;
-            try parseExpr2Operand(s, operand_flags);
+            try parseAssignExpr2(s, operand_flags);
         }
         if (saw_comma) {
             s.last_anonymous_function_expr = false;
@@ -6442,148 +6429,6 @@ pub const parser_core = struct {
             // lvalue merely because `b` ended in a getter.
             s.invalidateLastOpcode();
         }
-    }
-
-    const ReturnExprOperandMode = struct {
-        disabled: bool = false,
-        return_expr_mode: bool = false,
-        return_expr_cond_depth: u32 = 0,
-
-        fn restore(self: ReturnExprOperandMode, s: *State) void {
-            if (!self.disabled) return;
-            s.return_expr_mode = self.return_expr_mode;
-            s.return_expr_cond_depth = self.return_expr_cond_depth;
-        }
-    };
-
-    fn enterReturnExprOperandMode(s: *State) ReturnExprOperandMode {
-        if (!s.return_expr_mode or s.return_expr_cond_depth != 0) return .{};
-        if (!returnExprOperandHasFollowingTopLevelComma(s)) return .{};
-
-        const saved = ReturnExprOperandMode{
-            .disabled = true,
-            .return_expr_mode = s.return_expr_mode,
-            .return_expr_cond_depth = s.return_expr_cond_depth,
-        };
-        s.return_expr_mode = false;
-        s.return_expr_cond_depth = 0;
-        return saved;
-    }
-
-    fn parseExpr2Operand(s: *State, flags: ParseFlags) Error!void {
-        const return_operand_mode = enterReturnExprOperandMode(s);
-        defer return_operand_mode.restore(s);
-        try parseAssignExpr2(s, flags);
-    }
-
-    const ReturnExprCommaScan = struct {
-        paren_depth: usize = 0,
-        bracket_depth: usize = 0,
-        brace_depth: usize = 0,
-
-        fn atTop(self: ReturnExprCommaScan) bool {
-            return self.paren_depth == 0 and self.bracket_depth == 0 and self.brace_depth == 0;
-        }
-    };
-
-    const ReturnExprCommaScanResult = enum {
-        continue_scan,
-        found_comma,
-        end_of_expr,
-    };
-
-    fn returnExprOperandHasFollowingTopLevelComma(s: *State) bool {
-        const saved_pos = s.lex.pos;
-        const saved_line = s.lex.line;
-        const saved_col = s.lex.col;
-        const saved_got_lf = s.lex.got_lf;
-        const saved_mark_pos = s.lex.mark_pos;
-        const saved_mark_line = s.lex.mark_line;
-        const saved_mark_col = s.lex.mark_col;
-        defer {
-            s.lex.pos = saved_pos;
-            s.lex.line = saved_line;
-            s.lex.col = saved_col;
-            s.lex.got_lf = saved_got_lf;
-            s.lex.mark_pos = saved_mark_pos;
-            s.lex.mark_line = saved_mark_line;
-            s.lex.mark_col = saved_mark_col;
-        }
-
-        var scan: ReturnExprCommaScan = .{};
-        var previous_token_kind: ?tok.TokenKind = null;
-        switch (scanReturnExprCommaToken(s, &s.token, false, &scan, &previous_token_kind) catch return false) {
-            .found_comma => return true,
-            .end_of_expr => return false,
-            .continue_scan => {},
-        }
-
-        while (true) {
-            var lookahead = s.lex.next() catch return false;
-            defer s.lex.freeToken(&lookahead);
-            const token_had_lf = s.lex.gotLineTerminator();
-            switch (scanReturnExprCommaToken(s, &lookahead, token_had_lf, &scan, &previous_token_kind) catch return false) {
-                .found_comma => return true,
-                .end_of_expr => return false,
-                .continue_scan => {},
-            }
-        }
-    }
-
-    fn scanReturnExprCommaToken(
-        s: *State,
-        scan_token: *const tok.Token,
-        token_had_lf: bool,
-        scan: *ReturnExprCommaScan,
-        previous_token_kind: *?tok.TokenKind,
-    ) Error!ReturnExprCommaScanResult {
-        const kind = scan_token.val;
-        if (scan.atTop()) {
-            if (token_had_lf) return .end_of_expr;
-            switch (kind) {
-                @as(tok.TokenKind, @intCast(',')) => return .found_comma,
-                @as(tok.TokenKind, @intCast(';')),
-                @as(tok.TokenKind, @intCast(')')),
-                @as(tok.TokenKind, @intCast(']')),
-                @as(tok.TokenKind, @intCast('}')),
-                tok.TOK_EOF,
-                => return .end_of_expr,
-                else => {},
-            }
-        }
-
-        switch (kind) {
-            @as(tok.TokenKind, @intCast('/')), tok.TOK_DIV_ASSIGN => {
-                if (try skipRegexpInPredeclareScan(s, previous_token_kind.*)) {
-                    previous_token_kind.* = tok.TOK_REGEXP;
-                    return .continue_scan;
-                }
-            },
-            tok.TOK_TEMPLATE => {
-                try skipTemplateInPredeclareScan(s, scan_token.*);
-                previous_token_kind.* = tok.TOK_TEMPLATE;
-                return .continue_scan;
-            },
-            @as(tok.TokenKind, @intCast('(')) => scan.paren_depth += 1,
-            @as(tok.TokenKind, @intCast('[')) => scan.bracket_depth += 1,
-            @as(tok.TokenKind, @intCast('{')) => scan.brace_depth += 1,
-            @as(tok.TokenKind, @intCast(')')) => {
-                if (scan.paren_depth == 0) return .end_of_expr;
-                scan.paren_depth -= 1;
-            },
-            @as(tok.TokenKind, @intCast(']')) => {
-                if (scan.bracket_depth == 0) return .end_of_expr;
-                scan.bracket_depth -= 1;
-            },
-            @as(tok.TokenKind, @intCast('}')) => {
-                if (scan.brace_depth == 0) return .end_of_expr;
-                scan.brace_depth -= 1;
-            },
-            else => {},
-        }
-
-        previous_token_kind.* = kind;
-        return .continue_scan;
     }
 
     /// `js_parse_assign_expr` (`quickjs.c:27615`).
@@ -7402,31 +7247,8 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.put_ref_value);
     }
 
-    /// Emit the return for one pushed-down `return`-expression branch (see
-    /// `parseCondExpr`), folding a trailing call into a tail call when the
-    /// branch ends in one. Mirrors the `TOK_RETURN` rewrite conditions.
-    fn emitReturnExprBranch(s: *State) Error!void {
-        // Async generator explicit return awaits the branch value (qjs
-        // emit_return OP_await, quickjs.c:28401-28404) before OP_return_async.
-        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
-        const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
-            rewriteTrailingCallAsTailCall(s)
-        else
-            TrailingCallRewrite.none;
-        if (tail_rewrite != .rewrote) {
-            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
-        }
-    }
-
     /// `js_parse_cond_expr` (`quickjs.c:27282`). `a ? b : c`.
     pub fn parseCondExpr(s: *State, flags: ParseFlags) Error!void {
-        const return_cond_depth = s.return_expr_cond_depth;
-        const in_return_expr = s.return_expr_mode;
-        if (in_return_expr) s.return_expr_cond_depth += 1;
-        defer {
-            if (in_return_expr) s.return_expr_cond_depth -= 1;
-        }
-
         try parseCoalesceExpr(s, flags);
         if (s.isPunct('?')) {
             try s.advance();
@@ -7437,17 +7259,6 @@ pub const parser_core = struct {
             // absolute u32 offsets; `resolve_labels` lowers them to relative
             // goto8/goto16 forms.
             const else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
-            if (s.return_expr_mode and return_cond_depth == 0 and !hasActiveIteratorCloses(s)) {
-                try parseAssignExprWithoutPendingFunctionName(s, then_flags);
-                try emitReturnExprBranch(s);
-                try patchForwardJump(s, else_jump_offset);
-                try expectPunct(s, ':');
-                try parseAssignExprWithoutPendingFunctionName(s, else_flags);
-                try emitReturnExprBranch(s);
-                s.return_expr_emitted_return = true;
-                s.last_anonymous_function_expr = false;
-                return;
-            }
             try parseAssignExprWithoutPendingFunctionName(s, then_flags);
             const end_jump_offset = try emitForwardJump(s, opcode.op.goto);
             try patchForwardJump(s, else_jump_offset);
@@ -11426,60 +11237,8 @@ pub const parser_core = struct {
                 if (s.is_eval or s.return_depth == 0) return Error.UnexpectedToken;
                 try s.advance();
                 const has_expr = s.peekKind() != ';' and s.peekKind() != '}' and !s.gotLineTerminator();
-                if (try emitCapturedReturnThroughFinally(s, has_expr)) {
-                    // return is emitted after the active finally block completes normally.
-                } else if (has_expr) {
-                    // When every active catch marker is a finally-less rethrow
-                    // marker, drop them before evaluating the return expression:
-                    // catch-and-rethrow equals plain propagation, and the
-                    // trailing call lands in tail position (HasCallInTailPosition
-                    // includes finally-less Catch blocks).
-                    const dropped_markers_early = !s.in_constructor and !s.in_async and
-                        s.active_catch_marker_depth > 0 and
-                        s.active_catch_marker_depth == s.droppable_rethrow_marker_count and
-                        s.return_finally_frames.items.len == 0 and
-                        !hasActiveIteratorCloses(s);
-                    if (dropped_markers_early) try emitCatchMarkerDropsToDepth(s, 0);
-                    const saved_return_expr_mode = s.return_expr_mode;
-                    const saved_return_expr_emitted = s.return_expr_emitted_return;
-                    s.return_expr_mode = true;
-                    s.return_expr_emitted_return = false;
-                    try parseExpr(s);
-                    const emitted_return = s.return_expr_emitted_return;
-                    s.return_expr_mode = saved_return_expr_mode;
-                    s.return_expr_emitted_return = saved_return_expr_emitted;
-                    if (!emitted_return) {
-                        // Async generator `return value;`: qjs awaits the value
-                        // before completing (emit_return OP_await for
-                        // JS_FUNC_ASYNC_GENERATOR hasval, quickjs.c:28401-28404).
-                        // Emit the await on the return value (now on the stack)
-                        // before the iterator-close / finally unwinding.
-                        if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
-                        if (hasActiveIteratorCloses(s) or (!dropped_markers_early and s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
-                            const return_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, return_tmp);
-                            try emitCatchMarkerDropsToDepth(s, 0);
-                            try emitActiveIteratorCloses(s);
-                            try s.emitOpU16(opcode.op.get_loc, return_tmp);
-                        }
-                        const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
-                            rewriteTrailingCallAsTailCall(s)
-                        else
-                            TrailingCallRewrite.none;
-                        if (tail_rewrite != .rewrote) {
-                            // QuickJS folds `return f(...)` into tail-call
-                            // opcodes; short-circuit paths jumping past a
-                            // rewritten call still need the return to land on.
-                            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
-                        }
-                    }
-                } else {
-                    if (s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0) {
-                        try emitCatchMarkerDropsToDepth(s, 0);
-                    }
-                    try emitActiveIteratorCloses(s);
-                    try s.emitOp(opcode.op.return_undef);
-                }
+                if (has_expr) try parseExpr(s);
+                try emitParsedReturn(s, has_expr);
                 _ = try s.expectSemicolon();
             },
             tok.TOK_THROW => {
@@ -12113,11 +11872,6 @@ pub const parser_core = struct {
                     }
                     const rethrow_off = try emitForwardJump(s, opcode.op.@"catch");
                     s.active_catch_marker_depth += 1;
-                    // Without a finally, this marker only re-throws: a `return`
-                    // in the catch body may drop it up front, putting a trailing
-                    // call into tail position (sec-static-semantics-
-                    // hascallintailposition lists finally-less Catch blocks).
-                    if (!has_finally) s.droppable_rethrow_marker_count += 1;
                     // QuickJS owns a wrapper scope for the catch statement in
                     // addition to the catch-binding scope and the ordinary
                     // block's own scope. This exact +2 topology is consumed by
@@ -12125,7 +11879,6 @@ pub const parser_core = struct {
                     try s.pushScope();
                     try s.emitEnterScope();
                     try parseBlock(s);
-                    if (!has_finally) s.droppable_rethrow_marker_count -= 1;
                     s.active_catch_marker_depth -= 1;
                     try s.emitOp(opcode.op.drop);
                     const catch_end_off = try emitForwardJump(s, opcode.op.goto);
@@ -12595,7 +12348,7 @@ pub const parser_core = struct {
         try emitPendingAbruptDropsForReturn(s);
         try emitActiveIteratorCloses(s);
         try s.emitOpU16(opcode.op.get_loc, s.return_finally_frames.items[current_frame_index].value_loc);
-        try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+        try emitFunctionReturn(s, true);
     }
 
     fn emitControlAfterFinallyCopy(s: *State, current_frame_index: usize, target: FinallyControlTarget) Error!void {
@@ -12618,7 +12371,6 @@ pub const parser_core = struct {
     fn emitCapturedReturnThroughFinally(s: *State, has_expr: bool) Error!bool {
         const frame_index = nearestReturnFinallyFrameForReturn(s, null) orelse return false;
         if (has_expr) {
-            try parseExpr(s);
             // Async generator explicit `return value;` awaits the value (qjs
             // emit_return OP_await, quickjs.c:28401-28404) before the finally
             // unwinding. An implicit return (no expr, `undefined` above) does not.
@@ -12628,6 +12380,56 @@ pub const parser_core = struct {
         }
         try emitStackTopReturnThroughFinallyFrame(s, frame_index, shouldDropPendingAbruptForCapture(s, frame_index));
         return true;
+    }
+
+    /// Complete a return after its optional expression has been parsed exactly
+    /// once. This is the parser-side counterpart of QuickJS `emit_return`: the
+    /// expression value is preserved while catch/iterator cleanup runs, and all
+    /// return kinds converge on one final opcode selection.
+    fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
+        if (try emitCapturedReturnThroughFinally(s, has_expr)) return;
+
+        if (has_expr and s.in_async and s.in_generator) {
+            try s.emitOp(opcode.op.await);
+        }
+
+        if (has_expr and (hasActiveIteratorCloses(s) or s.active_catch_marker_depth > 0)) {
+            const return_tmp = try appendTempLocal(s);
+            try s.emitOpU16(opcode.op.put_loc, return_tmp);
+            try emitCatchMarkerDropsToDepth(s, 0);
+            try emitActiveIteratorCloses(s);
+            try s.emitOpU16(opcode.op.get_loc, return_tmp);
+        } else if (!has_expr) {
+            if (s.active_catch_marker_depth > 0) try emitCatchMarkerDropsToDepth(s, 0);
+            try emitActiveIteratorCloses(s);
+        }
+
+        try emitFunctionReturn(s, has_expr);
+    }
+
+    fn emitFunctionReturn(s: *State, has_value: bool) Error!void {
+        var value_on_stack = has_value;
+        if (!value_on_stack and (s.in_async or s.in_generator)) {
+            try s.emitOp(opcode.op.undefined);
+            value_on_stack = true;
+        }
+
+        if (s.in_constructor and s.class_has_extends) {
+            if (value_on_stack) {
+                try s.emitOp(opcode.op.check_ctor_return);
+                const return_value = try emitForwardJump(s, opcode.op.if_false);
+                try s.emitOp(opcode.op.drop);
+                try s.emitScopeGetVarCheckThis(atom_this);
+                try patchForwardJump(s, return_value);
+            } else {
+                try s.emitScopeGetVarCheckThis(atom_this);
+            }
+            try s.emitOp(opcode.op.@"return");
+        } else if (s.in_async or s.in_generator) {
+            try s.emitOp(opcode.op.return_async);
+        } else {
+            try s.emitOp(if (value_on_stack) opcode.op.@"return" else opcode.op.return_undef);
+        }
     }
 
     fn emitCapturedControlThroughFinally(s: *State, target: FinallyControlTarget) Error!bool {
@@ -14495,9 +14297,6 @@ pub const parser_core = struct {
         const saved_is_eval = s.is_eval;
         const saved_eval_ret_idx = s.eval_ret_idx;
         const saved_return_depth = s.return_depth;
-        const saved_return_expr_mode = s.return_expr_mode;
-        const saved_return_expr_cond_depth = s.return_expr_cond_depth;
-        const saved_return_expr_emitted_return = s.return_expr_emitted_return;
         const saved_is_strict = s.is_strict;
         const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_allow_super = s.allow_super;
@@ -14522,9 +14321,6 @@ pub const parser_core = struct {
             s.is_eval = saved_is_eval;
             s.eval_ret_idx = saved_eval_ret_idx;
             s.return_depth = saved_return_depth;
-            s.return_expr_mode = saved_return_expr_mode;
-            s.return_expr_cond_depth = saved_return_expr_cond_depth;
-            s.return_expr_emitted_return = saved_return_expr_emitted_return;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             s.new_target_allowed = saved_new_target_allowed;
@@ -14893,9 +14689,6 @@ pub const parser_core = struct {
             s.is_eval = false;
             s.eval_ret_idx = -1;
             s.return_depth = if (func_kind == .class_static_block) 0 else 1;
-            s.return_expr_mode = false;
-            s.return_expr_cond_depth = 0;
-            s.return_expr_emitted_return = false;
         }
 
         // A nested function closes over the outer parameter environment, but
@@ -15012,9 +14805,6 @@ pub const parser_core = struct {
             s.is_eval = saved_is_eval;
             s.eval_ret_idx = saved_eval_ret_idx;
             s.return_depth = saved_return_depth;
-            s.return_expr_mode = saved_return_expr_mode;
-            s.return_expr_cond_depth = saved_return_expr_cond_depth;
-            s.return_expr_emitted_return = saved_return_expr_emitted_return;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
@@ -15149,9 +14939,6 @@ pub const parser_core = struct {
         const saved_pending_name = s.pending_function_name;
         const saved_pending_decl = s.pending_function_is_decl;
         const saved_return_depth = s.return_depth;
-        const saved_return_expr_mode = s.return_expr_mode;
-        const saved_return_expr_cond_depth = s.return_expr_cond_depth;
-        const saved_return_expr_emitted_return = s.return_expr_emitted_return;
         const saved_is_strict = s.is_strict;
         const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_new_target_allowed = s.new_target_allowed;
@@ -15172,9 +14959,6 @@ pub const parser_core = struct {
             s.is_eval = saved_is_eval;
             s.eval_ret_idx = saved_eval_ret_idx;
             s.return_depth = saved_return_depth;
-            s.return_expr_mode = saved_return_expr_mode;
-            s.return_expr_cond_depth = saved_return_expr_cond_depth;
-            s.return_expr_emitted_return = saved_return_expr_emitted_return;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             s.new_target_allowed = saved_new_target_allowed;
@@ -15219,9 +15003,6 @@ pub const parser_core = struct {
             s.is_eval = false;
             s.eval_ret_idx = -1;
             s.return_depth = 1;
-            s.return_expr_mode = false;
-            s.return_expr_cond_depth = 0;
-            s.return_expr_emitted_return = false;
         }
         const saved_outer_parameter_initializer = s.in_parameter_initializer;
         s.in_parameter_initializer = false;
@@ -15477,9 +15258,7 @@ pub const parser_core = struct {
             // qjs parses arrow bodies with `js_parse_assign_expr`
             // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
-            if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
-                try s.emitOp(opcode.op.@"return");
-            }
+            try s.emitOp(if (is_async) opcode.op.return_async else opcode.op.@"return");
             s.popScope();
         }
         s.leaveControlBoundary(saved_control_frames);
@@ -15499,9 +15278,6 @@ pub const parser_core = struct {
             s.is_eval = saved_is_eval;
             s.eval_ret_idx = saved_eval_ret_idx;
             s.return_depth = saved_return_depth;
-            s.return_expr_mode = saved_return_expr_mode;
-            s.return_expr_cond_depth = saved_return_expr_cond_depth;
-            s.return_expr_emitted_return = saved_return_expr_emitted_return;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             s.new_target_allowed = saved_new_target_allowed;
@@ -15514,66 +15290,6 @@ pub const parser_core = struct {
             try s.emitFClosure(child_cpool_idx);
             s.last_anonymous_function_expr = true;
         }
-    }
-
-    const TrailingCallRewrite = enum {
-        /// No rewrite happened; the caller must emit its return opcode.
-        none,
-        /// Trailing call rewritten to a tail call and nothing jumps to the
-        /// current end: the tail call subsumes the return entirely.
-        rewrote,
-        /// Trailing call rewritten to a tail call, but short-circuit paths
-        /// (`&&` / `||` / `??` / optional chains) jump to the current end
-        /// carrying their own result value: the caller must still emit the
-        /// return opcode for those paths to land on.
-        rewrote_jump_target,
-    };
-
-    const TrailingScan = struct { last_op_index: usize, jump_to_end: bool };
-
-    /// Decode the current (Phase 1) code linearly to find the last
-    /// instruction boundary and whether any jump targets the current end.
-    /// Use the parser-phase decoder so temp opcodes sharing ids with final
-    /// short forms (`push_empty_string` / private-field temps, line_num /
-    /// get_loc1, etc.) are sized from the byte stream plus atom operand
-    /// stream, not from the opcode id alone. Returns null when the stream
-    /// cannot be decoded, keeping tail-call rewriting disabled.
-    fn scanTrailingCode(code: []const u8, atoms: []const Atom, include_conditional: bool) ?TrailingScan {
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        var last_op_index: usize = 0;
-        var jump_to_end = false;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
-            const size: usize = instr.size;
-            if (size == 0 or pc + size > code.len) return null;
-            if (op_id == opcode.op.goto or
-                (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
-            {
-                const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-                if (target == code.len) jump_to_end = true;
-            }
-            last_op_index = pc;
-            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += size;
-        }
-        return .{ .last_op_index = last_op_index, .jump_to_end = jump_to_end };
-    }
-
-    fn rewriteTrailingCallAsTailCall(s: *State) TrailingCallRewrite {
-        var code = s.currentCode();
-        if (code.len < 3) return .none;
-        const scan = scanTrailingCode(code, s.currentAtomOperands(), true) orelse return .none;
-        // The trailing call opcode must be a real instruction boundary; a raw
-        // `code[len - 3]` probe can hit operand payload bytes (e.g. push_i32).
-        if (scan.last_op_index != code.len - 3) return .none;
-        switch (code[scan.last_op_index]) {
-            opcode.op.call => code[scan.last_op_index] = opcode.op.tail_call,
-            opcode.op.call_method => code[scan.last_op_index] = opcode.op.tail_call_method,
-            else => return .none,
-        }
-        return if (scan.jump_to_end) .rewrote_jump_target else .rewrote;
     }
 
     const DestructuringKind = enum { array, object };

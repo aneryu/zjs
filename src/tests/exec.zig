@@ -9918,36 +9918,48 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
     try std.testing.expect(result.isUndefined());
 }
 
-test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
+test "ordinary arrow and method recursion exhaust the logical stack budget" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    // Each recursion goes 40000 deep — past both the native-recursion limit
-    // (`max(16, stack_limit/16384)`) and the inline-frame storage cap
-    // (`max_chunks * entries_per_chunk` = 8192), so it only completes if the
-    // tail call REUSES the inline frame rather than pushing a new one (Phase 7).
-    // test262 has no coverage for deep tail recursion at the arrow or method
-    // position, so this is the self-built fixture. Arrows gained inline
-    // eligibility (lexical this/new.target routed through the shared frame-setup
-    // boxing primitive); `tail_call_method` reuses the frame with the receiver
-    // as `this` (mutual `even`/`odd` and self `loop`).
+    // The baseline source compiler deliberately emits ordinary call + return,
+    // not parser-produced tail-call opcodes.  Like QuickJS without the
+    // tail-call-optimization feature, sufficiently deep recursion must consume
+    // the logical stack budget and surface the catchable stack-overflow error.
+    // Exercise arrows, mutual methods, and a self method, then prove that the
+    // same runtime remains usable after each caught overflow.
     const result = try js.evalWithOutput(
-        \\const arrowTail = (n, acc) => n === 0 ? acc : arrowTail(n - 1, acc + 1);
-        \\print(arrowTail(40000, 0));
+        \\function expectStackOverflow(run) {
+        \\  try {
+        \\    run();
+        \\    print("missing overflow");
+        \\  } catch (error) {
+        \\    print(error.name + ": " + error.message);
+        \\  }
+        \\}
+        \\const arrowRecurse = (n) => n === 0 ? 0 : arrowRecurse(n - 1);
+        \\expectStackOverflow(() => arrowRecurse(40000));
         \\const machine = {
         \\  even(n) { return n === 0 ? "even" : this.odd(n - 1); },
         \\  odd(n) { return n === 0 ? "odd" : this.even(n - 1); },
         \\};
-        \\print(machine.even(40000));
-        \\const counter = { loop(n, acc) { return n === 0 ? acc : this.loop(n - 1, acc + n); } };
-        \\print(counter.loop(40000, 0));
+        \\expectStackOverflow(() => machine.even(40000));
+        \\const counter = { loop(n) { return n === 0 ? 0 : this.loop(n - 1); } };
+        \\expectStackOverflow(() => counter.loop(40000));
+        \\print("recovered");
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("40000\neven\n800020000\n", stream.buffered());
+    try std.testing.expectEqualStrings(
+        "InternalError: stack overflow\n" ++
+            "InternalError: stack overflow\n" ++
+            "InternalError: stack overflow\n" ++
+            "recovered\n",
+        stream.buffered(),
+    );
 }
 
 test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {

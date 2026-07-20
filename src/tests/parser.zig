@@ -1048,20 +1048,6 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     return function;
 }
 
-fn returnExprEmittedReturn(env: *TestEnv, src: []const u8) !bool {
-    const name = try env.rt.internAtom("test");
-    defer env.rt.atoms.free(name);
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
-    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
-    defer state.deinit(env.rt);
-    state.return_expr_mode = true;
-    state.return_expr_emitted_return = false;
-    try parser_core.parseExpr(&state);
-    return state.return_expr_emitted_return;
-}
-
 fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
     if (parseStatement(env, src)) |fn_bc_result| {
         var fn_bc = fn_bc_result;
@@ -2646,33 +2632,45 @@ test "F5: return statement with value" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.@"return" });
 }
 
-test "F5: return conditional branch emission only applies to comma tail operand" {
+test "F5: return comma and conditional expressions use one final return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
-    try std.testing.expect(try returnExprEmittedReturn(&env, "a ? b : c"));
-    try std.testing.expect(!try returnExprEmittedReturn(&env, "a ? b : c, d"));
-    try std.testing.expect(try returnExprEmittedReturn(&env, "a, b ? c : d"));
+    const cases = [_][]const u8{
+        "return a, b;",
+        "return a ? b : c, d;",
+        "return a, b ? c : d;",
+        "return (a, (b, c));",
+    };
+    for (cases) |source| {
+        var fn_bc = try parseFunctionBodyStatement(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
+        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
+    }
 }
 
-test "F5: return conditional branch emission preserves tail calls" {
+test "F5: return conditional expression merges before one plain return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseFunctionBodyStatement(&env, "return f() ? g() : h();");
+    var fn_bc = try parseFunctionBodyStatement(&env, "return p ? f() : g();");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.tail_call));
+    try std.testing.expectEqual(@as(usize, 2), countCalls(fn_bc.code));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
 }
 
-test "F5: tail call scan handles push_empty_string overlap" {
+test "F5: return call remains plain call plus return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return f(\"\");");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcode(fn_bc.code, op.push_empty_string);
-    try expectOpcode(fn_bc.code, op.tail_call);
-    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.call));
+    try std.testing.expectEqual(@as(usize, 1), countCalls(fn_bc.code));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
 }
 
 test "F5: throw statement" {

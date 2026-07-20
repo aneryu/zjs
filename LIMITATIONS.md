@@ -61,23 +61,14 @@ module loading are not supported.
 
 ## Proper Tail Calls
 
-- Plain `tail_call` sites, tail-position direct `eval` calls that do not
-  resolve to %eval%, arrow targets, and `tail_call_method` sites can run as
-  real tail-call optimization through inline-frame reuse when the target is
-  inline-eligible: logical call depth stays constant. `test262.conf` enables
-  the `tail-call-optimization` feature.
-- Tail targets that still take the recursive slow path, where deep tail
-  recursion grows the native stack, include L0 frames (generator/eval shells),
-  class-constructor calls, cross-realm callees, async/generator targets, native
-  builtins, and simple fusion bodies that deliberately use their specialized
-  path. The class-constructor exclusion is spec-correct: calling a class
-  constructor without `new` throws TypeError, so no deep recursion exists
-  there.
-- Failure shape: the recursive path is protected by the dual depth guard
-  (native depth `max(16, stack_limit / 16384)` plus the logical depth limit)
-  and throws RangeError when exceeded — it is not a crash. The consequence is
-  that spec-legal deep tail recursion through a non-inline-eligible tail target
-  hits RangeError early, deviating from PTC's constant-stack semantics.
+- The default source compiler emits ordinary `call + return`; it does not
+  perform parser-time proper-tail-call rewriting. Accordingly,
+  `tail-call-optimization` is skipped in `test262.conf`, and deep source-level
+  tail recursion eventually throws catchable `InternalError: stack overflow`.
+- The `tail_call` / `tail_call_method` bytecode ABI and VM frame-reuse machinery
+  remain available for hand-authored bytecode and internal paths. A future PTC
+  product extension must be a default-off, independent post-CFG pass and be
+  A/B-tested separately from the baseline compiler.
 - Note: test262 has no coverage for deep tail recursion in method/arrow
   position (`tco-member-args.js` actually contains a plain call), so those
   shapes are guarded by focused Zig regression fixtures.
