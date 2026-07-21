@@ -3552,6 +3552,7 @@ pub const parser_core = struct {
         drop_count: i32,
         label_finally: i32,
         scope_level: i32,
+        catch_marker_depth: u32,
         has_iterator: bool,
         is_regular_stmt: bool,
     };
@@ -3572,6 +3573,7 @@ pub const parser_core = struct {
     };
 
     const ControlFrames = struct {
+        top_break: ?*BlockEnv,
         break_fixups: std.ArrayList(usize),
         break_frame_lens: std.ArrayList(usize),
         break_frame_catch_marker_depths: std.ArrayList(u32),
@@ -3594,6 +3596,7 @@ pub const parser_core = struct {
         break_depth: usize,
         continue_depth: usize,
         label_depth: usize,
+        block_boundary: ?*BlockEnv,
         fixups: std.ArrayList(usize) = .empty,
         break_fixups: std.ArrayList(usize) = .empty,
         continue_fixups: std.ArrayList(usize) = .empty,
@@ -3612,18 +3615,6 @@ pub const parser_core = struct {
     const LabelledFinallyControlFixup = struct {
         off: usize,
         atom_id: Atom,
-    };
-
-    const BlockScopeDecls = struct {
-        scope_level: i32,
-        function_depth: usize,
-        lexical_names: std.ArrayList(Atom) = .empty,
-        var_names: std.ArrayList(Atom) = .empty,
-
-        fn deinit(self: *BlockScopeDecls, allocator: std.mem.Allocator) void {
-            self.lexical_names.deinit(allocator);
-            self.var_names.deinit(allocator);
-        }
     };
 
     const UsingStackKind = enum {
@@ -3894,15 +3885,10 @@ pub const parser_core = struct {
         last_primary_was_arrow_function: bool = false,
         last_var_decl_atom: ?Atom = null,
         last_class_decl_atom: ?Atom = null,
-        destructuring_binding_is_lexical: bool = false,
-        destructuring_binding_is_const: bool = false,
-        destructuring_predeclare_only: bool = false,
         // True while parsing the parameter list of a class/object-literal
         // method. Mirrors qjs func_type == JS_PARSE_FUNC_METHOD in the
         // duplicate-argument check gate (quickjs.c:36443-36448).
         parsing_method_params: bool = false,
-        destructuring_assignment_target_mode: bool = false,
-        collect_module_export_bindings: bool = false,
         assign_expr_depth: u32 = 0,
         last_coalesce_expr_depth: ?u32 = null,
         active_with_atom: ?Atom = null,
@@ -3926,7 +3912,6 @@ pub const parser_core = struct {
         suppress_return_finally_capture_depth: usize = 0,
         suppress_return_finally_capture_end: usize = 0,
         finally_pending_abrupt_frames: std.ArrayList(FinallyPendingAbruptFrame) = .empty,
-        block_scope_decls: std.ArrayList(BlockScopeDecls) = .empty,
         using_block_frames: std.ArrayList(UsingBlockFrame) = .empty,
         class_private_elements: std.ArrayList(ClassPrivateElement) = .empty,
         class_private_bound_names: std.ArrayList(Atom) = .empty,
@@ -4036,10 +4021,6 @@ pub const parser_core = struct {
             }
             self.return_finally_frames.deinit(self.function.memory.allocator);
             self.finally_pending_abrupt_frames.deinit(self.function.memory.allocator);
-            for (self.block_scope_decls.items) |*decls| {
-                decls.deinit(self.function.memory.allocator);
-            }
-            self.block_scope_decls.deinit(self.function.memory.allocator);
             self.using_block_frames.deinit(self.function.memory.allocator);
             self.truncateClassPrivateElements(0);
             self.class_private_elements.deinit(self.function.memory.allocator);
@@ -4129,10 +4110,6 @@ pub const parser_core = struct {
             const new_scope = self.cur_func().appendScope(parent) catch return error.OutOfMemory;
             self.scope_level = new_scope;
             self.cur_func().scope_level = new_scope;
-            try self.block_scope_decls.append(self.function.memory.allocator, .{
-                .scope_level = new_scope,
-                .function_depth = self.cur_func_stack.len,
-            });
         }
 
         /// Allocate the current function's ordinary body scope without
@@ -4150,14 +4127,6 @@ pub const parser_core = struct {
         /// correct chain.
         pub fn popScope(self: *State) void {
             if (self.scope_level < 0) return;
-            if (self.block_scope_decls.items.len > 0) {
-                const last_idx = self.block_scope_decls.items.len - 1;
-                const last = &self.block_scope_decls.items[last_idx];
-                if (last.scope_level == self.scope_level and last.function_depth == self.cur_func_stack.len) {
-                    last.deinit(self.function.memory.allocator);
-                    _ = self.block_scope_decls.pop().?;
-                }
-            }
             const parent = self.cur_func().scopes[@intCast(self.scope_level)].parent;
             self.scope_level = parent;
             self.cur_func().scope_level = parent;
@@ -4572,43 +4541,6 @@ pub const parser_core = struct {
             try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, 0);
         }
 
-        fn currentBlockDecls(self: *State) ?*BlockScopeDecls {
-            if (self.block_scope_decls.items.len == 0) return null;
-            const idx = self.block_scope_decls.items.len - 1;
-            const decls = &self.block_scope_decls.items[idx];
-            if (decls.scope_level != self.scope_level or decls.function_depth != self.cur_func_stack.len) return null;
-            return decls;
-        }
-
-        fn appendUniqueAtom(self: *State, list: *std.ArrayList(Atom), name: Atom) Error!void {
-            for (list.items) |existing| {
-                if (existing == name) return;
-            }
-            try list.append(self.function.memory.allocator, name);
-        }
-
-        fn registerBlockLexicalDeclaration(self: *State, name: Atom) Error!void {
-            const decls = self.currentBlockDecls() orelse return;
-            for (decls.var_names.items) |var_name| {
-                if (var_name == name) return Error.UnexpectedToken;
-            }
-            try self.appendUniqueAtom(&decls.lexical_names, name);
-        }
-
-        fn registerBlockVarDeclaration(self: *State, name: Atom) Error!void {
-            const function_depth = self.cur_func_stack.len;
-            for (self.block_scope_decls.items) |*decls| {
-                if (decls.function_depth != function_depth) continue;
-                for (decls.lexical_names.items) |lexical_name| {
-                    if (lexical_name == name) return Error.UnexpectedToken;
-                }
-            }
-            for (self.block_scope_decls.items) |*decls| {
-                if (decls.function_depth != function_depth) continue;
-                try self.appendUniqueAtom(&decls.var_names, name);
-            }
-        }
-
         /// Atom id reserved for the eval-return slot, mirroring
         /// `JS_ATOM__ret_` / `<ret>` (`quickjs-atom.h:115`). Used as the
         /// var name for the synthetic local that captures every
@@ -4879,6 +4811,7 @@ pub const parser_core = struct {
 
         fn enterControlBoundary(s: *State) ControlFrames {
             const saved = ControlFrames{
+                .top_break = s.top_break,
                 .break_fixups = s.break_fixups,
                 .break_frame_lens = s.break_frame_lens,
                 .break_frame_catch_marker_depths = s.break_frame_catch_marker_depths,
@@ -4894,6 +4827,7 @@ pub const parser_core = struct {
                 .active_catch_marker_depth = s.active_catch_marker_depth,
                 .using_block_frames = s.using_block_frames,
             };
+            s.top_break = null;
             s.break_fixups = .empty;
             s.break_frame_lens = .empty;
             s.break_frame_catch_marker_depths = .empty;
@@ -4913,6 +4847,7 @@ pub const parser_core = struct {
 
         fn leaveControlBoundary(s: *State, saved: ControlFrames) void {
             s.deinitCurrentControlFrames();
+            s.top_break = saved.top_break;
             s.break_fixups = saved.break_fixups;
             s.break_frame_lens = saved.break_frame_lens;
             s.break_frame_catch_marker_depths = saved.break_frame_catch_marker_depths;
@@ -6526,45 +6461,20 @@ pub const parser_core = struct {
     }
 
     fn parseDestructuringAssignment(s: *State, flags: ParseFlags) Error!bool {
-        const kind: DestructuringKind = switch (s.peekKind()) {
-            @as(tok.TokenKind, @intCast('[')) => .array,
-            @as(tok.TokenKind, @intCast('{')) => .object,
-            else => return false,
-        };
-        const initial = takeParserSnapshot(s);
+        if (s.peekKind() != @as(tok.TokenKind, @intCast('[')) and
+            s.peekKind() != @as(tok.TokenKind, @intCast('{')))
         {
-            const saved_assignment_target_mode = s.destructuring_assignment_target_mode;
-            s.destructuring_assignment_target_mode = true;
-            defer s.destructuring_assignment_target_mode = saved_assignment_target_mode;
-            parseDestructuringPattern(s, kind, null) catch |err| switch (err) {
-                error.UnexpectedToken, error.InvalidAssignmentTarget => {
-                    try truncateSpeculativeParse(s, initial.code_len, initial.atom_len);
-                    restoreParserLexerSnapshot(s, initial);
-                    return false;
-                },
-                else => return err,
-            };
-            try truncateSpeculativeParse(s, initial.code_len, initial.atom_len);
-        }
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('='))) {
-            restoreParserLexerSnapshot(s, initial);
             return false;
         }
-        try s.advance();
-
-        const temp_idx = try appendTempLocal(s);
-        const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
-        try parseAssignExpr2(s, rhs_flags);
-        try s.emitOpU16(opcode.op.set_loc, temp_idx);
-        const after_rhs = takeParserSnapshot(s);
-        restoreParserLexerSnapshot(s, initial);
-        {
-            const saved_assignment_target_mode = s.destructuring_assignment_target_mode;
-            s.destructuring_assignment_target_mode = true;
-            defer s.destructuring_assignment_target_mode = saved_assignment_target_mode;
-            try parseDestructuringPattern(s, kind, BindingSource{ .loc = temp_idx });
-        }
-        restoreParserLexerSnapshot(s, after_rhs);
+        const topology = try scanPatternTopology(s);
+        if (topology.following != @as(tok.TokenKind, @intCast('='))) return false;
+        _ = try parseDestructuringElement(
+            s,
+            .assignment,
+            false,
+            true,
+            ParseFlags{ .in_accepted = flags.in_accepted },
+        );
         return true;
     }
 
@@ -7041,160 +6951,6 @@ pub const parser_core = struct {
         try list.append(allocator, retained);
     }
 
-    fn appendSwitchLexName(lex_names: *std.ArrayList(Atom), var_names: *const std.ArrayList(Atom), atom_id: Atom, allocator: std.mem.Allocator) Error!void {
-        if (atomListContains(lex_names.items, atom_id) or atomListContains(var_names.items, atom_id)) return Error.UnexpectedToken;
-        try lex_names.append(allocator, atom_id);
-    }
-
-    fn appendSwitchFunctionName(
-        s: *State,
-        lex_names: *std.ArrayList(Atom),
-        function_names: *std.ArrayList(Atom),
-        var_names: *const std.ArrayList(Atom),
-        atom_id: Atom,
-    ) Error!void {
-        if (s.is_strict or s.cur_func().is_strict_mode) {
-            try appendSwitchLexName(lex_names, var_names, atom_id, s.lex.allocator);
-            return;
-        }
-        if (atomListContains(var_names.items, atom_id)) return Error.UnexpectedToken;
-        if (atomListContains(lex_names.items, atom_id) and !atomListContains(function_names.items, atom_id)) return Error.UnexpectedToken;
-        if (!atomListContains(lex_names.items, atom_id)) try lex_names.append(s.lex.allocator, atom_id);
-        if (!atomListContains(function_names.items, atom_id)) try function_names.append(s.lex.allocator, atom_id);
-    }
-
-    fn appendSwitchVarName(var_names: *std.ArrayList(Atom), lex_names: *const std.ArrayList(Atom), atom_id: Atom, allocator: std.mem.Allocator) Error!void {
-        if (atomListContains(lex_names.items, atom_id)) return Error.UnexpectedToken;
-        if (!atomListContains(var_names.items, atom_id)) try var_names.append(allocator, atom_id);
-    }
-
-    fn scanSwitchDeclarationName(
-        s: *State,
-        lex_names: *std.ArrayList(Atom),
-        function_names: *std.ArrayList(Atom),
-        var_names: *std.ArrayList(Atom),
-        kind: enum { lexical, function, var_decl },
-    ) Error!void {
-        var effective_kind = kind;
-        if (s.peekKind() == '*') {
-            try s.advance();
-            if (kind == .function) effective_kind = .lexical;
-        }
-        if (s.peekKind() != tok.TOK_IDENT) return;
-        const atom_id = s.token.payload.ident.atom;
-        switch (effective_kind) {
-            .lexical => try appendSwitchLexName(lex_names, var_names, atom_id, s.lex.allocator),
-            .function => try appendSwitchFunctionName(s, lex_names, function_names, var_names, atom_id),
-            .var_decl => try appendSwitchVarName(var_names, lex_names, atom_id, s.lex.allocator),
-        }
-    }
-
-    fn validateSwitchCaseBlockDeclarations(s: *State) Error!void {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var lex_names: std.ArrayList(Atom) = .empty;
-        defer lex_names.deinit(s.lex.allocator);
-        var function_names: std.ArrayList(Atom) = .empty;
-        defer function_names.deinit(s.lex.allocator);
-        var var_names: std.ArrayList(Atom) = .empty;
-        defer var_names.deinit(s.lex.allocator);
-
-        var brace_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const kind = s.peekKind();
-            if (kind == @as(tok.TokenKind, @intCast('}'))) {
-                if (brace_depth == 0) return;
-                brace_depth -= 1;
-                previous_token_kind = kind;
-                try s.advance();
-                continue;
-            }
-            if (kind == @as(tok.TokenKind, @intCast('{'))) {
-                brace_depth += 1;
-                previous_token_kind = kind;
-                try s.advance();
-                continue;
-            }
-            if (brace_depth != 0) {
-                if (kind == tok.TOK_TEMPLATE) {
-                    try skipTemplateInPredeclareScan(s, s.token);
-                    previous_token_kind = tok.TOK_TEMPLATE;
-                    try s.advance();
-                    continue;
-                }
-                if (tokenCanStartSlashRegexp(kind)) {
-                    if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
-                        previous_token_kind = tok.TOK_REGEXP;
-                        try s.advance();
-                        continue;
-                    }
-                    previous_token_kind = kind;
-                    try s.advance();
-                    continue;
-                }
-                previous_token_kind = kind;
-                try s.advance();
-                continue;
-            }
-
-            if (kind == tok.TOK_IF and try skipAnnexBIfFunctionDeclarationsInScan(s)) continue;
-
-            switch (kind) {
-                tok.TOK_LET, tok.TOK_CONST => {
-                    previous_token_kind = kind;
-                    try s.advance();
-                    try scanSwitchDeclarationName(s, &lex_names, &function_names, &var_names, .lexical);
-                },
-                tok.TOK_VAR => {
-                    previous_token_kind = kind;
-                    try s.advance();
-                    try scanSwitchDeclarationName(s, &lex_names, &function_names, &var_names, .var_decl);
-                },
-                tok.TOK_CLASS => {
-                    previous_token_kind = kind;
-                    try s.advance();
-                    try scanSwitchDeclarationName(s, &lex_names, &function_names, &var_names, .lexical);
-                },
-                tok.TOK_FUNCTION => {
-                    previous_token_kind = kind;
-                    try s.advance();
-                    try scanSwitchDeclarationName(s, &lex_names, &function_names, &var_names, .function);
-                },
-                tok.TOK_IDENT => {
-                    if (s.isIdent("async") and s.peekNextKindNoLineTerminator(tok.TOK_FUNCTION)) {
-                        previous_token_kind = tok.TOK_FUNCTION;
-                        try s.advance();
-                        try s.advance();
-                        try scanSwitchDeclarationName(s, &lex_names, &function_names, &var_names, .lexical);
-                    } else {
-                        previous_token_kind = kind;
-                        try s.advance();
-                    }
-                },
-                tok.TOK_TEMPLATE => {
-                    try skipTemplateInPredeclareScan(s, s.token);
-                    previous_token_kind = tok.TOK_TEMPLATE;
-                    try s.advance();
-                },
-                '/', tok.TOK_DIV_ASSIGN => {
-                    if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
-                        previous_token_kind = tok.TOK_REGEXP;
-                        try s.advance();
-                        continue;
-                    }
-                    previous_token_kind = kind;
-                    try s.advance();
-                },
-                else => {
-                    previous_token_kind = kind;
-                    try s.advance();
-                },
-            }
-        }
-    }
-
     fn tokenStartsPrimaryExpression(k: tok.TokenKind) bool {
         return k == tok.TOK_NUMBER or
             k == tok.TOK_STRING or
@@ -7222,54 +6978,6 @@ pub const parser_core = struct {
 
     fn tokenCanStartSlashRegexp(k: tok.TokenKind) bool {
         return k == @as(tok.TokenKind, @intCast('/')) or k == tok.TOK_DIV_ASSIGN;
-    }
-
-    fn emitWithGetVarFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        _ = with_atom;
-        try s.emitScopeGetVar(ident);
-    }
-
-    fn emitWithMakeRefFallback(s: *State, with_atom: Atom, ident: Atom) Error!void {
-        _ = with_atom;
-        try s.emitScopeMakeRef(ident);
-    }
-
-    fn emitDestructuringTargetBase(s: *State, ident: Atom) Error!void {
-        if (s.active_with_atom) |with_atom| {
-            try emitWithGetVarFallback(s, with_atom, ident);
-        } else {
-            try s.emitScopeGetVar(ident);
-        }
-    }
-
-    const DestructuringBindingRef = struct {
-        base_tmp: u16,
-        key_tmp: u16,
-    };
-
-    fn captureDestructuringVarBindingRef(s: *State, atom_id: Atom) Error!?DestructuringBindingRef {
-        if (s.destructuring_binding_is_lexical) return null;
-        const with_atom = s.active_with_atom orelse return null;
-        try emitWithMakeRefFallback(s, with_atom, atom_id);
-        const key_tmp = try appendTempLocal(s);
-        try s.emitOpU16(opcode.op.put_loc, key_tmp);
-        const base_tmp = try appendTempLocal(s);
-        try s.emitOpU16(opcode.op.put_loc, base_tmp);
-        return .{ .base_tmp = base_tmp, .key_tmp = key_tmp };
-    }
-
-    fn emitPutDestructuringBinding(
-        s: *State,
-        target: DestructuringBindingTarget,
-        binding_ref: ?DestructuringBindingRef,
-    ) Error!void {
-        const ref = binding_ref orelse return emitPutBindingTarget(s, target);
-        const value_tmp = try appendTempLocal(s);
-        try s.emitOpU16(opcode.op.put_loc, value_tmp);
-        try s.emitOpU16(opcode.op.get_loc, ref.base_tmp);
-        try s.emitOpU16(opcode.op.get_loc, ref.key_tmp);
-        try s.emitOpU16(opcode.op.get_loc, value_tmp);
-        try s.emitOp(opcode.op.put_ref_value);
     }
 
     /// `js_parse_cond_expr` (`quickjs.c:27282`). `a ? b : c`.
@@ -7578,7 +7286,10 @@ pub const parser_core = struct {
                 }
                 try s.emitOp(opcode.op.yield);
                 const normal_resume = try emitForwardJump(s, opcode.op.if_false);
-                try s.emitOp(opcode.op.return_async);
+                if (!try emitStackTopReturnThroughFinally(s)) {
+                    try emitBlockEnvReturnCleanup(s);
+                    try s.emitOp(opcode.op.return_async);
+                }
                 try patchForwardJump(s, normal_resume);
             }
             return;
@@ -7678,6 +7389,7 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.nip);
         if (is_async) try s.emitOp(opcode.op.await);
         if (!try emitStackTopReturnThroughFinally(s)) {
+            try emitBlockEnvReturnCleanup(s);
             try s.emitOp(opcode.op.return_async);
         }
 
@@ -7712,10 +7424,12 @@ pub const parser_core = struct {
     }
 
     fn emitStackTopReturnThroughFinallyFrame(s: *State, frame_index: usize, drop_pending_abrupt: bool) Error!void {
-        const value_loc = s.return_finally_frames.items[frame_index].value_loc;
-        const catch_marker_depth = s.return_finally_frames.items[frame_index].catch_marker_depth;
+        const return_frame = s.return_finally_frames.items[frame_index];
+        var catch_marker_depth = s.active_catch_marker_depth;
+        try emitBlockEnvReturnCleanupUntil(s, return_frame.block_boundary, &catch_marker_depth);
+        try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
+        const value_loc = return_frame.value_loc;
         try s.emitOpU16(opcode.op.put_loc, value_loc);
-        try emitCatchMarkerDropsToDepth(s, catch_marker_depth);
         if (drop_pending_abrupt) try emitPendingAbruptDropsForReturn(s);
         const off = try emitForwardJump(s, opcode.op.goto);
         try s.return_finally_frames.items[frame_index].fixups.append(s.function.memory.allocator, off);
@@ -8792,7 +8506,6 @@ pub const parser_core = struct {
                         return Error.UnexpectedToken;
                     }
                     try s.advance();
-                    if (s.destructuring_assignment_target_mode) return Error.InvalidAssignmentTarget;
                     try s.emitOpU8(opcode.op.special_object, 4);
                     s.last_was_super = false;
                     return;
@@ -9294,6 +9007,7 @@ pub const parser_core = struct {
         // Computed property name: [expr]: value
         if (k == @as(tok.TokenKind, @intCast('['))) {
             try s.advance();
+            s.features.insert(.expression);
             try parseAssignExpr2(s, computed_flags);
             try expectPunct(s, ']');
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
@@ -11693,7 +11407,6 @@ pub const parser_core = struct {
                 try parseExpr(s); // discriminant on stack
                 try s.expectToken(')');
                 try s.expectToken('{');
-                try validateSwitchCaseBlockDeclarations(s);
                 try s.pushScope();
                 errdefer s.popScope();
                 try s.emitEnterScope();
@@ -11845,31 +11558,17 @@ pub const parser_core = struct {
                     } else {
                         try s.expectToken('(');
                         if (s.peekKind() == '[' or s.peekKind() == '{') {
-                            // qjs parses catch patterns as TOK_LET destructuring
-                            // (js_parse_destructuring_element quickjs.c:29439);
-                            // every binding runs define_var(JS_VAR_DEF_LET) whose
-                            // same-scope find_lexical_decl rejects duplicate names
-                            // ("invalid redefinition of lexical identifier",
-                            // quickjs.c:24337). Pre-collect the bound names of both
-                            // array and object patterns and reject duplicates.
-                            {
-                                var catch_pattern_names = std.ArrayList(Atom).empty;
-                                defer catch_pattern_names.deinit(s.function.memory.allocator);
-                                const pattern_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                                try collectArrowPatternBindingNamesSnapshot(s, pattern_kind, &catch_pattern_names);
-                            }
-                            const temp_idx = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                            const kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                            const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                            const saved_binding_is_const = s.destructuring_binding_is_const;
-                            s.destructuring_binding_is_lexical = true;
-                            s.destructuring_binding_is_const = false;
-                            defer {
-                                s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                                s.destructuring_binding_is_const = saved_binding_is_const;
-                            }
-                            try parseDestructuringPattern(s, kind, BindingSource{ .loc = temp_idx });
+                            _ = try parseDestructuringElement(
+                                s,
+                                .{ .binding = .{
+                                    .define_type = .let_,
+                                    .is_parameter = false,
+                                    .export_flag = false,
+                                } },
+                                true,
+                                true,
+                                ParseFlags.default,
+                            );
                         } else {
                             if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
                             const catch_atom = if (s.peekKind() == tok.TOK_IDENT)
@@ -12214,6 +11913,7 @@ pub const parser_core = struct {
             .break_depth = s.break_frame_lens.items.len,
             .continue_depth = s.continue_frame_lens.items.len,
             .label_depth = s.label_frames.items.len,
+            .block_boundary = s.top_break,
         });
         return s.return_finally_frames.items.len - 1;
     }
@@ -12771,66 +12471,22 @@ pub const parser_core = struct {
                     }
                 }
             } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                const pattern_snapshot = takeParserSnapshot(s);
-                const kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                if (is_lexical) {
-                    const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                    const saved_binding_is_const = s.destructuring_binding_is_const;
-                    const saved_predeclare_only = s.destructuring_predeclare_only;
-                    const saved_collect_module_export_bindings = s.collect_module_export_bindings;
-                    s.destructuring_binding_is_lexical = true;
-                    s.destructuring_binding_is_const = is_const;
-                    s.destructuring_predeclare_only = true;
-                    s.collect_module_export_bindings = export_decl;
-                    errdefer {
-                        s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                        s.destructuring_binding_is_const = saved_binding_is_const;
-                        s.destructuring_predeclare_only = saved_predeclare_only;
-                        s.collect_module_export_bindings = saved_collect_module_export_bindings;
-                    }
-                    try parseDestructuringPattern(s, kind, null);
-                    s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                    s.destructuring_binding_is_const = saved_binding_is_const;
-                    s.destructuring_predeclare_only = saved_predeclare_only;
-                    s.collect_module_export_bindings = saved_collect_module_export_bindings;
-                } else {
-                    const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                    const saved_binding_is_const = s.destructuring_binding_is_const;
-                    const saved_predeclare_only = s.destructuring_predeclare_only;
-                    const saved_collect_module_export_bindings = s.collect_module_export_bindings;
-                    s.destructuring_binding_is_lexical = false;
-                    s.destructuring_binding_is_const = false;
-                    s.destructuring_predeclare_only = true;
-                    s.collect_module_export_bindings = export_decl;
-                    defer {
-                        s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                        s.destructuring_binding_is_const = saved_binding_is_const;
-                        s.destructuring_predeclare_only = saved_predeclare_only;
-                        s.collect_module_export_bindings = saved_collect_module_export_bindings;
-                    }
-                    try parseDestructuringPattern(s, kind, null);
-                }
-                try truncateSpeculativeParse(s, pattern_snapshot.code_len, pattern_snapshot.atom_len);
-                if (s.peekKind() != '=') return Error.UnexpectedToken;
-                try s.advance();
-                try parseAssignExpr2(s, parse_flags);
-                const temp_idx = try appendTempLocal(s);
-                try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                const after_initializer = takeParserSnapshot(s);
-                restoreParserLexerSnapshot(s, pattern_snapshot);
-                const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                const saved_binding_is_const = s.destructuring_binding_is_const;
-                const saved_predeclare_only = s.destructuring_predeclare_only;
-                s.destructuring_binding_is_lexical = is_lexical;
-                s.destructuring_binding_is_const = is_const;
-                s.destructuring_predeclare_only = false;
-                defer {
-                    s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                    s.destructuring_binding_is_const = saved_binding_is_const;
-                    s.destructuring_predeclare_only = saved_predeclare_only;
-                }
-                try parseDestructuringPattern(s, kind, BindingSource{ .loc = temp_idx });
-                restoreParserLexerSnapshot(s, after_initializer);
+                try s.emitOp(opcode.op.undefined);
+                const has_initializer = try parseDestructuringElement(
+                    s,
+                    .{ .binding = .{
+                        .define_type = if (is_lexical)
+                            (if (is_const) .const_ else .let_)
+                        else
+                            .var_,
+                        .is_parameter = false,
+                        .export_flag = export_decl,
+                    } },
+                    true,
+                    true,
+                    parse_flags,
+                );
+                if (!has_initializer) return Error.UnexpectedToken;
             } else {
                 return Error.UnexpectedToken;
             }
@@ -12869,31 +12525,6 @@ pub const parser_core = struct {
         s.popScope();
     }
 
-    const ForInOfLvalueControl = struct {
-        assignment_pc: u32,
-        expression_jump_offset: usize,
-        body_jump_offset: usize,
-    };
-
-    /// Parse a non-destructuring for-in/of assignment target exactly once.
-    /// This is the Zig equivalent of QuickJS's label_expr + get_lvalue +
-    /// PUT_LVALUE_NOKEEP_BOTTOM sequence: execution initially skips the target
-    /// evaluation, while each iterator value later enters at assignment_pc.
-    fn parseForInOfLvalueTarget(s: *State) Error!ForInOfLvalueControl {
-        const expression_jump_offset = try emitForwardJump(s, opcode.op.goto);
-        const assignment_pc: u32 = @intCast(s.currentCodeLen());
-        try parseLhsExpr(s, .{ .in_accepted = false });
-        var lvalue = try getLValue(s, false);
-        defer lvalue.deinit(s);
-        try putLValue(s, &lvalue, .no_keep_bottom);
-        const body_jump_offset = try emitForwardJump(s, opcode.op.goto);
-        return .{
-            .assignment_pc = assignment_pc,
-            .expression_jump_offset = expression_jump_offset,
-            .body_jump_offset = body_jump_offset,
-        };
-    }
-
     fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
         const defined = try s.defineVar(atom_id, .var_);
         if (atomNameEquals(s, atom_id, "arguments") and s.cur_func().has_arguments_binding) {
@@ -12908,79 +12539,48 @@ pub const parser_core = struct {
     /// Mirrors `js_parse_for_in_of` in quickjs.c:27991
     fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         const block_scope_level = s.scope_level;
-        // Parse left-hand side (var declaration or lvalue expression)
         const var_tok = s.peekKind();
         var target_atom: ?Atom = null;
-        var target_lvalue_control: ?ForInOfLvalueControl = null;
-        var target_indexed_array_base: ?Atom = null;
-        var target_indexed_array_index: ?i32 = null;
-        var target_array_pattern_atoms = std.ArrayList(?Atom).empty;
-        defer target_array_pattern_atoms.deinit(s.function.memory.allocator);
-        var target_array_pattern_member_bases = std.ArrayList(?Atom).empty;
-        defer target_array_pattern_member_bases.deinit(s.function.memory.allocator);
-        var target_array_pattern_member_props = std.ArrayList(?Atom).empty;
-        defer target_array_pattern_member_props.deinit(s.function.memory.allocator);
-        var target_array_pattern_computed_bases = std.ArrayList(?Atom).empty;
-        defer target_array_pattern_computed_bases.deinit(s.function.memory.allocator);
-        var target_array_pattern_computed_key_points = std.ArrayList(?LexerReplayPoint).empty;
-        defer target_array_pattern_computed_key_points.deinit(s.function.memory.allocator);
-        var target_array_pattern_object_points = std.ArrayList(?LexerReplayPoint).empty;
-        defer target_array_pattern_object_points.deinit(s.function.memory.allocator);
-        var target_array_pattern_object_props = std.ArrayList(?Atom).empty;
-        defer target_array_pattern_object_props.deinit(s.function.memory.allocator);
-        var target_array_pattern_object_computed_points = std.ArrayList(?LexerReplayPoint).empty;
-        defer target_array_pattern_object_computed_points.deinit(s.function.memory.allocator);
-        var target_array_pattern_object_computed_key_points = std.ArrayList(?LexerReplayPoint).empty;
-        defer target_array_pattern_object_computed_key_points.deinit(s.function.memory.allocator);
-        var target_array_pattern_default_snapshots = std.ArrayList(?ParserSnapshot).empty;
-        defer target_array_pattern_default_snapshots.deinit(s.function.memory.allocator);
-        var target_array_pattern_temp: ?u16 = null;
-        var target_array_pattern_snapshot: ?ParserSnapshot = null;
-        var target_array_pattern_kind: DestructuringKind = .array;
-        var target_array_pattern_rest_atom: ?Atom = null;
-        var target_array_pattern_rest_member_base: ?Atom = null;
-        var target_array_pattern_rest_member_prop: ?Atom = null;
-        var target_array_pattern_rest_computed_base: ?Atom = null;
-        var target_array_pattern_rest_computed_key_point: ?LexerReplayPoint = null;
-        var target_array_pattern_rest_object_computed_point: ?LexerReplayPoint = null;
-        var target_array_pattern_rest_object_computed_key_point: ?LexerReplayPoint = null;
-        var target_array_pattern_rest_index: u32 = 0;
-        var target_is_decl = false;
         var target_is_lexical_decl = false;
-        var target_lexical_is_const = false;
+        var target_is_pattern = false;
         var target_is_using_decl = false;
         var target_using_kind: UsingStackKind = .sync;
         var target_var_initializer_atom: ?Atom = null;
+        var iteration_using_value_loc: ?u16 = null;
+
         var pushed_for_scope = false;
         errdefer if (pushed_for_scope) s.popScope();
-        // QuickJS always creates one enumeration-head scope, including `var`
-        // and assignment-target heads. Lexical declarations are attached to
-        // this single identity and the scope stays active until loop exit.
         try s.pushScope();
         pushed_for_scope = true;
         try s.emitEnterScope();
-        // QuickJS `for ( [lookahead != let] LeftHandSideExpression of ...)`:
-        // a bare `let` may never begin a for-of LHS, so `let` is only treated
-        // as an identifier reference when the head is a for-in (`let in obj`),
-        // never when the contextual `of` keyword follows (that stays a decl and
-        // errors, matching quickjs "expected 'of' or 'in'").
-        const let_as_identifier = var_tok == tok.TOK_LET and !s.is_strict and !s.cur_func().is_strict_mode and
+
+        // Initial entry skips the target. Each successful iterator step later
+        // branches to this exact one-pass target block with its value on TOS.
+        const expression_jump_offset = try emitForwardJump(s, opcode.op.goto);
+        const assignment_pc: u32 = @intCast(s.currentCodeLen());
+
+        const let_as_identifier = var_tok == tok.TOK_LET and
+            !s.is_strict and !s.cur_func().is_strict_mode and
             s.peekNextKind() == tok.TOK_IN;
         const direct_using_kind = directUsingDeclarationKind(s);
         const parse_using_decl = if (direct_using_kind) |using_kind|
             using_kind == .async or !usingDeclarationBindingIsOf(s, using_kind)
         else
             false;
+
         if (parse_using_decl) {
             const using_kind = direct_using_kind.?;
             target_using_kind = using_kind;
             if (using_kind == .async) {
-                if (!s.in_async and !(s.lex.is_module and s.cur_func_stack.len == 0)) return Error.AwaitOutsideAsyncFunction;
+                if (!s.in_async and !(s.lex.is_module and s.cur_func_stack.len == 0)) {
+                    return Error.AwaitOutsideAsyncFunction;
+                }
                 try s.advance();
             }
             try s.advance();
-            if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
-            if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+            if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) {
+                return Error.UnexpectedToken;
+            }
             const atom_id = identifierLikeAtom(s);
             if (atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
             if ((s.is_strict or s.cur_func().is_strict_mode) and
@@ -12990,128 +12590,50 @@ pub const parser_core = struct {
             }
             _ = try s.defineVar(atom_id, .const_);
             target_atom = atom_id;
-            target_is_decl = true;
             target_is_lexical_decl = true;
-            target_lexical_is_const = true;
             target_is_using_decl = true;
             try s.advance();
-            if (s.peekKind() == '=') return Error.UnexpectedToken;
-        } else if ((var_tok == tok.TOK_VAR or var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST) and !let_as_identifier) {
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+
+            const value_loc = try appendAnonymousTempLocal(s);
+            iteration_using_value_loc = value_loc;
+            try s.emitOpU16(opcode.op.put_loc, value_loc);
+        } else if ((var_tok == tok.TOK_VAR or var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST) and
+            !let_as_identifier)
+        {
             try s.advance();
             const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST;
             const is_const = var_tok == tok.TOK_CONST;
-            target_lexical_is_const = is_const;
-            if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                const pattern_snapshot = takeParserSnapshot(s);
-                const has_default = try arrayPatternContainsDefault(s);
-                const needs_generic_pattern = has_default or try arrayPatternContainsNestedBindingPattern(s);
-                restoreParserLexerSnapshot(s, pattern_snapshot);
-                if (needs_generic_pattern) {
-                    if (is_lexical) try rejectDuplicateSimpleArrayBindings(s);
-                    restoreParserLexerSnapshot(s, pattern_snapshot);
-                    {
-                        const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                        const saved_binding_is_const = s.destructuring_binding_is_const;
-                        const saved_predeclare_only = s.destructuring_predeclare_only;
-                        s.destructuring_binding_is_lexical = is_lexical;
-                        s.destructuring_binding_is_const = is_const;
-                        // This first parse records the ForBinding while the
-                        // loop body is emitted later from the saved lexer
-                        // point. It is a declaration pass for `var` as well as
-                        // `let`/`const`; the second pass must only initialize
-                        // the already-created local/global binding.
-                        s.destructuring_predeclare_only = true;
-                        defer {
-                            s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                            s.destructuring_binding_is_const = saved_binding_is_const;
-                            s.destructuring_predeclare_only = saved_predeclare_only;
-                        }
-                        try parseDestructuringPattern(s, .array, null);
-                        try truncateSpeculativeParse(s, pattern_snapshot.code_len, pattern_snapshot.atom_len);
-                    }
-                    target_array_pattern_temp = try appendTempLocal(s);
-                    target_array_pattern_snapshot = pattern_snapshot;
-                } else {
-                    try s.advance();
-                    while (s.peekKind() != @as(tok.TokenKind, @intCast(']')) and s.peekKind() != tok.TOK_EOF) {
-                        if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            const rest_atom = s.token.payload.ident.atom;
-                            if (is_lexical) {
-                                for (target_array_pattern_atoms.items) |maybe_existing| {
-                                    if (maybe_existing != null and maybe_existing.? == rest_atom) return Error.UnexpectedToken;
-                                }
-                            }
-                            if (is_lexical) {
-                                _ = try s.addScopeVar(rest_atom, .normal, true, is_const);
-                            } else {
-                                try declareForInOfVarBinding(s, rest_atom);
-                            }
-                            target_array_pattern_rest_atom = rest_atom;
-                            target_array_pattern_rest_index = @intCast(target_array_pattern_atoms.items.len);
-                            try s.advance();
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) return Error.UnexpectedToken;
-                            break;
-                        }
-                        if (s.peekKind() == ',') {
-                            try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                            try s.advance();
-                            continue;
-                        }
-                        if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                        const atom_id = s.token.payload.ident.atom;
-                        if (is_lexical) {
-                            for (target_array_pattern_atoms.items) |maybe_existing| {
-                                if (maybe_existing != null and maybe_existing.? == atom_id) return Error.UnexpectedToken;
-                            }
-                        }
-                        if (is_lexical) {
-                            _ = try s.addScopeVar(atom_id, .normal, true, is_const);
-                        } else {
-                            try declareForInOfVarBinding(s, atom_id);
-                        }
-                        try target_array_pattern_atoms.append(s.function.memory.allocator, atom_id);
-                        try s.advance();
-                        if (s.peekKind() == ',') {
-                            try s.advance();
-                        } else if (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) {
-                            return Error.UnexpectedToken;
-                        }
-                    }
-                    try s.expectToken(']');
-                    target_array_pattern_temp = try appendTempLocal(s);
-                }
-                target_is_decl = true;
-                target_is_lexical_decl = is_lexical;
-            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-                const pattern_snapshot = takeParserSnapshot(s);
-                {
-                    const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                    const saved_binding_is_const = s.destructuring_binding_is_const;
-                    const saved_predeclare_only = s.destructuring_predeclare_only;
-                    s.destructuring_binding_is_lexical = is_lexical;
-                    s.destructuring_binding_is_const = is_const;
-                    s.destructuring_predeclare_only = true;
-                    defer {
-                        s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                        s.destructuring_binding_is_const = saved_binding_is_const;
-                        s.destructuring_predeclare_only = saved_predeclare_only;
-                    }
-                    try parseDestructuringPattern(s, .object, null);
-                    try truncateSpeculativeParse(s, pattern_snapshot.code_len, pattern_snapshot.atom_len);
-                }
-                target_array_pattern_temp = try appendTempLocal(s);
-                target_array_pattern_snapshot = pattern_snapshot;
-                target_array_pattern_kind = .object;
-                target_is_decl = true;
-                target_is_lexical_decl = is_lexical;
+            target_is_lexical_decl = is_lexical;
+
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('[')) or
+                s.peekKind() == @as(tok.TokenKind, @intCast('{')))
+            {
+                target_is_pattern = true;
+                _ = try parseDestructuringElement(
+                    s,
+                    .{ .binding = .{
+                        .define_type = if (is_lexical)
+                            (if (is_const) .const_ else .let_)
+                        else
+                            .var_,
+                        .is_parameter = false,
+                        .export_flag = false,
+                    } },
+                    true,
+                    false,
+                    ParseFlags.default,
+                );
             } else {
                 const sloppy_keyword_var = var_tok == tok.TOK_VAR and
-                    (s.peekKind() == tok.TOK_YIELD or s.peekKind() == tok.TOK_STATIC or s.peekKind() == tok.TOK_LET) and
+                    (s.peekKind() == tok.TOK_YIELD or s.peekKind() == tok.TOK_STATIC or
+                        s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_AWAIT or
+                        isSloppyFutureReservedBindingToken(s)) and
                     !(s.is_strict or s.cur_func().is_strict_mode);
-                if (s.peekKind() != tok.TOK_IDENT and !sloppy_keyword_var) return Error.UnexpectedToken;
-                const atom_id = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+                if (!isIdentifierLikeToken(s) and !sloppy_keyword_var) return Error.UnexpectedToken;
+                if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
+                const atom_id = identifierLikeAtom(s);
+                if (is_lexical and atomNameEquals(s, atom_id, "let")) return Error.UnexpectedToken;
                 if ((s.is_strict or s.cur_func().is_strict_mode) and
                     (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
                 {
@@ -13121,22 +12643,17 @@ pub const parser_core = struct {
                     _ = try s.defineVar(atom_id, if (is_const) .const_ else .let_);
                 } else {
                     try declareForInOfVarBinding(s, atom_id);
-                }
-                target_atom = atom_id;
-                target_is_decl = true;
-                target_is_lexical_decl = is_lexical;
-                try s.advance();
-                if (s.peekKind() == '=') {
-                    if (is_lexical or s.is_strict or s.cur_func().is_strict_mode) return Error.UnexpectedToken;
-                    try s.advance();
-                    try parseAssignExpr2(s, ParseFlags{ .in_accepted = false });
-                    try s.emitScopePutVar(atom_id);
                     target_var_initializer_atom = atom_id;
                 }
+                target_atom = atom_id;
+                try s.advance();
+                if (is_lexical) {
+                    try s.emitScopePutVarInit(atom_id);
+                } else {
+                    try s.emitScopePutVar(atom_id);
+                }
             }
-        } else if (var_tok != @as(tok.TokenKind, @intCast('[')) and
-            var_tok != @as(tok.TokenKind, @intCast('{')))
-        {
+        } else {
             if (!is_for_await and var_tok == tok.TOK_IDENT and
                 !s.token.payload.ident.has_escape and
                 atomNameEquals(s, s.token.payload.ident.atom, "async") and
@@ -13144,325 +12661,76 @@ pub const parser_core = struct {
             {
                 return Error.UnexpectedToken;
             }
-            target_lvalue_control = try parseForInOfLvalueTarget(s);
-        } else if (var_tok == @as(tok.TokenKind, @intCast('['))) {
-            const pattern_snapshot = takeParserSnapshot(s);
-            const needs_generic_pattern = try arrayPatternContainsNestedAssignmentPattern(s);
-            restoreParserLexerSnapshot(s, pattern_snapshot);
-            if (needs_generic_pattern) {
-                {
-                    const saved_assignment_target_mode = s.destructuring_assignment_target_mode;
-                    s.destructuring_assignment_target_mode = true;
-                    defer s.destructuring_assignment_target_mode = saved_assignment_target_mode;
-                    try parseDestructuringPattern(s, .array, null);
-                    try truncateSpeculativeParse(s, pattern_snapshot.code_len, pattern_snapshot.atom_len);
-                }
-                target_array_pattern_temp = try appendTempLocal(s);
-                target_array_pattern_snapshot = pattern_snapshot;
+
+            const is_pattern = if (var_tok == @as(tok.TokenKind, @intCast('[')) or
+                var_tok == @as(tok.TokenKind, @intCast('{')))
+            blk: {
+                const topology = try scanPatternTopology(s);
+                break :blk topology.following == tok.TOK_IN or
+                    topology.following == tok.TOK_IDENT or
+                    topology.following == @as(tok.TokenKind, @intCast('='));
+            } else false;
+
+            if (is_pattern) {
+                target_is_pattern = true;
+                _ = try parseDestructuringElement(
+                    s,
+                    .assignment,
+                    true,
+                    true,
+                    ParseFlags.default,
+                );
             } else {
-                try s.advance();
-                while (s.peekKind() != @as(tok.TokenKind, @intCast(']')) and s.peekKind() != tok.TOK_EOF) {
-                    if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                        try s.advance();
-                        target_array_pattern_rest_index = @intCast(target_array_pattern_atoms.items.len);
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-                            const object_point = takeLexerReplayPoint(s);
-                            const object_code_len = s.currentCodeLen();
-                            const object_atom_len = s.currentAtomOperandLen();
-                            try parseObjectLiteral(s, ParseFlags.default);
-                            try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return Error.UnexpectedToken;
-                            try s.advance();
-                            target_array_pattern_rest_object_computed_point = object_point;
-                            target_array_pattern_rest_object_computed_key_point = takeLexerReplayPoint(s);
-                            const key_code_len = s.currentCodeLen();
-                            const key_atom_len = s.currentAtomOperandLen();
-                            try parseExpr(s);
-                            try truncateSpeculativeParse(s, key_code_len, key_atom_len);
-                            try s.expectToken(']');
-                        } else {
-                            if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_LET) return Error.UnexpectedToken;
-                            const rest_atom = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(tok.TOK_LET);
-                            if ((s.is_strict or s.cur_func().is_strict_mode) and
-                                (atomNameEquals(s, rest_atom, "eval") or atomNameEquals(s, rest_atom, "arguments")))
-                            {
-                                return Error.UnexpectedToken;
-                            }
-                            try s.advance();
-                            if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                                try s.advance();
-                                if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                                target_array_pattern_rest_member_base = rest_atom;
-                                target_array_pattern_rest_member_prop = s.token.payload.ident.atom;
-                                try s.advance();
-                            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                                try s.advance();
-                                const key_point = takeLexerReplayPoint(s);
-                                const key_code_len = s.currentCodeLen();
-                                const key_atom_len = s.currentAtomOperandLen();
-                                try parseExpr(s);
-                                try truncateSpeculativeParse(s, key_code_len, key_atom_len);
-                                try s.expectToken(']');
-                                target_array_pattern_rest_computed_base = rest_atom;
-                                target_array_pattern_rest_computed_key_point = key_point;
-                            } else {
-                                target_array_pattern_rest_atom = rest_atom;
-                            }
-                        }
-                        if (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) return Error.UnexpectedToken;
-                        break;
-                    }
-                    if (s.peekKind() == ',') {
-                        try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_props.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_key_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_props.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_computed_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, null);
-                        try s.advance();
-                        continue;
-                    }
-                    var atom_id: Atom = atom_module.null_atom;
-                    var object_point: ?LexerReplayPoint = null;
-                    var object_prop: ?Atom = null;
-                    var object_computed_point: ?LexerReplayPoint = null;
-                    var object_computed_key_point: ?LexerReplayPoint = null;
-                    if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-                        object_point = takeLexerReplayPoint(s);
-                        const object_code_len = s.currentCodeLen();
-                        const object_atom_len = s.currentAtomOperandLen();
-                        try parseObjectLiteral(s, ParseFlags.default);
-                        try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            object_prop = s.token.payload.ident.atom;
-                            try s.advance();
-                        } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                            object_computed_point = object_point;
-                            object_point = null;
-                            try s.advance();
-                            const key_point = takeLexerReplayPoint(s);
-                            const key_code_len = s.currentCodeLen();
-                            const key_atom_len = s.currentAtomOperandLen();
-                            try parseExpr(s);
-                            try truncateSpeculativeParse(s, key_code_len, key_atom_len);
-                            try s.expectToken(']');
-                            object_computed_key_point = key_point;
-                        } else {
-                            return Error.UnexpectedToken;
-                        }
-                    } else {
-                        if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_LET) return Error.UnexpectedToken;
-                        atom_id = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(tok.TOK_LET);
-                    }
-                    if (object_point == null and (s.is_strict or s.cur_func().is_strict_mode) and
-                        (atomNameEquals(s, atom_id, "eval") or atomNameEquals(s, atom_id, "arguments")))
-                    {
-                        return Error.UnexpectedToken;
-                    }
-                    if (object_point != null) {
-                        try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_props.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_key_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_points.append(s.function.memory.allocator, object_point);
-                        try target_array_pattern_object_props.append(s.function.memory.allocator, object_prop);
-                        try target_array_pattern_object_computed_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, null);
-                    } else if (object_computed_point != null) {
-                        try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_member_props.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_bases.append(s.function.memory.allocator, null);
-                        try target_array_pattern_computed_key_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_points.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_props.append(s.function.memory.allocator, null);
-                        try target_array_pattern_object_computed_points.append(s.function.memory.allocator, object_computed_point);
-                        try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, object_computed_key_point);
-                    } else {
-                        try s.advance();
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                            try target_array_pattern_member_bases.append(s.function.memory.allocator, atom_id);
-                            try target_array_pattern_member_props.append(s.function.memory.allocator, s.token.payload.ident.atom);
-                            try target_array_pattern_computed_bases.append(s.function.memory.allocator, null);
-                            try target_array_pattern_computed_key_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_props.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, null);
-                            try s.advance();
-                        } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                            try s.advance();
-                            const key_point = takeLexerReplayPoint(s);
-                            const key_code_len = s.currentCodeLen();
-                            const key_atom_len = s.currentAtomOperandLen();
-                            try parseExpr(s);
-                            try truncateSpeculativeParse(s, key_code_len, key_atom_len);
-                            try s.expectToken(']');
-                            try target_array_pattern_atoms.append(s.function.memory.allocator, null);
-                            try target_array_pattern_member_bases.append(s.function.memory.allocator, null);
-                            try target_array_pattern_member_props.append(s.function.memory.allocator, null);
-                            try target_array_pattern_computed_bases.append(s.function.memory.allocator, atom_id);
-                            try target_array_pattern_computed_key_points.append(s.function.memory.allocator, key_point);
-                            try target_array_pattern_object_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_props.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, null);
-                        } else {
-                            try target_array_pattern_atoms.append(s.function.memory.allocator, atom_id);
-                            try target_array_pattern_member_bases.append(s.function.memory.allocator, null);
-                            try target_array_pattern_member_props.append(s.function.memory.allocator, null);
-                            try target_array_pattern_computed_bases.append(s.function.memory.allocator, null);
-                            try target_array_pattern_computed_key_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_props.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_points.append(s.function.memory.allocator, null);
-                            try target_array_pattern_object_computed_key_points.append(s.function.memory.allocator, null);
-                        }
-                    }
-                    if (s.peekKind() == '=') {
-                        const default_snapshot = takeParserSnapshot(s);
-                        try s.advance();
-                        try parseAssignExpr(s);
-                        try truncateSpeculativeParse(s, default_snapshot.code_len, default_snapshot.atom_len);
-                        try target_array_pattern_default_snapshots.append(s.function.memory.allocator, default_snapshot);
-                    } else {
-                        try target_array_pattern_default_snapshots.append(s.function.memory.allocator, null);
-                    }
-                    if (s.peekKind() == ',') {
-                        try s.advance();
-                    } else if (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) {
-                        return Error.UnexpectedToken;
-                    }
-                }
-                try s.expectToken(']');
-                if (s.peekKind() == tok.TOK_IN or s.isOfToken()) {
-                    target_array_pattern_temp = try appendTempLocal(s);
-                    var has_assignment_target = false;
-                    for (target_array_pattern_atoms.items) |maybe_atom| {
-                        if (maybe_atom != null) {
-                            has_assignment_target = true;
-                            break;
-                        }
-                    }
-                    if (!has_assignment_target) {
-                        for (target_array_pattern_member_bases.items) |maybe_atom| {
-                            if (maybe_atom != null) {
-                                has_assignment_target = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!has_assignment_target) {
-                        for (target_array_pattern_computed_bases.items) |maybe_atom| {
-                            if (maybe_atom != null) {
-                                has_assignment_target = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!has_assignment_target) {
-                        for (target_array_pattern_object_points.items) |maybe_point| {
-                            if (maybe_point != null) {
-                                has_assignment_target = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!has_assignment_target) {
-                        for (target_array_pattern_object_computed_points.items) |maybe_point| {
-                            if (maybe_point != null) {
-                                has_assignment_target = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!has_assignment_target and
-                        (target_array_pattern_rest_atom != null or
-                            target_array_pattern_rest_member_base != null or
-                            target_array_pattern_rest_computed_base != null or
-                            target_array_pattern_rest_object_computed_point != null))
-                    {
-                        has_assignment_target = true;
-                    }
-                    if (!has_assignment_target) target_array_pattern_snapshot = pattern_snapshot;
-                } else {
-                    if (target_array_pattern_atoms.items.len != 1 or target_array_pattern_atoms.items[0] == null) return Error.UnexpectedToken;
-                    target_indexed_array_base = target_array_pattern_atoms.items[0].?;
-                    target_array_pattern_atoms.clearRetainingCapacity();
-                    try s.expectToken('[');
-                    if (s.peekKind() != tok.TOK_NUMBER) return Error.UnexpectedToken;
-                    const raw_index = s.token.payload.num.value;
-                    if (@trunc(raw_index) != raw_index or raw_index < 0 or raw_index > @as(f64, @floatFromInt(std.math.maxInt(i32)))) return Error.UnexpectedToken;
-                    target_indexed_array_index = @intFromFloat(raw_index);
-                    try s.advance();
-                    try s.expectToken(']');
-                }
+                try parseLhsExpr(s, .{ .in_accepted = false });
+                var lvalue = try getLValue(s, false);
+                defer lvalue.deinit(s);
+                try putLValue(s, &lvalue, .no_keep_bottom);
             }
-        } else if (var_tok == @as(tok.TokenKind, @intCast('{'))) {
-            const pattern_snapshot = takeParserSnapshot(s);
-            {
-                const saved_assignment_target_mode = s.destructuring_assignment_target_mode;
-                s.destructuring_assignment_target_mode = true;
-                defer s.destructuring_assignment_target_mode = saved_assignment_target_mode;
-                try parseDestructuringPattern(s, .object, null);
-                try truncateSpeculativeParse(s, pattern_snapshot.code_len, pattern_snapshot.atom_len);
-            }
-            target_array_pattern_temp = try appendTempLocal(s);
-            target_array_pattern_snapshot = pattern_snapshot;
-            target_array_pattern_kind = .object;
-        } else {
-            // Anything else is not a valid for-in/of assignment target in this
-            // grammar position.
-            return Error.UnexpectedToken;
-        }
-        // Parse 'in' or 'of'
-        const in_of_tok = s.peekKind();
-        const is_for_of = s.isOfToken();
-        if (in_of_tok != tok.TOK_IN and !is_for_of) {
-            return Error.UnexpectedToken;
-        }
-        if (target_is_using_decl and !is_for_of) return Error.UnexpectedToken;
-        if (target_var_initializer_atom != null and is_for_of) return Error.UnexpectedToken;
-        try s.advance();
-        if (target_lvalue_control) |control| {
-            try patchAbsoluteTarget(s, control.expression_jump_offset);
         }
 
-        // `for-of` takes AssignmentExpression, so a comma here is a syntax error.
-        // `for-in` keeps the existing Expression parsing path.
+        const body_jump_offset = try emitForwardJump(s, opcode.op.goto);
+        try patchForwardJump(s, expression_jump_offset);
+
+        // Annex-B legacy initializer: only sloppy non-lexical simple
+        // for-in declarations accept it.
+        var has_var_initializer = false;
+        if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) {
+            if (target_var_initializer_atom == null or target_is_pattern or
+                target_is_lexical_decl or s.is_strict or s.cur_func().is_strict_mode)
+            {
+                return Error.UnexpectedToken;
+            }
+            has_var_initializer = true;
+            try s.advance();
+            try parseAssignExpr2(s, ParseFlags{ .in_accepted = false });
+            try s.emitScopePutVar(target_var_initializer_atom.?);
+        }
+
+        const in_of_tok = s.peekKind();
+        const is_for_of = s.isOfToken();
+        if (in_of_tok != tok.TOK_IN and !is_for_of) return Error.UnexpectedToken;
+        if (target_is_using_decl and !is_for_of) return Error.UnexpectedToken;
+        if (has_var_initializer and is_for_of) return Error.UnexpectedToken;
+        if (is_for_await and !is_for_of) return Error.UnexpectedToken;
+        try s.advance();
+
         if (is_for_of) {
             try parseAssignExpr(s);
         } else {
             try parseExpr(s);
         }
-        // Preserve the head scope identity while closing its current lexical
-        // cells after iterable evaluation, exactly like qjs close_scopes.
         try s.closeScopes(s.scope_level, block_scope_level);
         try s.expectToken(')');
-        // Initialize the iterator for the iterable on the stack.
+
         if (is_for_of) {
             try s.emitOp(if (is_for_await) opcode.op.for_await_of_start else opcode.op.for_of_start);
         } else {
             try s.emitOp(opcode.op.for_in_start);
         }
 
-        // QuickJS enters for-in/of loops by jumping to the iterator step,
-        // then the step branches back to the body with the next value on
-        // the stack. The body begins by storing that value into the LHS.
         const next_jump_off = try emitForwardJump(s, opcode.op.goto);
-        const body_pc: u32 = @intCast(s.currentCodeLen());
-        if (target_lvalue_control) |control| {
-            try patchAbsoluteTarget(s, control.body_jump_offset);
-        }
+        try patchForwardJump(s, body_jump_offset);
+
         const loop_label = s.pending_label_atom;
         s.pending_label_atom = null;
         try pushBreakFrame(s);
@@ -13473,8 +12741,25 @@ pub const parser_core = struct {
         }
         const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
 
+        var loop_block = BlockEnv{
+            .prev = s.top_break,
+            .label_name = loop_label orelse atom_module.null_atom,
+            .label_break = -1,
+            .label_cont = -1,
+            .drop_count = if (is_for_of) 3 else 1,
+            .label_finally = -1,
+            .scope_level = s.scope_level,
+            .catch_marker_depth = s.active_catch_marker_depth,
+            .has_iterator = is_for_of,
+            .is_regular_stmt = false,
+        };
+        s.top_break = &loop_block;
+        var loop_block_active = true;
+        defer if (loop_block_active) {
+            s.top_break = loop_block.prev;
+        };
+
         var iteration_using_stack_loc: ?u16 = null;
-        var iteration_using_value_loc: ?u16 = null;
         var iteration_using_catch_off: ?usize = null;
         var iteration_using_frame_active = false;
         var iteration_using_catch_active = false;
@@ -13483,9 +12768,6 @@ pub const parser_core = struct {
             if (iteration_using_catch_active) s.active_catch_marker_depth -= 1;
         }
         if (target_is_using_decl) {
-            const value_loc = try appendAnonymousTempLocal(s);
-            iteration_using_value_loc = value_loc;
-            try s.emitOpU16(opcode.op.put_loc, value_loc);
             const stack_loc = try emitCreateUsingDisposableStack(s, target_using_kind);
             iteration_using_stack_loc = stack_loc;
             const catch_off = try emitForwardJump(s, opcode.op.@"catch");
@@ -13498,200 +12780,17 @@ pub const parser_core = struct {
                 .kind = target_using_kind,
             });
             iteration_using_frame_active = true;
-        }
 
-        if (target_lvalue_control != null) {
-            // The iterator value is consumed by the earlier one-pass lvalue
-            // block before control jumps here.
-        } else if (target_atom) |atom_id| {
-            if (target_is_using_decl) {
-                const stack_loc = iteration_using_stack_loc orelse return Error.UnexpectedToken;
-                const value_loc = iteration_using_value_loc orelse return Error.UnexpectedToken;
-                try s.emitOpU16(opcode.op.get_loc, value_loc);
-                try s.emitOp(opcode.op.dup);
-                try s.emitScopePutVarInit(atom_id);
-                const resource_loc = try appendAnonymousTempLocal(s);
-                try s.emitOpU16(opcode.op.put_loc, resource_loc);
-                try emitUsingAddResource(s, target_using_kind, stack_loc, resource_loc);
-                try s.emitCloseLoc(resource_loc);
-                try s.emitCloseLoc(value_loc);
-            } else if (target_is_decl) {
-                if (target_is_lexical_decl) {
-                    try s.emitScopePutVarInit(atom_id);
-                } else {
-                    try s.emitScopePutVar(atom_id);
-                }
-            } else {
-                try s.emitScopePutVar(atom_id);
-            }
-        } else if (target_array_pattern_temp) |temp_idx| {
-            try s.emitOpU16(opcode.op.put_loc, temp_idx);
-            if (target_array_pattern_snapshot) |pattern_snapshot| {
-                const after_head = takeParserSnapshot(s);
-                if (target_array_pattern_kind == .array) {
-                    try emitRequireIteratorForBindingSource(s, BindingSource{ .loc = temp_idx });
-                }
-                restoreParserLexerSnapshot(s, pattern_snapshot);
-                const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-                const saved_binding_is_const = s.destructuring_binding_is_const;
-                const saved_predeclare_only = s.destructuring_predeclare_only;
-                const saved_assignment_target_mode = s.destructuring_assignment_target_mode;
-                s.destructuring_binding_is_lexical = target_is_lexical_decl;
-                s.destructuring_binding_is_const = target_lexical_is_const;
-                s.destructuring_predeclare_only = false;
-                s.destructuring_assignment_target_mode = !target_is_decl;
-                defer {
-                    s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-                    s.destructuring_binding_is_const = saved_binding_is_const;
-                    s.destructuring_predeclare_only = saved_predeclare_only;
-                    s.destructuring_assignment_target_mode = saved_assignment_target_mode;
-                }
-                try parseDestructuringPattern(s, target_array_pattern_kind, BindingSource{ .loc = temp_idx });
-                restoreParserLexerSnapshot(s, after_head);
-            } else {
-                if (target_array_pattern_kind == .array) {
-                    try emitRequireIteratorForBindingSource(s, BindingSource{ .loc = temp_idx });
-                }
-                for (target_array_pattern_atoms.items, 0..) |maybe_atom, index| {
-                    const maybe_member_base = if (index < target_array_pattern_member_bases.items.len) target_array_pattern_member_bases.items[index] else null;
-                    const maybe_member_prop = if (index < target_array_pattern_member_props.items.len) target_array_pattern_member_props.items[index] else null;
-                    const maybe_computed_base = if (index < target_array_pattern_computed_bases.items.len) target_array_pattern_computed_bases.items[index] else null;
-                    const maybe_computed_key_point = if (index < target_array_pattern_computed_key_points.items.len) target_array_pattern_computed_key_points.items[index] else null;
-                    const maybe_object_point = if (index < target_array_pattern_object_points.items.len) target_array_pattern_object_points.items[index] else null;
-                    const maybe_object_prop = if (index < target_array_pattern_object_props.items.len) target_array_pattern_object_props.items[index] else null;
-                    const maybe_object_computed_point = if (index < target_array_pattern_object_computed_points.items.len) target_array_pattern_object_computed_points.items[index] else null;
-                    const maybe_object_computed_key_point = if (index < target_array_pattern_object_computed_key_points.items.len) target_array_pattern_object_computed_key_points.items[index] else null;
-                    const is_member_target = maybe_member_base != null and maybe_member_prop != null;
-                    const is_computed_target = maybe_computed_base != null and maybe_computed_key_point != null;
-                    const is_object_member_target = maybe_object_point != null and maybe_object_prop != null;
-                    const is_object_computed_target = maybe_object_computed_point != null and maybe_object_computed_key_point != null;
-                    const atom_id = maybe_atom orelse blk: {
-                        if (is_member_target) break :blk maybe_member_base.?;
-                        if (is_computed_target) break :blk maybe_computed_base.?;
-                        if (is_object_member_target) break :blk maybe_object_prop.?;
-                        if (is_object_computed_target) break :blk atom_module.null_atom;
-                        if (is_for_of) try emitBindingElision(s, BindingSource{ .loc = temp_idx }, @intCast(index));
-                        continue;
-                    };
-                    var object_computed_base_tmp: ?u16 = null;
-                    var object_computed_key_tmp: ?u16 = null;
-                    if (is_object_computed_target) {
-                        try emitRequireIteratorForBindingSource(s, BindingSource{ .loc = temp_idx });
-                        const after_object = takeParserSnapshot(s);
-                        try restoreLexerReplayPoint(s, maybe_object_computed_point.?);
-                        try parseObjectLiteral(s, ParseFlags.default);
-                        restoreParserLexerSnapshot(s, after_object);
-                        const base_tmp = try appendTempLocal(s);
-                        try s.emitOpU16(opcode.op.put_loc, base_tmp);
-                        const after_key = takeParserSnapshot(s);
-                        try restoreLexerReplayPoint(s, maybe_object_computed_key_point.?);
-                        try parseExpr(s);
-                        restoreParserLexerSnapshot(s, after_key);
-                        const key_tmp = try appendTempLocal(s);
-                        try s.emitOpU16(opcode.op.put_loc, key_tmp);
-                        object_computed_base_tmp = base_tmp;
-                        object_computed_key_tmp = key_tmp;
-                    }
-                    try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_get);
-                    try s.emitOpU16(opcode.op.get_loc, temp_idx);
-                    try s.emitOpI32(opcode.op.push_i32, @intCast(index));
-                    try s.emitOpU16(opcode.op.call, 2);
-                    if (index < target_array_pattern_default_snapshots.items.len) {
-                        if (target_array_pattern_default_snapshots.items[index]) |default_snapshot| {
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            const after_head = takeParserSnapshot(s);
-                            restoreParserLexerSnapshot(s, default_snapshot);
-                            try s.advance();
-                            try parseAssignExpr(s);
-                            if (!is_member_target and !is_computed_target and !is_object_member_target and !is_object_computed_target) try emitAnonymousDefaultName(s, atom_id);
-                            restoreParserLexerSnapshot(s, after_head);
-                            try patchForwardJump(s, keep_value);
-                        }
-                    }
-                    if (is_member_target) {
-                        try s.emitScopeGetVar(maybe_member_base.?);
-                        try s.emitOp(opcode.op.swap);
-                        try s.emitOpAtom(opcode.op.put_field, maybe_member_prop.?);
-                    } else if (is_computed_target) {
-                        try s.emitScopeGetVar(maybe_computed_base.?);
-                        const after_key = takeParserSnapshot(s);
-                        try restoreLexerReplayPoint(s, maybe_computed_key_point.?);
-                        try parseExpr(s);
-                        restoreParserLexerSnapshot(s, after_key);
-                        try s.emitOp(opcode.op.rot3l);
-                        try s.emitOp(opcode.op.put_array_el);
-                    } else if (is_object_member_target) {
-                        const after_object = takeParserSnapshot(s);
-                        try restoreLexerReplayPoint(s, maybe_object_point.?);
-                        try parseObjectLiteral(s, ParseFlags.default);
-                        restoreParserLexerSnapshot(s, after_object);
-                        try s.emitOp(opcode.op.swap);
-                        try s.emitOpAtom(opcode.op.put_field, maybe_object_prop.?);
-                    } else if (is_object_computed_target) {
-                        try s.emitOpU16(opcode.op.get_loc, object_computed_base_tmp.?);
-                        try s.emitOpU16(opcode.op.get_loc, object_computed_key_tmp.?);
-                        try s.emitOp(opcode.op.rot3l);
-                        try s.emitOp(opcode.op.put_array_el);
-                    } else if (target_is_lexical_decl) {
-                        try s.emitScopePutVarInit(atom_id);
-                    } else {
-                        try s.emitScopePutVar(atom_id);
-                    }
-                }
-                if (target_array_pattern_rest_atom) |rest_atom| {
-                    try emitRestArrayFromSource(s, BindingSource{ .loc = temp_idx }, target_array_pattern_rest_index);
-                    if (target_is_lexical_decl) {
-                        try s.emitScopePutVarInit(rest_atom);
-                    } else {
-                        try s.emitScopePutVar(rest_atom);
-                    }
-                } else if (target_array_pattern_rest_member_base) |base_atom| {
-                    try emitRestArrayFromSource(s, BindingSource{ .loc = temp_idx }, target_array_pattern_rest_index);
-                    try s.emitScopeGetVar(base_atom);
-                    try s.emitOp(opcode.op.swap);
-                    try s.emitOpAtom(opcode.op.put_field, target_array_pattern_rest_member_prop orelse return Error.UnexpectedToken);
-                } else if (target_array_pattern_rest_computed_base) |base_atom| {
-                    try emitRestArrayFromSource(s, BindingSource{ .loc = temp_idx }, target_array_pattern_rest_index);
-                    try s.emitScopeGetVar(base_atom);
-                    const after_key = takeParserSnapshot(s);
-                    try restoreLexerReplayPoint(s, target_array_pattern_rest_computed_key_point orelse return Error.UnexpectedToken);
-                    try parseExpr(s);
-                    restoreParserLexerSnapshot(s, after_key);
-                    try s.emitOp(opcode.op.rot3l);
-                    try s.emitOp(opcode.op.put_array_el);
-                } else if (target_array_pattern_rest_object_computed_point) |object_point| {
-                    try emitRequireIteratorForBindingSource(s, BindingSource{ .loc = temp_idx });
-                    const after_object = takeParserSnapshot(s);
-                    try restoreLexerReplayPoint(s, object_point);
-                    try parseObjectLiteral(s, ParseFlags.default);
-                    restoreParserLexerSnapshot(s, after_object);
-                    const object_tmp = try appendTempLocal(s);
-                    try s.emitOpU16(opcode.op.put_loc, object_tmp);
-                    const after_key = takeParserSnapshot(s);
-                    try restoreLexerReplayPoint(s, target_array_pattern_rest_object_computed_key_point orelse return Error.UnexpectedToken);
-                    try parseExpr(s);
-                    restoreParserLexerSnapshot(s, after_key);
-                    const key_tmp = try appendTempLocal(s);
-                    try s.emitOpU16(opcode.op.put_loc, key_tmp);
-                    try emitRestArrayFromSource(s, BindingSource{ .loc = temp_idx }, target_array_pattern_rest_index);
-                    try s.emitOpU16(opcode.op.get_loc, object_tmp);
-                    try s.emitOpU16(opcode.op.get_loc, key_tmp);
-                    try s.emitOp(opcode.op.rot3l);
-                    try s.emitOp(opcode.op.put_array_el);
-                }
-                if (is_for_of) try emitCloseBindingSource(s, BindingSource{ .loc = temp_idx });
-            }
-        } else if (target_indexed_array_base) |base_atom| {
-            try s.emitScopeGetVar(base_atom);
-            try s.emitOpU16(opcode.op.array_from, 1);
-            try s.emitOpI32(opcode.op.push_i32, target_indexed_array_index orelse return Error.UnexpectedToken);
-            try s.emitOp(opcode.op.rot3l);
-            try s.emitOp(opcode.op.put_array_el);
-        } else {
-            return Error.UnexpectedToken;
+            const atom_id = target_atom orelse return Error.UnexpectedToken;
+            const value_loc = iteration_using_value_loc orelse return Error.UnexpectedToken;
+            try s.emitOpU16(opcode.op.get_loc, value_loc);
+            try s.emitOp(opcode.op.dup);
+            try s.emitScopePutVarInit(atom_id);
+            const resource_loc = try appendAnonymousTempLocal(s);
+            try s.emitOpU16(opcode.op.put_loc, resource_loc);
+            try emitUsingAddResource(s, target_using_kind, stack_loc, resource_loc);
+            try s.emitCloseLoc(resource_loc);
+            try s.emitCloseLoc(value_loc);
         }
 
         try parseStatementOrDecl(s, DeclMask{});
@@ -13715,6 +12814,7 @@ pub const parser_core = struct {
             try patchContinueFrame(s);
             if (label_frame) |idx| try s.patchLabelContinues(idx);
         }
+
         try s.closeScopes(s.scope_level, block_scope_level);
         try patchForwardJump(s, next_jump_off);
         if (is_for_of) {
@@ -13728,12 +12828,13 @@ pub const parser_core = struct {
         } else {
             try s.emitOp(opcode.op.for_in_next);
         }
-        const assignment_pc = if (target_lvalue_control) |control| control.assignment_pc else body_pc;
+
         if (is_for_await) {
             try emitBackwardJumpNoSource(s, opcode.op.if_false, assignment_pc);
         } else {
             try emitBackwardJump(s, opcode.op.if_false, assignment_pc);
         }
+
         if (is_for_await) {
             try s.emitOpNoSource(opcode.op.drop);
             try popBreakFrameAndPatch(s);
@@ -13751,70 +12852,15 @@ pub const parser_core = struct {
             try s.patchLabelBreaks(idx);
             s.popLabelFrame(idx);
         }
+
+        s.top_break = loop_block.prev;
+        loop_block_active = false;
         try s.closeScopes(s.scope_level, block_scope_level);
         if (pushed_for_scope) {
             s.popScope();
             pushed_for_scope = false;
         }
     }
-
-    fn rejectDuplicateSimpleArrayBindings(s: *State) Error!void {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        var names = std.ArrayList(Atom).empty;
-        defer names.deinit(s.function.memory.allocator);
-
-        try s.expectToken('[');
-        while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
-            if (s.peekKind() == ',') {
-                try s.advance();
-                continue;
-            }
-            if (s.peekKind() == tok.TOK_ELLIPSIS) try s.advance();
-            if (s.peekKind() == tok.TOK_IDENT) {
-                const atom_id = s.token.payload.ident.atom;
-                for (names.items) |existing| {
-                    if (existing == atom_id) return Error.UnexpectedToken;
-                }
-                try names.append(s.function.memory.allocator, atom_id);
-                try s.advance();
-            } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                try skipBalancedPatternElement(s);
-            } else {
-                return Error.UnexpectedToken;
-            }
-            if (s.peekKind() == '=') {
-                try s.advance();
-                try skipInitializerInBindingPattern(s);
-            }
-            if (s.peekKind() == ',') {
-                try s.advance();
-            } else if (s.peekKind() != ']') {
-                return Error.UnexpectedToken;
-            }
-        }
-        try s.expectToken(']');
-    }
-
-    fn arrayPatternContainsDefault(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try s.expectToken('[');
-        var depth: usize = 0;
-        while (true) {
-            const k = s.peekKind();
-            if (k == tok.TOK_EOF) return Error.UnexpectedToken;
-            if (depth == 0 and k == ']') return false;
-            if (depth == 0 and k == '=') return true;
-            if (k == '[' or k == '{' or k == '(') depth += 1;
-            if (k == ']' or k == '}' or k == ')') {
-                if (depth == 0) return false;
-                depth -= 1;
-            }
-            try s.advance();
-        }
-    }
-
     fn arrayPatternContainsNestedBindingPattern(s: *State) Error!bool {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
@@ -14055,8 +13101,6 @@ pub const parser_core = struct {
         var parameters: FunctionParameters = .{};
         errdefer parameters.deinit(s);
 
-        var pattern_names: std.ArrayList(Atom) = .empty;
-        defer deinitParserList(Atom, s, &pattern_names);
         var param_count: u32 = 0;
         var first_default_param: ?u32 = null;
         var has_rest_parameter = false;
@@ -14104,8 +13148,8 @@ pub const parser_core = struct {
                             break;
                         }
                     }
-                    for (pattern_names.items) |existing| {
-                        if (existing == param_atom) return Error.UnexpectedToken;
+                    for (s.cur_func().vars) |existing| {
+                        if (existing.var_name == param_atom) return Error.UnexpectedToken;
                     }
                     try parameters.simple_names.append(s.function.memory.allocator, param_atom);
                     if (capture_child) {
@@ -14128,15 +13172,14 @@ pub const parser_core = struct {
                         if (first_default_param == null) first_default_param = arg_index;
                         try s.advance();
                         if (capture_child) {
-                            try emitPushBindingSource(s, .{ .arg = arg_index });
+                            try s.emitOpU16(opcode.op.get_arg, @intCast(arg_index));
                             try s.emitOp(opcode.op.is_undefined);
                             const keep_value = try emitForwardJump(s, opcode.op.if_false);
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
                             s.in_parameter_initializer = true;
                             defer s.in_parameter_initializer = saved_in_parameter_initializer;
                             try parseNamedBindingDefaultInitializer(s, param_atom);
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
+                            try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
                             try patchForwardJump(s, keep_value);
                         } else {
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
@@ -14152,16 +13195,28 @@ pub const parser_core = struct {
                 } else if (s.peekKind() == '{') {
                     parameters.has_simple_list = false;
                     const arg_index = param_count;
-                    try collectParamPatternDupNames(s, .object, &parameters.simple_names, &pattern_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                    const has_initializer = try parseParameterDestructuring(
+                        s,
+                        if (capture_child) arg_index else null,
+                        parameter_scope != null,
+                        false,
+                        true,
+                    );
+                    if (has_initializer and first_default_param == null) first_default_param = arg_index;
                     param_count += 1;
                 } else if (s.peekKind() == '[') {
                     parameters.has_simple_list = false;
                     const arg_index = param_count;
-                    try collectParamPatternDupNames(s, .array, &parameters.simple_names, &pattern_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                    const has_initializer = try parseParameterDestructuring(
+                        s,
+                        if (capture_child) arg_index else null,
+                        parameter_scope != null,
+                        false,
+                        true,
+                    );
+                    if (has_initializer and first_default_param == null) first_default_param = arg_index;
                     param_count += 1;
                 } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
                     s.features.insert(.spread_rest);
@@ -14175,8 +13230,8 @@ pub const parser_core = struct {
                         for (parameters.simple_names.items) |existing| {
                             if (existing == rest_atom) return Error.UnexpectedToken;
                         }
-                        for (pattern_names.items) |existing| {
-                            if (existing == rest_atom) return Error.UnexpectedToken;
+                        for (s.cur_func().vars) |existing| {
+                            if (existing.var_name == rest_atom) return Error.UnexpectedToken;
                         }
                         try parameters.simple_names.append(s.function.memory.allocator, rest_atom);
                         if (capture_child) {
@@ -14192,8 +13247,7 @@ pub const parser_core = struct {
                             });
                             if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
+                            try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
                         if (parameter_scope != null) {
@@ -14201,25 +13255,35 @@ pub const parser_core = struct {
                         }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
-                        try collectParamPatternDupNames(s, .array, &parameters.simple_names, &pattern_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
+                        } else {
+                            try s.emitOp(opcode.op.undefined);
                         }
-                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                        if (try parseParameterDestructuring(
+                            s,
+                            if (capture_child) arg_index else null,
+                            parameter_scope != null,
+                            true,
+                            false,
+                        )) return Error.UnexpectedToken;
                     } else if (s.peekKind() == '{') {
-                        try collectParamPatternDupNames(s, .object, &parameters.simple_names, &pattern_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
+                        } else {
+                            try s.emitOp(opcode.op.undefined);
                         }
-                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                        if (try parseParameterDestructuring(
+                            s,
+                            if (capture_child) arg_index else null,
+                            parameter_scope != null,
+                            true,
+                            false,
+                        )) return Error.UnexpectedToken;
                     } else {
                         return Error.UnexpectedToken;
                     }
@@ -15044,6 +14108,9 @@ pub const parser_core = struct {
                     if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                     const param_atom = identifierLikeAtom(s);
                     try appendArrowParamBindingName(s, &param_names, param_atom);
+                    for (s.cur_func().vars) |existing| {
+                        if (existing.var_name == param_atom) return Error.UnexpectedToken;
+                    }
                     const arg_index = param_count;
                     if (capture_child) {
                         if (parameter_scope != null) {
@@ -15064,15 +14131,14 @@ pub const parser_core = struct {
                         if (first_default_param == null) first_default_param = arg_index;
                         try s.advance();
                         if (capture_child) {
-                            try emitPushBindingSource(s, .{ .arg = arg_index });
+                            try s.emitOpU16(opcode.op.get_arg, @intCast(arg_index));
                             try s.emitOp(opcode.op.is_undefined);
                             const keep_value = try emitForwardJump(s, opcode.op.if_false);
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
                             s.in_parameter_initializer = true;
                             defer s.in_parameter_initializer = saved_in_parameter_initializer;
                             try parseNamedBindingDefaultInitializer(s, param_atom);
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
+                            try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
                             try patchForwardJump(s, keep_value);
                         } else {
                             const saved_in_parameter_initializer = s.in_parameter_initializer;
@@ -15089,17 +14155,29 @@ pub const parser_core = struct {
                     // Object destructuring parameter
                     const arg_index = param_count;
                     has_non_simple_params = true;
-                    try collectArrowPatternBindingNamesSnapshot(s, .object, &param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                    const has_initializer = try parseParameterDestructuring(
+                        s,
+                        if (capture_child) arg_index else null,
+                        parameter_scope != null,
+                        false,
+                        true,
+                    );
+                    if (has_initializer and first_default_param == null) first_default_param = arg_index;
                     param_count += 1;
                 } else if (s.peekKind() == '[') {
                     // Array destructuring parameter
                     const arg_index = param_count;
                     has_non_simple_params = true;
-                    try collectArrowPatternBindingNamesSnapshot(s, .array, &param_names);
                     if (capture_child) try ensureDestructuringArgSlot(s, arg_index);
-                    try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                    const has_initializer = try parseParameterDestructuring(
+                        s,
+                        if (capture_child) arg_index else null,
+                        parameter_scope != null,
+                        false,
+                        true,
+                    );
+                    if (has_initializer and first_default_param == null) first_default_param = arg_index;
                     param_count += 1;
                 } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
                     s.features.insert(.spread_rest);
@@ -15110,6 +14188,9 @@ pub const parser_core = struct {
                         if (identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
                         const param_atom = identifierLikeAtom(s);
                         try appendArrowParamBindingName(s, &param_names, param_atom);
+                        for (s.cur_func().vars) |existing| {
+                            if (existing.var_name == param_atom) return Error.UnexpectedToken;
+                        }
                         if (capture_child) {
                             if (parameter_scope != null) {
                                 try appendParameterExpressionBinding(s, param_atom);
@@ -15123,8 +14204,7 @@ pub const parser_core = struct {
                             });
                             if (idx != @as(i32, @intCast(arg_index))) return Error.UnexpectedToken;
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
+                            try s.emitOpU16(opcode.op.put_arg, @intCast(arg_index));
                             s.cur_func().defined_arg_count = @intCast(arg_index);
                         }
                         if (parameter_scope != null) {
@@ -15132,25 +14212,35 @@ pub const parser_core = struct {
                         }
                         try s.advance();
                     } else if (s.peekKind() == '[') {
-                        try collectArrowPatternBindingNamesSnapshot(s, .array, &param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
+                        } else {
+                            try s.emitOp(opcode.op.undefined);
                         }
-                        try parseParameterDestructuring(s, .array, if (capture_child) arg_index else null, parameter_scope != null);
+                        if (try parseParameterDestructuring(
+                            s,
+                            if (capture_child) arg_index else null,
+                            parameter_scope != null,
+                            true,
+                            false,
+                        )) return Error.UnexpectedToken;
                     } else if (s.peekKind() == '{') {
-                        try collectArrowPatternBindingNamesSnapshot(s, .object, &param_names);
                         if (capture_child) {
                             try ensureDestructuringArgSlot(s, arg_index);
                             try s.emitOpU16(opcode.op.rest, @intCast(arg_index));
-                            try emitStoreBindingSourceKeep(s, .{ .arg = arg_index });
-                            try s.emitOp(opcode.op.drop);
                             s.cur_func().defined_arg_count = @intCast(arg_index);
+                        } else {
+                            try s.emitOp(opcode.op.undefined);
                         }
-                        try parseParameterDestructuring(s, .object, if (capture_child) arg_index else null, parameter_scope != null);
+                        if (try parseParameterDestructuring(
+                            s,
+                            if (capture_child) arg_index else null,
+                            parameter_scope != null,
+                            true,
+                            false,
+                        )) return Error.UnexpectedToken;
                     } else {
                         return Error.UnexpectedToken;
                     }
@@ -15276,156 +14366,643 @@ pub const parser_core = struct {
 
     const DestructuringKind = enum { array, object };
 
-    const BindingSource = union(enum) {
-        arg: u32,
-        loc: u16,
+    const PatternBindingMode = struct {
+        define_type: State.DefineVarType,
+        is_parameter: bool,
+        export_flag: bool,
     };
+
+    const PatternMode = union(enum) {
+        binding: PatternBindingMode,
+        assignment,
+    };
+
+    /// A destructuring target is either a binding that can be initialized by
+    /// a direct scope put, or the one canonical M-LVALUE descriptor.  There is
+    /// deliberately no destructuring-specific reference/spill representation.
+    const PatternTarget = union(enum) {
+        direct_binding: struct {
+            name: Atom,
+            scope: u16,
+            is_init: bool,
+        },
+        lvalue: LValue,
+
+        fn depth(self: *const PatternTarget) u8 {
+            return switch (self.*) {
+                .direct_binding => 0,
+                .lvalue => |lvalue| lvalue.depth,
+            };
+        }
+
+        fn defaultName(self: *const PatternTarget) ?Atom {
+            return switch (self.*) {
+                .direct_binding => |binding| binding.name,
+                .lvalue => |lvalue| switch (lvalue.opcode) {
+                    .scope_var, .ref_value => lvalue.name,
+                    else => null,
+                },
+            };
+        }
+
+        fn deinit(self: *PatternTarget, s: *State) void {
+            switch (self.*) {
+                .direct_binding => {},
+                .lvalue => |*lvalue| lvalue.deinit(s),
+            }
+        }
+    };
+
+    const PatternTopology = struct {
+        following: tok.TokenKind,
+        has_top_level_rest: bool,
+    };
+
+    /// Token-only topology scan used to decide whether the outer pattern has
+    /// an initializer/rest and whether a nested `[`/`{` is a pattern rather
+    /// than the base of a member target.  It never parses expressions, emits
+    /// code, defines variables, creates children, or mutates FunctionDef.
+    fn scanPatternTopology(s: *State) Error!PatternTopology {
+        if (s.peekKind() != @as(tok.TokenKind, @intCast('[')) and
+            s.peekKind() != @as(tok.TokenKind, @intCast('{')))
+        {
+            return Error.UnexpectedToken;
+        }
+
+        const snapshot = takeParserSnapshot(s);
+        defer restoreParserLexerSnapshot(s, snapshot);
+
+        var depth: usize = 0;
+        var has_top_level_rest = false;
+        var previous_token_kind: ?tok.TokenKind = null;
+        while (true) {
+            const kind = s.peekKind();
+            if (kind == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (kind == tok.TOK_TEMPLATE) {
+                // A template token owns its `${ ... }` delimiters in the
+                // lexer. Skip the complete template so delimiters inside a
+                // substitution cannot terminate the outer topology scan.
+                try skipTemplateInPredeclareScan(s, s.token);
+                previous_token_kind = tok.TOK_TEMPLATE;
+                try s.advance();
+                continue;
+            }
+            if (kind == @as(tok.TokenKind, @intCast('[')) or
+                kind == @as(tok.TokenKind, @intCast('{')) or
+                kind == @as(tok.TokenKind, @intCast('(')))
+            {
+                depth += 1;
+            } else if (kind == @as(tok.TokenKind, @intCast(']')) or
+                kind == @as(tok.TokenKind, @intCast('}')) or
+                kind == @as(tok.TokenKind, @intCast(')')))
+            {
+                if (depth == 0) return Error.UnexpectedToken;
+                depth -= 1;
+                try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
+                if (depth == 0) {
+                    return .{
+                        .following = s.peekKind(),
+                        .has_top_level_rest = has_top_level_rest,
+                    };
+                }
+                continue;
+            } else if (kind == tok.TOK_ELLIPSIS and depth == 1) {
+                has_top_level_rest = true;
+            }
+            try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
+        }
+    }
+
+    fn tokenStartsNestedPattern(s: *State, enclosing_close: tok.TokenKind) Error!bool {
+        if (s.peekKind() != @as(tok.TokenKind, @intCast('[')) and
+            s.peekKind() != @as(tok.TokenKind, @intCast('{')))
+        {
+            return false;
+        }
+        const topology = try scanPatternTopology(s);
+        return topology.following == @as(tok.TokenKind, @intCast(',')) or
+            topology.following == @as(tok.TokenKind, @intCast('=')) or
+            topology.following == enclosing_close;
+    }
+
+    fn checkPatternParameterDuplicate(s: *State, name: Atom) Error!void {
+        for (s.cur_func().args) |arg| {
+            if (arg.var_name == name) return Error.UnexpectedToken;
+        }
+        for (s.cur_func().vars) |variable| {
+            if (variable.var_name == name) return Error.UnexpectedToken;
+        }
+    }
+
+    fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) Error!PatternTarget {
+        if ((s.is_strict or s.cur_func().is_strict_mode) and
+            (atomNameEquals(s, name, "eval") or atomNameEquals(s, name, "arguments")))
+        {
+            return Error.UnexpectedToken;
+        }
+        if ((binding.define_type == .let_ or binding.define_type == .const_) and
+            atomNameEquals(s, name, "let"))
+        {
+            return Error.UnexpectedToken;
+        }
+        if (binding.is_parameter) try checkPatternParameterDuplicate(s, name);
+
+        // Imported/module declaration names are not represented in vars until
+        // module resolution.  Preserve the same wrapper collision check used
+        // by the simple declaration producer before calling defineVar.
+        if ((binding.define_type == .let_ or binding.define_type == .const_) and
+            s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and
+            hasKnownBinding(s, name))
+        {
+            return Error.UnexpectedToken;
+        }
+
+        const defined = try s.defineVar(name, binding.define_type);
+        if (binding.define_type == .let_ or binding.define_type == .const_) {
+            switch (defined) {
+                .local => |idx| if (s.emit_lexical_tdz_at_decl) {
+                    s.cur_func().vars[idx].tdz_emitted_at_decl = true;
+                    try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
+                },
+                .global => {},
+                .argument => unreachable,
+            }
+        }
+        if (binding.export_flag) try addModuleExportName(s, name, name);
+
+        if (binding.define_type == .var_ and needVarReference(s, tok.TOK_VAR)) {
+            try s.emitScopeGetVar(name);
+            return .{ .lvalue = try getLValue(s, false) };
+        }
+        return .{ .direct_binding = .{
+            .name = name,
+            .scope = @intCast(s.scope_level),
+            .is_init = binding.define_type == .let_ or binding.define_type == .const_,
+        } };
+    }
+
+    fn parsePatternBindingTarget(s: *State, binding: PatternBindingMode) Error!PatternTarget {
+        if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) {
+            return Error.UnexpectedToken;
+        }
+        const name = identifierLikeAtom(s);
+        var target = try definePatternBindingAtom(s, binding, name);
+        errdefer target.deinit(s);
+        try s.advance();
+        return target;
+    }
+
+    fn parsePatternTarget(s: *State, mode: PatternMode) Error!PatternTarget {
+        return switch (mode) {
+            .binding => |binding| try parsePatternBindingTarget(s, binding),
+            .assignment => blk: {
+                try parseLhsExpr(s, ParseFlags{ .in_accepted = false });
+                break :blk .{ .lvalue = try getLValue(s, false) };
+            },
+        };
+    }
+
+    fn shorthandPatternTarget(
+        s: *State,
+        mode: PatternMode,
+        property: ObjectPropertyName,
+    ) Error!PatternTarget {
+        if (!property.allow_shorthand or
+            (property.has_escape and escapedIdentifierIsReservedWordForBinding(s, property.atom, true)))
+        {
+            return Error.UnexpectedToken;
+        }
+        return switch (mode) {
+            .binding => |binding| try definePatternBindingAtom(s, binding, property.atom),
+            .assignment => blk: {
+                try s.emitScopeGetVar(property.atom);
+                break :blk .{ .lvalue = try getLValue(s, false) };
+            },
+        };
+    }
+
+    fn shorthandPatternCanUseGetField2(s: *State, mode: PatternMode) bool {
+        return switch (mode) {
+            .binding => |binding| binding.define_type != .var_ or !needVarReference(s, tok.TOK_VAR),
+            .assignment => false,
+        };
+    }
+
+    fn emitDirectPatternPut(s: *State, binding: anytype) Error!void {
+        try s.ensureClosureVar(binding.name);
+        if (s.emit_phase1_temp) {
+            try s.emitOpAtomU16(
+                if (binding.is_init) opcode.op.scope_put_var_init else opcode.op.scope_put_var,
+                binding.name,
+                binding.scope,
+            );
+        } else if (binding.is_init) {
+            try s.emitGlobalVarOp(opcode.op.put_var_init, binding.name);
+        } else {
+            try s.emitGlobalVarOp(opcode.op.put_var, binding.name);
+        }
+    }
+
+    fn putPatternTarget(s: *State, target: *PatternTarget) Error!void {
+        switch (target.*) {
+            .direct_binding => |binding| try emitDirectPatternPut(s, binding),
+            .lvalue => |*lvalue| try putLValue(s, lvalue, .no_keep_depth),
+        }
+    }
+
+    fn parsePatternDefault(s: *State, target: *const PatternTarget) Error!void {
+        if (s.peekKind() != @as(tok.TokenKind, @intCast('='))) return;
+        try s.emitOp(opcode.op.dup);
+        try s.emitOp(opcode.op.undefined);
+        try s.emitOp(opcode.op.strict_eq);
+        const has_value = try emitForwardJump(s, opcode.op.if_false);
+        try s.emitOp(opcode.op.drop);
+        try s.advance();
+
+        const saved_pending_name = s.pending_function_name;
+        const saved_pending_decl = s.pending_function_is_decl;
+        s.pending_function_name = target.defaultName();
+        s.pending_function_is_decl = false;
+        s.last_anonymous_function_expr = false;
+        defer {
+            s.pending_function_name = saved_pending_name;
+            s.pending_function_is_decl = saved_pending_decl;
+        }
+        try parseAssignExpr(s);
+        if (target.defaultName()) |name| try emitAnonymousDefaultName(s, name);
+        try patchForwardJump(s, has_value);
+    }
+
+    fn rotateNamedSourcePastTarget(s: *State, depth: u8) Error!void {
+        switch (depth) {
+            0 => {},
+            1 => try s.emitOp(opcode.op.swap),
+            2 => try s.emitOp(opcode.op.rot3l),
+            3 => try s.emitOp(opcode.op.rot4l),
+            else => unreachable,
+        }
+    }
+
+    fn rotateComputedSourcePastTarget(s: *State, depth: u8) Error!void {
+        switch (depth) {
+            0 => {},
+            1 => try s.emitOp(opcode.op.rot3r),
+            2 => try s.emitOp(opcode.op.swap2),
+            3 => {
+                try s.emitOp(opcode.op.rot5l);
+                try s.emitOp(opcode.op.rot5l);
+            },
+            else => unreachable,
+        }
+    }
+
+    fn addNamedObjectRestExclusion(s: *State, name: Atom) Error!void {
+        try s.emitOp(opcode.op.swap);
+        try s.emitOp(opcode.op.null);
+        try s.emitOpAtom(opcode.op.define_field, name);
+        try s.emitOp(opcode.op.swap);
+    }
+
+    fn addComputedObjectRestExclusion(s: *State) Error!void {
+        try s.emitOp(opcode.op.to_propkey);
+        try s.emitOp(opcode.op.perm3);
+        try s.emitOp(opcode.op.null);
+        try s.emitOp(opcode.op.define_array_el);
+        try s.emitOp(opcode.op.perm3);
+    }
+
+    fn objectRestCopyMask(depth: u8) Error!u8 {
+        // getLValue has exactly four canonical stack shapes (depth 0...3).
+        // Widen before shifting so a broken future caller reports an internal
+        // assignment-target error instead of overflowing narrow arithmetic.
+        if (depth > 3) return Error.InvalidAssignmentTarget;
+        const wide_depth: u16 = depth;
+        return @intCast(((wide_depth + 1) << 2) | ((wide_depth + 2) << 5));
+    }
+
+    fn emitArrayPatternRest(s: *State, target_depth: u8) Error!void {
+        try s.emitOpU16(opcode.op.array_from, 0);
+        try s.emitOpI32(opcode.op.push_i32, 0);
+        const next_pc: u32 = @intCast(s.currentCodeLen());
+        try s.emitOpU8(opcode.op.for_of_next, target_depth + 2);
+        const done = try emitForwardJump(s, opcode.op.if_true);
+        try s.emitOp(opcode.op.define_array_el);
+        try s.emitOp(opcode.op.inc);
+        try emitBackwardJump(s, opcode.op.goto, next_pc);
+        try patchForwardJump(s, done);
+        try s.emitOp(opcode.op.drop);
+        try s.emitOp(opcode.op.drop);
+    }
+
+    fn pushPatternIteratorBlock(s: *State, block: *BlockEnv) void {
+        block.* = .{
+            .prev = s.top_break,
+            .label_name = atom_module.null_atom,
+            .label_break = -1,
+            .label_cont = -1,
+            .drop_count = 2,
+            .label_finally = -1,
+            .scope_level = s.scope_level,
+            .catch_marker_depth = s.active_catch_marker_depth,
+            .has_iterator = true,
+            .is_regular_stmt = false,
+        };
+        s.top_break = block;
+    }
+
+    fn popPatternIteratorBlock(s: *State, block: *BlockEnv) void {
+        std.debug.assert(s.top_break == block);
+        s.top_break = block.prev;
+    }
+
+    /// Preserve an abrupt return value while removing ordinary catch markers.
+    /// `nip_catch` is required because a suspended yield may have expression
+    /// operands between the marker and the injected return value.
+    fn emitStackTopCatchMarkerDropsToDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
+        if (current_depth.* < target_depth) return Error.UnexpectedToken;
+        while (current_depth.* > target_depth) {
+            try s.emitOp(opcode.op.nip_catch);
+            try emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
+            current_depth.* -= 1;
+        }
+    }
+
+    /// Unwind iterator records down to (but excluding) `boundary`. QuickJS
+    /// interleaves catch/finally and iterator BlockEnv entries; zjs records the
+    /// catch depth at iterator creation and emits the equivalent marker walk.
+    fn emitBlockEnvReturnCleanupUntil(
+        s: *State,
+        boundary: ?*BlockEnv,
+        catch_marker_depth: *u32,
+    ) Error!void {
+        const async_generator = s.in_async and s.in_generator;
+        const return_atom = if (async_generator)
+            atom_module.predefinedId("return", .string) orelse return Error.UnexpectedToken
+        else
+            atom_module.null_atom;
+        var block = s.top_break;
+        while (block) |current| : (block = current.prev) {
+            if (current == boundary) return;
+            if (!current.has_iterator) continue;
+            try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
+            try s.emitOp(opcode.op.nip_catch);
+            if (async_generator) {
+                // QuickJS emit_return (quickjs.c:28422-28440): discard the
+                // cached next method, call iterator.return(), require an
+                // Object result, await it, then restore the injected return
+                // value for the next enclosing cleanup / OP_return_async.
+                try s.emitOp(opcode.op.nip);
+                try s.emitOp(opcode.op.swap);
+                try s.emitOpAtom(opcode.op.get_field2, return_atom);
+                try s.emitOp(opcode.op.dup);
+                try s.emitOp(opcode.op.is_undefined_or_null);
+                const no_return = try emitForwardJump(s, opcode.op.if_true);
+                try s.emitOpU16(opcode.op.call_method, 0);
+                try s.emitOp(opcode.op.iterator_check_object);
+                try s.emitOp(opcode.op.await);
+                const closed = try emitForwardJump(s, opcode.op.goto);
+                try patchForwardJump(s, no_return);
+                try s.emitOp(opcode.op.drop);
+                try patchForwardJump(s, closed);
+                try s.emitOp(opcode.op.drop);
+            } else {
+                try s.emitOp(opcode.op.rot3r);
+                try s.emitOp(opcode.op.undefined);
+                try s.emitOp(opcode.op.iterator_close);
+            }
+        }
+        if (boundary != null) return Error.UnexpectedToken;
+    }
+
+    fn emitBlockEnvReturnCleanup(s: *State) Error!void {
+        var catch_marker_depth = s.active_catch_marker_depth;
+        try emitBlockEnvReturnCleanupUntil(s, null, &catch_marker_depth);
+        try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, 0);
+    }
+
+    fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {
+        try s.expectToken('[');
+        try s.emitOp(opcode.op.for_of_start);
+
+        var block: BlockEnv = undefined;
+        pushPatternIteratorBlock(s, &block);
+        var block_active = true;
+        defer if (block_active) popPatternIteratorBlock(s, &block);
+
+        while (s.peekKind() != @as(tok.TokenKind, @intCast(']'))) {
+            if (s.peekKind() == tok.TOK_EOF) return Error.UnexpectedToken;
+
+            var is_rest = false;
+            if (s.peekKind() == tok.TOK_ELLIPSIS) {
+                s.features.insert(.spread_rest);
+                is_rest = true;
+                try s.advance();
+                if (s.peekKind() == @as(tok.TokenKind, @intCast(',')) or
+                    s.peekKind() == @as(tok.TokenKind, @intCast(']')))
+                {
+                    return Error.UnexpectedToken;
+                }
+            }
+
+            if (!is_rest and s.peekKind() == @as(tok.TokenKind, @intCast(','))) {
+                try s.emitOpU8(opcode.op.for_of_next, 0);
+                try s.emitOp(opcode.op.drop);
+                try s.emitOp(opcode.op.drop);
+            } else if (try tokenStartsNestedPattern(s, @as(tok.TokenKind, @intCast(']')))) {
+                if (is_rest) {
+                    const topology = try scanPatternTopology(s);
+                    if (topology.following == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+                    try emitArrayPatternRest(s, 0);
+                } else {
+                    try s.emitOpU8(opcode.op.for_of_next, 0);
+                    try s.emitOp(opcode.op.drop);
+                }
+                _ = try parseDestructuringElement(s, mode, true, true, ParseFlags.default);
+            } else {
+                var target = try parsePatternTarget(s, mode);
+                defer target.deinit(s);
+                if (is_rest) {
+                    if (s.peekKind() == @as(tok.TokenKind, @intCast('='))) return Error.UnexpectedToken;
+                    try emitArrayPatternRest(s, target.depth());
+                } else {
+                    try s.emitOpU8(opcode.op.for_of_next, target.depth());
+                    try s.emitOp(opcode.op.drop);
+                    try parsePatternDefault(s, &target);
+                }
+                try putPatternTarget(s, &target);
+            }
+
+            if (s.peekKind() == @as(tok.TokenKind, @intCast(']'))) break;
+            if (is_rest) return Error.UnexpectedToken;
+            try s.expectToken(',');
+        }
+
+        try s.expectToken(']');
+        try s.emitOp(opcode.op.iterator_close);
+        popPatternIteratorBlock(s, &block);
+        block_active = false;
+    }
+
+    fn parseObjectPatternBody(s: *State, mode: PatternMode, has_rest: bool) Error!void {
+        try s.expectToken('{');
+        try s.emitOp(opcode.op.to_object);
+        if (has_rest) {
+            try s.emitOp(opcode.op.object);
+            try s.emitOp(opcode.op.swap);
+        }
+
+        while (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) {
+            if (s.peekKind() == tok.TOK_EOF) return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_ELLIPSIS) {
+                if (!has_rest) return Error.UnexpectedToken;
+                s.features.insert(.spread_rest);
+                try s.advance();
+                var target = try parsePatternTarget(s, mode);
+                defer target.deinit(s);
+                if (s.peekKind() != @as(tok.TokenKind, @intCast('}'))) return Error.UnexpectedToken;
+                try s.emitOp(opcode.op.object);
+                const depth = target.depth();
+                const mask = try objectRestCopyMask(depth);
+                try s.emitOpU8(opcode.op.copy_data_properties, mask);
+                try putPatternTarget(s, &target);
+                break;
+            }
+
+            var computed = false;
+            var property_info: ?ObjectPropertyName = null;
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
+                computed = true;
+                try s.advance();
+                try parseAssignExpr(s);
+                try s.expectToken(']');
+            } else {
+                property_info = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
+            }
+            defer if (property_info) |property| {
+                if (property.retained) s.function.atoms.free(property.atom);
+            };
+
+            const explicit_target = s.peekKind() == @as(tok.TokenKind, @intCast(':'));
+            if (explicit_target) try s.advance();
+            if (computed and !explicit_target) return Error.UnexpectedToken;
+
+            if (explicit_target and try tokenStartsNestedPattern(s, @as(tok.TokenKind, @intCast('}')))) {
+                if (computed) {
+                    if (has_rest) try addComputedObjectRestExclusion(s) else try s.emitOp(opcode.op.to_propkey);
+                    try s.emitOp(opcode.op.get_array_el2);
+                } else {
+                    const property = property_info orelse return Error.UnexpectedToken;
+                    if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
+                    try s.emitOpAtom(opcode.op.get_field2, property.atom);
+                }
+                _ = try parseDestructuringElement(s, mode, true, true, ParseFlags.default);
+            } else if (!computed and !explicit_target and shorthandPatternCanUseGetField2(s, mode)) {
+                const property = property_info orelse return Error.UnexpectedToken;
+                if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
+                var target = try shorthandPatternTarget(s, mode, property);
+                defer target.deinit(s);
+                if (target.depth() != 0) return Error.UnexpectedToken;
+                // QuickJS's direct shorthand-binding arm keeps the source and
+                // fetches the value in one opcode. Reference-producing `var`
+                // bindings and assignment patterns stay on the depth-aware
+                // dup/rotate/get_field path below.
+                try s.emitOpAtom(opcode.op.get_field2, property.atom);
+                try parsePatternDefault(s, &target);
+                try putPatternTarget(s, &target);
+            } else {
+                if (computed) {
+                    if (has_rest) try addComputedObjectRestExclusion(s) else try s.emitOp(opcode.op.to_propkey);
+                    try s.emitOp(opcode.op.dup1);
+                } else {
+                    const property = property_info orelse return Error.UnexpectedToken;
+                    if (has_rest) try addNamedObjectRestExclusion(s, property.atom);
+                    try s.emitOp(opcode.op.dup);
+                }
+
+                var target = if (explicit_target)
+                    try parsePatternTarget(s, mode)
+                else
+                    try shorthandPatternTarget(s, mode, property_info orelse return Error.UnexpectedToken);
+                defer target.deinit(s);
+
+                if (computed) {
+                    try rotateComputedSourcePastTarget(s, target.depth());
+                    try s.emitOp(opcode.op.get_array_el);
+                } else {
+                    try rotateNamedSourcePastTarget(s, target.depth());
+                    try s.emitOpAtom(opcode.op.get_field, property_info.?.atom);
+                }
+                try parsePatternDefault(s, &target);
+                try putPatternTarget(s, &target);
+            }
+
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('}'))) break;
+            try s.expectToken(',');
+            if (s.peekKind() == @as(tok.TokenKind, @intCast('}'))) break;
+        }
+
+        try s.expectToken('}');
+        try s.emitOp(opcode.op.drop);
+        if (has_rest) try s.emitOp(opcode.op.drop);
+    }
+
+    /// Unified QuickJS-style destructuring traversal.  The pattern topology is
+    /// parsed exactly once.  When an outer initializer exists, its bytecode is
+    /// emitted after the pattern but reached first at runtime, preserving both
+    /// source child order and initialization semantics without a temporary.
+    fn parseDestructuringElement(
+        s: *State,
+        mode: PatternMode,
+        has_value: bool,
+        allow_outer_initializer: bool,
+        initializer_flags: ParseFlags,
+    ) Error!bool {
+        s.features.insert(.destructuring);
+        const topology = try scanPatternTopology(s);
+        const has_initializer = allow_outer_initializer and
+            topology.following == @as(tok.TokenKind, @intCast('='));
+        if (!has_value and !has_initializer) return Error.UnexpectedToken;
+
+        var parse_jump: ?usize = null;
+        var assign_pc: u32 = @intCast(s.currentCodeLen());
+        if (has_initializer) {
+            if (has_value) {
+                try s.emitOp(opcode.op.dup);
+                try s.emitOp(opcode.op.undefined);
+                try s.emitOp(opcode.op.strict_eq);
+                parse_jump = try emitForwardJump(s, opcode.op.if_true);
+            } else {
+                parse_jump = try emitForwardJump(s, opcode.op.goto);
+            }
+            assign_pc = @intCast(s.currentCodeLen());
+            if (!has_value) try s.emitOp(opcode.op.dup);
+        }
+
+        switch (s.peekKind()) {
+            @as(tok.TokenKind, @intCast('[')) => try parseArrayPatternBody(s, mode),
+            @as(tok.TokenKind, @intCast('{')) => try parseObjectPatternBody(s, mode, topology.has_top_level_rest),
+            else => return Error.UnexpectedToken,
+        }
+
+        if (has_initializer) {
+            const done = try emitForwardJump(s, opcode.op.goto);
+            try patchForwardJump(s, parse_jump orelse return Error.UnexpectedToken);
+            if (has_value) try s.emitOp(opcode.op.drop);
+            try s.expectToken('=');
+            s.last_anonymous_function_expr = false;
+            try parseAssignExpr2(s, initializer_flags);
+            s.last_anonymous_function_expr = false;
+            try emitBackwardJump(s, opcode.op.goto, assign_pc);
+            try patchForwardJump(s, done);
+        }
+        return has_initializer;
+    }
 
     fn appendArrowParamBindingName(s: *State, names: *std.ArrayList(Atom), atom_id: Atom) Error!void {
         for (names.items) |existing| {
             if (existing == atom_id) return Error.UnexpectedToken;
         }
         try names.append(s.function.memory.allocator, atom_id);
-    }
-
-    fn collectArrowBindingIdentifier(s: *State, names: *std.ArrayList(Atom)) Error!void {
-        if (!isIdentifierLikeToken(s) or identifierLikeHasInvalidEscapeForBinding(s)) return Error.UnexpectedToken;
-        const atom_id = identifierLikeAtom(s);
-        try appendArrowParamBindingName(s, names, atom_id);
-        try s.advance();
-    }
-
-    fn collectArrowPatternBindingNames(s: *State, kind: DestructuringKind, names: *std.ArrayList(Atom)) Error!void {
-        switch (kind) {
-            .array => try collectArrowArrayBindingNames(s, names),
-            .object => try collectArrowObjectBindingNames(s, names),
-        }
-    }
-
-    fn collectArrowPatternBindingNamesSnapshot(s: *State, kind: DestructuringKind, names: *std.ArrayList(Atom)) Error!void {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try collectArrowPatternBindingNames(s, kind, names);
-    }
-
-    /// Pre-scan a destructuring parameter pattern of an ordinary function or
-    /// method and reject any bound name that duplicates a previous argument or
-    /// a name bound by an earlier destructuring parameter. Mirrors
-    /// js_parse_check_duplicate_parameter (quickjs.c:26276), which qjs runs for
-    /// every binding added during destructuring parameter parsing
-    /// (quickjs.c:26325 identifiers, 26574 object shorthand props); duplicates
-    /// inside a single pattern are also caught here, matching the same check.
-    fn collectParamPatternDupNames(
-        s: *State,
-        kind: DestructuringKind,
-        simple_param_names: *const std.ArrayList(Atom),
-        pattern_param_names: *std.ArrayList(Atom),
-    ) Error!void {
-        var collected = std.ArrayList(Atom).empty;
-        defer collected.deinit(s.function.memory.allocator);
-        try collectArrowPatternBindingNamesSnapshot(s, kind, &collected);
-        for (collected.items) |name| {
-            for (simple_param_names.items) |existing| {
-                if (existing == name) return Error.UnexpectedToken;
-            }
-            try appendArrowParamBindingName(s, pattern_param_names, name);
-        }
-    }
-
-    fn collectArrowArrayBindingNames(s: *State, names: *std.ArrayList(Atom)) Error!void {
-        try s.expectToken('[');
-        while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
-            if (s.peekKind() == ',') {
-                try s.advance();
-                continue;
-            }
-
-            const is_rest = s.peekKind() == tok.TOK_ELLIPSIS;
-            if (is_rest) try s.advance();
-
-            if (isIdentifierLikeToken(s)) {
-                try collectArrowBindingIdentifier(s, names);
-            } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                const nested_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                try collectArrowPatternBindingNames(s, nested_kind, names);
-            } else {
-                return Error.UnexpectedToken;
-            }
-
-            if (s.peekKind() == '=') {
-                if (is_rest) return Error.UnexpectedToken;
-                try s.advance();
-                try skipInitializerInBindingPattern(s);
-            }
-
-            if (is_rest and s.peekKind() != ']') return Error.UnexpectedToken;
-            if (s.peekKind() == ',') {
-                try s.advance();
-            } else if (s.peekKind() != ']') {
-                return Error.UnexpectedToken;
-            }
-        }
-        try s.expectToken(']');
-    }
-
-    fn collectArrowObjectBindingNames(s: *State, names: *std.ArrayList(Atom)) Error!void {
-        try s.expectToken('{');
-        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-            if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                try s.advance();
-                try collectArrowBindingIdentifier(s, names);
-                if (s.peekKind() != '}') return Error.UnexpectedToken;
-                continue;
-            }
-
-            var prop_name: ?ObjectPropertyName = null;
-            var has_binding_target = false;
-            if (s.peekKind() == '[') {
-                try skipBalancedPatternElement(s);
-                try s.expectToken(':');
-                has_binding_target = true;
-            } else {
-                prop_name = (try parseObjectPropertyName(s)) orelse return Error.UnexpectedToken;
-            }
-            defer if (prop_name) |name| {
-                if (name.retained) s.function.atoms.free(name.atom);
-            };
-
-            if (has_binding_target or s.peekKind() == ':') {
-                if (!has_binding_target) try s.advance();
-                if (isIdentifierLikeToken(s)) {
-                    try collectArrowBindingIdentifier(s, names);
-                } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                    const nested_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                    try collectArrowPatternBindingNames(s, nested_kind, names);
-                } else {
-                    return Error.UnexpectedToken;
-                }
-                if (s.peekKind() == '=') {
-                    try s.advance();
-                    try skipInitializerInBindingPattern(s);
-                }
-            } else {
-                const name = prop_name orelse return Error.UnexpectedToken;
-                if (!name.allow_shorthand or
-                    (name.has_escape and escapedIdentifierIsReservedWordForBinding(s, name.atom, true)))
-                {
-                    return Error.UnexpectedToken;
-                }
-                try appendArrowParamBindingName(s, names, name.atom);
-                if (s.peekKind() == '=') {
-                    try s.advance();
-                    try skipInitializerInBindingPattern(s);
-                }
-            }
-
-            if (s.peekKind() == ',') {
-                try s.advance();
-            } else if (s.peekKind() != '}') {
-                return Error.UnexpectedToken;
-            }
-        }
-        try s.expectToken('}');
     }
 
     const ParserSnapshot = struct {
@@ -15447,12 +15024,6 @@ pub const parser_core = struct {
         source_loc_len: usize,
         label_count: u32,
         features: std.EnumSet(FeatureImpl),
-    };
-
-    const LexerReplayPoint = struct {
-        mark_pos: usize,
-        mark_line: u32,
-        mark_col: u32,
     };
 
     fn takeParserSnapshot(s: *State) ParserSnapshot {
@@ -15479,76 +15050,6 @@ pub const parser_core = struct {
             .label_count = s.currentParserLabelCount(),
             .features = s.features,
         };
-    }
-
-    fn takeLexerReplayPoint(s: *State) LexerReplayPoint {
-        return .{
-            .mark_pos = s.lex.mark_pos,
-            .mark_line = s.lex.mark_line,
-            .mark_col = s.lex.mark_col,
-        };
-    }
-
-    fn restoreLexerReplayPoint(s: *State, point: LexerReplayPoint) Error!void {
-        s.lex.freeToken(&s.token);
-        s.lex.pos = point.mark_pos;
-        s.lex.line = point.mark_line;
-        s.lex.col = point.mark_col;
-        s.lex.mark_pos = point.mark_pos;
-        s.lex.mark_line = point.mark_line;
-        s.lex.mark_col = point.mark_col;
-        s.token = try s.lex.next();
-    }
-
-    fn objectLiteralPatternCandidateIsMemberTarget(s: *State) Error!bool {
-        const point = takeLexerReplayPoint(s);
-        defer restoreLexerReplayPoint(s, point) catch {};
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('{'))) return false;
-
-        var depth: usize = 0;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const k = s.peekKind();
-            if (k == @as(tok.TokenKind, @intCast('{'))) {
-                depth += 1;
-            } else if (k == @as(tok.TokenKind, @intCast('}'))) {
-                if (depth == 0) return false;
-                depth -= 1;
-                try s.advance();
-                if (depth == 0) {
-                    return s.peekKind() == @as(tok.TokenKind, @intCast('.')) or
-                        s.peekKind() == @as(tok.TokenKind, @intCast('['));
-                }
-                continue;
-            }
-            try s.advance();
-        }
-        return false;
-    }
-
-    fn restoreParserSnapshot(s: *State, snapshot: ParserSnapshot) Error!void {
-        s.lex.freeToken(&s.token);
-        s.lex.pos = snapshot.pos;
-        s.lex.line = snapshot.line;
-        s.lex.col = snapshot.col;
-        s.lex.got_lf = snapshot.got_lf;
-        s.lex.mark_pos = snapshot.mark_pos;
-        s.lex.mark_line = snapshot.mark_line;
-        s.lex.mark_col = snapshot.mark_col;
-        s.token = snapshot.token;
-        s.last_token_end_offset = snapshot.last_token_end_offset;
-        s.last_token_line_num = snapshot.last_token_line_num;
-        s.last_token_col_num = snapshot.last_token_col_num;
-        s.last_opcode_source_offset = snapshot.last_opcode_source_offset;
-        try s.truncateCode(snapshot.code_len);
-        try s.truncateAtomOperands(snapshot.atom_len);
-        if (s.emit_to_function_def) {
-            s.cur_func().truncateSourceLocs(snapshot.source_loc_len);
-        } else {
-            s.function.truncateSourceLocs(snapshot.source_loc_len);
-        }
-        s.setParserLabelCount(snapshot.label_count);
-        s.cur_func().last_opcode_pos = snapshot.last_opcode_pos;
-        s.features = snapshot.features;
     }
 
     fn restoreParserLexerSnapshot(s: *State, snapshot: ParserSnapshot) void {
@@ -15594,34 +15095,48 @@ pub const parser_core = struct {
 
     fn parseParameterDestructuring(
         s: *State,
-        kind: DestructuringKind,
         arg_index: ?u32,
         has_parameter_expressions: bool,
-    ) Error!void {
-        const saved_binding_is_lexical = s.destructuring_binding_is_lexical;
-        const saved_binding_is_const = s.destructuring_binding_is_const;
+        value_already_on_stack: bool,
+        allow_outer_initializer: bool,
+    ) Error!bool {
         const saved_in_parameter_initializer = s.in_parameter_initializer;
         if (has_parameter_expressions) {
-            s.destructuring_binding_is_lexical = true;
-            s.destructuring_binding_is_const = false;
             s.in_parameter_initializer = true;
         }
-        defer {
-            s.destructuring_binding_is_lexical = saved_binding_is_lexical;
-            s.destructuring_binding_is_const = saved_binding_is_const;
-            s.in_parameter_initializer = saved_in_parameter_initializer;
+        defer s.in_parameter_initializer = saved_in_parameter_initializer;
+
+        if (!value_already_on_stack) {
+            if (arg_index) |idx| {
+                try s.emitOpU16(opcode.op.get_arg, @intCast(idx));
+            } else {
+                try s.emitOp(opcode.op.undefined);
+            }
         }
-        try parseDestructuringParam(s, kind, arg_index);
+        return parseDestructuringElement(
+            s,
+            .{ .binding = .{
+                .define_type = if (has_parameter_expressions) .let_ else .var_,
+                .is_parameter = true,
+                .export_flag = false,
+            } },
+            true,
+            allow_outer_initializer,
+            ParseFlags.default,
+        );
     }
 
     fn leaveParameterExpressionScope(s: *State, parameter_scope: i32) Error!void {
         const fd = s.cur_func();
-        const parameter_var_count = fd.vars.len;
-
-        var idx: usize = 0;
-        while (idx < parameter_var_count) : (idx += 1) {
+        var var_index = fd.scopes[@intCast(parameter_scope)].first;
+        var visited: usize = 0;
+        while (var_index >= 0 and visited <= fd.vars.len) : (visited += 1) {
+            const idx: usize = @intCast(var_index);
+            if (idx >= fd.vars.len) return Error.UnexpectedToken;
             const vd = fd.vars[idx];
-            if (vd.scope_level != parameter_scope) continue;
+            const next = vd.scope_next;
+            if (vd.scope_level != parameter_scope) return Error.UnexpectedToken;
+            var_index = next;
             if (fd.findArg(vd.var_name) >= 0 or s.findFunctionScopeVar(vd.var_name) != null) continue;
 
             // QuickJS copies parameter-environment-only names with add_var,
@@ -15671,6 +15186,16 @@ pub const parser_core = struct {
                 if (s.peekKind() == tok.TOK_IDENT) {
                     try s.advance();
                 }
+                var depth: usize = 0;
+                var previous_token_kind: ?tok.TokenKind = tok.TOK_ELLIPSIS;
+                while (s.peekKind() != tok.TOK_EOF) {
+                    const k = s.peekKind();
+                    if (depth == 0 and k == ')') break;
+                    if (k == '=') scan.has_parameter_expressions = true;
+                    if (k == '(' or k == '[' or k == '{') depth += 1;
+                    if ((k == ')' or k == ']' or k == '}') and depth > 0) depth -= 1;
+                    try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
+                }
                 break;
             } else {
                 var depth: usize = 0;
@@ -15693,11 +15218,6 @@ pub const parser_core = struct {
         }
 
         return scan;
-    }
-
-    fn truncateSpeculativeParse(s: *State, code_len: usize, atom_len: usize) Error!void {
-        try s.truncateCode(code_len);
-        try s.truncateAtomOperands(atom_len);
     }
 
     fn ensureDestructuringArgSlot(s: *State, arg_index: u32) Error!void {
@@ -15728,121 +15248,6 @@ pub const parser_core = struct {
         return null;
     }
 
-    fn atFunctionBodyLexicalScope(s: *State) bool {
-        return s.atFunctionBodyScope();
-    }
-
-    const DestructuringBindingTarget = union(enum) {
-        local: u16,
-        scoped: struct {
-            atom_id: Atom,
-            is_lexical: bool,
-        },
-    };
-
-    fn appendBindingLocal(s: *State, atom_id: Atom) Error!DestructuringBindingTarget {
-        if (s.destructuring_binding_is_lexical) {
-            try s.registerBlockLexicalDeclaration(atom_id);
-            if (findCurrentScopeVar(s, atom_id)) |idx| {
-                if (s.destructuring_predeclare_only) return Error.UnexpectedToken;
-                return .{ .local = idx };
-            }
-            const top_level_scoped = s.atProgramBodyScope() and
-                (s.top_level_lexical_as_module_ref or
-                    (s.top_level_lexical_as_global_ref and !s.is_eval));
-            if (top_level_scoped) {
-                // This parser has a declaration-only pass followed by an
-                // emission pass. QuickJS calls define_var once; our first pass
-                // performs that operation and the second must consume the same
-                // GLOBAL_DECL/MODULE_DECL binding instead of diagnosing it as
-                // a collision with itself.
-                if (s.destructuring_predeclare_only) {
-                    if (hasKnownBinding(s, atom_id)) return Error.UnexpectedToken;
-                    try s.addGlobalVar(atom_id, true, s.destructuring_binding_is_const);
-                    if (s.collect_module_export_bindings) try addModuleExportName(s, atom_id, atom_id);
-                } else if (!s.findGlobalVar(atom_id)) {
-                    return Error.UnexpectedToken;
-                }
-                return .{ .scoped = .{
-                    .atom_id = atom_id,
-                    .is_lexical = true,
-                } };
-            }
-            // qjs define_var JS_VAR_DEF_LET/CONST is_global_var branch
-            // (quickjs.c:24352-24360): lexical destructuring at the global body
-            // scope colliding with any global_vars entry is a SyntaxError.
-            if (s.lexicalBodyDeclarationConflictsWithGlobalVar(atom_id)) {
-                return Error.UnexpectedToken;
-            }
-            if (atFunctionBodyLexicalScope(s) and s.cur_func().findArg(atom_id) >= 0) {
-                return Error.UnexpectedToken;
-            }
-            const idx: u16 = @intCast(try s.addScopeVar(atom_id, .normal, true, s.destructuring_binding_is_const));
-            if (s.collect_module_export_bindings) {
-                try addModuleExportName(s, atom_id, atom_id);
-            }
-            if (s.emit_lexical_tdz_at_decl) {
-                s.cur_func().vars[idx].tdz_emitted_at_decl = true;
-                if (s.cur_func().use_short_opcodes) {
-                    try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
-                }
-            }
-            return .{ .local = idx };
-        }
-        try s.registerBlockVarDeclaration(atom_id);
-        // qjs define_var JS_VAR_DEF_VAR (quickjs.c:24395-24399): a var-pattern
-        // binding colliding with a same-scope lexical (find_lexical_decl) or a
-        // top-level lexical of global code (find_lexical_global_var,
-        // quickjs.c:24099-24102) is a SyntaxError.
-        if (findCurrentScopeVar(s, atom_id)) |existing_idx| {
-            if (s.cur_func().vars[existing_idx].is_lexical) return Error.UnexpectedToken;
-        }
-        if (s.cur_func_stack.len == 0 and s.findLexicalGlobalVar(atom_id)) {
-            return Error.UnexpectedToken;
-        }
-        const eval_var_object_binding = s.is_eval and
-            !s.eval_global_var_bindings and
-            !s.cur_func().is_strict_mode and
-            s.cur_func_stack.len == 0;
-        const top_level_scoped = s.cur_func_stack.len == 0 and
-            ((s.top_level_lexical_as_module_ref and s.atProgramBodyScope()) or
-                (!s.is_eval or s.eval_global_var_bindings));
-        if (top_level_scoped) {
-            if (s.destructuring_predeclare_only) {
-                try s.addGlobalVar(atom_id, false, false);
-                if (s.collect_module_export_bindings) try addModuleExportName(s, atom_id, atom_id);
-            } else if (!s.findGlobalVar(atom_id)) {
-                return Error.UnexpectedToken;
-            }
-            return .{ .scoped = .{
-                .atom_id = atom_id,
-                .is_lexical = false,
-            } };
-        }
-        if (eval_var_object_binding) {
-            // A sloppy direct-eval body is `fd->is_global_var` in QuickJS.
-            // define_var(JS_VAR_DEF_VAR) therefore records this name only as a
-            // JSGlobalVar; the emitted scope put is later resolved through the
-            // captured _arg_var_/_var_ object and keeps its global fallback.
-            // Creating a same-name local here lets descendants capture a frame
-            // slot that does not exist in QuickJS and bypasses that lookup.
-            if (!s.findGlobalVar(atom_id)) try s.addDirectEvalVarObjectVar(atom_id);
-            return .{ .scoped = .{
-                .atom_id = atom_id,
-                .is_lexical = false,
-            } };
-        }
-        if (s.findFunctionScopeVar(atom_id)) |idx| {
-            const entry = s.cur_func().vars[idx];
-            if (!entry.is_lexical and entry.var_kind == .normal) return .{ .local = idx };
-        }
-        const idx = try s.appendFunctionVarAtOrigin(atom_id, s.scope_level);
-        if (s.collect_module_export_bindings) {
-            try addModuleExportName(s, atom_id, atom_id);
-        }
-        return .{ .local = idx };
-    }
-
     fn appendTempLocal(s: *State) Error!u16 {
         return try appendAnonymousTempLocal(s);
     }
@@ -15856,84 +15261,6 @@ pub const parser_core = struct {
             .var_kind = .normal,
         });
         return @intCast(idx);
-    }
-
-    fn emitPushBindingSource(s: *State, source: BindingSource) Error!void {
-        switch (source) {
-            .arg => |idx| try s.emitOpU16(opcode.op.get_arg, @intCast(idx)),
-            .loc => |idx| try s.emitOpU16(opcode.op.get_loc, idx),
-        }
-    }
-
-    fn emitStoreBindingSourceKeep(s: *State, source: BindingSource) Error!void {
-        switch (source) {
-            .arg => |idx| try s.emitOpU16(opcode.op.set_arg, @intCast(idx)),
-            .loc => |idx| try s.emitOpU16(opcode.op.set_loc, idx),
-        }
-    }
-
-    fn emitPutBindingTarget(s: *State, target: DestructuringBindingTarget) Error!void {
-        switch (target) {
-            .scoped => |binding| {
-                if (binding.is_lexical) {
-                    try s.emitScopePutVarInit(binding.atom_id);
-                } else {
-                    try s.emitScopePutVar(binding.atom_id);
-                }
-            },
-            .local => |idx| {
-                if (s.destructuring_binding_is_lexical) {
-                    try s.emitOpU16(opcode.op.put_loc_check_init, idx);
-                } else {
-                    try s.emitOpU16(opcode.op.put_loc, idx);
-                }
-            },
-        }
-    }
-
-    fn emitBindingField(s: *State, source: BindingSource, atom_id: Atom) Error!void {
-        try emitPushBindingSource(s, source);
-        try s.emitOpAtom(opcode.op.get_field, atom_id);
-    }
-
-    fn emitBindingIndex(s: *State, source: BindingSource, index: u32) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_get);
-        try emitPushBindingSource(s, source);
-        try s.emitOpI32(opcode.op.push_i32, @intCast(index));
-        try s.emitOpU16(opcode.op.call, 2);
-    }
-
-    fn emitBindingElision(s: *State, source: BindingSource, index: u32) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_elide);
-        try emitPushBindingSource(s, source);
-        try s.emitOpI32(opcode.op.push_i32, @intCast(index));
-        try s.emitOpU16(opcode.op.call, 2);
-        try s.emitOp(opcode.op.drop);
-    }
-
-    fn emitCloseBindingSource(s: *State, source: BindingSource) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_close);
-        try emitPushBindingSource(s, source);
-        try s.emitOpU16(opcode.op.call, 1);
-        try s.emitOp(opcode.op.drop);
-    }
-
-    fn emitRequireIteratorForBindingSource(s: *State, source: BindingSource) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_require_iterator);
-        try emitPushBindingSource(s, source);
-        try s.emitOpU16(opcode.op.call, 1);
-        try emitStoreBindingSourceKeep(s, source);
-        try s.emitOp(opcode.op.drop);
-    }
-
-    fn emitDefaultForBindingSource(s: *State, source: BindingSource) Error!void {
-        try emitPushBindingSource(s, source);
-        try s.emitOp(opcode.op.is_undefined);
-        const keep_value = try emitForwardJump(s, opcode.op.if_false);
-        try parseAssignExpr(s);
-        try emitStoreBindingSourceKeep(s, source);
-        try s.emitOp(opcode.op.drop);
-        try patchForwardJump(s, keep_value);
     }
 
     fn parseNamedBindingDefaultInitializer(s: *State, atom_id: Atom) Error!void {
@@ -15950,1257 +15277,10 @@ pub const parser_core = struct {
         try emitAnonymousDefaultName(s, atom_id);
     }
 
-    fn emitRequireObjectCoercibleForBindingSource(s: *State, source: BindingSource) Error!void {
-        try emitPushBindingSource(s, source);
-        try s.emitOp(opcode.op.is_undefined_or_null);
-        const keep_value = try emitForwardJump(s, opcode.op.if_false);
-        try s.emitOpAtomU8(opcode.op.throw_error, atom_module.null_atom, 4);
-        try patchForwardJump(s, keep_value);
-    }
-
     fn emitAnonymousDefaultName(s: *State, atom_id: Atom) Error!void {
         if (!s.last_anonymous_function_expr) return;
         try s.emitOpAtom(opcode.op.set_name, atom_id);
         s.last_anonymous_function_expr = false;
-    }
-
-    fn parseThisPrivateAssignmentTarget(s: *State) Error!Atom {
-        if (s.peekKind() != tok.TOK_THIS) return Error.UnexpectedToken;
-        try s.advance();
-        try s.expectToken('.');
-        if (s.peekKind() != tok.TOK_PRIVATE_NAME or !s.in_class) return Error.UnexpectedToken;
-        const private_atom = try privateNameAtom(s, s.token.payload.ident.atom);
-        errdefer s.function.atoms.free(private_atom);
-        if (!classPrivateNameIsBound(s, private_atom)) return Error.UnexpectedToken;
-        try s.advance();
-        return private_atom;
-    }
-
-    fn emitStoreThisPrivateReceiver(s: *State) Error!u16 {
-        const receiver_tmp = try appendTempLocal(s);
-        try s.emitOp(opcode.op.push_this);
-        try s.emitOpU16(opcode.op.put_loc, receiver_tmp);
-        return receiver_tmp;
-    }
-
-    fn emitPutThisPrivateFieldFromReceiver(s: *State, receiver_tmp: u16, private_atom: Atom) Error!void {
-        try s.emitOpU16(opcode.op.get_loc, receiver_tmp);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOpAtom(opcode.op.put_field, private_atom);
-    }
-
-    fn emitPutThisPrivateFieldFromTop(s: *State, private_atom: Atom) Error!void {
-        try s.emitOp(opcode.op.push_this);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOpAtom(opcode.op.put_field, private_atom);
-    }
-
-    fn parseDestructuringPattern(s: *State, kind: DestructuringKind, source: ?BindingSource) Error!void {
-        s.features.insert(.destructuring);
-        switch (kind) {
-            .array => try parseDestructuringArrayFromSource(s, source),
-            .object => try parseDestructuringObjectFromSource(s, source),
-        }
-    }
-
-    /// Advance across one binding pattern without emitting bytecode or
-    /// mutating FunctionDef topology, leaving the lexer on the following
-    /// token. Destructuring defaults need a lookahead because their fallback
-    /// value must be emitted before the element/property initialization.
-    ///
-    /// The old lookahead called parseDestructuringPattern with a null source.
-    /// That still created locals, child functions and class initializer
-    /// carriers; truncating only code/atoms then parsed the same pattern again.
-    /// QuickJS parses these declarations once, so use the existing
-    /// binding-grammar scanner for the lookahead and reserve the real parser
-    /// for the single topology-producing pass.
-    fn scanBindingPatternForTrailingDefault(s: *State, kind: DestructuringKind) Error!bool {
-        var names = std.ArrayList(Atom).empty;
-        defer names.deinit(s.function.memory.allocator);
-        try collectArrowPatternBindingNames(s, kind, &names);
-        return s.peekKind() == '=';
-    }
-
-    /// Assignment patterns can contain member targets and `yield`
-    /// expressions, so the binding-name scanner is not their grammar.  This
-    /// topology-free lookahead only finds the matching outer delimiter; the
-    /// real assignment-pattern parse below still performs all validation and
-    /// emits the target exactly once.
-    fn scanAssignmentPatternForTrailingDefault(s: *State) Error!bool {
-        var depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
-        while (true) {
-            const k = s.peekKind();
-            if (k == tok.TOK_EOF) return Error.UnexpectedToken;
-            if (k == '[' or k == '{' or k == '(') {
-                depth += 1;
-            } else if (k == ']' or k == '}' or k == ')') {
-                if (depth == 0) return Error.UnexpectedToken;
-                depth -= 1;
-                try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
-                if (depth == 0) return s.peekKind() == '=';
-                continue;
-            }
-            try advanceRegexpAwareSpeculativeToken(s, &previous_token_kind);
-        }
-    }
-
-    fn parseDestructuringParam(s: *State, kind: DestructuringKind, arg_index: ?u32) Error!void {
-        const source: ?BindingSource = if (arg_index) |idx| BindingSource{ .arg = idx } else null;
-        const snapshot = takeParserSnapshot(s);
-        const has_default = try scanBindingPatternForTrailingDefault(s, kind);
-        if (has_default) {
-            try s.advance();
-            if (source) |binding_source| {
-                try emitDefaultForBindingSource(s, binding_source);
-            } else {
-                try parseAssignExpr(s);
-                try s.emitOp(opcode.op.drop);
-            }
-        }
-        const after_initializer = if (has_default) takeParserSnapshot(s) else null;
-        restoreParserLexerSnapshot(s, snapshot);
-
-        try parseDestructuringPattern(s, kind, source);
-        if (after_initializer) |after| {
-            if (s.peekKind() != '=') return Error.UnexpectedToken;
-            restoreParserLexerSnapshot(s, after);
-        }
-    }
-
-    fn parseNestedDestructuringElement(
-        s: *State,
-        kind: DestructuringKind,
-        source: ?BindingSource,
-        element_source: ?BindingSource,
-    ) Error!void {
-        if (source == null) {
-            try parseDestructuringPattern(s, kind, null);
-            if (s.peekKind() == '=') {
-                try s.advance();
-                try parseAssignExpr(s);
-                try s.emitOp(opcode.op.drop);
-            }
-            return;
-        }
-
-        const nested_source = element_source orelse return Error.UnexpectedToken;
-        const snapshot = takeParserSnapshot(s);
-        const has_default = if (s.destructuring_assignment_target_mode)
-            try scanAssignmentPatternForTrailingDefault(s)
-        else
-            try scanBindingPatternForTrailingDefault(s, kind);
-        if (has_default) {
-            try s.advance();
-            try emitDefaultForBindingSource(s, nested_source);
-        }
-        const after_initializer = if (has_default) takeParserSnapshot(s) else null;
-        restoreParserLexerSnapshot(s, snapshot);
-
-        try parseDestructuringPattern(s, kind, nested_source);
-        if (after_initializer) |after| {
-            if (s.peekKind() != '=') return Error.UnexpectedToken;
-            restoreParserLexerSnapshot(s, after);
-        }
-    }
-
-    fn emitRestArrayFromSource(s: *State, source: BindingSource, element_index: u32) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_rest);
-        try emitPushBindingSource(s, source);
-        try s.emitOpI32(opcode.op.push_i32, @intCast(element_index));
-        try s.emitOpU16(opcode.op.call, 2);
-    }
-
-    const ObjectRestExcludedKey = union(enum) {
-        atom: Atom,
-        loc: u16,
-    };
-
-    fn appendExcludedAtomKey(s: *State, excluded_keys: *std.ArrayList(ObjectRestExcludedKey), atom_id: Atom) Error!void {
-        const retained = s.function.atoms.dup(atom_id);
-        errdefer s.function.atoms.free(retained);
-        try excluded_keys.append(s.function.memory.allocator, .{ .atom = retained });
-    }
-
-    const DestructuringAssignmentTargetRef = struct {
-        lvalue: LValue,
-
-        fn deinit(self: *DestructuringAssignmentTargetRef, s: *State) void {
-            self.lvalue.deinit(s);
-        }
-    };
-
-    fn emitRestObjectFromSource(s: *State, source: BindingSource, excluded_keys: []const ObjectRestExcludedKey) Error!void {
-        try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.dstr_obj_rest);
-        try emitPushBindingSource(s, source);
-        for (excluded_keys) |excluded| switch (excluded) {
-            .atom => |atom_id| try s.emitOpAtom(opcode.op.push_atom_value, atom_id),
-            .loc => |idx| try s.emitOpU16(opcode.op.get_loc, idx),
-        };
-        try s.emitOpU16(opcode.op.call, @intCast(1 + excluded_keys.len));
-    }
-
-    fn arrayLiteralPatternCandidateIsMemberTarget(s: *State) Error!bool {
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return false;
-        const snapshot = takeParserSnapshot(s);
-        parseArrayLiteral(s, ParseFlags.default) catch |err| switch (err) {
-            error.UnexpectedToken, error.InvalidAssignmentTarget, error.YieldOutsideGenerator => {
-                try truncateSpeculativeParse(s, snapshot.code_len, snapshot.atom_len);
-                restoreParserLexerSnapshot(s, snapshot);
-                return false;
-            },
-            else => return err,
-        };
-        const is_member = s.peekKind() == @as(tok.TokenKind, @intCast('.')) or
-            s.peekKind() == @as(tok.TokenKind, @intCast('['));
-        try truncateSpeculativeParse(s, snapshot.code_len, snapshot.atom_len);
-        restoreParserLexerSnapshot(s, snapshot);
-        return is_member;
-    }
-
-    fn destructuringAssignmentTargetCanStart(s: *State) Error!bool {
-        if (!s.destructuring_assignment_target_mode) return false;
-        return switch (s.peekKind()) {
-            @as(tok.TokenKind, @intCast('(')), tok.TOK_THIS, tok.TOK_SUPER => true,
-            @as(tok.TokenKind, @intCast('{')) => try objectLiteralPatternCandidateIsMemberTarget(s),
-            @as(tok.TokenKind, @intCast('[')) => try arrayLiteralPatternCandidateIsMemberTarget(s),
-            else => false,
-        };
-    }
-
-    fn thisPrivateAssignmentTargetFollows(s: *State) Error!bool {
-        if (s.peekKind() != tok.TOK_THIS) return false;
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try s.advance();
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('.'))) return false;
-        try s.advance();
-        return s.peekKind() == tok.TOK_PRIVATE_NAME;
-    }
-
-    fn parseDestructuringAssignmentTargetLValue(s: *State) Error!LValue {
-        try parseLhsExpr(s, ParseFlags{ .in_accepted = false });
-        return getLValue(s, false);
-    }
-
-    fn parseDestructuringAssignmentTargetSyntax(s: *State) Error!void {
-        const code_len = s.currentCodeLen();
-        const atom_len = s.currentAtomOperandLen();
-        var lvalue = try parseDestructuringAssignmentTargetLValue(s);
-        defer lvalue.deinit(s);
-        try truncateSpeculativeParse(s, code_len, atom_len);
-    }
-
-    fn parseDestructuringAssignmentTargetRef(s: *State) Error!DestructuringAssignmentTargetRef {
-        return .{ .lvalue = try parseDestructuringAssignmentTargetLValue(s) };
-    }
-
-    fn emitPutDestructuringAssignmentTarget(s: *State, target: *DestructuringAssignmentTargetRef) Error!void {
-        try putLValue(s, &target.lvalue, .no_keep);
-    }
-
-    /// Parse object destructuring pattern
-    /// Mirrors object destructuring in quickjs.c
-    fn parseDestructuringObjectFromSource(s: *State, source: ?BindingSource) Error!void {
-        try s.expectToken('{');
-        if (source) |binding_source| try emitRequireObjectCoercibleForBindingSource(s, binding_source);
-        var excluded_keys = std.ArrayList(ObjectRestExcludedKey).empty;
-        defer {
-            for (excluded_keys.items) |excluded| switch (excluded) {
-                .atom => |atom_id| s.function.atoms.free(atom_id),
-                .loc => {},
-            };
-            excluded_keys.deinit(s.function.memory.allocator);
-        }
-
-        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-            if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                try s.advance();
-                if (s.destructuring_assignment_target_mode and try thisPrivateAssignmentTargetFollows(s)) {
-                    const private_atom = try parseThisPrivateAssignmentTarget(s);
-                    defer s.function.atoms.free(private_atom);
-                    if (source) |binding_source| {
-                        const receiver_tmp = try emitStoreThisPrivateReceiver(s);
-                        try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
-                        try emitPutThisPrivateFieldFromReceiver(s, receiver_tmp, private_atom);
-                    }
-                    if (s.peekKind() != '}') return Error.UnexpectedToken;
-                    continue;
-                }
-                if (try destructuringAssignmentTargetCanStart(s)) {
-                    if (source) |binding_source| {
-                        var target_ref = try parseDestructuringAssignmentTargetRef(s);
-                        defer target_ref.deinit(s);
-                        try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
-                        try emitPutDestructuringAssignmentTarget(s, &target_ref);
-                    } else {
-                        try parseDestructuringAssignmentTargetSyntax(s);
-                    }
-                    if (s.peekKind() != '}') return Error.UnexpectedToken;
-                    continue;
-                }
-                if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                const rest_atom = s.token.payload.ident.atom;
-                var local_index: ?DestructuringBindingTarget = null;
-                var binding_ref: ?DestructuringBindingRef = null;
-                try s.advance();
-                if (s.destructuring_assignment_target_mode and s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                    try s.advance();
-                    if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                    const target_prop = s.token.payload.ident.atom;
-                    if (source) |binding_source| {
-                        try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
-                        const rest_tmp = try appendTempLocal(s);
-                        try s.emitOpU16(opcode.op.put_loc, rest_tmp);
-                        try s.emitScopeGetVar(rest_atom);
-                        try s.emitOpU16(opcode.op.get_loc, rest_tmp);
-                        try s.emitOpAtom(opcode.op.put_field, target_prop);
-                    }
-                    try s.advance();
-                } else if (s.destructuring_assignment_target_mode) {
-                    if (source) |binding_source| {
-                        try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
-                        try s.emitScopePutVar(rest_atom);
-                    }
-                } else {
-                    if (source) |binding_source| {
-                        local_index = try appendBindingLocal(s, rest_atom);
-                        binding_ref = try captureDestructuringVarBindingRef(s, rest_atom);
-                        try emitRestObjectFromSource(s, binding_source, excluded_keys.items);
-                    } else if (s.destructuring_predeclare_only) {
-                        _ = try appendBindingLocal(s, rest_atom);
-                    }
-                }
-                if (s.peekKind() != '}') return Error.UnexpectedToken;
-                if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
-            } else if (s.peekKind() == '[') {
-                try s.advance();
-                if (source) |binding_source| try emitPushBindingSource(s, binding_source);
-                try parseExpr(s);
-                if (source != null) try s.emitOp(opcode.op.to_propkey);
-                try s.expectToken(']');
-                try s.expectToken(':');
-                if (s.destructuring_assignment_target_mode and try thisPrivateAssignmentTargetFollows(s)) {
-                    const private_atom = try parseThisPrivateAssignmentTarget(s);
-                    defer s.function.atoms.free(private_atom);
-                    var receiver_tmp: ?u16 = null;
-                    if (source != null) receiver_tmp = try emitStoreThisPrivateReceiver(s);
-                    if (source != null) {
-                        const excluded_tmp = try appendTempLocal(s);
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc, excluded_tmp);
-                        try excluded_keys.append(s.function.memory.allocator, .{ .loc = excluded_tmp });
-                        try s.emitOp(opcode.op.get_array_el);
-                    } else {
-                        try s.emitOp(opcode.op.drop);
-                    }
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        if (source != null) {
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            try parseAssignExpr(s);
-                            try patchForwardJump(s, keep_value);
-                        } else {
-                            try parseAssignExpr(s);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    }
-                    if (source != null) try emitPutThisPrivateFieldFromReceiver(s, receiver_tmp orelse return Error.UnexpectedToken, private_atom);
-                } else {
-                    if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                    const target_atom = s.token.payload.ident.atom;
-                    var local_index: ?DestructuringBindingTarget = null;
-                    var binding_ref: ?DestructuringBindingRef = null;
-                    var assignment_atom: ?Atom = null;
-                    try s.advance();
-                    if (source == null and s.destructuring_assignment_target_mode and
-                        (s.peekKind() == @as(tok.TokenKind, @intCast('.')) or
-                            s.peekKind() == @as(tok.TokenKind, @intCast('[')) or
-                            s.peekKind() == @as(tok.TokenKind, @intCast('('))))
-                    {
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-                            const shape = try parseCallArgs(s, ParseFlags.default);
-                            try emitPlainCallFromStack(s, shape);
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return Error.UnexpectedToken;
-                        }
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            try s.advance();
-                        } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                            try s.advance();
-                            try parseExpr(s);
-                            try s.expectToken(']');
-                        } else {
-                            return Error.UnexpectedToken;
-                        }
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            try parseAssignExpr(s);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    } else if (source != null and s.destructuring_assignment_target_mode and
-                        (s.peekKind() == @as(tok.TokenKind, @intCast('.')) or
-                            s.peekKind() == @as(tok.TokenKind, @intCast('[')) or
-                            s.peekKind() == @as(tok.TokenKind, @intCast('('))))
-                    {
-                        const base_tmp = try appendTempLocal(s);
-                        var prop_atom: ?Atom = null;
-                        var key_tmp: ?u16 = null;
-                        try emitDestructuringTargetBase(s, target_atom);
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-                            const shape = try parseCallArgs(s, ParseFlags.default);
-                            try emitPlainCallFromStack(s, shape);
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return Error.UnexpectedToken;
-                        }
-                        try s.emitOpU16(opcode.op.put_loc, base_tmp);
-                        if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            prop_atom = s.token.payload.ident.atom;
-                            try s.advance();
-                        } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                            try s.advance();
-                            try parseExpr(s);
-                            const tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, tmp);
-                            key_tmp = tmp;
-                            try s.expectToken(']');
-                        } else {
-                            return Error.UnexpectedToken;
-                        }
-                        const excluded_tmp = try appendTempLocal(s);
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc, excluded_tmp);
-                        try excluded_keys.append(s.function.memory.allocator, .{ .loc = excluded_tmp });
-                        try s.emitOp(opcode.op.get_array_el);
-                        const value_tmp = try appendTempLocal(s);
-                        try s.emitOpU16(opcode.op.put_loc, value_tmp);
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp);
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            try parseAssignExpr(s);
-                            try patchForwardJump(s, keep_value);
-                            try s.emitOpU16(opcode.op.put_loc, value_tmp);
-                        }
-                        try s.emitOpU16(opcode.op.get_loc, base_tmp);
-                        if (prop_atom) |atom_id| {
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp);
-                            try s.emitOpAtom(opcode.op.put_field, atom_id);
-                        } else {
-                            try s.emitOpU16(opcode.op.get_loc, key_tmp orelse return Error.UnexpectedToken);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp);
-                            try s.emitOp(opcode.op.put_array_el);
-                        }
-                    } else if (source != null) {
-                        const excluded_tmp = try appendTempLocal(s);
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc, excluded_tmp);
-                        try excluded_keys.append(s.function.memory.allocator, .{ .loc = excluded_tmp });
-                        if (s.destructuring_assignment_target_mode) {
-                            assignment_atom = target_atom;
-                        } else {
-                            local_index = try appendBindingLocal(s, target_atom);
-                            binding_ref = try captureDestructuringVarBindingRef(s, target_atom);
-                        }
-                        try s.emitOp(opcode.op.get_array_el);
-                    } else if (s.destructuring_predeclare_only) {
-                        _ = try appendBindingLocal(s, target_atom);
-                        try s.emitOp(opcode.op.drop);
-                    } else {
-                        try s.emitOp(opcode.op.drop);
-                    }
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        if (source != null) {
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            try parseNamedBindingDefaultInitializer(s, target_atom);
-                            try patchForwardJump(s, keep_value);
-                        } else {
-                            try parseAssignExpr(s);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    }
-                    if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
-                    if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
-                }
-            } else if (try parseObjectPropertyName(s)) |prop_name| {
-                const prop_atom = prop_name.atom;
-                defer if (prop_name.retained) s.function.atoms.free(prop_atom);
-                if (source != null) try appendExcludedAtomKey(s, &excluded_keys, prop_atom);
-
-                // Check for renaming: {a: b}
-                if (s.peekKind() == ':') {
-                    try s.advance();
-                    if (s.peekKind() == tok.TOK_IDENT) {
-                        const target_atom = s.token.payload.ident.atom;
-                        var local_index: ?DestructuringBindingTarget = null;
-                        var binding_ref: ?DestructuringBindingRef = null;
-                        var assignment_atom: ?Atom = null;
-                        var member_base: ?Atom = null;
-                        var member_prop: ?Atom = null;
-                        var computed_base: ?Atom = null;
-                        var computed_key_point: ?LexerReplayPoint = null;
-                        var value_tmp: ?u16 = null;
-                        if (source) |binding_source| {
-                            if (!s.destructuring_assignment_target_mode) {
-                                local_index = try appendBindingLocal(s, target_atom);
-                                binding_ref = try captureDestructuringVarBindingRef(s, target_atom);
-                            }
-                            try emitBindingField(s, binding_source, prop_atom);
-                        } else if (s.destructuring_predeclare_only) {
-                            _ = try appendBindingLocal(s, target_atom);
-                        }
-                        try s.advance();
-                        if (s.destructuring_assignment_target_mode) {
-                            if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                                if (source != null) {
-                                    const tmp = try appendTempLocal(s);
-                                    try s.emitOpU16(opcode.op.put_loc, tmp);
-                                    value_tmp = tmp;
-                                }
-                                try s.advance();
-                                if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                                member_base = target_atom;
-                                member_prop = s.token.payload.ident.atom;
-                                try s.advance();
-                            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                                if (source != null) {
-                                    const tmp = try appendTempLocal(s);
-                                    try s.emitOpU16(opcode.op.put_loc, tmp);
-                                    value_tmp = tmp;
-                                }
-                                try s.advance();
-                                computed_base = target_atom;
-                                computed_key_point = takeLexerReplayPoint(s);
-                                const key_code_len = s.currentCodeLen();
-                                const key_atom_len = s.currentAtomOperandLen();
-                                try parseExpr(s);
-                                try truncateSpeculativeParse(s, key_code_len, key_atom_len);
-                                try s.expectToken(']');
-                            } else {
-                                assignment_atom = target_atom;
-                            }
-                        }
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            if (source != null) {
-                                if (value_tmp) |tmp| try s.emitOpU16(opcode.op.get_loc, tmp);
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                if (assignment_atom != null or local_index != null) {
-                                    try parseNamedBindingDefaultInitializer(s, target_atom);
-                                } else {
-                                    try parseAssignExpr(s);
-                                }
-                                try patchForwardJump(s, keep_value);
-                                // Member/computed targets store from value_tmp
-                                // below; thread the post-default value back so
-                                // the store sees it (qjs keeps the value on top
-                                // of the lvalue ref and put_lvalue stores the
-                                // defaulted TOS, quickjs.c:26621-26640).
-                                if (value_tmp) |tmp| try s.emitOpU16(opcode.op.put_loc, tmp);
-                            } else {
-                                try parseAssignExpr(s);
-                                try s.emitOp(opcode.op.drop);
-                            }
-                        }
-                        if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
-                        if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
-                        if (source != null and member_base != null) {
-                            const base_atom = member_base.?;
-                            try s.emitScopeGetVar(base_atom);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                            try s.emitOpAtom(opcode.op.put_field, member_prop orelse return Error.UnexpectedToken);
-                        } else if (source != null and computed_base != null) {
-                            const base_atom = computed_base.?;
-                            try s.emitScopeGetVar(base_atom);
-                            const after_key = takeParserSnapshot(s);
-                            try restoreLexerReplayPoint(s, computed_key_point orelse return Error.UnexpectedToken);
-                            try parseExpr(s);
-                            restoreParserLexerSnapshot(s, after_key);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                            try s.emitOp(opcode.op.put_array_el);
-                        }
-                    } else if (s.destructuring_assignment_target_mode and try thisPrivateAssignmentTargetFollows(s)) {
-                        const private_atom = try parseThisPrivateAssignmentTarget(s);
-                        defer s.function.atoms.free(private_atom);
-                        var receiver_tmp: ?u16 = null;
-                        if (source != null) receiver_tmp = try emitStoreThisPrivateReceiver(s);
-                        if (source) |binding_source| {
-                            try emitBindingField(s, binding_source, prop_atom);
-                        }
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            if (source != null) {
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                try parseAssignExpr(s);
-                                try patchForwardJump(s, keep_value);
-                            } else {
-                                try parseAssignExpr(s);
-                                try s.emitOp(opcode.op.drop);
-                            }
-                        }
-                        if (source != null) {
-                            try emitPutThisPrivateFieldFromReceiver(s, receiver_tmp orelse return Error.UnexpectedToken, private_atom);
-                        }
-                    } else if (try destructuringAssignmentTargetCanStart(s)) {
-                        if (source) |binding_source| {
-                            var target_ref = try parseDestructuringAssignmentTargetRef(s);
-                            defer target_ref.deinit(s);
-                            try emitBindingField(s, binding_source, prop_atom);
-                            if (s.peekKind() == '=') {
-                                try s.advance();
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                try parseAssignExpr(s);
-                                try patchForwardJump(s, keep_value);
-                            }
-                            try emitPutDestructuringAssignmentTarget(s, &target_ref);
-                        } else {
-                            try parseDestructuringAssignmentTargetSyntax(s);
-                            if (s.peekKind() == '=') {
-                                try s.advance();
-                                try parseAssignExpr(s);
-                                try s.emitOp(opcode.op.drop);
-                            }
-                        }
-                    } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{')) and s.destructuring_assignment_target_mode) {
-                        const object_point = takeLexerReplayPoint(s);
-                        if (try objectLiteralPatternCandidateIsMemberTarget(s)) {
-                            var value_tmp: ?u16 = null;
-                            if (source) |binding_source| {
-                                try emitBindingField(s, binding_source, prop_atom);
-                                const tmp = try appendTempLocal(s);
-                                try s.emitOpU16(opcode.op.put_loc, tmp);
-                                value_tmp = tmp;
-                            }
-                            const object_code_len = s.currentCodeLen();
-                            const object_atom_len = s.currentAtomOperandLen();
-                            try parseObjectLiteral(s, ParseFlags.default);
-                            try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            const target_prop = s.token.payload.ident.atom;
-                            try s.advance();
-                            if (s.peekKind() == '=') {
-                                try s.advance();
-                                if (source != null) {
-                                    try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                                    try s.emitOp(opcode.op.dup);
-                                    try s.emitOp(opcode.op.is_undefined);
-                                    const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                    try s.emitOp(opcode.op.drop);
-                                    try parseAssignExpr(s);
-                                    try patchForwardJump(s, keep_value);
-                                    const value_with_default_tmp = try appendTempLocal(s);
-                                    try s.emitOpU16(opcode.op.put_loc, value_with_default_tmp);
-                                    value_tmp = value_with_default_tmp;
-                                } else {
-                                    try parseAssignExpr(s);
-                                    try s.emitOp(opcode.op.drop);
-                                }
-                            }
-                            if (source != null) {
-                                const after_object = takeParserSnapshot(s);
-                                try restoreLexerReplayPoint(s, object_point);
-                                try parseObjectLiteral(s, ParseFlags.default);
-                                restoreParserLexerSnapshot(s, after_object);
-                                try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                                try s.emitOpAtom(opcode.op.put_field, target_prop);
-                            }
-                        } else {
-                            try restoreLexerReplayPoint(s, object_point);
-                            const nested_kind: DestructuringKind = .object;
-                            var nested_source: ?BindingSource = null;
-                            if (source) |binding_source| {
-                                const temp_idx = try appendTempLocal(s);
-                                try emitBindingField(s, binding_source, prop_atom);
-                                try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                                nested_source = BindingSource{ .loc = temp_idx };
-                            }
-                            try parseNestedDestructuringElement(s, nested_kind, source, nested_source);
-                        }
-                    } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                        const nested_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                        var nested_source: ?BindingSource = null;
-                        if (source) |binding_source| {
-                            const temp_idx = try appendTempLocal(s);
-                            try emitBindingField(s, binding_source, prop_atom);
-                            try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                            nested_source = BindingSource{ .loc = temp_idx };
-                        }
-                        try parseNestedDestructuringElement(s, nested_kind, source, nested_source);
-                    } else {
-                        return Error.UnexpectedToken;
-                    }
-                } else {
-                    if (!prop_name.allow_shorthand) return Error.UnexpectedToken;
-                    if (s.destructuring_assignment_target_mode and (s.is_strict or s.cur_func().is_strict_mode) and
-                        (atomNameEquals(s, prop_atom, "eval") or atomNameEquals(s, prop_atom, "arguments")))
-                    {
-                        return Error.UnexpectedToken;
-                    }
-                    var local_index: ?DestructuringBindingTarget = null;
-                    var binding_ref: ?DestructuringBindingRef = null;
-                    var assignment_atom: ?Atom = null;
-                    if (source) |binding_source| {
-                        if (s.destructuring_assignment_target_mode) {
-                            assignment_atom = prop_atom;
-                        } else {
-                            local_index = try appendBindingLocal(s, prop_atom);
-                            binding_ref = try captureDestructuringVarBindingRef(s, prop_atom);
-                        }
-                        try emitBindingField(s, binding_source, prop_atom);
-                    } else if (s.destructuring_predeclare_only) {
-                        _ = try appendBindingLocal(s, prop_atom);
-                    }
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        if (source != null) {
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            try parseNamedBindingDefaultInitializer(s, prop_atom);
-                            try patchForwardJump(s, keep_value);
-                        } else {
-                            try parseAssignExpr(s);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    }
-                    if (local_index) |idx| try emitPutDestructuringBinding(s, idx, binding_ref);
-                    if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
-                }
-            } else {
-                return Error.UnexpectedToken;
-            }
-
-            if (s.peekKind() == ',') {
-                try s.advance();
-            } else if (s.peekKind() != '}') {
-                return Error.UnexpectedToken;
-            }
-        }
-
-        try s.expectToken('}');
-    }
-
-    /// Parse array destructuring pattern
-    /// Mirrors array destructuring in quickjs.c
-    fn parseDestructuringArrayFromSource(s: *State, source: ?BindingSource) Error!void {
-        try s.expectToken('[');
-        if (source) |binding_source| try emitRequireIteratorForBindingSource(s, binding_source);
-
-        var element_index: u32 = 0;
-        while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
-            var consumed_elision_comma = false;
-            if (isIdentifierLikeToken(s) or s.peekKind() == tok.TOK_AWAIT) {
-                if (s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s)) return Error.UnexpectedToken;
-                const elem_atom = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
-                const can_parse_assignment_target = s.destructuring_assignment_target_mode;
-                if (can_parse_assignment_target) {
-                    try s.advance();
-                    if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                        if (source) |binding_source| {
-                            const base_tmp = try appendTempLocal(s);
-                            try emitDestructuringTargetBase(s, elem_atom);
-                            try s.emitOpU16(opcode.op.put_loc, base_tmp);
-                            try s.advance();
-                            try parseExpr(s);
-                            const key_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, key_tmp);
-                            try s.expectToken(']');
-                            try emitBindingIndex(s, binding_source, element_index);
-                            const value_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, value_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, base_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, key_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp);
-                            try s.emitOp(opcode.op.put_array_el);
-                        } else {
-                            try s.advance();
-                            try parseExpr(s);
-                            try s.expectToken(']');
-                        }
-                    } else if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-                        if (source) |binding_source| {
-                            const base_tmp = try appendTempLocal(s);
-                            try emitDestructuringTargetBase(s, elem_atom);
-                            const shape = try parseCallArgs(s, ParseFlags.default);
-                            try emitPlainCallFromStack(s, shape);
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return Error.UnexpectedToken;
-                            try s.emitOpU16(opcode.op.put_loc, base_tmp);
-                            try s.advance();
-                            try parseExpr(s);
-                            const key_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, key_tmp);
-                            try s.expectToken(']');
-                            try emitBindingIndex(s, binding_source, element_index);
-                            const value_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, value_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, base_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, key_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp);
-                            try s.emitOp(opcode.op.put_array_el);
-                        } else {
-                            const shape = try parseCallArgs(s, ParseFlags.default);
-                            try emitPlainCallFromStack(s, shape);
-                            if (s.peekKind() != @as(tok.TokenKind, @intCast('['))) return Error.UnexpectedToken;
-                            try s.advance();
-                            try parseExpr(s);
-                            try s.expectToken(']');
-                        }
-                    } else if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                        const value_tmp: ?u16 = null;
-                        if (source) |binding_source| {
-                            const base_tmp = try appendTempLocal(s);
-                            try emitDestructuringTargetBase(s, elem_atom);
-                            try s.emitOpU16(opcode.op.put_loc, base_tmp);
-                            try s.advance();
-                            if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                            const prop_atom = s.token.payload.ident.atom;
-                            try s.advance();
-                            try emitBindingIndex(s, binding_source, element_index);
-                            const stored_value_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, stored_value_tmp);
-                            if (s.peekKind() == '=') {
-                                try s.advance();
-                                try s.emitOpU16(opcode.op.get_loc, stored_value_tmp);
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                try parseAssignExpr(s);
-                                try patchForwardJump(s, keep_value);
-                                try s.emitOpU16(opcode.op.put_loc, stored_value_tmp);
-                            }
-                            try s.emitOpU16(opcode.op.get_loc, base_tmp);
-                            try s.emitOpU16(opcode.op.get_loc, stored_value_tmp);
-                            try s.emitOpAtom(opcode.op.put_field, prop_atom);
-                            element_index += 1;
-                            if (s.peekKind() == ',') {
-                                try s.advance();
-                                continue;
-                            } else if (s.peekKind() != ']') {
-                                return Error.UnexpectedToken;
-                            }
-                            continue;
-                        }
-                        try s.advance();
-                        if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                        const prop_atom = s.token.payload.ident.atom;
-                        try s.advance();
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            if (source != null) {
-                                try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                try parseAssignExpr(s);
-                                try patchForwardJump(s, keep_value);
-                                try s.emitOpU16(opcode.op.put_loc, value_tmp orelse return Error.UnexpectedToken);
-                            } else {
-                                try parseAssignExpr(s);
-                                try s.emitOp(opcode.op.drop);
-                            }
-                        }
-                        if (source != null) {
-                            try s.emitScopeGetVar(elem_atom);
-                            try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                            try s.emitOpAtom(opcode.op.put_field, prop_atom);
-                        }
-                    } else {
-                        if (s.destructuring_assignment_target_mode and (s.is_strict or s.cur_func().is_strict_mode) and
-                            (atomNameEquals(s, elem_atom, "eval") or atomNameEquals(s, elem_atom, "arguments")))
-                        {
-                            return Error.UnexpectedToken;
-                        }
-                        var local_index: ?DestructuringBindingTarget = null;
-                        var binding_ref: ?DestructuringBindingRef = null;
-                        var assignment_atom: ?Atom = null;
-                        if (source) |binding_source| {
-                            if (s.destructuring_assignment_target_mode) {
-                                assignment_atom = elem_atom;
-                            } else {
-                                local_index = try appendBindingLocal(s, elem_atom);
-                                binding_ref = try captureDestructuringVarBindingRef(s, elem_atom);
-                            }
-                            try emitBindingIndex(s, binding_source, element_index);
-                        }
-                        if (s.peekKind() == '=') {
-                            try s.advance();
-                            if (source != null) {
-                                try s.emitOp(opcode.op.dup);
-                                try s.emitOp(opcode.op.is_undefined);
-                                const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                                try s.emitOp(opcode.op.drop);
-                                try parseNamedBindingDefaultInitializer(s, elem_atom);
-                                try patchForwardJump(s, keep_value);
-                            } else {
-                                try parseAssignExpr(s);
-                                try s.emitOp(opcode.op.drop);
-                            }
-                        }
-                        if (local_index) |idx| {
-                            try emitPutDestructuringBinding(s, idx, binding_ref);
-                        }
-                        if (assignment_atom) |atom_id| try s.emitScopePutVar(atom_id);
-                    }
-                } else {
-                    var local_index: ?DestructuringBindingTarget = null;
-                    var binding_ref: ?DestructuringBindingRef = null;
-                    if (source) |binding_source| {
-                        local_index = try appendBindingLocal(s, elem_atom);
-                        binding_ref = try captureDestructuringVarBindingRef(s, elem_atom);
-                        try emitBindingIndex(s, binding_source, element_index);
-                    } else if (s.destructuring_predeclare_only) {
-                        _ = try appendBindingLocal(s, elem_atom);
-                    }
-                    try s.advance();
-
-                    // Check for default value
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        if (source != null) {
-                            try s.emitOp(opcode.op.dup);
-                            try s.emitOp(opcode.op.is_undefined);
-                            const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                            try s.emitOp(opcode.op.drop);
-                            try parseNamedBindingDefaultInitializer(s, elem_atom);
-                            try patchForwardJump(s, keep_value);
-                        } else {
-                            try parseAssignExpr(s);
-                            try s.emitOp(opcode.op.drop);
-                        }
-                    }
-                    if (local_index) |idx| {
-                        try emitPutDestructuringBinding(s, idx, binding_ref);
-                    }
-                }
-            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{')) and
-                s.destructuring_assignment_target_mode and
-                try objectLiteralPatternCandidateIsMemberTarget(s))
-            {
-                const object_point = takeLexerReplayPoint(s);
-                var object_tmp: ?u16 = null;
-                var key_tmp: ?u16 = null;
-                var value_tmp: ?u16 = null;
-                const object_code_len = s.currentCodeLen();
-                const object_atom_len = s.currentAtomOperandLen();
-                try parseObjectLiteral(s, ParseFlags.default);
-                try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                const after_object = takeParserSnapshot(s);
-                try restoreLexerReplayPoint(s, object_point);
-                try parseObjectLiteral(s, ParseFlags.default);
-                restoreParserLexerSnapshot(s, after_object);
-                if (source != null) {
-                    const tmp = try appendTempLocal(s);
-                    try s.emitOpU16(opcode.op.put_loc, tmp);
-                    object_tmp = tmp;
-                }
-                var target_prop: ?Atom = null;
-                if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                    try s.advance();
-                    if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                    target_prop = s.token.payload.ident.atom;
-                    try s.advance();
-                } else if (s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                    try s.advance();
-                    try parseExpr(s);
-                    try s.expectToken(']');
-                    if (source != null) {
-                        const tmp = try appendTempLocal(s);
-                        try s.emitOpU16(opcode.op.put_loc, tmp);
-                        key_tmp = tmp;
-                    }
-                } else {
-                    return Error.UnexpectedToken;
-                }
-                if (source) |binding_source| {
-                    try emitBindingIndex(s, binding_source, element_index);
-                    const tmp = try appendTempLocal(s);
-                    try s.emitOpU16(opcode.op.put_loc, tmp);
-                    value_tmp = tmp;
-                }
-                if (s.peekKind() == '=') {
-                    try s.advance();
-                    if (source != null) {
-                        try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOp(opcode.op.is_undefined);
-                        const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                        try s.emitOp(opcode.op.drop);
-                        try parseAssignExpr(s);
-                        try patchForwardJump(s, keep_value);
-                        try s.emitOpU16(opcode.op.put_loc, value_tmp orelse return Error.UnexpectedToken);
-                    } else {
-                        try parseAssignExpr(s);
-                        try s.emitOp(opcode.op.drop);
-                    }
-                }
-                if (source != null) {
-                    try s.emitOpU16(opcode.op.get_loc, object_tmp orelse return Error.UnexpectedToken);
-                    if (target_prop) |prop_atom| {
-                        try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                        try s.emitOpAtom(opcode.op.put_field, prop_atom);
-                    } else {
-                        try s.emitOpU16(opcode.op.get_loc, key_tmp orelse return Error.UnexpectedToken);
-                        try s.emitOpU16(opcode.op.get_loc, value_tmp orelse return Error.UnexpectedToken);
-                        try s.emitOp(opcode.op.put_array_el);
-                    }
-                }
-            } else if (s.destructuring_assignment_target_mode and try thisPrivateAssignmentTargetFollows(s)) {
-                const private_atom = try parseThisPrivateAssignmentTarget(s);
-                defer s.function.atoms.free(private_atom);
-                var receiver_tmp: ?u16 = null;
-                if (source != null) receiver_tmp = try emitStoreThisPrivateReceiver(s);
-                if (source) |binding_source| {
-                    try emitBindingIndex(s, binding_source, element_index);
-                }
-                if (s.peekKind() == '=') {
-                    try s.advance();
-                    if (source != null) {
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOp(opcode.op.is_undefined);
-                        const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                        try s.emitOp(opcode.op.drop);
-                        try parseAssignExpr(s);
-                        try patchForwardJump(s, keep_value);
-                    } else {
-                        try parseAssignExpr(s);
-                        try s.emitOp(opcode.op.drop);
-                    }
-                }
-                if (source != null) {
-                    try emitPutThisPrivateFieldFromReceiver(s, receiver_tmp orelse return Error.UnexpectedToken, private_atom);
-                }
-            } else if (try destructuringAssignmentTargetCanStart(s)) {
-                if (source) |binding_source| {
-                    var target_ref = try parseDestructuringAssignmentTargetRef(s);
-                    defer target_ref.deinit(s);
-                    try emitBindingIndex(s, binding_source, element_index);
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        try s.emitOp(opcode.op.dup);
-                        try s.emitOp(opcode.op.is_undefined);
-                        const keep_value = try emitForwardJump(s, opcode.op.if_false);
-                        try s.emitOp(opcode.op.drop);
-                        try parseAssignExpr(s);
-                        try patchForwardJump(s, keep_value);
-                    }
-                    try emitPutDestructuringAssignmentTarget(s, &target_ref);
-                } else {
-                    try parseDestructuringAssignmentTargetSyntax(s);
-                    if (s.peekKind() == '=') {
-                        try s.advance();
-                        try parseAssignExpr(s);
-                        try s.emitOp(opcode.op.drop);
-                    }
-                }
-            } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                const nested_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                var nested_source: ?BindingSource = null;
-                if (source) |binding_source| {
-                    const temp_idx = try appendTempLocal(s);
-                    try emitBindingIndex(s, binding_source, element_index);
-                    try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                    nested_source = BindingSource{ .loc = temp_idx };
-                }
-                try parseNestedDestructuringElement(s, nested_kind, source, nested_source);
-            } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
-                // Rest element: [...rest]
-                try s.advance();
-                if (s.destructuring_assignment_target_mode and try thisPrivateAssignmentTargetFollows(s)) {
-                    const private_atom = try parseThisPrivateAssignmentTarget(s);
-                    defer s.function.atoms.free(private_atom);
-                    if (source) |binding_source| {
-                        const receiver_tmp = try emitStoreThisPrivateReceiver(s);
-                        try emitRestArrayFromSource(s, binding_source, element_index);
-                        try emitPutThisPrivateFieldFromReceiver(s, receiver_tmp, private_atom);
-                    }
-                } else if (try destructuringAssignmentTargetCanStart(s)) {
-                    if (source) |binding_source| {
-                        var target_ref = try parseDestructuringAssignmentTargetRef(s);
-                        defer target_ref.deinit(s);
-                        try emitRestArrayFromSource(s, binding_source, element_index);
-                        try emitPutDestructuringAssignmentTarget(s, &target_ref);
-                    } else {
-                        try parseDestructuringAssignmentTargetSyntax(s);
-                    }
-                } else if (isIdentifierLikeToken(s) or s.peekKind() == tok.TOK_AWAIT) {
-                    if (s.peekKind() == tok.TOK_AWAIT and !canUseAwaitAsIdentifier(s)) return Error.UnexpectedToken;
-                    const rest_atom = if (s.peekKind() == tok.TOK_IDENT) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
-                    if (s.destructuring_assignment_target_mode and (s.is_strict or s.cur_func().is_strict_mode) and
-                        (atomNameEquals(s, rest_atom, "eval") or atomNameEquals(s, rest_atom, "arguments")))
-                    {
-                        return Error.UnexpectedToken;
-                    }
-                    try s.advance();
-                    if (s.destructuring_assignment_target_mode and s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
-                        try s.advance();
-                        if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
-                        const prop_atom = s.token.payload.ident.atom;
-                        if (source) |binding_source| {
-                            try emitRestArrayFromSource(s, binding_source, element_index);
-                            const rest_tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, rest_tmp);
-                            try s.emitScopeGetVar(rest_atom);
-                            try s.emitOpU16(opcode.op.get_loc, rest_tmp);
-                            try s.emitOpAtom(opcode.op.put_field, prop_atom);
-                        }
-                        try s.advance();
-                    } else if (s.destructuring_assignment_target_mode and s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                        try s.advance();
-                        var rest_tmp: ?u16 = null;
-                        if (source) |binding_source| {
-                            try emitRestArrayFromSource(s, binding_source, element_index);
-                            const tmp = try appendTempLocal(s);
-                            try s.emitOpU16(opcode.op.put_loc, tmp);
-                            rest_tmp = tmp;
-                            try s.emitScopeGetVar(rest_atom);
-                        }
-                        try parseExpr(s);
-                        try s.expectToken(']');
-                        if (source != null) {
-                            try s.emitOpU16(opcode.op.get_loc, rest_tmp orelse return Error.UnexpectedToken);
-                            try s.emitOp(opcode.op.put_array_el);
-                        }
-                    } else {
-                        if (source) |binding_source| {
-                            if (s.destructuring_assignment_target_mode) {
-                                try emitRestArrayFromSource(s, binding_source, element_index);
-                                try s.emitScopePutVar(rest_atom);
-                            } else {
-                                const local_index = try appendBindingLocal(s, rest_atom);
-                                const binding_ref = try captureDestructuringVarBindingRef(s, rest_atom);
-                                try emitRestArrayFromSource(s, binding_source, element_index);
-                                try emitPutDestructuringBinding(s, local_index, binding_ref);
-                            }
-                        } else if (s.destructuring_predeclare_only) {
-                            _ = try appendBindingLocal(s, rest_atom);
-                        }
-                    }
-                } else if (s.peekKind() == '[' or s.peekKind() == '{') {
-                    if (s.peekKind() == @as(tok.TokenKind, @intCast('{')) and s.destructuring_assignment_target_mode) {
-                        const object_point = takeLexerReplayPoint(s);
-                        const object_code_len = s.currentCodeLen();
-                        const object_atom_len = s.currentAtomOperandLen();
-                        const parsed_object_literal = blk: {
-                            parseObjectLiteral(s, ParseFlags.default) catch |err| switch (err) {
-                                error.UnexpectedToken, error.InvalidAssignmentTarget, error.YieldOutsideGenerator => {
-                                    try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                                    try restoreLexerReplayPoint(s, object_point);
-                                    break :blk false;
-                                },
-                                else => return err,
-                            };
-                            try truncateSpeculativeParse(s, object_code_len, object_atom_len);
-                            break :blk true;
-                        };
-                        if (parsed_object_literal and s.peekKind() == @as(tok.TokenKind, @intCast('['))) {
-                            var object_tmp: ?u16 = null;
-                            var key_tmp: ?u16 = null;
-                            var rest_tmp: ?u16 = null;
-                            const after_object = takeParserSnapshot(s);
-                            try restoreLexerReplayPoint(s, object_point);
-                            try parseObjectLiteral(s, ParseFlags.default);
-                            restoreParserLexerSnapshot(s, after_object);
-                            if (source != null) {
-                                const tmp = try appendTempLocal(s);
-                                try s.emitOpU16(opcode.op.put_loc, tmp);
-                                object_tmp = tmp;
-                            }
-                            try s.advance();
-                            try parseExpr(s);
-                            try s.expectToken(']');
-                            if (source != null) {
-                                const key_local = try appendTempLocal(s);
-                                try s.emitOpU16(opcode.op.put_loc, key_local);
-                                key_tmp = key_local;
-                            }
-                            if (source) |binding_source| {
-                                try emitRestArrayFromSource(s, binding_source, element_index);
-                                const tmp = try appendTempLocal(s);
-                                try s.emitOpU16(opcode.op.put_loc, tmp);
-                                rest_tmp = tmp;
-                            }
-                            if (source != null) {
-                                try s.emitOpU16(opcode.op.get_loc, object_tmp orelse return Error.UnexpectedToken);
-                                try s.emitOpU16(opcode.op.get_loc, key_tmp orelse return Error.UnexpectedToken);
-                                try s.emitOpU16(opcode.op.get_loc, rest_tmp orelse return Error.UnexpectedToken);
-                                try s.emitOp(opcode.op.put_array_el);
-                            }
-                        } else {
-                            const nested_kind: DestructuringKind = .object;
-                            var nested_source: ?BindingSource = null;
-                            if (source) |binding_source| {
-                                const temp_idx = try appendTempLocal(s);
-                                try emitRestArrayFromSource(s, binding_source, element_index);
-                                try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                                nested_source = BindingSource{ .loc = temp_idx };
-                            }
-                            try restoreLexerReplayPoint(s, object_point);
-                            try parseDestructuringPattern(s, nested_kind, nested_source);
-                            if (s.peekKind() == '=') return Error.UnexpectedToken;
-                        }
-                    } else {
-                        const nested_kind: DestructuringKind = if (s.peekKind() == '[') .array else .object;
-                        var nested_source: ?BindingSource = null;
-                        if (source) |binding_source| {
-                            const temp_idx = try appendTempLocal(s);
-                            try emitRestArrayFromSource(s, binding_source, element_index);
-                            try s.emitOpU16(opcode.op.put_loc, temp_idx);
-                            nested_source = BindingSource{ .loc = temp_idx };
-                        }
-                        try parseDestructuringPattern(s, nested_kind, nested_source);
-                        if (s.peekKind() == '=') return Error.UnexpectedToken;
-                    }
-                } else {
-                    return Error.UnexpectedToken;
-                }
-                break; // Rest element must be last
-            } else {
-                // Skip empty slots in array destructuring
-                if (s.peekKind() != @as(tok.TokenKind, @intCast(','))) return Error.UnexpectedToken;
-                if (source) |binding_source| {
-                    try emitBindingElision(s, binding_source, element_index);
-                }
-                try s.advance();
-                consumed_elision_comma = true;
-            }
-
-            element_index += 1;
-            if (consumed_elision_comma) {
-                continue;
-            } else if (s.peekKind() == ',') {
-                try s.advance();
-            } else if (s.peekKind() != ']') {
-                return Error.UnexpectedToken;
-            }
-        }
-
-        try s.expectToken(']');
-        if (source) |binding_source| try emitCloseBindingSource(s, binding_source);
     }
 
     // ---- Class parsing ----------------------------------------------------

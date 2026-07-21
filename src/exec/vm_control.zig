@@ -190,18 +190,20 @@ fn createThrowErrorValue(ctx: *core.JSContext, global: *core.Object, atom_id: u3
 
 fn deliverPendingThrow(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
     comptime err: anytype,
 ) !ThrowResult {
-    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
     return err;
 }
 
 pub noinline fn throwErrorVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -217,10 +219,10 @@ pub noinline fn throwErrorVm(
     // Inline-call unwinding uses the sentinel to find a catch in an outer frame;
     // pendingExceptionMatchesError then transfers this exact Error object.
     return switch (error_type) {
-        0, 4 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.TypeError),
-        1 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.SyntaxError),
-        2, 3 => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.ReferenceError),
-        else => deliverPendingThrow(ctx, stack, frame, catch_target, global, error.JSException),
+        0, 4 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.TypeError),
+        1 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.SyntaxError),
+        2, 3 => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.ReferenceError),
+        else => deliverPendingThrow(ctx, output, stack, frame, catch_target, global, error.JSException),
     };
 }
 

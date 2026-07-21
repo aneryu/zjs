@@ -167,6 +167,7 @@ pub noinline fn arg(
 
 pub noinline fn checkedLocVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -188,7 +189,7 @@ pub noinline fn checkedLocVm(
         op.get_loc_check, op.get_loc_checkthis => {
             if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             try stack.push(frame.locals[idx]);
@@ -196,13 +197,13 @@ pub noinline fn checkedLocVm(
         op.put_loc_check => {
             if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = try stack.pop();
             if (idx < function.vardefs.len and function.vardefs[idx].isConst()) {
                 value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
@@ -210,7 +211,7 @@ pub noinline fn checkedLocVm(
         op.set_loc_check => {
             if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = stack.peek() orelse return error.StackUnderflow;
@@ -221,7 +222,7 @@ pub noinline fn checkedLocVm(
                 idx < function.vardefs.len and
                 function.vardefs[idx].var_name == core.atom.ids.this_;
             if (is_derived_this and !frame.locals[idx].isUninitialized()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             const value = try stack.pop();
@@ -242,6 +243,7 @@ pub noinline fn checkedLocVm(
 
 pub fn varRef(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -254,7 +256,7 @@ pub fn varRef(
             if (frame.pc + 2 > function.code.len) return error.TypeError;
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             if (try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
@@ -268,19 +270,19 @@ pub fn varRef(
 
         op.get_var_ref0 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc),
         op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc),
@@ -297,6 +299,7 @@ pub fn varRef(
 
 pub noinline fn varRefVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -304,8 +307,8 @@ pub noinline fn varRefVm(
     opc: u8,
     catch_target: *?usize,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    return varRef(ctx, output, function, global, frame, stack, opc, catch_target) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
 }

@@ -149,6 +149,7 @@ pub fn execGetVarRef(
 
 pub fn execGetVarRefMaybeTdz(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
@@ -172,7 +173,7 @@ pub fn execGetVarRefMaybeTdz(
                 if (lexical_value.isUninitialized()) {
                     lexical_value.free(ctx.runtime);
                     const err = throwTdzReference(ctx);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+                    if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
                     }
                     return err;
@@ -198,13 +199,13 @@ pub fn execGetVarRefMaybeTdz(
         // eval-created binding (qjs remove_global_object_property):
         // plain ReferenceError, not the TDZ message.
         if (cell.varRefIsDeletableSlot().*) {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
                 return true;
             }
             return error.ReferenceError;
         }
         const err = throwTdzReference(ctx);
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return true;
         }
         return err;

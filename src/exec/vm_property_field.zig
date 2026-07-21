@@ -154,7 +154,7 @@ pub noinline fn toPropKeyVm(
     catch_target: *?usize,
 ) !Step {
     toPropKey(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -217,7 +217,7 @@ pub noinline fn inOrInstanceof(
     else
         call_runtime.instanceofOp(ctx, stack, output, global, function, frame);
     err catch |runtime_err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, runtime_err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, runtime_err)) return .continue_loop;
         return runtime_err;
     };
     return .done;
@@ -270,7 +270,7 @@ pub noinline fn field(
             defer obj.free(ctx.runtime);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
@@ -305,7 +305,7 @@ pub noinline fn field(
             }
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
@@ -328,7 +328,7 @@ pub noinline fn field(
             }
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             result.free(ctx.runtime);
@@ -771,7 +771,7 @@ pub noinline fn arrayElement(
             defer obj.free(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 unreachable;
@@ -784,7 +784,7 @@ pub noinline fn arrayElement(
                 const retained_atom = ctx.runtime.atoms.dup(atom_id);
                 defer ctx.runtime.atoms.free(retained_atom);
                 const value = object_ops.getValueProperty(ctx, output, global, obj, retained_atom, function, frame) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 errdefer value.free(ctx.runtime);
@@ -807,12 +807,12 @@ pub noinline fn arrayElement(
                 return .done;
             }
             const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
@@ -825,7 +825,7 @@ pub noinline fn arrayElement(
             defer obj.free(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 unreachable;
@@ -852,14 +852,14 @@ pub noinline fn arrayElement(
                 return .done;
             }
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             defer key_value.free(ctx.runtime);
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
@@ -874,7 +874,7 @@ pub noinline fn arrayElement(
             defer obj.free(ctx.runtime);
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 unreachable;
@@ -895,7 +895,7 @@ pub noinline fn arrayElement(
                 return .done;
             }
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             var key_value_owned = true;
@@ -903,7 +903,7 @@ pub noinline fn arrayElement(
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const value = object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             errdefer value.free(ctx.runtime);
@@ -921,7 +921,7 @@ pub noinline fn arrayElement(
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
             switch (putTypedArrayElementFast(ctx.runtime, obj, key, value) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }) {
                 .handled => return .continue_loop,
@@ -929,7 +929,7 @@ pub noinline fn arrayElement(
             }
             if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             defer key_value.free(ctx.runtime);
@@ -938,7 +938,7 @@ pub noinline fn arrayElement(
             // base TypeError, so user key-coercion side effects fire first.
             if (obj.isNull() or obj.isUndefined()) {
                 _ = object_ops.throwNullishComputedPropertyTypeError(ctx, global, obj, key_value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 unreachable;
@@ -947,7 +947,7 @@ pub noinline fn arrayElement(
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             result.free(ctx.runtime);

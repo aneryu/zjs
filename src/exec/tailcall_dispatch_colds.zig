@@ -36,12 +36,12 @@ const vm_property_private = @import("vm_property_private.zig");
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.varRefVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
+        _ = try vm_property_locals.varRefVm(vm.ctx, vm.output, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
     }
 }.b);
 pub const h_checkedloc = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
+        _ = try vm_property_locals.checkedLocVm(vm.ctx, vm.output, vm.function, vm.global, vm.frame, vm.stack, pc[0], vm.catch_target);
     }
 }.b);
 pub const h_loc = coldStd(struct {
@@ -258,7 +258,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.set_name_computed] = t[op.set_name];
     t[op.nip_catch] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try value_vm.nipCatch(vm.ctx.runtime, vm.stack);
+            switch (try value_vm.nipCatch(vm.ctx.runtime, vm.stack)) {
+                .value => {},
+                .catch_target => |target| vm.catch_target.* = target,
+            }
         }
     }.b);
 
@@ -394,7 +397,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.to_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try value_vm.toObjectVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try value_vm.toObjectVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
 
@@ -472,7 +475,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.define_method] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try class_vm.defineMethod(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
+            _ = try class_vm.defineMethod(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
     t[op.define_method_computed] = h(struct {
@@ -495,7 +498,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.put_var_init] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), undefined);
+            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), undefined);
         }
     }.b);
     t[op.put_var_init] = h_putvarinit(op.put_var_init);
@@ -642,12 +645,12 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.check_ctor] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try call_vm.checkCtorVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try call_vm.checkCtorVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.check_ctor_return] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try call_vm.checkCtorReturnVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try call_vm.checkCtorReturnVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.init_ctor] = h(struct {
@@ -657,12 +660,12 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.check_brand] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try class_vm.checkBrandVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try class_vm.checkBrandVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.add_brand] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try class_vm.addBrandVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try class_vm.addBrandVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.close_loc] = h(struct {
@@ -678,7 +681,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.push_this] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try value_vm.pushThisVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try value_vm.pushThisVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.delete_var] = h(struct {
@@ -727,7 +730,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.iterator_check_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try iter_vm.iteratorCheckObjectVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global);
+            _ = try iter_vm.iteratorCheckObjectVm(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global);
         }
     }.b);
     t[op.iterator_get_value_done] = h(struct {
@@ -928,7 +931,7 @@ fn h_putvarinit(comptime o: u8) Handler {
     return coldStd(struct {
         fn b(vm: *Vm, pc: [*]const u8) HostError!void {
             _ = pc;
-            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), o);
+            _ = try vm_property_globals.globalDefinition(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, td.evalGlobalVarBindings(vm), o);
         }
     }.b);
 }

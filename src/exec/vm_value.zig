@@ -2,25 +2,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
-const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
+const forof_ops = @import("forof_ops.zig");
 const object_ops = @import("object_ops.zig");
-const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
-
-// `ToObject(string)` (the `with`-statement / Object coercion) builds its String
-// wrapper through the String construct record (Phase 6b-3 STEP 4) rather than
-// naming `string_builtin_ops.constructWithPrototype`; the construct branch is pure
-// (reads only `args`/`new_target`).
-const string_construct_ref = core.function.NativeBuiltinRef{
-    .domain = .string,
-    .id = @intFromEnum(core.host_function.builtin_method_ids.string.ConstructorMethod.call),
-};
 
 pub const DropResult = union(enum) {
     value,
@@ -137,6 +127,7 @@ pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
 
 pub noinline fn pushThisVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -144,40 +135,42 @@ pub noinline fn pushThisVm(
 ) !Step {
     const this_value = object_ops.materializeFrameThisBinding(ctx, global, frame) catch |err| switch (err) {
         error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         },
         else => return err,
     };
     pushThis(stack, this_value) catch |err| switch (err) {
         error.ReferenceError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         },
     };
     return .done;
 }
 
-pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    var object_value = try toObjectForWith(ctx, value);
+    var object_value = if (value.isObject())
+        value.dup()
+    else
+        try object_ops.primitiveObjectForAccess(ctx.runtime, global, value);
     errdefer object_value.free(ctx.runtime);
-    const object = try property_ops.expectObject(object_value);
-    object.flags.is_with_environment = true;
     stack.pushOwnedAssumeCapacity(object_value);
 }
 
 pub noinline fn toObjectVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
-    toObject(ctx, stack) catch |err| switch (err) {
+    toObject(ctx, global, stack) catch |err| switch (err) {
         error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         },
         else => return err,
@@ -243,6 +236,10 @@ pub noinline fn logicalNot(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
 
 pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
+    if (forof_ops.isIteratorCatchMarker(value)) {
+        value.free(rt);
+        return .value;
+    }
     if (value.isCatchOffset()) {
         if ((value.asCatchOffset() orelse -1) == 0) {
             value.free(rt);
@@ -255,18 +252,23 @@ pub noinline fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     return .value;
 }
 
-pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
+pub noinline fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const ret_value = try stack.pop();
 
     while (stack.len() != 0) {
         const value = try stack.pop();
         if (value.isCatchOffset()) {
+            const result: DropResult = if (forof_ops.isIteratorCatchMarker(value) or
+                (value.asCatchOffset() orelse -1) == 0)
+                .value
+            else
+                .{ .catch_target = catchTargetFromMarker(value) };
             value.free(rt);
             stack.pushOwned(ret_value) catch |err| {
                 ret_value.free(rt);
                 return err;
             };
-            return;
+            return result;
         }
         value.free(rt);
     }
@@ -498,65 +500,6 @@ pub noinline fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.isNull()));
-}
-
-pub fn toObjectForWith(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
-    const rt = ctx.runtime;
-    if (value.isObject()) return value.dup();
-    if (value.isNull() or value.isUndefined()) return error.TypeError;
-    if (value.isString()) return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, null, &.{value}, null, null)) orelse error.TypeError;
-    if (value.isNumber()) return primitiveObject(rt, core.class.ids.number, value);
-    if (value.asBool() != null) return primitiveObject(rt, core.class.ids.boolean, value);
-    if (value.isBigInt()) return primitiveObject(rt, core.class.ids.big_int, value);
-    if (value.isSymbol()) return primitiveObject(rt, core.class.ids.symbol, value);
-    return error.TypeError;
-}
-
-fn primitiveObject(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue) !core.JSValue {
-    var rooted_primitive = primitive;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_primitive },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const object = try core.Object.create(rt, class_id, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
-    return object.value();
-}
-
-test "primitiveObject roots direct symbol while creating ToObject wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-vm-value-wrapper-symbol");
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const symbol_value = try rt.symbolValue(symbol_atom);
-    var symbol_value_alive = true;
-    defer if (symbol_value_alive) symbol_value.free(rt);
-    const wrapper_value = try primitiveObject(rt, core.class.ids.symbol, symbol_value);
-    symbol_value.free(rt);
-    symbol_value_alive = false;
-    var wrapper_alive = true;
-    defer if (wrapper_alive) wrapper_value.free(rt);
-    const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
-
-    wrapper_value.free(rt);
-    wrapper_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 fn pushAdapterValue(stack: *stack_mod.Stack, slot: core.JSValue) void {

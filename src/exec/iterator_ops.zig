@@ -20,7 +20,6 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const IteratorZipError = exceptions.HostError;
-const for_await_record_marker: i32 = -0x7fff0001;
 pub const for_in_iterator_kind: u8 = 251;
 pub const Step = enum { done, continue_loop };
 
@@ -46,7 +45,7 @@ pub fn forOfStart(
             const iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, async_method, &.{}, function, frame);
             errdefer iterator_value.free(ctx.runtime);
             _ = try property_ops.expectObject(iterator_value);
-            const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+            const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty);
             defer next_method.free(ctx.runtime);
             try pushForAwaitRecord(ctx, stack, iterator_value, next_method);
             iterator_value.free(ctx.runtime);
@@ -69,13 +68,13 @@ pub fn forOfStart(
         iterator_value.free(ctx.runtime);
         owns_iterator_value = false;
         defer wrapper.free(ctx.runtime);
-        const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+        const next_method = try iteratorNextMethod(ctx, output, global, wrapper, function, frame, object_ops.getValueProperty);
         defer next_method.free(ctx.runtime);
         try pushForAwaitRecord(ctx, stack, wrapper, next_method);
         return;
     }
 
-    const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty, call_runtime.isCallableValue);
+    const next_method = try iteratorNextMethod(ctx, output, global, iterator_value, function, frame, object_ops.getValueProperty);
     defer next_method.free(ctx.runtime);
     try stack.pushOwned(iterator_value);
     owns_iterator_value = false;
@@ -90,7 +89,7 @@ pub fn forOfStart(
         const it = stack.pop() catch null;
         if (it) |value| value.free(ctx.runtime);
     }
-    try stack.pushOwned(core.JSValue.catchOffset(catchTargetMarkerValue(catch_target)));
+    try stack.pushOwned(forof_ops.iteratorCatchMarker(catchTargetMarkerValue(catch_target)));
 }
 
 pub noinline fn forOfStartVm(
@@ -104,7 +103,7 @@ pub noinline fn forOfStartVm(
     is_async: bool,
 ) !Step {
     forOfStart(ctx, output, global, stack, function, frame, catch_target.*, is_async) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -122,17 +121,19 @@ fn iteratorNextMethod(
     function: ?*const bytecode.Bytecode,
     frame: ?*frame_mod.Frame,
     comptime getValueProperty: anytype,
-    comptime isCallableValue: anytype,
 ) !core.JSValue {
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const next_method = try getValueProperty(ctx, output, global, iterator_value, next_key, function, frame);
-    errdefer next_method.free(ctx.runtime);
-    if (!isCallableValue(next_method)) return error.TypeError;
     return next_method;
 }
 
-fn pushForAwaitRecord(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_value: core.JSValue, next_method: core.JSValue) !void {
+fn pushForAwaitRecord(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    iterator_value: core.JSValue,
+    next_method: core.JSValue,
+) !void {
     try stack.push(iterator_value);
     errdefer {
         const it = stack.pop() catch null;
@@ -145,7 +146,7 @@ fn pushForAwaitRecord(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_va
         const it = stack.pop() catch null;
         if (it) |value| value.free(ctx.runtime);
     }
-    try stack.pushOwned(core.JSValue.int32(for_await_record_marker));
+    try stack.pushOwned(forof_ops.asyncIteratorCatchMarker());
 }
 
 pub fn createAsyncFromSyncIterator(
@@ -158,6 +159,7 @@ pub fn createAsyncFromSyncIterator(
     comptime getValueProperty: anytype,
     comptime isCallableValue: anytype,
 ) !core.JSValue {
+    _ = isCallableValue;
     const rt = ctx.runtime;
     var rooted_sync_iterator = sync_iterator;
     var rooted_next_method = core.JSValue.undefinedValue();
@@ -173,7 +175,7 @@ pub fn createAsyncFromSyncIterator(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    rooted_next_method = try iteratorNextMethod(ctx, output, global, rooted_sync_iterator, function, frame, getValueProperty, isCallableValue);
+    rooted_next_method = try iteratorNextMethod(ctx, output, global, rooted_sync_iterator, function, frame, getValueProperty);
     owns_next_method = true;
     defer if (owns_next_method) rooted_next_method.free(rt);
 
@@ -321,7 +323,7 @@ pub noinline fn forInStartVm(
     catch_target: *?usize,
 ) !Step {
     forInStart(ctx, output, global, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -366,7 +368,7 @@ pub noinline fn iteratorNextVm(
     catch_target: *?usize,
 ) !Step {
     iteratorNext(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -380,13 +382,14 @@ pub fn iteratorCheckObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void 
 
 pub noinline fn iteratorCheckObjectVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
     iteratorCheckObject(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -427,7 +430,7 @@ pub noinline fn forAwaitOfNextVm(
     catch_target: *?usize,
 ) !Step {
     forAwaitOfNext(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -458,7 +461,7 @@ pub fn iteratorGetValueDone(
 
     const marker_index = stack.len() - 1;
     const old_marker = stack.values[marker_index];
-    stack.values[marker_index] = core.JSValue.int32(for_await_record_marker);
+    stack.values[marker_index] = forof_ops.asyncIteratorCatchMarker();
     old_marker.free(ctx.runtime);
 
     stack.pushOwnedAssumeCapacity(value);
@@ -475,7 +478,7 @@ pub noinline fn iteratorGetValueDoneVm(
     catch_target: *?usize,
 ) !Step {
     iteratorGetValueDone(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -532,10 +535,25 @@ pub noinline fn iteratorCallVm(
     catch_target: *?usize,
 ) !Step {
     iteratorCall(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
+}
+
+/// Resolve the iterator record addressed by a `for_of_next depth` operand.
+/// The depth is part of the bytecode contract: accepting another iterator
+/// found elsewhere on the operand stack would silently execute malformed
+/// bytecode and can close the wrong iterator on an abrupt completion.
+pub fn forOfIteratorIndex(stack: *const stack_mod.Stack, depth: u8) !usize {
+    const required = @as(usize, depth) + 3;
+    if (stack.len() < required) return error.InvalidBytecode;
+    const iterator_index = stack.len() - required;
+    const iterator = stack.values[iterator_index];
+    const catch_marker = stack.values[iterator_index + 2];
+    if (!forof_ops.isIteratorCatchMarker(catch_marker)) return error.InvalidBytecode;
+    if (!iterator.isUndefined() and !iterator.isObject()) return error.InvalidBytecode;
+    return iterator_index;
 }
 
 pub fn forOfNext(
@@ -549,10 +567,8 @@ pub fn forOfNext(
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const depth = function.code[frame.pc];
     frame.pc += 1;
-    const iterator_index = if (stack.len() >= @as(usize, depth) + 3)
-        stack.len() - @as(usize, depth) - 3
-    else
-        try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
+    const iterator_index = try forOfIteratorIndex(stack, depth);
+    errdefer forof_ops.abandonForOfIteratorAtIndex(ctx.runtime, stack, iterator_index);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
     if (try fastMapSetForOfNext(ctx, stack, iterator_index)) return;
     if (try fastGeneratorForOfNext(ctx, output, global, stack, iterator_index)) return;
@@ -600,10 +616,8 @@ pub fn finishForOfNextResult(
     next_result: core.JSValue,
 ) !void {
     defer next_result.free(ctx.runtime);
-    const iterator_index = if (stack.len() >= @as(usize, depth) + 3)
-        stack.len() - @as(usize, depth) - 3
-    else
-        try forof_ops.findForOfIteratorIndex(ctx.runtime, stack);
+    const iterator_index = try forOfIteratorIndex(stack, depth);
+    errdefer forof_ops.abandonForOfIteratorAtIndex(ctx.runtime, stack, iterator_index);
 
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done_value = try iteratorResultProperty(
@@ -881,7 +895,7 @@ pub noinline fn forOfNextVm(
     catch_target: *?usize,
 ) !Step {
     forOfNext(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -1054,7 +1068,7 @@ pub noinline fn forInNextVm(
     catch_target: *?usize,
 ) !Step {
     forInNext(ctx, output, global, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -1066,19 +1080,19 @@ pub fn iteratorClose(
     global: *core.Object,
     stack: *stack_mod.Stack,
 ) !void {
-    var is_for_await_record = false;
-    const it = blk: {
-        const top = stack.peekBorrowed() orelse return error.StackUnderflow;
-        const is_record = top.isCatchOffset() or (top.asInt32() orelse 0) == for_await_record_marker;
-        is_for_await_record = !top.isCatchOffset() and (top.asInt32() orelse 0) == for_await_record_marker;
-        if (!is_record) break :blk try stack.pop();
-
-        const marker = try stack.pop();
-        marker.free(ctx.runtime);
-        const next_method = stack.pop() catch |err| return err;
-        next_method.free(ctx.runtime);
-        break :blk try stack.pop();
-    };
+    // OP_iterator_close has one compiler contract and always consumes the
+    // three-slot iterator record.  A live record carries an exact sync/async
+    // catch marker; QuickJS-style generator-return cleanup deliberately uses
+    // `undefined` as its dummy sync marker after nip_catch/rot3r.  Do not infer
+    // a record from the iterator/next value shapes: proxies and host callables
+    // make those shapes neither unique nor stable.
+    const marker = try stack.pop();
+    defer marker.free(ctx.runtime);
+    if (!forof_ops.isIteratorCatchMarker(marker) and !marker.isUndefined()) return error.InvalidBytecode;
+    const is_for_await_record = forof_ops.isAsyncIteratorCatchMarker(marker);
+    const next_method = try stack.pop();
+    defer next_method.free(ctx.runtime);
+    const it = try stack.pop();
     defer it.free(ctx.runtime);
     if (it.isUndefined()) return;
     if (is_for_await_record) {
@@ -1097,7 +1111,7 @@ pub noinline fn iteratorCloseVm(
     catch_target: *?usize,
 ) !Step {
     iteratorClose(ctx, output, global, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

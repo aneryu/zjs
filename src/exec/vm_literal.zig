@@ -262,7 +262,7 @@ pub noinline fn defineField(
         return .done;
     }
     object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, effective_atom, rooted_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -316,12 +316,12 @@ pub noinline fn defineArrayEl(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const object_value = property_ops.expectObject(rooted_array) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
     defer ctx.runtime.atoms.free(atom_id);
     object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
     try stack.push(rooted_index);
     return .done;
 }
@@ -360,7 +360,7 @@ pub noinline fn appendSpreadValuesVm(
     catch_target: *?usize,
 ) !Step {
     appendSpreadValues(ctx, output, global, stack, opc) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -383,10 +383,14 @@ pub noinline fn copyDataProperties(
     const source_value = try stackValueFromTop(stack, (mask >> 2) & 7);
     var rooted_source_value = source_value;
     defer source_value.free(rt);
+    const exclusion_value = try stackValueFromTop(stack, (mask >> 5) & 7);
+    var rooted_exclusion_value = exclusion_value;
+    defer exclusion_value.free(rt);
 
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_target_value },
         .{ .value = &rooted_source_value },
+        .{ .value = &rooted_exclusion_value },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = rt.active_value_roots,
@@ -398,11 +402,16 @@ pub noinline fn copyDataProperties(
     if (rooted_source_value.isNull() or rooted_source_value.isUndefined()) return .done;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     const source = property_ops.expectObject(rooted_source_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
+    const exclusion: ?*core.Object = if (rooted_exclusion_value.isNull() or rooted_exclusion_value.isUndefined())
+        null
+    else
+        property_ops.expectObject(rooted_exclusion_value) catch |err|
+            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     const keys = object_ops.objectRestOwnKeys(ctx, output, global, source) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
 
     // qjs JS_CopyDataProperties (quickjs.c:16920) requests JS_GPN_ENUM_ONLY
@@ -427,6 +436,12 @@ pub noinline fn copyDataProperties(
         const copy_flags = try rt.memory.alloc(bool, keys.len);
         defer rt.memory.free(bool, copy_flags);
         for (keys, copy_flags) |key, *copy| {
+            if (exclusion) |excluded| {
+                if (excluded.hasOwnProperty(key)) {
+                    copy.* = false;
+                    continue;
+                }
+            }
             copy.* = switch (source.ownPropertyEnumerableKind(rt, key)) {
                 .enumerable => true,
                 .not_enumerable => false,
@@ -435,7 +450,7 @@ pub noinline fn copyDataProperties(
                 // path above); fall back defensively if that ever changes.
                 .descriptor => blk: {
                     const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
-                        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+                        return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
                     const desc = maybe_desc orelse break :blk false;
                     defer desc.destroy(rt);
                     break :blk (desc.enumerable orelse false);
@@ -445,7 +460,7 @@ pub noinline fn copyDataProperties(
         for (keys, copy_flags) |key, copy| {
             if (!copy) continue;
             const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
-                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+                return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
             var rooted_value = value;
             defer value.free(rt);
             var value_root_values = [_]core.runtime.ValueRootValue{
@@ -458,19 +473,22 @@ pub noinline fn copyDataProperties(
             rt.active_value_roots = &value_root_frame;
             defer rt.active_value_roots = value_root_frame.previous;
             property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
-                return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+                return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         }
         return .done;
     }
 
     for (keys) |key| {
+        if (exclusion) |excluded| {
+            if (excluded.hasOwnProperty(key)) continue;
+        }
         const maybe_desc = object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         const desc = maybe_desc orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         var rooted_value = value;
         defer value.free(rt);
         var value_root_values = [_]core.runtime.ValueRootValue{
@@ -483,20 +501,21 @@ pub noinline fn copyDataProperties(
         rt.active_value_roots = &value_root_frame;
         defer rt.active_value_roots = value_root_frame.previous;
         property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+            return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     }
     return .done;
 }
 
 fn handleLiteralRuntimeError(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
     err: anytype,
 ) !Step {
-    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
 }
 
@@ -551,7 +570,7 @@ pub noinline fn getLength(
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const length = object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer length.free(ctx.runtime);

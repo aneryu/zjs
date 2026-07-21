@@ -335,7 +335,11 @@ noinline fn resumeExecutionStateRaw(
         if (completion_type != 0) payload.resume_completion_type = 0;
     }
     if (resume_needs_branch_false) {
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+        // A plain `yield` resumes with the QuickJS two-slot protocol:
+        // `[resume_value, completion_magic]`.  The parser lowers the magic
+        // test to `if_false normal_resume`; NEXT is false while RETURN must
+        // fall through to the compiled return/iterator/finally cleanup path.
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(completion_type == 1));
     }
     return .{ .catch_target = catch_target };
 }
@@ -355,7 +359,7 @@ pub fn completeResumeState(
     const thrown = resume_value orelse core.JSValue.undefinedValue();
     _ = ctx.throwValue(thrown.dup());
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
-    if (!(try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, &catch_target, global, error.JSException))) {
+    if (!(try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, &catch_target, global, error.JSException))) {
         return error.JSException;
     }
     return catch_target;
@@ -372,7 +376,7 @@ fn handleAwaitError(
     err: anyerror,
 ) !bool {
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
-    return try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err);
+    return try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err);
 }
 
 pub fn stopBeforePc(
@@ -461,7 +465,7 @@ pub noinline fn yieldStar(
     catch_target: *?usize,
 ) !Result {
     return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield, catch_target.*) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;

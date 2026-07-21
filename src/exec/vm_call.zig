@@ -427,7 +427,7 @@ pub noinline fn callMethod(
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (fast_result) |value| {
@@ -438,7 +438,7 @@ pub noinline fn callMethod(
     }
     const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const result = if (maybe_array_result) |array_result|
@@ -446,7 +446,7 @@ pub noinline fn callMethod(
     else
         call_runtime.callValueOrBytecodeClassModePreRooted(ctx, output, global, obj, func, args, function, frame, class_init_ops.isCurrentSuperConstructor(ctx, frame, func)) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
     call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
@@ -514,7 +514,7 @@ pub noinline fn tailCallMethod(
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
         return err;
     };
     if (fast_result) |value| {
@@ -523,7 +523,7 @@ pub noinline fn tailCallMethod(
     }
     const maybe_array_result = collection_vm.qjsArrayMethodFastCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
         return err;
     };
     const result = if (maybe_array_result) |array_result|
@@ -531,7 +531,7 @@ pub noinline fn tailCallMethod(
     else
         call_runtime.callValueOrBytecodeClassModePreRooted(ctx, output, global, obj, func, args, function, frame, false) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
             return err;
         };
     call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
@@ -653,16 +653,16 @@ pub noinline fn apply(
     const result = if (is_new != 0) blk: {
         if (allow_class_constructor_call) {
             break :blk call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
         }
         break :blk call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, func) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
     } else call_runtime.callValueOrBytecodeClassMode(ctx, output, global, effective_this, func, apply_args, function, frame, allow_class_constructor_call) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (is_new != 0) {
@@ -675,12 +675,12 @@ pub noinline fn apply(
                 if (function_object.functionHomeObject()) |home_object| {
                     const instance_object = property_ops.expectObject(result) catch |err| {
                         result.free(ctx.runtime);
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                         return err;
                     };
                     class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
                         result.free(ctx.runtime);
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                         return err;
                     };
                 }
@@ -698,11 +698,11 @@ pub noinline fn apply(
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
             slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
         } else {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
         try collection_vm.pushAdapterValue(stack, frame.this_value);
@@ -710,7 +710,7 @@ pub noinline fn apply(
     } else if (is_arrow_super_constructor) {
         if (arrow_super_this) |this_value_for_arrow| {
             if (!this_value_for_arrow.isUninitialized()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -764,7 +764,7 @@ pub noinline fn constructor(
     defer if (has_explicit_new_target) new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
     const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer result.free(ctx.runtime);
@@ -773,7 +773,7 @@ pub noinline fn constructor(
             if (function_object.functionHomeObject()) |home_object| {
                 const instance_object = try property_ops.expectObject(result);
                 class_init_ops.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
             }
@@ -789,13 +789,14 @@ pub fn checkCtor(frame: *frame_mod.Frame) !void {
 
 pub noinline fn checkCtorVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
     checkCtor(frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -815,13 +816,14 @@ pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 
 pub noinline fn checkCtorReturnVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
     checkCtorReturn(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -862,7 +864,7 @@ pub noinline fn initCtorVm(
     catch_target: *?usize,
 ) !Step {
     initCtor(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

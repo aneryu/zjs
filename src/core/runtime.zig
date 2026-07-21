@@ -713,7 +713,7 @@ const RecentAtomString = struct {
 };
 
 pub const shared_lazy_native_function_slots = 12;
-pub const internal_destructuring_helper_slots = 14;
+pub const internal_using_helper_slots = 8;
 const root_provider_inline_capacity = 1;
 
 /// Cold runtime bookkeeping whose ranges fit in one byte. The atom-string
@@ -857,10 +857,10 @@ pub const JSRuntime = struct {
     percent_hex_strings: [256]?*string.String = @splat(null),
     /// Lazy cache for small integer strings ("0".."255").
     small_int_strings: [256]?*string.String = @splat(null),
-    /// JSRuntime-owned internal destructuring helper functions. Parser-emitted
-    /// destructuring bytecode uses these as stack-only callees instead of
-    /// resolving pseudo-private `__zjs_dstr_*` globals.
-    internal_destructuring_helpers: [internal_destructuring_helper_slots]?JSValue = @splat(null),
+    /// JSRuntime-owned explicit-resource-management helper functions. Their
+    /// special-object subtype ids stay frozen at 14..21; the removed
+    /// destructuring helper ids remain reserved holes and consume no roots.
+    internal_using_helpers: [internal_using_helper_slots]?JSValue = @splat(null),
     /// Error object preallocated while memory is plentiful so the VM catch
     /// machinery can still materialize a catch value when the heap is fully
     /// exhausted (QuickJS's preallocated out-of-memory exception analogue).
@@ -1012,7 +1012,7 @@ pub const JSRuntime = struct {
         rt.recent_atom_strings = @splat(null);
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
-        rt.internal_destructuring_helpers = @splat(null);
+        rt.internal_using_helpers = @splat(null);
         rt.preallocated_oom_error = null;
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
@@ -1068,7 +1068,7 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
-        for (&self.internal_destructuring_helpers) |*slot| {
+        for (&self.internal_using_helpers) |*slot| {
             const cached = slot.*;
             slot.* = null;
             if (cached) |stored| stored.free(self);
@@ -1430,7 +1430,7 @@ pub const JSRuntime = struct {
     pub fn traceRoots(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
         try self.traceValueRootFrames(roots, visitor);
         try visitor.value(&self.current_exception);
-        for (&self.internal_destructuring_helpers) |*maybe_helper| {
+        for (&self.internal_using_helpers) |*maybe_helper| {
             try visitor.optionalValue(maybe_helper);
         }
         try visitor.optionalValue(&self.preallocated_oom_error);

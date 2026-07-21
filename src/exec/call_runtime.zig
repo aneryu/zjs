@@ -138,7 +138,7 @@ pub fn execCall(
     const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, super_this, func, args, function, frame, is_super_constructor) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;
@@ -150,13 +150,13 @@ pub fn execCall(
             const next_this = if (result.isObject()) result else frame.constructorThisValue();
             slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
             class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+                if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                     return .continue_loop;
                 }
                 return err;
             };
         } else {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
                 return .continue_loop;
             }
             return error.ReferenceError;
@@ -168,7 +168,7 @@ pub fn execCall(
         defer result.free(ctx.runtime);
         if (arrow_super_this) |this_value_for_arrow| {
             if (!this_value_for_arrow.isUninitialized()) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
+                if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
                     return .continue_loop;
                 }
                 return error.ReferenceError;
@@ -234,13 +234,14 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
 // single `bl` on the cold edge and shrinks every wrapper's frame.
 pub noinline fn handleCatchableRuntimeError(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
     err: anytype,
 ) !bool {
-    return tryCatchInFrame(ctx, stack, frame, catch_target, global, err);
+    return tryCatchInFrame(ctx, output, stack, frame, catch_target, global, err);
 }
 
 /// Attempt to dispatch `err` to the current frame's catch handler. Returns
@@ -251,6 +252,7 @@ pub noinline fn handleCatchableRuntimeError(
 /// frames before the error escapes `runWithArgsState`.
 pub fn tryCatchInFrame(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -260,8 +262,12 @@ pub fn tryCatchInFrame(
     core.profile.recordSlowPath();
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
+    // Run before testing the local catch target: an uncaught abrupt completion
+    // must close this frame's live pattern/loop iterators before the frame is
+    // unwound. IteratorNext marks only its failing record undefined before it
+    // reaches this seam, so enclosing pattern iterators still close normally.
+    try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
     const target = catch_target.* orelse return false;
-    closeFrameDestructuringIteratorsForAbruptCompletion(ctx, null, global, stack, frame);
     try stack.reserveAdditional(1);
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
@@ -2484,283 +2490,6 @@ pub fn qjsIteratorClose(
     result.free(ctx.runtime);
 }
 
-pub const destructuring_iterator_state_kind: u8 = 0xf0;
-pub const destructuring_iterator_state_mask: u8 = 0xfc;
-pub const destructuring_iterator_done_bit: u8 = 0x01;
-pub const destructuring_iterator_closing_bit: u8 = 0x02;
-
-pub fn destructuringIteratorStateFromValue(value: core.JSValue) ?*core.Object {
-    const object = property_ops.expectObject(value) catch return null;
-    return if (isDestructuringIteratorState(object)) object else null;
-}
-
-pub fn isDestructuringIteratorState(object: *core.Object) bool {
-    return object.class_id == core.class.ids.iterator_wrap and
-        ((object.iteratorKindSlot().*) & destructuring_iterator_state_mask) == destructuring_iterator_state_kind;
-}
-
-pub fn createDestructuringIteratorState(rt: *core.JSRuntime, iterator_value: core.JSValue) !*core.Object {
-    var owned_iterator_value = iterator_value;
-    errdefer owned_iterator_value.free(rt);
-    const state = try core.Object.create(rt, core.class.ids.iterator_wrap, null);
-    errdefer core.Object.destroyFromHeader(rt, &state.header);
-    state.iteratorKindSlot().* = destructuring_iterator_state_kind;
-    state.iteratorIndexSlot().* = 0;
-    try state.setOptionalValueSlot(rt, state.iteratorTargetSlot(), owned_iterator_value);
-    owned_iterator_value = core.JSValue.undefinedValue();
-    return state;
-}
-
-pub fn destructuringIteratorStateDone(state: *core.Object) bool {
-    return ((state.iteratorKindSlot().*) & destructuring_iterator_done_bit) != 0;
-}
-
-pub fn setDestructuringIteratorStateDone(state: *core.Object) void {
-    state.iteratorKindSlot().* |= destructuring_iterator_done_bit;
-}
-
-pub fn destructuringIteratorStateClosing(state: *core.Object) bool {
-    return ((state.iteratorKindSlot().*) & destructuring_iterator_closing_bit) != 0;
-}
-
-pub fn setDestructuringIteratorStateClosing(state: *core.Object) void {
-    state.iteratorKindSlot().* |= destructuring_iterator_closing_bit;
-}
-
-pub fn qjsDestructuringGet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const target_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        const current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        var index = current_index;
-        var value = core.JSValue.undefinedValue();
-        var has_value = false;
-        while (index <= target_index) : (index += 1) {
-            if (has_value) value.free(ctx.runtime);
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            value = step.value;
-            has_value = true;
-            state.iteratorIndexSlot().* = index + 1;
-        }
-        return value;
-    }
-    if (args[0].isString()) {
-        const atom_id = core.atom.atomFromUInt32(target_index);
-        if (try string_ops.getStringIndexValue(ctx.runtime, args[0], atom_id)) |value| return value;
-        return core.JSValue.undefinedValue();
-    }
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
-        return object.getProperty(core.atom.atomFromUInt32(target_index));
-    }
-
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringElide(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const target_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        const current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        var index = current_index;
-        while (index <= target_index) : (index += 1) {
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            state.iteratorIndexSlot().* = index + 1;
-            step.value.free(ctx.runtime);
-            if (step.done) break;
-        }
-        return core.JSValue.undefinedValue();
-    }
-    if (args[0].isString()) return core.JSValue.undefinedValue();
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) return core.JSValue.undefinedValue();
-
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringRest(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const start_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        var current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        while (current_index < start_index) : (current_index += 1) {
-            const skipped = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            state.iteratorIndexSlot().* = current_index + 1;
-            skipped.value.free(ctx.runtime);
-            if (skipped.done) break;
-        }
-
-        const out = try core.Object.createArray(ctx.runtime, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        var out_value = out.value();
-        var value = core.JSValue.undefinedValue();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &out_value },
-            .{ .value = &value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
-        defer value.free(ctx.runtime);
-
-        while (true) {
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            value = step.value;
-            if (step.done) {
-                value.free(ctx.runtime);
-                value = core.JSValue.undefinedValue();
-                break;
-            }
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
-            value.free(ctx.runtime);
-            value = core.JSValue.undefinedValue();
-            current_index += 1;
-            state.iteratorIndexSlot().* = current_index;
-        }
-        return out_value;
-    }
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
-        const out = try core.Object.createArray(ctx.runtime, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        var out_value = out.value();
-        var value = core.JSValue.undefinedValue();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &out_value },
-            .{ .value = &value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
-        defer value.free(ctx.runtime);
-
-        var index = start_index;
-        while (index < object.arrayLength()) : (index += 1) {
-            value = object.getProperty(core.atom.atomFromUInt32(index));
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
-            value.free(ctx.runtime);
-            value = core.JSValue.undefinedValue();
-        }
-        return out_value;
-    }
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringClose(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return core.JSValue.undefinedValue();
-    const state = destructuringIteratorStateFromValue(args[0]) orelse return core.JSValue.undefinedValue();
-    const iterator_value = (state.iteratorTargetSlot().*) orelse return core.JSValue.undefinedValue();
-    if (destructuringIteratorStateDone(state)) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return core.JSValue.undefinedValue();
-    }
-    const iterator = try property_ops.expectObject(iterator_value);
-    errdefer clearDestructuringIteratorState(ctx.runtime, state) catch {};
-    setDestructuringIteratorStateClosing(state);
-    setDestructuringIteratorStateDone(state);
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), return_key, null, null);
-    defer return_method.free(ctx.runtime);
-    if (!isCallableValue(return_method)) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return core.JSValue.undefinedValue();
-    }
-    const result = try callValueOrBytecode(ctx, output, global, iterator.value(), return_method, &.{}, null, null);
-    defer result.free(ctx.runtime);
-    if (!result.isObject()) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return error.TypeError;
-    }
-    try clearDestructuringIteratorState(ctx.runtime, state);
-    return core.JSValue.undefinedValue();
-}
-
-pub fn qjsDestructuringRequireIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (destructuringIteratorStateFromValue(args[0])) |_| return args[0].dup();
-
-    var iterator_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iterator_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
-    defer iterator_value.free(ctx.runtime);
-
-    const source = property_ops.expectObject(args[0]) catch {
-        const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
-        defer iterator_method.free(ctx.runtime);
-        if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-        iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
-        _ = try property_ops.expectObject(iterator_value);
-        try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
-        const state = try createDestructuringIteratorState(ctx.runtime, iterator_value.dup());
-        return state.value();
-    };
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], source)) return args[0].dup();
-    if (source.class_id == core.class.ids.generator or source.class_id == core.class.ids.async_generator) {
-        try cacheDestructuringIteratorNextMethod(ctx, output, global, source.value());
-        const state = try createDestructuringIteratorState(ctx.runtime, source.value().dup());
-        return state.value();
-    }
-    const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
-    defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-    iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
-    _ = try property_ops.expectObject(iterator_value);
-    try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
-    const state = try createDestructuringIteratorState(ctx.runtime, iterator_value.dup());
-    return state.value();
-}
-
 pub fn getIteratorMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2806,90 +2535,21 @@ pub fn cacheIteratorNextMethod(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
-    try cacheIteratorNextMethodMode(ctx, output, global, iterator_value, true);
-}
-
-pub fn cacheDestructuringIteratorNextMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-) !void {
-    try cacheIteratorNextMethodMode(ctx, output, global, iterator_value, false);
-}
-
-pub fn cacheIteratorNextMethodMode(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-    require_callable: bool,
-) !void {
     const iterator = try property_ops.expectObject(iterator_value);
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     defer next_method.free(ctx.runtime);
-    if (require_callable and !isCallableValue(next_method)) return error.TypeError;
+    if (!isCallableValue(next_method)) return error.TypeError;
     const cached = try iterator.cachedIteratorNextSlot(ctx.runtime);
     try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
 }
-
-pub const DestructuringIteratorStep = struct {
-    value: core.JSValue,
-    done: bool,
-};
 
 pub const IteratorStepResult = struct {
     result: core.JSValue,
     value: core.JSValue,
     done: bool,
 };
-
-pub fn destructuringIteratorStep(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    state: *core.Object,
-) !DestructuringIteratorStep {
-    const iterator_value = (state.iteratorTargetSlot().*) orelse
-        return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
-        const next_key = try ctx.runtime.internAtom("next");
-        defer ctx.runtime.atoms.free(next_key);
-        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-    };
-    defer next_method.free(ctx.runtime);
-    if (!isCallableValue(next_method)) return error.TypeError;
-    var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
-    defer next_result_value.free(ctx.runtime);
-    if (object_ops.objectFromValue(next_result_value)) |promise| {
-        if (promise.class_id == core.class.ids.promise) {
-            if (promise.promiseIsRejected()) {
-                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-                _ = ctx.throwValue(reason);
-                return error.JSException;
-            }
-            const fulfilled = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-            next_result_value.free(ctx.runtime);
-            next_result_value = fulfilled;
-        }
-    }
-    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
-    if (next_result.class_id == core.class.ids.regexp) {
-        return .{ .value = core.JSValue.undefinedValue(), .done = false };
-    }
-    const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
-    defer done.free(ctx.runtime);
-    if (value_ops.isTruthy(done)) {
-        setDestructuringIteratorStateDone(state);
-        return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    }
-    const value_key = core.atom.predefinedId("value", .string).?;
-    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
-}
 
 pub fn appendIteratorValues(
     ctx: *core.JSContext,
@@ -3027,12 +2687,17 @@ pub fn appendSpreadValuesEnumerate(
     return index;
 }
 
+pub const IteratorValueDone = struct {
+    value: core.JSValue,
+    done: bool,
+};
+
 pub fn iteratorStepValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-) !DestructuringIteratorStep {
+) !IteratorValueDone {
     const iterator = try property_ops.expectObject(iterator_value);
     const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
@@ -3095,13 +2760,6 @@ pub fn iteratorStepResult(
     } else core.JSValue.undefinedValue();
     errdefer value.free(ctx.runtime);
     return .{ .result = next_result_value, .value = value, .done = is_done };
-}
-
-pub fn clearDestructuringIteratorState(rt: *core.JSRuntime, state: *core.Object) !void {
-    if (!isDestructuringIteratorState(state)) return;
-    state.clearIteratorTarget(rt);
-    state.iteratorIndexSlot().* = 0;
-    state.iteratorKindSlot().* = 0;
 }
 
 pub fn isCallableValue(value: core.JSValue) bool {
@@ -5063,7 +4721,6 @@ pub fn qjsGeneratorReturn(
     // return that suspended inside a finally block (qjs: the new completion resumes at
     // the yield and the old stack slots unwind with the frame).
     if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
-    try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
@@ -5084,48 +4741,37 @@ pub fn qjsGeneratorReturn(
             },
         }
     }
-    if (object.generatorPc() != 0) {
-        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (findGeneratorReturnFinallyTarget(fb, @intCast(object.generatorPc()))) |finally_range| {
-            const current_function_value = object.generatorCurrentFunction() orelse receiver;
-            object.generatorPcSlot().* = finally_range.start;
-            object.generatorJustYieldedSlot().* = false;
-            const result = callFunctionBytecodeModeState(
-                ctx,
-                function_value,
-                current_function_value,
-                object.generatorThis() orelse core.JSValue.undefinedValue(),
-                object.generatorArgs(),
-                object.generatorCaptures(),
-                output,
-                generator_global,
-                false,
-                object,
-                core.JSValue.undefinedValue(),
-                finally_range.stop,
-                core.JSValue.undefinedValue(),
-                core.JSValue.undefinedValue(),
-            ) catch |err| {
-                object.completeGeneratorExecution(ctx.runtime);
-                return err;
-            };
-            defer result.free(ctx.runtime);
-            const done = !object.generatorJustYielded();
-            if (done) object.completeGeneratorExecution(ctx.runtime);
-            if (!done) {
-                // The finally block itself yielded: preserve the pending return
-                // completion across the suspension (qjs js_generator_next
-                // GEN_MAGIC_RETURN, quickjs.c:21109).
-                try stashGeneratorPendingReturn(ctx.runtime, object, return_value, finally_range.stop);
-                if (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)) {
-                    // yield* passthrough: `result` is already an iterator-result object.
-                    return result.dup();
-                }
-            }
-            const iterator_value = if (done and result.isUndefined()) return_value else result;
-            return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
-        }
+    if (object.generatorPc() != 0 and payload.started) {
+        const execution = payload.execution orelse return error.TypeError;
+        const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+        const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+        payload.resume_completion_type = 1;
+        payload.executing = true;
+        defer payload.executing = false;
+        const result = callFunctionBytecodeModeState(
+            ctx,
+            function_value,
+            current_function_value,
+            execution.this_value,
+            execution.suspended.storage.frame.args,
+            execution.suspended.storage.frame.var_refs,
+            output,
+            generator_global,
+            false,
+            object,
+            return_value,
+            null,
+            core.JSValue.undefinedValue(),
+            core.JSValue.undefinedValue(),
+        ) catch |err| {
+            object.completeGeneratorExecution(ctx.runtime);
+            return err;
+        };
+        defer result.free(ctx.runtime);
+        const done = !payload.just_yielded;
+        if (done) object.completeGeneratorExecution(ctx.runtime);
+        if (!done and generatorHasYieldStarResult(payload)) return result.dup();
+        return try createIteratorResult(ctx.runtime, generator_global, result, done);
     }
     object.completeGeneratorExecution(ctx.runtime);
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
@@ -5560,79 +5206,6 @@ pub fn forwardGotoTarget(fb: *const bytecode.FunctionBytecode, pc: usize) ?u32 {
         },
         else => null,
     };
-}
-
-pub fn closeGeneratorDestructuringIterators(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    generator: *core.Object,
-) !void {
-    const suspended = generator.generatorExecutionState();
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.stack.values);
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.locals);
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.args);
-    // frame_var_refs: every element is a VarRef cell (typed slots), never a
-    // destructuring-iterator-state Object — the pre-typed scan over the slots
-    // was a provable no-op (expectObject rejects the var_ref GC kind), so the
-    // typed slice is simply skipped.
-}
-
-pub fn closeDestructuringIteratorsInValues(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    values: []const core.JSValue,
-) !void {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        if (destructuringIteratorStateClosing(object)) continue;
-        const close_arg = value.dup();
-        defer close_arg.free(ctx.runtime);
-        const close_result = try qjsDestructuringClose(ctx, output, global, &.{close_arg});
-        close_result.free(ctx.runtime);
-    }
-}
-
-pub fn closeDestructuringIteratorsInValuesForAbruptCompletion(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    values: []const core.JSValue,
-) void {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        if (destructuringIteratorStateClosing(object)) continue;
-        const close_arg = value.dup();
-        defer close_arg.free(ctx.runtime);
-        const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-        defer if (pending_exception) |pending| pending.free(ctx.runtime);
-        const close_result = qjsDestructuringClose(ctx, output, global, &.{close_arg}) catch {
-            if (ctx.hasException()) ctx.clearException();
-            if (pending_exception) |pending| _ = ctx.throwValue(pending.dup());
-            clearDestructuringIteratorState(ctx.runtime, object) catch {};
-            continue;
-        };
-        close_result.free(ctx.runtime);
-        if (ctx.hasException()) ctx.clearException();
-        if (pending_exception) |pending| _ = ctx.throwValue(pending.dup());
-    }
-}
-
-pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-    frame: *const frame_mod.Frame,
-) void {
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.liveValues());
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
-    // frame.var_refs: typed cell slots are never iterator-state Objects (the
-    // pre-typed slot scan was a provable no-op) — skipped.
 }
 
 pub fn qjsIteratorCallForNativeRecord(

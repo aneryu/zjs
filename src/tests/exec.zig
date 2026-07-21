@@ -9706,6 +9706,142 @@ test "for-of bytecode next continuation preserves result and abrupt semantics" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "IteratorNext bound proxy and native throws do not close the iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let closeCalls = 0;
+        \\function throwingNext() { throw 1; }
+        \\const nextMethods = [
+        \\    throwingNext.bind(null),
+        \\    new Proxy(throwingNext, { apply(target, receiver, args) { return Reflect.apply(target, receiver, args); } }),
+        \\    Symbol.prototype.valueOf,
+        \\];
+        \\for (const next of nextMethods) {
+        \\    const iterator = {
+        \\        [Symbol.iterator]() { return this; },
+        \\        next,
+        \\        return() { closeCalls++; return { done: true }; },
+        \\    };
+        \\    try { for (const value of iterator) {} } catch (error) {}
+        \\}
+        \\assert.sameValue(closeCalls, 0);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "destructuring abrupt completion closes every live outer iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function run(value, body) {
+        \\    const events = [];
+        \\    const iterator = {
+        \\        [Symbol.iterator]() { return this; },
+        \\        next() { events.push("next"); return { value, done: false }; },
+        \\        return() { events.push("return"); return { done: true }; },
+        \\    };
+        \\    body(iterator, events);
+        \\    return events.join(",");
+        \\}
+        \\assert.sameValue(run(undefined, function(iterator, events) {
+        \\    try { let [value = missingDefaultBinding] = iterator; } catch (error) { events.push(error.name); }
+        \\}), "next,return,ReferenceError");
+        \\assert.sameValue(run(1, function(iterator, events) {
+        \\    try { let [[value]] = iterator; } catch (error) { events.push(error.name); }
+        \\}), "next,return,TypeError");
+        \\assert.sameValue(run(null, function(iterator, events) {
+        \\    try { let [{ value }] = iterator; } catch (error) { events.push(error.name); }
+        \\}), "next,return,TypeError");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array destructuring rest roots direct symbol values while creating its result" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const old_threshold = js.runtime.gcThreshold();
+    js.runtime.setGCThreshold(0);
+    defer js.runtime.setGCThreshold(old_threshold);
+
+    const result = try js.eval(
+        \\const symbol = Symbol("gc-destructuring-rest-symbol");
+        \\const source = [symbol];
+        \\const [...rest] = source;
+        \\assert.sameValue(rest.length, 1);
+        \\assert.sameValue(rest[0], symbol);
+        \\assert.sameValue(rest[0].description, "gc-destructuring-rest-symbol");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "computed object-rest keys perform observable ToPropertyKey once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let conversions = 0;
+        \\const key = {
+        \\  [Symbol.toPrimitive](hint) {
+        \\    conversions++;
+        \\    assert.sameValue(hint, "string");
+        \\    return "kept";
+        \\  },
+        \\};
+        \\const source = { kept: 1, copied: 2 };
+        \\const { [key]: value, ...rest } = source;
+        \\assert.sameValue(conversions, 1);
+        \\assert.sameValue(value, 1);
+        \\assert.sameValue(rest.kept, undefined);
+        \\assert.sameValue(rest.copied, 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "object destructuring does not turn its source into a with environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function(global) {
+        \\  "use strict";
+        \\  const { Object } = global;
+        \\  global.__destructuringFollowup = Object.freeze([1]);
+        \\})(globalThis);
+        \\assert.sameValue(globalThis.__destructuringFollowup.length, 1);
+        \\delete globalThis.__destructuringFollowup;
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "object destructuring ToObject uses the current realm primitive prototypes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const { __proto__: numberPrototype } = 42;
+        \\const { __proto__: stringPrototype } = "value";
+        \\const { __proto__: booleanPrototype } = true;
+        \\const { __proto__: symbolPrototype } = Symbol("value");
+        \\const { __proto__: bigintPrototype } = 1n;
+        \\assert.sameValue(numberPrototype, Number.prototype);
+        \\assert.sameValue(stringPrototype, String.prototype);
+        \\assert.sameValue(booleanPrototype, Boolean.prototype);
+        \\assert.sameValue(symbolPrototype, Symbol.prototype);
+        \\assert.sameValue(bigintPrototype, BigInt.prototype);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "for-in-of generic lvalues use QuickJS bottom-stack evaluation order" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -10004,6 +10140,22 @@ test "ordinary arrow and method recursion exhaust the logical stack budget" {
             "recovered\n",
         stream.buffered(),
     );
+}
+
+test "return conditional followed by newline comma keeps the comma expression" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function choose(condition) {
+        \\  return condition ? 1 : 2
+        \\  , 42;
+        \\}
+        \\assert.sameValue(choose(true), 42);
+        \\assert.sameValue(choose(false), 42);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
@@ -10498,6 +10650,235 @@ test "Engine generator return keeps finally rethrow control marker" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "generator return runs nested finally before closing its for-of iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const events = [];
+        \\let step = 0;
+        \\const iterator = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return step++ === 0 ? { value: 1, done: false } : { done: true }; },
+        \\  return() { events.push("return"); return { done: true }; },
+        \\};
+        \\function* values() {
+        \\  for (const value of iterator) {
+        \\    try {
+        \\      yield value;
+        \\    } finally {
+        \\      events.push("cleanup");
+        \\    }
+        \\  }
+        \\}
+        \\const generator = values();
+        \\const first = generator.next();
+        \\assert.sameValue(first.value, 1);
+        \\assert.sameValue(first.done, false);
+        \\const returned = generator.return(9);
+        \\assert.sameValue(events.join(","), "cleanup,return");
+        \\assert.sameValue(returned.value, 9);
+        \\assert.sameValue(returned.done, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "return cleanup restores outer catch targets before finally and IteratorClose throws" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let finallyCount = 0;
+        \\function catchReturnFinallyThrow() {
+        \\  try {
+        \\    throw "try";
+        \\  } catch (error) {
+        \\    return "catch";
+        \\  } finally {
+        \\    finallyCount++;
+        \\    throw "finally";
+        \\  }
+        \\}
+        \\let caught;
+        \\try { catchReturnFinallyThrow(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, "finally");
+        \\assert.sameValue(finallyCount, 1);
+        \\function nestedReturn() {
+        \\  try {
+        \\    return 42;
+        \\  } finally {
+        \\    try {
+        \\      try { return 43; } finally { throw 9; }
+        \\    } catch (error) {}
+        \\  }
+        \\}
+        \\assert.sameValue(nestedReturn(), 42);
+        \\let returnCalled = 0;
+        \\let innerCatchEntered = 0;
+        \\let innerFinallyEntered = 0;
+        \\const iterable = {
+        \\  [Symbol.iterator]() {
+        \\    return {
+        \\      next() { return { done: false }; },
+        \\      return() { returnCalled++; throw 42; },
+        \\    };
+        \\  },
+        \\};
+        \\function closeOnReturn() {
+        \\  for (const value of iterable) {
+        \\    try { return; }
+        \\    catch (error) { innerCatchEntered++; }
+        \\    finally { innerFinallyEntered++; }
+        \\  }
+        \\}
+        \\caught = undefined;
+        \\try { closeOnReturn(); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 42);
+        \\assert.sameValue(returnCalled, 1);
+        \\assert.sameValue(innerCatchEntered, 0);
+        \\assert.sameValue(innerFinallyEntered, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator return crosses catch markers before closing its for-of iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const events = [];
+        \\let step = 0;
+        \\const iterator = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: ++step, done: false }; },
+        \\  return() { events.push("return"); return { done: true }; },
+        \\};
+        \\function* oneCatch() {
+        \\  for (const value of iterator) {
+        \\    try { yield value; } catch (error) {}
+        \\  }
+        \\}
+        \\const first = oneCatch();
+        \\first.next();
+        \\const firstReturn = first.return(9);
+        \\assert.sameValue(firstReturn.value, 9);
+        \\assert.sameValue(firstReturn.done, true);
+        \\assert.sameValue(events.join(","), "return");
+        \\events.length = 0;
+        \\function* twoCatches() {
+        \\  for (const value of iterator) {
+        \\    try { try { yield value; } catch (error) {} } catch (error) {}
+        \\  }
+        \\}
+        \\const second = twoCatches();
+        \\second.next();
+        \\const secondReturn = second.return(10);
+        \\assert.sameValue(secondReturn.value, 10);
+        \\assert.sameValue(secondReturn.done, true);
+        \\assert.sameValue(events.join(","), "return");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "generator return closes an inner for-of iterator before its enclosing finally" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const events = [];
+        \\let step = 0;
+        \\const iterator = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: ++step, done: false }; },
+        \\  return() { events.push("return"); return { done: true }; },
+        \\};
+        \\function* values() {
+        \\  try {
+        \\    for (const value of iterator) yield value;
+        \\  } finally {
+        \\    events.push("finally");
+        \\  }
+        \\}
+        \\const generator = values();
+        \\generator.next();
+        \\const returned = generator.return(9);
+        \\assert.sameValue(events.join(","), "return,finally");
+        \\assert.sameValue(returned.value, 9);
+        \\assert.sameValue(returned.done, true);
+        \\events.length = 0;
+        \\const patternIterator = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: undefined, done: false }; },
+        \\  return() { events.push("pattern-return"); return { done: true }; },
+        \\};
+        \\function* patternValue() {
+        \\  try {
+        \\    const [value = yield 1] = patternIterator;
+        \\  } finally {
+        \\    events.push("pattern-finally");
+        \\  }
+        \\}
+        \\const patternGenerator = patternValue();
+        \\patternGenerator.next();
+        \\const patternReturned = patternGenerator.return(10);
+        \\assert.sameValue(events.join(","), "pattern-return,pattern-finally");
+        \\assert.sameValue(patternReturned.value, 10);
+        \\assert.sameValue(patternReturned.done, true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "destructuring rest parameter defaults use the parameter environment" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let binding = "outer";
+        \\function value(...[get = () => binding]) {
+        \\  var binding = "body";
+        \\  return get();
+        \\}
+        \\assert.sameValue(value(), "outer");
+        \\function objectValue(...{ 0: get = () => binding }) {
+        \\  var binding = "body";
+        \\  return get();
+        \\}
+        \\assert.sameValue(objectValue(), "outer");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "caught destructuring error preserves IteratorClose output" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const iterator = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: undefined, done: false }; },
+        \\  return() { print("CLOSED"); return { done: true }; },
+        \\};
+        \\try { let [value = missingName] = iterator; } catch (error) {}
+        \\print("END");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("CLOSED\nEND\n", stream.buffered());
+}
+
 test "generator parameter eval cells close before body resume" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -10875,6 +11256,79 @@ test "Engine generator return propagates an explicit finally throw" {
         "sync-rejected true\nasync-rejected true\nasync-closed undefined true\n",
         stream.buffered(),
     );
+}
+
+test "async generator return awaits for-await iterator close before completing" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var closeCalls = 0;
+        \\var awaitCalls = 0;
+        \\var iterable = {};
+        \\iterable[Symbol.asyncIterator] = function() {
+        \\  return {
+        \\    next: function() { return Promise.resolve({ value: 1, done: false }); },
+        \\    return: function() {
+        \\      closeCalls++;
+        \\      return { then: function(resolve) { awaitCalls++; resolve({ done: true }); } };
+        \\    }
+        \\  };
+        \\};
+        \\async function* values() {
+        \\  for await (var value of iterable) yield value;
+        \\}
+        \\var iterator = values();
+        \\iterator.next().then(function() {
+        \\  return iterator.return(9);
+        \\}).then(function(result) {
+        \\  print(result.value, result.done, closeCalls, awaitCalls);
+        \\}, function(error) {
+        \\  print("rejected", error.name, closeCalls, awaitCalls);
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("9 true 1 1\n", stream.buffered());
+}
+
+test "async generator return closes an inner iterator before its enclosing finally" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const events = [];
+        \\const iterable = {
+        \\  [Symbol.asyncIterator]() {
+        \\    return {
+        \\      next() { return Promise.resolve({ value: 1, done: false }); },
+        \\      return() { events.push("return"); return Promise.resolve({ done: true }); },
+        \\    };
+        \\  },
+        \\};
+        \\async function* values() {
+        \\  try {
+        \\    for await (const value of iterable) yield value;
+        \\  } finally {
+        \\    events.push("finally");
+        \\  }
+        \\}
+        \\const generator = values();
+        \\generator.next().then(function() {
+        \\  return generator.return(9);
+        \\}).then(function(returned) {
+        \\  print(events.join(","), returned.value, returned.done);
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("return,finally 9 true\n", stream.buffered());
 }
 
 test "Engine eval preserves simple for-in mutation semantics" {

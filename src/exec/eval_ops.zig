@@ -412,14 +412,14 @@ pub fn execDirectEval(
     const result = if (isContextIntrinsicEval(ctx, func))
         directEval(ctx, output, global, rooted_args, function, frame, eval_scope_head, eval_in_class_field_initializer) catch |err| {
             const eval_err = normalizeEvalRuntimeError(err);
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, eval_err)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, eval_err)) {
                 return .continue_loop;
             }
             return eval_err;
         }
     else
         callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }
             return err;
@@ -467,14 +467,14 @@ pub fn execApplyEval(
     const result = if (isContextIntrinsicEval(ctx, func))
         directEval(ctx, output, global, args, function, frame, eval_scope_head, eval_in_class_field_initializer) catch |err| {
             const eval_err = normalizeEvalRuntimeError(err);
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, eval_err)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, eval_err)) {
                 return .continue_loop;
             }
             return eval_err;
         }
     else
         callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }
             return err;

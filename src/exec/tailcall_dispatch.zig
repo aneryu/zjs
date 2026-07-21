@@ -387,7 +387,7 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
         vm.pending_error = e2;
         return false;
     };
-    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
         vm.pending_error = e2;
         return false;
     };
@@ -402,8 +402,12 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
 /// `JS_IteratorNext2` propagates a failing `next()` directly). A same-Machine
 /// setup failure for that method therefore tries the caller catch without
 /// closing the iterator record first.
-noinline fn iteratorNextCallSetupRecover(vm: *Vm, err: HostError) bool {
-    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
+noinline fn iteratorNextCallSetupRecover(vm: *Vm, depth: u8, err: HostError) bool {
+    forof_ops.abandonForOfIteratorAtDepth(vm.ctx.runtime, vm.stack, depth) catch |abandon_err| {
+        vm.pending_error = abandon_err;
+        return false;
+    };
+    const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| {
         vm.pending_error = e2;
         return false;
     };
@@ -681,7 +685,7 @@ inline fn pushMovedAndEnter(
 ) Outcome {
     const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_payload) catch |err| {
         const recovered = if (return_action == .for_of_next)
-            iteratorNextCallSetupRecover(vm, err)
+            iteratorNextCallSetupRecover(vm, @intCast(continuation_payload), err)
         else
             callSetupRecover(vm, err);
         if (!recovered) return .threw;
@@ -705,7 +709,7 @@ inline fn pushBorrowedIteratorAndEnter(
     depth: u8,
 ) Outcome {
     const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, target, iterator_record, depth) catch |err| {
-        if (!iteratorNextCallSetupRecover(vm, err)) return .threw;
+        if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
         return coldNext(vb, vm);
     };
     const entry = maybe_entry orelse {
@@ -832,7 +836,7 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
         failed_result.free(rt);
         key.free(rt);
         target_value.free(rt);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return e2;
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return e2;
         if (!caught) return err;
         return;
     };
@@ -878,6 +882,7 @@ fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!
     ) catch |err| {
         const caught = try call_runtime.handleCatchableRuntimeError(
             vm.ctx,
+            vm.output,
             vm.stack,
             vm.frame,
             vm.catch_target,
@@ -1484,9 +1489,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
     // per-frame `vm.code_end` mirror is retired — see the Vm field).
     if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.code.ptr + vm.function.code.len)) {
         const depth = pc[1];
-        const stack_len = vm.stack.len();
-        if (stack_len >= @as(usize, depth) + 3) {
-            const iterator_index = stack_len - @as(usize, depth) - 3;
+        if (iter_vm.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
             const receiver = vm.stack.values[iterator_index];
             const method = vm.stack.values[iterator_index + 1];
             if (!receiver.isUndefined()) {
@@ -1496,7 +1499,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                     return pushBorrowedIteratorAndEnter(vb, vm, &target, iterator_record, depth);
                 }
             }
-        }
+        } else |_| {}
     }
     _ = iter_vm.forOfNextVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target) catch |err| return vm.fail(err);
     return coldNext(vb, vm);
@@ -1604,7 +1607,7 @@ fn op_throw(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.
 }
 fn op_throw_error(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (control_vm.throwErrorVm(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e)) {
+    switch (control_vm.throwErrorVm(vm.ctx, vm.output, vm.stack, vm.function, vm.frame, vm.catch_target, vm.global) catch |e| return vm.fail(e)) {
         .handled => return coldNext(vb, vm),
     }
 }
@@ -1806,7 +1809,7 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
                         // shortened stack only on the exceptional path, then
                         // use the same catch materialization as h_binary.
                         vm.publish(pc, sp - 2);
-                        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+                        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
                         if (!caught) return vm.fail(err);
                         return coldNext(var_buf, vm);
                     };
@@ -2381,7 +2384,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         vm.stack.setLen(operand_len - 2);
         getter.free(vm.ctx.runtime);
         receiver.free(vm.ctx.runtime);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -2421,7 +2424,7 @@ fn op_get_static_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     ) catch |err| {
         vm.stack.setLen(operand_len - 1);
         receiver.free(vm.ctx.runtime);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -2467,7 +2470,7 @@ inline fn tryInlineProxyTrap(comptime computed_key: bool, var_buf: [*]JSValue, v
         class_vm.proxyTrapKeyValue(vm.ctx.runtime, atom_id) catch |err| {
             stack.setLen(region_base);
             receiver.free(vm.ctx.runtime);
-            const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+            const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
             if (!caught) return vm.fail(err);
             return coldNext(var_buf, vm);
         };
@@ -2507,7 +2510,7 @@ fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
         vm.stack.setLen(operand_len - 2);
         key.free(vm.ctx.runtime);
         receiver.free(vm.ctx.runtime);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -2782,7 +2785,7 @@ pub fn op_compare_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         // Error only: compareAt freed both operands, so publish the doubly-popped sp
         // (frame.pc → next op) for a consistent catch stack.
         vm.publish(pc, sp - 2);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -2941,7 +2944,7 @@ pub fn op_update_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, 
     vm.syncPc(pc, 2); // qjs sf->cur_pc — backtrace fidelity through valueOf (see op_add_loc_cold)
     arith_vm.updateLocalAt(vm.ctx, vm.global, vm.output, &var_buf[idx], pc[0]) catch |err| {
         vm.publish(pc + 1, sp);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -3021,7 +3024,7 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         // state. addLocalAt already freed rhs, so the published length excludes the
         // dead slot — no double free.
         vm.publish(pc + 1, sp - 1);
-        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
+        const caught = call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err) catch |e2| return vm.fail(e2);
         if (!caught) return vm.fail(err);
         return coldNext(var_buf, vm);
     };
@@ -3335,7 +3338,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                         // the preallocated InternalError to the frame's catch.
                         // Only an uncaught error propagates out of the loop.
                         try forof_ops.closeStackTopForOfIteratorForPendingError(vm.ctx, vm.output, vm.global, vm.stack);
-                        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
+                        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
                             reloadTop(vm, &pc, &sp, &var_buf);
                             continue;
                         }

@@ -41,7 +41,7 @@ pub noinline fn getPrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     getPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -77,7 +77,7 @@ pub noinline fn putPrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     putPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -113,7 +113,7 @@ pub noinline fn definePrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     definePrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

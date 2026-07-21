@@ -626,13 +626,8 @@ pub const Machine = struct {
 
     /// Drains any leftover inline frames (error propagation out of the
     /// dispatch loop without a catch handler) and releases chunk storage.
-    /// Draining mirrors the per-level `errdefer` of the recursive path:
-    /// abrupt-completion destructuring iterators are closed before each
-    /// frame is torn down.
     pub fn deinit(self: *Machine) void {
         while (self.depth > 0) {
-            const entry = self.topEntry();
-            call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(self.ctx, self.output, self.global, &entry.stack, &entry.frame);
             var continuation = self.popFrame();
             continuation.deinit(self.ctx.runtime);
         }
@@ -2796,23 +2791,22 @@ pub const Machine = struct {
     pub fn unwindForError(self: *Machine, global: *core.Object, err: anyerror) HostError!bool {
         const ctx = self.ctx;
         while (self.depth > 0) {
-            {
-                const failing = self.topEntry();
-                call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, self.output, global, &failing.stack, &failing.frame);
-            }
             var continuation = self.popFrame();
-            const iterator_next_abrupt = continuation.action == .for_of_next;
+            const iterator_next_depth: ?u8 = if (continuation.action == .for_of_next)
+                continuation.takeForOfDepth()
+            else
+                null;
             continuation.deinit(ctx.runtime);
 
             const level = self.currentLevel();
-            // A throw from IteratorNext propagates directly; IteratorClose is
-            // required for abrupt loop-body completion, not for a failing
-            // `next()` call itself. The continuation survives proper-tail-call
-            // replacement, so this remains exact even when next tail-calls.
-            if (!iterator_next_abrupt) {
-                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            // The continuation survives proper-tail-call replacement, so an
+            // abrupt bytecode `next()` can retire exactly its own record before
+            // ordinary unwind closes any enclosing iterators.
+            if (iterator_next_depth) |depth| {
+                try forof_ops.abandonForOfIteratorAtDepth(ctx.runtime, level.stack, depth);
             }
-            if (try call_runtime.tryCatchInFrame(ctx, level.stack, level.frame, level.catch_target, global, err)) return true;
+            try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            if (try call_runtime.tryCatchInFrame(ctx, self.output, level.stack, level.frame, level.catch_target, global, err)) return true;
             if (self.depth == 0) return false;
         }
         return false;

@@ -101,13 +101,14 @@ inline fn closureVarAt(function: *const bytecode.Bytecode, idx: u16) ?bytecode.f
 
 fn throwGlobalTdz(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
     const err = exception_ops.throwTdzReference(ctx);
-    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
 }
 
@@ -141,11 +142,11 @@ fn getVarFromGlobalObject(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -197,7 +198,7 @@ pub noinline fn getVar(
                 // never the lexical env.
                 const cv_is_lexical = if (closureVarAt(function, ref_idx)) |cv| cv.isLexical() else false;
                 if (cv_is_lexical and !cell.varRefIsDeletableSlot().*) {
-                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                    return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
                 }
                 // zjs frame-model adaptation: qjs resolves an in-function
                 // `arguments` read to the arguments pseudo-var at parse
@@ -220,7 +221,7 @@ pub noinline fn getVar(
             }
         }
     } else if (closureVarAt(function, ref_idx)) |cv| {
-        if (cv.isLexical()) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+        if (cv.isLexical()) return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
     }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) {
@@ -241,7 +242,7 @@ pub noinline fn getVar(
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             errdefer lex_value.free(ctx.runtime);
@@ -258,7 +259,7 @@ pub noinline fn getVar(
             if (call_runtime.lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
@@ -266,7 +267,7 @@ pub noinline fn getVar(
             if (call_runtime.lookupFrameVarRef(ctx, global, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
@@ -279,7 +280,7 @@ pub noinline fn getVar(
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value lex_value;
@@ -291,11 +292,11 @@ pub noinline fn getVar(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -630,12 +631,12 @@ pub noinline fn putVar(
                 if (cell.is_lexical and core.VarRef.fromValue(current) == null) {
                     value.free(ctx.runtime);
                     if (current.isUninitialized()) {
-                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                        return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
                     }
                     // qjs JS_ThrowTypeErrorReadOnly (18507); zjs reports
                     // the const violation through the same catchable
                     // TypeError channel the lexical-env write used.
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                     return error.TypeError;
                 }
                 // Non-lexical cell: fall to the global-object set below.
@@ -650,7 +651,7 @@ pub noinline fn putVar(
     } else if (closureVarAt(function, ref_idx)) |cv| {
         if (cv.isLexical()) {
             value.free(ctx.runtime);
-            return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+            return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
         }
     }
     const opcode_profile = ctx.runtime.opcode_profile;
@@ -678,7 +679,7 @@ pub noinline fn putVar(
     }
     const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
         value.free(ctx.runtime);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (updated_global_lexical) {
@@ -690,12 +691,12 @@ pub noinline fn putVar(
         defer global_value.free(ctx.runtime);
         const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
             value.free(ctx.runtime);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_global_binding) {
             value.free(ctx.runtime);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
     }
@@ -720,7 +721,7 @@ pub noinline fn putVar(
     const global_value = global.value().dup();
     defer global_value.free(ctx.runtime);
     _ = object_ops.setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -952,6 +953,7 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 
 pub noinline fn globalDefinition(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -974,7 +976,7 @@ pub noinline fn globalDefinition(
             // therefore needs only its combined eval marker.
             if (!eval_global_var_bindings) {
                 const fast_global_lexical = call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (fast_global_lexical) {
@@ -982,7 +984,7 @@ pub noinline fn globalDefinition(
                     return .continue_loop;
                 }
                 const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (updated_global_lexical) return .continue_loop;

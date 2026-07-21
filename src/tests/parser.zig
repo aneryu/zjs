@@ -2641,6 +2641,7 @@ test "F5: return comma and conditional expressions use one final return" {
         "return a ? b : c, d;",
         "return a, b ? c : d;",
         "return (a, (b, c));",
+        "return c ? g() : h()\n, 42;",
     };
     for (cases) |source| {
         var fn_bc = try parseFunctionBodyStatement(&env, source);
@@ -2762,6 +2763,24 @@ test "F5: labelled break crossing switch drops discriminant" {
         var fn_bc = try parseStatementWithTopLevelChildren(&env, source);
         defer fn_bc.deinit(env.rt);
     }
+}
+
+test "F5: switch CaseBlock does not treat a function expression name as a declaration" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseStatementWithTopLevelChildren(&env,
+        \\switch (0) {
+        \\case 0: (function clash() {}); break;
+        \\case 1: let clash;
+        \\}
+    );
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        parseStatement(&env, "switch (0) { case 0: let duplicate; case 1: let duplicate; }"),
+    );
 }
 
 test "F5: labelled break to loop inside switch keeps discriminant stack balanced" {
@@ -3209,7 +3228,7 @@ test "F6: function with array destructuring parameter" {
     try expectAtomName(&env, child.func_name, "foo");
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byteCode(), op.special_object);
+    try expectOpcode(child.byteCode(), op.for_of_start);
     try expectOpcode(child.byteCode(), op.return_undef);
 }
 
@@ -3237,8 +3256,19 @@ test "F6: arrow function with array destructuring parameter" {
     try std.testing.expect(child.flags.is_arrow_function);
     try std.testing.expectEqual(@as(u16, 1), child.arg_count);
     try std.testing.expectEqual(@as(u16, 2), child.var_count);
-    try expectOpcode(child.byteCode(), op.special_object);
+    try expectOpcode(child.byteCode(), op.for_of_start);
     try expectOpcode(child.byteCode(), op.@"return");
+}
+
+test "F6: direct shorthand destructuring bindings use get_field2" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo(source) { let { a, b } = source; }");
+    defer fn_bc.deinit(env.rt);
+
+    const child = try expectFunctionConstant(&fn_bc, 0);
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(child.byteCode(), op.get_field2));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(child.byteCode(), op.get_field));
 }
 
 // ---- F7 Class parsing tests ----
@@ -6676,6 +6706,7 @@ test "for-in-of rejects call and optional-chain assignment targets" {
     const cases = [_][]const u8{
         "function f(){}; for (f() of []) {}",
         "let value = {}; for (value?.x in {}) {}",
+        "let a, source = {}; for ([a] = 1 in source) {}",
     };
     for (cases) |source| {
         var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "invalid-for-lvalue.js" });
@@ -7465,8 +7496,27 @@ test "arrow early error checks do not reject valid nested rest destructuring" {
     const arrow = try expectFunctionConstant(&parsed.function, 0);
     try std.testing.expect(arrow.flags.is_arrow_function);
     try std.testing.expectEqual(function_def.FunctionKind.normal, arrow.flags.func_kind);
-    try expectOpcode(arrow.byteCode(), qop.special_object);
+    try expectOpcode(arrow.byteCode(), qop.for_of_start);
     try expectOpcode(arrow.byteCode(), qop.return_undef);
+}
+
+test "destructuring rest parameter defaults enforce await and yield early errors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "async function f(...[value = await 1]) {}",
+        "var f = async (...{ 0: value = await 1 }) => {};",
+        "function* g(...[value = yield 1]) {}",
+        "var g = function* (...{ 0: value = yield 1 }) {};",
+    };
+
+    for (cases) |source| {
+        var parsed = try parser.compile(rt, source, .{ .mode = .script, .filename = "rest-parameter-default-early-error.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
 }
 
 test "assignment destructuring early errors reject invalid rest forms" {

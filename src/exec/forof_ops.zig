@@ -17,11 +17,9 @@ const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const freeAtomList = core.atom.freeAtomList;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
-const isDestructuringIteratorState = call_runtime.isDestructuringIteratorState;
 const objectRestOwnKeys = object_ops.objectRestOwnKeys;
 const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
 const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
-const sameObjectIdentity = object_ops.sameObjectIdentity;
 
 // ---------------------------------------------------------------------------
 // for-in iterator (mirrors qjs JSForInIterator / build_for_in_iterator)
@@ -253,31 +251,63 @@ pub fn forInHasEnumerableStringKey(
     return false;
 }
 
-pub fn findForOfIteratorIndex(rt: *core.JSRuntime, stack: *const stack_mod.Stack) !usize {
-    var index = stack.len();
-    while (index > 0) {
-        index -= 1;
-        const value = stack.values[index];
-        if (isIteratorLikeValue(rt, value)) return index;
-    }
-    return error.StackUnderflow;
+/// Iterator records share JSValue's internal catch-offset tag with ordinary
+/// catch markers, but use the otherwise-invalid payload range below -1. This
+/// preserves the saved outer catch target while giving unwind code an exact
+/// record discriminator instead of guessing from adjacent object/callable
+/// shapes. -2 identifies an async iterator; sync records use minInt...-3.
+const async_iterator_catch_offset: i32 = -2;
+
+pub fn iteratorCatchMarker(previous_target: i32) core.JSValue {
+    std.debug.assert(previous_target >= -1);
+    std.debug.assert(previous_target <= std.math.maxInt(i32) - 3);
+    const encoded: i32 = if (previous_target == -1)
+        std.math.minInt(i32)
+    else
+        @intCast(@as(i64, std.math.minInt(i32)) + @as(i64, previous_target) + 1);
+    return core.JSValue.catchOffset(encoded);
 }
 
-pub fn isIteratorLikeValue(rt: *core.JSRuntime, value: core.JSValue) bool {
-    const object = property_ops.expectObject(value) catch return false;
-    if (object.cachedIteratorNext(rt) != null) return true;
-    const next_key = rt.internAtom("next") catch return false;
-    defer rt.atoms.free(next_key);
-    const next_value = object.getProperty(next_key);
-    defer next_value.free(rt);
-    return isCallableValue(next_value);
+pub fn iteratorCatchMarkerPreviousTarget(value: core.JSValue) ?i32 {
+    const encoded = value.asCatchOffset() orelse return null;
+    if (encoded >= async_iterator_catch_offset) return null;
+    if (encoded == std.math.minInt(i32)) return -1;
+    return @intCast(@as(i64, encoded) - @as(i64, std.math.minInt(i32)) - 1);
+}
+
+pub fn asyncIteratorCatchMarker() core.JSValue {
+    return core.JSValue.catchOffset(async_iterator_catch_offset);
+}
+
+pub fn isAsyncIteratorCatchMarker(value: core.JSValue) bool {
+    return (value.asCatchOffset() orelse return false) == async_iterator_catch_offset;
+}
+
+pub fn isIteratorCatchMarker(value: core.JSValue) bool {
+    return isAsyncIteratorCatchMarker(value) or iteratorCatchMarkerPreviousTarget(value) != null;
+}
+
+test "iterator catch markers are distinct from ordinary catch offsets" {
+    for ([_]i32{ -1, 0, 42 }) |ordinary| {
+        try std.testing.expect(!isIteratorCatchMarker(core.JSValue.catchOffset(ordinary)));
+    }
+    for ([_]i32{ -1, 0, 42 }) |previous| {
+        const marker = iteratorCatchMarker(previous);
+        try std.testing.expect(isIteratorCatchMarker(marker));
+        try std.testing.expect(!isAsyncIteratorCatchMarker(marker));
+        try std.testing.expectEqual(previous, iteratorCatchMarkerPreviousTarget(marker).?);
+    }
+    const async_marker = asyncIteratorCatchMarker();
+    try std.testing.expect(isIteratorCatchMarker(async_marker));
+    try std.testing.expect(isAsyncIteratorCatchMarker(async_marker));
+    try std.testing.expect(iteratorCatchMarkerPreviousTarget(async_marker) == null);
 }
 
 pub fn closeStackTopForOfIteratorForPendingError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    stack: *const stack_mod.Stack,
+    stack: *stack_mod.Stack,
 ) !void {
     return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, null);
 }
@@ -286,7 +316,7 @@ pub fn closeStackTopForOfIteratorForPendingErrorWithFrame(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    stack: *const stack_mod.Stack,
+    stack: *stack_mod.Stack,
     frame: *const frame_mod.Frame,
 ) !void {
     return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, frame);
@@ -296,29 +326,36 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    stack: *const stack_mod.Stack,
+    stack: *stack_mod.Stack,
     frame: ?*const frame_mod.Frame,
 ) !void {
-    const record_index = findTopClosableForOfRecordIndex(stack) orelse return;
-    const iterator_value = stack.values[record_index].dup();
-    defer iterator_value.free(ctx.runtime);
-    if (property_ops.expectObject(iterator_value)) |object| {
-        if (isDestructuringIteratorState(object)) return;
-    } else |_| {}
-    if (frame) |active_frame| {
-        if (activeDestructuringStateTargetsIterator(stack.liveValues(), active_frame, iterator_value)) return;
-    }
-
+    _ = frame;
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
     defer if (pending_exception) |value| value.free(ctx.runtime);
-    closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-    if (ctx.hasException()) ctx.clearException();
+    var before = stack.len();
+    while (findTopClosableForOfRecordIndexBefore(stack, before)) |record_index| {
+        // Transfer the record's iterator ownership out before invoking user
+        // code. Besides matching IteratorClose's one-shot semantics, this
+        // prevents a later catch/unwind/deinit seam from calling return()
+        // again for the same abrupt completion.
+        const iterator_value = stack.values[record_index];
+        stack.values[record_index] = core.JSValue.undefinedValue();
+        closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        iterator_value.free(ctx.runtime);
+        if (ctx.hasException()) ctx.clearException();
+        before = record_index;
+    }
     if (pending_exception) |value| _ = ctx.throwValue(value.dup());
 }
 
 pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
-    if (stack.len() < 3) return null;
-    var index = stack.len() - 3;
+    return findTopClosableForOfRecordIndexBefore(stack, stack.len());
+}
+
+fn findTopClosableForOfRecordIndexBefore(stack: *const stack_mod.Stack, before: usize) ?usize {
+    const end = @min(before, stack.len());
+    if (end < 3) return null;
+    var index = end - 3;
     while (true) {
         if (isForOfRecordAt(stack, index) and !hasCatchMarkerAboveForOfRecord(stack, index)) {
             return index;
@@ -331,38 +368,35 @@ pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
 
 pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
     if (index + 2 >= stack.len()) return false;
-    return stack.values[index].isObject() and
-        isCallableValue(stack.values[index + 1]) and
-        stack.values[index + 2].isCatchOffset();
+    return isIteratorCatchMarker(stack.values[index + 2]);
+}
+
+/// QuickJS `js_for_of_next` replaces the current iterator with undefined on
+/// every IteratorNext abrupt completion. That prevents IteratorClose from
+/// calling `return()` on the iterator whose `next`/result access just failed,
+/// while leaving any enclosing iterator records available for normal unwind.
+pub fn abandonForOfIteratorAtIndex(rt: *core.JSRuntime, stack: *stack_mod.Stack, index: usize) void {
+    std.debug.assert(isForOfRecordAt(stack, index));
+    const iterator = stack.values[index];
+    stack.values[index] = core.JSValue.undefinedValue();
+    iterator.free(rt);
+}
+
+pub fn abandonForOfIteratorAtDepth(rt: *core.JSRuntime, stack: *stack_mod.Stack, depth: u8) !void {
+    const required = @as(usize, depth) + 3;
+    if (stack.len() < required) return error.InvalidBytecode;
+    const index = stack.len() - required;
+    if (!isForOfRecordAt(stack, index)) return error.InvalidBytecode;
+    abandonForOfIteratorAtIndex(rt, stack, index);
 }
 
 pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {
     var index = record_index + 3;
     while (index < stack.len()) : (index += 1) {
-        if (stack.values[index].isCatchOffset()) return true;
-    }
-    return false;
-}
-
-pub fn activeDestructuringStateTargetsIterator(
-    stack_values: []const core.JSValue,
-    frame: *const frame_mod.Frame,
-    iterator_value: core.JSValue,
-) bool {
-    // frame.var_refs is excluded: typed cell slots are never iterator-state
-    // Objects (the pre-typed slot scan was a provable no-op — expectObject
-    // rejects the var_ref GC kind).
-    return destructuringStateTargetsIteratorInValues(stack_values, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.locals, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.args, iterator_value);
-}
-
-pub fn destructuringStateTargetsIteratorInValues(values: []const core.JSValue, iterator_value: core.JSValue) bool {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        const target = (object.iteratorTargetSlot().*) orelse continue;
-        if (sameObjectIdentity(target, iterator_value)) return true;
+        if (!stack.values[index].isCatchOffset()) continue;
+        // Nested iterator markers are cleanup records, not catch boundaries.
+        if (isIteratorCatchMarker(stack.values[index])) continue;
+        return true;
     }
     return false;
 }

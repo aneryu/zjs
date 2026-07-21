@@ -96,7 +96,6 @@ const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
 const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
 const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
 const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
-const qjsDestructuringRest = call_runtime.qjsDestructuringRest;
 const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
 const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
@@ -1896,7 +1895,7 @@ pub fn qjsObjectGetPrototypeOfValue(
 }
 
 pub fn internalSpecialObjectValue(rt: *core.JSRuntime, subtype: u8) !?core.JSValue {
-    return try call_mod.internalDestructuringHelperFunction(rt, subtype);
+    return try call_mod.internalUsingHelperFunction(rt, subtype);
 }
 
 pub fn qjsDestructuringObjectRest(
@@ -1906,7 +1905,10 @@ pub fn qjsDestructuringObjectRest(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
-    var source_value = try value_vm.toObjectForWith(ctx, args[0]);
+    var source_value = if (args[0].isObject())
+        args[0].dup()
+    else
+        try primitiveObjectForAccess(ctx.runtime, global, args[0]);
     defer source_value.free(ctx.runtime);
     const source = try property_ops.expectObject(source_value);
 
@@ -1943,47 +1945,6 @@ pub fn qjsDestructuringObjectRest(
         value = core.JSValue.undefinedValue();
     }
     return out_value;
-}
-
-test "qjsDestructuringRest roots direct symbol values while creating rest array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-    const global = try zjs_vm.contextGlobal(ctx);
-
-    const source = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    var source_alive = true;
-    defer if (source_alive) source.value().free(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-rest-symbol");
-    const symbol_value = try rt.symbolValue(symbol_atom);
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
-    symbol_value.free(rt);
-    source.setArrayLength(1);
-
-    const args = [_]core.JSValue{ source.value(), core.JSValue.int32(0) };
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const rest_value = try qjsDestructuringRest(ctx, null, global, &args);
-    var rest_alive = true;
-    defer if (rest_alive) rest_value.free(rt);
-    const rest = try property_ops.expectObject(rest_value);
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    {
-        const stored = rest.getProperty(core.atom.atomFromUInt32(0));
-        defer stored.free(rt);
-        try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
-    }
-
-    rest_value.free(rt);
-    rest_alive = false;
-    source.value().free(rt);
-    source_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "qjsDestructuringObjectRest roots direct symbol values while creating rest object" {
@@ -4240,16 +4201,16 @@ pub noinline fn getSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isUndefined() or obj.isNull()) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
 
@@ -4267,7 +4228,7 @@ pub noinline fn getSuperValue(
         }
     } else |_| {}
     const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer value.free(ctx.runtime);
@@ -4293,15 +4254,15 @@ pub noinline fn putSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     if (obj.isUndefined() or obj.isNull()) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
@@ -4311,7 +4272,7 @@ pub noinline fn putSuperValue(
             if (sameObjectIdentity(super_constructor, obj)) {
                 if (function_object.functionHomeObject()) |home_object| {
                     prototype = home_object.getPrototype() orelse {
-                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                         return error.TypeError;
                     };
                 }
@@ -4319,7 +4280,7 @@ pub noinline fn putSuperValue(
         }
     } else |_| {}
     setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -4358,13 +4319,14 @@ pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 
 pub noinline fn checkBrandVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
     checkBrand(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -4406,13 +4368,14 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
 
 pub noinline fn addBrandVm(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !Step {
     addBrand(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -4455,7 +4418,7 @@ pub noinline fn privateInVm(
     catch_target: *?usize,
 ) !Step {
     privateIn(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -4522,7 +4485,7 @@ pub noinline fn defineClass(
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.isObject() or superclass_value.isNull())) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
     }
@@ -4531,7 +4494,7 @@ pub noinline fn defineClass(
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);
         const name_atom = toPropertyKeyAtom(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         defer ctx.runtime.atoms.free(name_atom);
@@ -4546,20 +4509,20 @@ pub noinline fn defineClass(
     if (superclass_value_active) {
         if (superclass_value.isObject()) {
             if (!(try isConstructorLike(ctx, superclass_value))) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
             try ctor_object.setOptionalValueSlot(ctx.runtime, try ctor_object.functionSuperConstructorSlot(ctx.runtime), superclass_value.dup());
             superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (superclass_proto.isObject()) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
             } else if (!superclass_proto.isNull()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
         } else {
@@ -4594,6 +4557,7 @@ pub noinline fn defineClass(
 
 pub noinline fn defineMethod(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -4605,7 +4569,7 @@ pub noinline fn defineMethod(
     const flags = function.code[frame.pc];
     frame.pc += 1;
     defineObjectMethod(ctx.runtime, stack, atom_id, flags, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -4627,12 +4591,12 @@ pub noinline fn defineMethodComputed(
     const key_value = try stack.pop();
     defer key_value.free(ctx.runtime);
     const atom_id = toPropertyKeyAtom(ctx, output, global, key_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

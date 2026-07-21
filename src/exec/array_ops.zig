@@ -68,7 +68,6 @@ const isBuiltinConstructorName = call_runtime.isBuiltinConstructorName;
 const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
 const isDirectIteratorClass = call_runtime.isDirectIteratorClass;
-const isIteratorLikeValue = forof_ops.isIteratorLikeValue;
 const objectFromValue = object_ops.objectFromValue;
 const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
 const objectRealmGlobal = object_ops.objectRealmGlobal;
@@ -120,18 +119,15 @@ const valuesStrictEqual = value_ops.valuesStrictEqual;
 pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peek()) |marker| {
         defer marker.free(rt);
-        if (marker.isCatchOffset() and stack.len() >= 3) {
-            const maybe_next = stack.values[stack.len() - 2];
-            const maybe_iterator = stack.values[stack.len() - 3];
-            if (isCallableValue(maybe_next) and isIteratorLikeValue(rt, maybe_iterator)) {
-                const record_marker = try stack.pop();
-                record_marker.free(rt);
-                const next_method = try stack.pop();
-                next_method.free(rt);
-                const iterator_value = try stack.pop();
-                iterator_value.free(rt);
-                continue;
-            }
+        if (forof_ops.isIteratorCatchMarker(marker)) {
+            if (stack.len() < 3) return error.StackUnderflow;
+            const record_marker = try stack.pop();
+            record_marker.free(rt);
+            const next_method = try stack.pop();
+            next_method.free(rt);
+            const iterator_value = try stack.pop();
+            iterator_value.free(rt);
+            continue;
         }
         const popped = try stack.pop();
         if (marker.isCatchOffset()) return catchTargetFromMarker(popped);

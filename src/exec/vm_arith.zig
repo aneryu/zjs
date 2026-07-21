@@ -75,7 +75,7 @@ pub noinline fn binaryVm(
     global: *core.Object,
 ) !Step {
     binary(ctx, stack, binop, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -147,7 +147,7 @@ pub noinline fn compareVm(
     global: *core.Object,
 ) !Step {
     compare(ctx, stack, cmp, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -328,7 +328,7 @@ pub noinline fn unaryVm(
     global: *core.Object,
 ) !Step {
     unary(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -358,7 +358,7 @@ pub noinline fn bitNotVm(
     global: *core.Object,
 ) !Step {
     bitNot(ctx, stack, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -411,7 +411,7 @@ pub noinline fn postUpdateVm(
     global: *core.Object,
 ) !Step {
     postUpdate(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -475,7 +475,7 @@ pub noinline fn updateLocalVm(
     output: ?*std.Io.Writer,
 ) !Step {
     updateLocal(ctx, function, global, frame, opcode_id, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -679,7 +679,7 @@ pub noinline fn addLocalVm(
     output: ?*std.Io.Writer,
 ) !Step {
     addLocal(ctx, stack, function, global, frame, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

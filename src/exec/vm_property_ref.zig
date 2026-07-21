@@ -54,12 +54,12 @@ pub noinline fn withGetOrDelete(
         return .continue_loop;
     };
     const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const blocked = if (is_with and has_binding)
         call_runtime.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
@@ -71,13 +71,13 @@ pub noinline fn withGetOrDelete(
     }
     const still_has_binding = if (opc == op.with_get_var or opc == op.with_get_ref)
         object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
         true;
     if (opc == op.with_get_var and !still_has_binding and (function.flags.is_strict or function.flags.runtime_strict)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     switch (opc) {
@@ -116,7 +116,7 @@ pub noinline fn withGetOrDelete(
                 }
             }
             if (!deleted and function.flags.is_strict) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const dropped = try stack.pop();
@@ -228,7 +228,7 @@ pub noinline fn makeVarRefVm(
     catch_target: *?usize,
 ) !Step {
     makeVarRef(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -282,7 +282,7 @@ pub noinline fn getRefValueVm(
     catch_target: *?usize,
 ) !Step {
     getRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -348,7 +348,7 @@ pub noinline fn putRefValueVm(
     catch_target: *?usize,
 ) !Step {
     putRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -378,30 +378,30 @@ pub noinline fn withPut(
     if (obj.isUndefined()) return .continue_loop;
     if (mode != .selected_reference) {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_binding) return .continue_loop;
         if (mode == .with_probe) {
             const blocked = call_runtime.isBlockedByUnscopables(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (blocked) return .continue_loop;
         }
     }
     const still_exists = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (!still_exists and (function.flags.is_strict or function.flags.runtime_strict)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
@@ -447,26 +447,26 @@ pub noinline fn deletePropertyVm(
     // FIRST: user toString/Symbol.toPrimitive side effects (and their
     // exceptions) fire before any base check.
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isNull() or obj.isUndefined()) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
     const obj_value = if (obj.isObject()) obj.dup() else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer obj_value.free(ctx.runtime);
     const object = try property_ops.expectObject(obj_value);
     const deleted = if (object.proxyTarget() != null) blk: {
         break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
     } else if (object.isArray() and atom_id == core.atom.ids.length)
@@ -476,7 +476,7 @@ pub noinline fn deletePropertyVm(
     else
         object.deleteProperty(ctx.runtime, atom_id);
     if (!deleted and function.flags.is_strict) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     try stack.pushOwned(core.JSValue.boolean(deleted));

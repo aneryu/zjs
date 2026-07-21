@@ -271,12 +271,6 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
 // cluster stay unused.
 pub const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
-    dstr_get = 15,
-    dstr_close = 16,
-    dstr_rest = 17,
-    dstr_obj_rest = 18,
-    dstr_elide = 19,
-    dstr_require_iterator = 109,
     using_create_disposable_stack = 111,
     using_add_sync_resource = 112,
     using_dispose_sync_stack = 113,
@@ -318,12 +312,6 @@ const max_host_function_id = @max(
 const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = records: {
     var records = [_]?HostFunctionRecord{null} ** (max_host_function_id + 1);
     records[@intFromEnum(HostFunction.output)] = .{ .length = 1, .call = hostCallOutput };
-    records[@intFromEnum(HostFunction.dstr_get)] = .{ .length = 2, .call = hostCallDstrGet };
-    records[@intFromEnum(HostFunction.dstr_elide)] = .{ .length = 2, .call = hostCallDstrElide };
-    records[@intFromEnum(HostFunction.dstr_rest)] = .{ .length = 2, .call = hostCallDstrRest };
-    records[@intFromEnum(HostFunction.dstr_obj_rest)] = .{ .length = 1, .call = hostCallDstrObjectRest };
-    records[@intFromEnum(HostFunction.dstr_close)] = .{ .length = 1, .call = hostCallDstrClose };
-    records[@intFromEnum(HostFunction.dstr_require_iterator)] = .{ .length = 1, .call = hostCallDstrRequireIterator };
     records[@intFromEnum(HostFunction.using_create_disposable_stack)] = .{ .length = 0, .call = hostCallUsingCreateDisposableStack };
     records[@intFromEnum(HostFunction.using_add_sync_resource)] = .{ .length = 2, .call = hostCallUsingAddSyncResource };
     records[@intFromEnum(HostFunction.using_dispose_sync_stack)] = .{ .length = 1, .call = hostCallUsingDisposeSyncStack };
@@ -560,8 +548,6 @@ pub fn callHostFunctionObjectForVm(
 fn hostFunctionCanDispatchFromVmWithoutGlobals(kind: i32) bool {
     return switch (kind) {
         @intFromEnum(HostFunction.output),
-        @intFromEnum(HostFunction.dstr_get)...@intFromEnum(HostFunction.dstr_elide),
-        @intFromEnum(HostFunction.dstr_require_iterator),
         @intFromEnum(HostFunction.using_create_disposable_stack)...@intFromEnum(HostFunction.using_dispose_async_stack_for_throw),
         @intFromEnum(HostFunction.external_host),
         => true,
@@ -600,32 +586,26 @@ fn createHostFunction(rt: *core.JSRuntime, kind: HostFunction) !*core.Object {
     return function_object;
 }
 
-pub fn internalDestructuringHelperFunction(rt: *core.JSRuntime, subtype: u8) !?core.JSValue {
-    const helper = internalDestructuringHelperForSubtype(subtype) orelse return null;
-    if (rt.internal_destructuring_helpers[helper.slot]) |cached| return cached.dup();
+pub fn internalUsingHelperFunction(rt: *core.JSRuntime, subtype: u8) !?core.JSValue {
+    const helper = internalUsingHelperForSubtype(subtype) orelse return null;
+    if (rt.internal_using_helpers[helper.slot]) |cached| return cached.dup();
     const function_object = try createHostFunction(rt, helper.kind);
     const value = function_object.value();
-    rt.internal_destructuring_helpers[helper.slot] = value;
+    rt.internal_using_helpers[helper.slot] = value;
     return value.dup();
 }
 
-fn internalDestructuringHelperForSubtype(subtype: u8) ?struct { slot: usize, kind: HostFunction } {
+fn internalUsingHelperForSubtype(subtype: u8) ?struct { slot: usize, kind: HostFunction } {
     const special = bytecode_opcode.special_object_subtype;
     return switch (subtype) {
-        special.dstr_get => .{ .slot = 0, .kind = .dstr_get },
-        special.dstr_elide => .{ .slot = 1, .kind = .dstr_elide },
-        special.dstr_rest => .{ .slot = 2, .kind = .dstr_rest },
-        special.dstr_obj_rest => .{ .slot = 3, .kind = .dstr_obj_rest },
-        special.dstr_close => .{ .slot = 4, .kind = .dstr_close },
-        special.dstr_require_iterator => .{ .slot = 5, .kind = .dstr_require_iterator },
-        special.using_create_disposable_stack => .{ .slot = 6, .kind = .using_create_disposable_stack },
-        special.using_add_sync_resource => .{ .slot = 7, .kind = .using_add_sync_resource },
-        special.using_dispose_sync_stack => .{ .slot = 8, .kind = .using_dispose_sync_stack },
-        special.using_dispose_sync_stack_for_throw => .{ .slot = 9, .kind = .using_dispose_sync_stack_for_throw },
-        special.using_create_async_disposable_stack => .{ .slot = 10, .kind = .using_create_async_disposable_stack },
-        special.using_add_async_resource => .{ .slot = 11, .kind = .using_add_async_resource },
-        special.using_dispose_async_stack => .{ .slot = 12, .kind = .using_dispose_async_stack },
-        special.using_dispose_async_stack_for_throw => .{ .slot = 13, .kind = .using_dispose_async_stack_for_throw },
+        special.using_create_disposable_stack => .{ .slot = 0, .kind = .using_create_disposable_stack },
+        special.using_add_sync_resource => .{ .slot = 1, .kind = .using_add_sync_resource },
+        special.using_dispose_sync_stack => .{ .slot = 2, .kind = .using_dispose_sync_stack },
+        special.using_dispose_sync_stack_for_throw => .{ .slot = 3, .kind = .using_dispose_sync_stack_for_throw },
+        special.using_create_async_disposable_stack => .{ .slot = 4, .kind = .using_create_async_disposable_stack },
+        special.using_add_async_resource => .{ .slot = 5, .kind = .using_add_async_resource },
+        special.using_dispose_async_stack => .{ .slot = 6, .kind = .using_dispose_async_stack },
+        special.using_dispose_async_stack_for_throw => .{ .slot = 7, .kind = .using_dispose_async_stack_for_throw },
         else => null,
     };
 }
@@ -2935,36 +2915,6 @@ fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []con
 fn globalGc(ctx: *core.JSContext) core.JSValue {
     _ = ctx.runtime.runObjectCycleRemoval();
     return core.JSValue.undefinedValue();
-}
-
-fn hostCallDstrGet(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(call_runtime.qjsDestructuringGet(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallDstrElide(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(call_runtime.qjsDestructuringElide(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallDstrRest(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(call_runtime.qjsDestructuringRest(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallDstrObjectRest(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(object_ops.qjsDestructuringObjectRest(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallDstrClose(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(call_runtime.qjsDestructuringClose(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallDstrRequireIterator(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(call_runtime.qjsDestructuringRequireIterator(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingCreateDisposableStack(call: HostCall) HostError!core.JSValue {

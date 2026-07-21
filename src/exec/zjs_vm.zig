@@ -450,9 +450,6 @@ fn runWithArgsState(
     // run, and GeneratorExecutionState retains (or grows) that same backing.
     // QuickJS likewise resumes its preallocated stack directly.
     if (!skip_resume_slab) try reserveEntryFrameCapacity(entry_stack, entry_function);
-    errdefer {
-        closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
-    }
     catch_target_storage = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
     // Marker-less internal generator bytecode has no parameter/body boundary to
     // execute toward. Park its fully initialized frame before dispatch at pc 0.
@@ -615,7 +612,6 @@ fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *con
 // ---- Shared helper aliases ----
 pub const qjsArraySortCall = array_ops.qjsArraySortCall;
 pub const qjsArrayByCopyCall = array_ops.qjsArrayByCopyCall;
-const closeFrameDestructuringIteratorsForAbruptCompletion = call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion;
 pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
 pub const cleanupAtomicsWaitersForContext = call_runtime.cleanupAtomicsWaitersForContext;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
