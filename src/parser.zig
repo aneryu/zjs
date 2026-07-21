@@ -3600,15 +3600,13 @@ pub const parser_core = struct {
         block_boundary: ?*BlockEnv,
     };
 
-    const UsingStackKind = enum {
-        sync,
-        async,
-    };
+    const DisposalHint = core.object.DisposalHint;
 
     const UsingBlockFrame = struct {
         stack_loc: ?u16 = null,
+        catch_off: ?usize = null,
         catch_marker_depth: u32 = 0,
-        kind: UsingStackKind = .sync,
+        seen_async_hint: bool = false,
     };
 
     const ClassPrivateElementKind = enum {
@@ -9787,7 +9785,7 @@ pub const parser_core = struct {
             const frame = s.using_block_frames.items[i];
             if (frame.catch_marker_depth != depth) continue;
             const stack_loc = frame.stack_loc orelse continue;
-            try emitUsingDisposeStack(s, frame.kind, stack_loc);
+            try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
             try s.emitCloseLoc(stack_loc);
         }
     }
@@ -10257,7 +10255,7 @@ pub const parser_core = struct {
         return tokenKindCanStartUsingBinding(s, binding_token.val);
     }
 
-    fn directUsingDeclarationKind(s: *State) ?UsingStackKind {
+    fn directUsingDeclarationKind(s: *State) ?DisposalHint {
         if (awaitUsingDeclarationStart(s)) return .async;
         if (usingDeclarationStart(s)) return .sync;
         return null;
@@ -10273,7 +10271,7 @@ pub const parser_core = struct {
                     kind == tok.TOK_PRIVATE or kind == tok.TOK_PROTECTED or kind == tok.TOK_PUBLIC));
     }
 
-    fn advanceUsingDeclarationPrefixForSnapshot(s: *State, kind: UsingStackKind) bool {
+    fn advanceUsingDeclarationPrefixForLookahead(s: *State, kind: DisposalHint) bool {
         switch (kind) {
             .sync => {
                 if (!usingDeclarationStart(s)) return false;
@@ -10289,143 +10287,16 @@ pub const parser_core = struct {
         }
     }
 
-    fn usingDeclarationBindingIsOf(s: *State, kind: UsingStackKind) bool {
+    fn usingDeclarationBindingIsOf(s: *State, kind: DisposalHint) bool {
         const snapshot = takeParserSnapshot(s);
         defer restoreParserLexerSnapshot(s, snapshot);
-        if (!advanceUsingDeclarationPrefixForSnapshot(s, kind)) return false;
+        if (!advanceUsingDeclarationPrefixForLookahead(s, kind)) return false;
         return s.isOfToken();
     }
 
-    fn usingDeclarationBindingFollowedByEquals(s: *State, kind: UsingStackKind) bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        if (!advanceUsingDeclarationPrefixForSnapshot(s, kind)) return false;
-        s.advance() catch return false;
-        return s.peekKind() == '=';
-    }
-
-    fn blockDirectUsingDeclarationKind(s: *State) ?UsingStackKind {
-        if (s.peekKind() != @as(tok.TokenKind, @intCast('{'))) return null;
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var depth: usize = 0;
-        var result: ?UsingStackKind = null;
-        var previous_token_kind: ?tok.TokenKind = null;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const kind = s.peekKind();
-            if (kind == tok.TOK_TEMPLATE) {
-                skipTemplateInPredeclareScan(s, s.token) catch return result;
-                s.advance() catch return result;
-                previous_token_kind = tok.TOK_TEMPLATE;
-                continue;
-            }
-            if (tokenCanStartSlashRegexp(kind)) {
-                if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
-                    s.advance() catch return result;
-                    previous_token_kind = tok.TOK_REGEXP;
-                    continue;
-                }
-            }
-
-            if (kind == @as(tok.TokenKind, @intCast('{'))) {
-                depth += 1;
-            } else if (kind == @as(tok.TokenKind, @intCast('}'))) {
-                if (depth == 0) return result;
-                depth -= 1;
-                s.advance() catch return result;
-                if (depth == 0) return result;
-                continue;
-            } else if (depth == 1) {
-                if (directUsingDeclarationKind(s)) |direct_kind| {
-                    if (direct_kind == .async) return .async;
-                    result = .sync;
-                }
-            }
-            s.advance() catch return result;
-            previous_token_kind = kind;
-        }
-        return result;
-    }
-
-    fn programDirectUsingDeclarationKind(s: *State) ?UsingStackKind {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var paren_depth: usize = 0;
-        var bracket_depth: usize = 0;
-        var brace_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
-        var result: ?UsingStackKind = null;
-        while (s.peekKind() != tok.TOK_EOF) {
-            if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
-                if (directUsingDeclarationKind(s)) |direct_kind| {
-                    if (direct_kind == .async) return .async;
-                    result = .sync;
-                }
-            }
-
-            const kind = s.peekKind();
-            if (kind == tok.TOK_TEMPLATE) {
-                skipTemplateInPredeclareScan(s, s.token) catch return result;
-                s.advance() catch return result;
-                previous_token_kind = tok.TOK_TEMPLATE;
-                continue;
-            }
-            if (tokenCanStartSlashRegexp(kind)) {
-                if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
-                    s.advance() catch return result;
-                    previous_token_kind = tok.TOK_REGEXP;
-                    continue;
-                }
-            }
-
-            switch (kind) {
-                '(' => paren_depth += 1,
-                ')' => {
-                    if (paren_depth > 0) paren_depth -= 1;
-                },
-                '[' => bracket_depth += 1,
-                ']' => {
-                    if (bracket_depth > 0) bracket_depth -= 1;
-                },
-                '{' => brace_depth += 1,
-                '}' => {
-                    if (brace_depth > 0) brace_depth -= 1;
-                },
-                else => {},
-            }
-            s.advance() catch return result;
-            previous_token_kind = kind;
-        }
-        return result;
-    }
-
-    fn emitUsingHelperCall(s: *State, subtype: u8, argc: u16) Error!void {
-        try s.emitOpU8(opcode.op.special_object, subtype);
-        switch (subtype) {
-            opcode.special_object_subtype.using_create_disposable_stack,
-            opcode.special_object_subtype.using_create_async_disposable_stack,
-            => {},
-            opcode.special_object_subtype.using_add_sync_resource,
-            opcode.special_object_subtype.using_dispose_sync_stack,
-            opcode.special_object_subtype.using_dispose_sync_stack_for_throw,
-            opcode.special_object_subtype.using_add_async_resource,
-            opcode.special_object_subtype.using_dispose_async_stack,
-            opcode.special_object_subtype.using_dispose_async_stack_for_throw,
-            => {},
-            else => return Error.UnexpectedToken,
-        }
-        try s.emitOpU16(opcode.op.call, argc);
-    }
-
-    fn emitCreateUsingDisposableStack(s: *State, kind: UsingStackKind) Error!u16 {
+    fn emitCreateUsingDisposableStack(s: *State) Error!u16 {
         const stack_loc = try appendAnonymousTempLocal(s);
-        const subtype = switch (kind) {
-            .sync => opcode.special_object_subtype.using_create_disposable_stack,
-            .async => opcode.special_object_subtype.using_create_async_disposable_stack,
-        };
-        try emitUsingHelperCall(s, subtype, 0);
+        try s.emitOp(opcode.op.using_create_stack);
         try s.emitOpU16(opcode.op.put_loc, stack_loc);
         return stack_loc;
     }
@@ -10436,85 +10307,101 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.await);
     }
 
-    fn emitUsingAddResource(s: *State, kind: UsingStackKind, stack_loc: u16, resource_loc: u16) Error!void {
-        const subtype = switch (kind) {
-            .sync => opcode.special_object_subtype.using_add_sync_resource,
-            .async => opcode.special_object_subtype.using_add_async_resource,
-        };
-        try s.emitOpU8(opcode.op.special_object, subtype);
+    fn emitUsingAddResource(s: *State, kind: DisposalHint, stack_loc: u16, resource_loc: u16) Error!void {
         try s.emitOpU16(opcode.op.get_loc, stack_loc);
         try s.emitOpU16(opcode.op.get_loc, resource_loc);
-        try s.emitOpU16(opcode.op.call, 2);
-        try s.emitOp(opcode.op.drop);
+        try s.emitOpU8(opcode.op.using_add_resource, @intFromEnum(kind));
     }
 
-    fn emitUsingDisposeStack(s: *State, kind: UsingStackKind, stack_loc: u16) Error!void {
-        const subtype = switch (kind) {
-            .sync => opcode.special_object_subtype.using_dispose_sync_stack,
-            .async => opcode.special_object_subtype.using_dispose_async_stack,
-        };
-        try s.emitOpU8(opcode.op.special_object, subtype);
+    fn emitUsingAwaitIfNeeded(s: *State, may_be_async: bool) Error!void {
+        if (!may_be_async) return;
+        try s.emitOp(opcode.op.dup);
+        try s.emitOp(opcode.op.is_undefined);
+        const skip_await = try emitForwardJump(s, opcode.op.if_true);
+        try emitUsingAwait(s);
+        try patchForwardJump(s, skip_await);
+    }
+
+    fn emitUsingDisposeStack(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
         try s.emitOpU16(opcode.op.get_loc, stack_loc);
-        try s.emitOpU16(opcode.op.call, 1);
-        if (kind == .async) try emitUsingAwait(s);
+        try s.emitOp(opcode.op.using_dispose_stack);
+        try emitUsingAwaitIfNeeded(s, may_be_async);
         try s.emitOp(opcode.op.drop);
     }
 
-    fn emitUsingDisposeStackForThrow(s: *State, kind: UsingStackKind, stack_loc: u16) Error!void {
-        const thrown_loc = try appendAnonymousTempLocal(s);
-        try s.emitOpU16(opcode.op.put_loc, thrown_loc);
-        const subtype = switch (kind) {
-            .sync => opcode.special_object_subtype.using_dispose_sync_stack_for_throw,
-            .async => opcode.special_object_subtype.using_dispose_async_stack_for_throw,
-        };
-        try s.emitOpU8(opcode.op.special_object, subtype);
+    fn emitUsingDisposeStackForThrow(s: *State, stack_loc: u16, may_be_async: bool) Error!void {
         try s.emitOpU16(opcode.op.get_loc, stack_loc);
-        try s.emitOpU16(opcode.op.get_loc, thrown_loc);
-        try s.emitOpU16(opcode.op.call, 2);
-        if (kind == .async) try emitUsingAwait(s);
+        try s.emitOp(opcode.op.swap);
+        try s.emitOp(opcode.op.using_dispose_stack_for_throw);
+        try emitUsingAwaitIfNeeded(s, may_be_async);
         try s.emitOp(opcode.op.drop);
     }
 
-    pub fn parseProgramStatements(s: *State, decl_mask: DeclMask) Error!void {
-        const direct_using_kind = if (s.lex.is_module) programDirectUsingDeclarationKind(s) else null;
-        if (direct_using_kind == null) {
-            while (s.peekKind() != tok.TOK_EOF) {
-                try parseStatementOrDecl(s, decl_mask);
-            }
-            return;
-        }
+    fn armCurrentUsingBlockFrame(s: *State) Error!u16 {
+        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        const frame_index = s.using_block_frames.items.len - 1;
+        if (s.using_block_frames.items[frame_index].stack_loc) |stack_loc| return stack_loc;
 
-        const stack_kind = direct_using_kind.?;
-        const stack_loc = try emitCreateUsingDisposableStack(s, stack_kind);
+        const stack_loc = try emitCreateUsingDisposableStack(s);
         const catch_off = try emitForwardJump(s, opcode.op.@"catch");
         s.active_catch_marker_depth += 1;
-        var catch_marker_active = true;
-        errdefer {
-            if (catch_marker_active) s.active_catch_marker_depth -= 1;
-        }
-        try s.using_block_frames.append(s.function.memory.allocator, .{
+        s.using_block_frames.items[frame_index] = .{
             .stack_loc = stack_loc,
+            .catch_off = catch_off,
             .catch_marker_depth = s.active_catch_marker_depth,
-            .kind = stack_kind,
-        });
-        errdefer _ = s.using_block_frames.pop();
-        while (s.peekKind() != tok.TOK_EOF) {
-            try parseStatementOrDecl(s, decl_mask);
-        }
-        s.active_catch_marker_depth -= 1;
-        catch_marker_active = false;
+        };
+        return stack_loc;
+    }
 
+    fn noteUsingResourceHint(s: *State, hint: DisposalHint) Error!void {
+        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        if (hint == .async) {
+            s.using_block_frames.items[s.using_block_frames.items.len - 1].seen_async_hint = true;
+        }
+    }
+
+    fn finalizeCurrentUsingBlockFrame(s: *State) Error!void {
+        if (s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
+        const frame = s.using_block_frames.items[s.using_block_frames.items.len - 1];
+        const stack_loc = frame.stack_loc orelse {
+            _ = s.using_block_frames.pop();
+            return;
+        };
+        const catch_off = frame.catch_off orelse return Error.UnexpectedToken;
+        if (frame.catch_marker_depth != s.active_catch_marker_depth or s.active_catch_marker_depth == 0) {
+            return Error.UnexpectedToken;
+        }
+
+        s.active_catch_marker_depth -= 1;
         try s.emitOp(opcode.op.drop);
-        try emitUsingDisposeStack(s, stack_kind, stack_loc);
+        try emitUsingDisposeStack(s, stack_loc, frame.seen_async_hint);
         try s.emitCloseLoc(stack_loc);
         const end_off = try emitForwardJump(s, opcode.op.goto);
         try patchForwardJump(s, catch_off);
-        try emitUsingDisposeStackForThrow(s, stack_kind, stack_loc);
+        try emitUsingDisposeStackForThrow(s, stack_loc, frame.seen_async_hint);
         try patchForwardJump(s, end_off);
         _ = s.using_block_frames.pop();
     }
 
-    fn parseBlockContentsAfterOpen(s: *State, direct_using_kind: ?UsingStackKind) Error!void {
+    fn restoreUsingBlockFramesAfterError(s: *State, frame_len: usize, catch_marker_depth: u32) void {
+        while (s.using_block_frames.items.len > frame_len) {
+            _ = s.using_block_frames.pop();
+        }
+        s.active_catch_marker_depth = catch_marker_depth;
+    }
+
+    pub fn parseProgramStatements(s: *State, decl_mask: DeclMask) Error!void {
+        const frame_len = s.using_block_frames.items.len;
+        const catch_marker_depth = s.active_catch_marker_depth;
+        try s.using_block_frames.append(s.function.memory.allocator, .{});
+        errdefer restoreUsingBlockFramesAfterError(s, frame_len, catch_marker_depth);
+        while (s.peekKind() != tok.TOK_EOF) {
+            try parseStatementOrDecl(s, decl_mask);
+        }
+        try finalizeCurrentUsingBlockFrame(s);
+    }
+
+    fn parseBlockContentsAfterOpen(s: *State) Error!void {
         if (s.is_outer_constructor_block and !s.class_has_extends) {
             s.is_outer_constructor_block = false;
             if (s.current_parameter_properties) |props| {
@@ -10525,45 +10412,21 @@ pub const parser_core = struct {
                 }
             }
         }
-        if (direct_using_kind) |stack_kind| {
-            const stack_loc = try emitCreateUsingDisposableStack(s, stack_kind);
-            const catch_off = try emitForwardJump(s, opcode.op.@"catch");
-            s.active_catch_marker_depth += 1;
-            try s.using_block_frames.append(s.function.memory.allocator, .{
-                .stack_loc = stack_loc,
-                .catch_marker_depth = s.active_catch_marker_depth,
-                .kind = stack_kind,
-            });
-            errdefer _ = s.using_block_frames.pop();
-            while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-                try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
-            }
-            s.active_catch_marker_depth -= 1;
-            try s.expectToken('}');
-            try s.emitOp(opcode.op.drop);
-            try emitUsingDisposeStack(s, stack_kind, stack_loc);
-            try s.emitCloseLoc(stack_loc);
-            const end_off = try emitForwardJump(s, opcode.op.goto);
-            try patchForwardJump(s, catch_off);
-            try emitUsingDisposeStackForThrow(s, stack_kind, stack_loc);
-            try patchForwardJump(s, end_off);
-            _ = s.using_block_frames.pop();
-        } else {
-            try s.using_block_frames.append(s.function.memory.allocator, .{});
-            errdefer _ = s.using_block_frames.pop();
-            while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
-                try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
-            }
-            try s.expectToken('}');
-            _ = s.using_block_frames.pop();
+        const frame_len = s.using_block_frames.items.len;
+        const catch_marker_depth = s.active_catch_marker_depth;
+        try s.using_block_frames.append(s.function.memory.allocator, .{});
+        errdefer restoreUsingBlockFramesAfterError(s, frame_len, catch_marker_depth);
+        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+            try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
+        try s.expectToken('}');
+        try finalizeCurrentUsingBlockFrame(s);
     }
 
     /// Mirror QuickJS `js_parse_block`: an empty ordinary block does not
     /// allocate a lexical scope, and directive prologues are not recognized
     /// here. Function bodies use `parseFunctionBodyBlock` below.
     pub fn parseBlock(s: *State) Error!void {
-        const direct_using_kind = blockDirectUsingDeclarationKind(s);
         try s.expectToken('{');
         if (s.peekKind() == '}') {
             try s.expectToken('}');
@@ -10572,7 +10435,7 @@ pub const parser_core = struct {
 
         try s.pushScope();
         errdefer s.popScopeIdentity();
-        try parseBlockContentsAfterOpen(s, direct_using_kind);
+        try parseBlockContentsAfterOpen(s);
         try s.popScope();
     }
 
@@ -10580,12 +10443,11 @@ pub const parser_core = struct {
     /// `js_parse_function_decl2`: body scope and directives belong to the
     /// FormalParameters/FunctionBody production, not to ordinary blocks.
     fn parseFunctionBodyBlock(s: *State) Error!void {
-        const direct_using_kind = blockDirectUsingDeclarationKind(s);
         try s.expectToken('{');
         try s.beginFunctionBody();
         errdefer s.popScopeIdentity();
         try parseDirectives(s);
-        try parseBlockContentsAfterOpen(s, direct_using_kind);
+        try parseBlockContentsAfterOpen(s);
         s.finishFunctionBody();
     }
 
@@ -11256,14 +11118,13 @@ pub const parser_core = struct {
                     var for_scope_pushed = false;
                     var for_head_is_lexical = false;
                     var for_has_initializer = false;
-                    var for_using_stack_loc: ?u16 = null;
-                    var for_using_kind: UsingStackKind = .sync;
-                    var for_using_catch_off: ?usize = null;
+                    const for_using_frame_len = s.using_block_frames.items.len;
+                    const for_using_catch_marker_depth = s.active_catch_marker_depth;
                     var for_using_frame_active = false;
-                    var for_using_catch_active = false;
                     errdefer {
-                        if (for_using_frame_active) _ = s.using_block_frames.pop();
-                        if (for_using_catch_active) s.active_catch_marker_depth -= 1;
+                        if (for_using_frame_active) {
+                            restoreUsingBlockFramesAfterError(s, for_using_frame_len, for_using_catch_marker_depth);
+                        }
                         if (for_scope_pushed) s.popScopeIdentity();
                     }
                     // C-style `for (init ; test ; update) body`. Lower as:
@@ -11277,20 +11138,9 @@ pub const parser_core = struct {
                     try s.pushScope();
                     for_scope_pushed = true;
                     if (directUsingDeclarationKind(s)) |using_kind| {
-                        for_using_kind = using_kind;
                         for_head_is_lexical = true;
                         for_has_initializer = true;
-                        const stack_loc = try emitCreateUsingDisposableStack(s, using_kind);
-                        for_using_stack_loc = stack_loc;
-                        const catch_off = try emitForwardJump(s, opcode.op.@"catch");
-                        for_using_catch_off = catch_off;
-                        s.active_catch_marker_depth += 1;
-                        for_using_catch_active = true;
-                        try s.using_block_frames.append(s.function.memory.allocator, .{
-                            .stack_loc = stack_loc,
-                            .catch_marker_depth = s.active_catch_marker_depth,
-                            .kind = using_kind,
-                        });
+                        try s.using_block_frames.append(s.function.memory.allocator, .{});
                         for_using_frame_active = true;
                         try parseUsingDeclaration(s, using_kind);
                         try s.expectToken(';');
@@ -11394,17 +11244,8 @@ pub const parser_core = struct {
                         try s.patchLabelBreaks(idx);
                         s.popLabelFrame(idx);
                     }
-                    if (for_using_stack_loc) |stack_loc| {
-                        s.active_catch_marker_depth -= 1;
-                        for_using_catch_active = false;
-                        try s.emitOp(opcode.op.drop);
-                        try emitUsingDisposeStack(s, for_using_kind, stack_loc);
-                        try s.emitCloseLoc(stack_loc);
-                        const end_off = try emitForwardJump(s, opcode.op.goto);
-                        try patchForwardJump(s, for_using_catch_off orelse return Error.UnexpectedToken);
-                        try emitUsingDisposeStackForThrow(s, for_using_kind, stack_loc);
-                        try patchForwardJump(s, end_off);
-                        _ = s.using_block_frames.pop();
+                    if (for_using_frame_active) {
+                        try finalizeCurrentUsingBlockFrame(s);
                         for_using_frame_active = false;
                     }
                     if (for_scope_pushed) {
@@ -11744,13 +11585,12 @@ pub const parser_core = struct {
         }
     }
 
-    fn parseUsingDeclaration(s: *State, kind: UsingStackKind) Error!void {
+    fn parseUsingDeclaration(s: *State, kind: DisposalHint) Error!void {
         const module_top_level = s.lex.is_module and
             s.top_level_lexical_as_module_ref and
             s.atProgramBodyScope();
         if (kind == .async and !s.in_async and !module_top_level) return Error.AwaitOutsideAsyncFunction;
         if ((!module_top_level and s.atProgramBodyScope()) or s.using_block_frames.items.len == 0) return Error.UnexpectedToken;
-        const stack_loc = s.using_block_frames.items[s.using_block_frames.items.len - 1].stack_loc orelse return Error.UnexpectedToken;
         if (kind == .async) try s.advance(); // consume `await`
         try s.advance(); // consume `using`
 
@@ -11770,6 +11610,7 @@ pub const parser_core = struct {
 
             if (s.peekKind() != '=') return Error.UnexpectedToken;
             try s.advance();
+            const stack_loc = try armCurrentUsingBlockFrame(s);
             {
                 s.last_anonymous_function_expr = false;
                 const saved_pending_name = s.pending_function_name;
@@ -11791,6 +11632,7 @@ pub const parser_core = struct {
             const resource_loc = try appendAnonymousTempLocal(s);
             try s.emitOpU16(opcode.op.put_loc, resource_loc);
             try emitUsingAddResource(s, kind, stack_loc, resource_loc);
+            try noteUsingResourceHint(s, kind);
             try s.emitCloseLoc(resource_loc);
 
             if (s.peekKind() != ',') break;
@@ -12546,7 +12388,7 @@ pub const parser_core = struct {
         var target_is_lexical_decl = false;
         var target_is_pattern = false;
         var target_is_using_decl = false;
-        var target_using_kind: UsingStackKind = .sync;
+        var target_using_kind: DisposalHint = .sync;
         var target_var_initializer_atom: ?Atom = null;
         var iteration_using_value_loc: ?u16 = null;
 
@@ -12757,27 +12599,18 @@ pub const parser_core = struct {
         var loop_block_active = true;
         defer if (loop_block_active) popControlBlock(s, &loop_block);
 
-        var iteration_using_stack_loc: ?u16 = null;
-        var iteration_using_catch_off: ?usize = null;
+        const iteration_using_frame_len = s.using_block_frames.items.len;
+        const iteration_using_catch_marker_depth = s.active_catch_marker_depth;
         var iteration_using_frame_active = false;
-        var iteration_using_catch_active = false;
         errdefer {
-            if (iteration_using_frame_active) _ = s.using_block_frames.pop();
-            if (iteration_using_catch_active) s.active_catch_marker_depth -= 1;
+            if (iteration_using_frame_active) {
+                restoreUsingBlockFramesAfterError(s, iteration_using_frame_len, iteration_using_catch_marker_depth);
+            }
         }
         if (target_is_using_decl) {
-            const stack_loc = try emitCreateUsingDisposableStack(s, target_using_kind);
-            iteration_using_stack_loc = stack_loc;
-            const catch_off = try emitForwardJump(s, opcode.op.@"catch");
-            iteration_using_catch_off = catch_off;
-            s.active_catch_marker_depth += 1;
-            iteration_using_catch_active = true;
-            try s.using_block_frames.append(s.function.memory.allocator, .{
-                .stack_loc = stack_loc,
-                .catch_marker_depth = s.active_catch_marker_depth,
-                .kind = target_using_kind,
-            });
+            try s.using_block_frames.append(s.function.memory.allocator, .{});
             iteration_using_frame_active = true;
+            const stack_loc = try armCurrentUsingBlockFrame(s);
 
             const atom_id = target_atom orelse return Error.UnexpectedToken;
             const value_loc = iteration_using_value_loc orelse return Error.UnexpectedToken;
@@ -12787,6 +12620,7 @@ pub const parser_core = struct {
             const resource_loc = try appendAnonymousTempLocal(s);
             try s.emitOpU16(opcode.op.put_loc, resource_loc);
             try emitUsingAddResource(s, target_using_kind, stack_loc, resource_loc);
+            try noteUsingResourceHint(s, target_using_kind);
             try s.emitCloseLoc(resource_loc);
             try s.emitCloseLoc(value_loc);
         }
@@ -12794,17 +12628,7 @@ pub const parser_core = struct {
         try parseStatementOrDecl(s, DeclMask{});
 
         if (target_is_using_decl) {
-            const stack_loc = iteration_using_stack_loc orelse return Error.UnexpectedToken;
-            s.active_catch_marker_depth -= 1;
-            iteration_using_catch_active = false;
-            try s.emitOp(opcode.op.drop);
-            try emitUsingDisposeStack(s, target_using_kind, stack_loc);
-            try s.emitCloseLoc(stack_loc);
-            const iteration_end_off = try emitForwardJump(s, opcode.op.goto);
-            try patchForwardJump(s, iteration_using_catch_off orelse return Error.UnexpectedToken);
-            try emitUsingDisposeStackForThrow(s, target_using_kind, stack_loc);
-            try patchForwardJump(s, iteration_end_off);
-            _ = s.using_block_frames.pop();
+            try finalizeCurrentUsingBlockFrame(s);
             iteration_using_frame_active = false;
         }
 

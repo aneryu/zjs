@@ -637,11 +637,22 @@ pub const DisposableResourceKind = enum(u8) {
     defer_,
 };
 
+pub const DisposalHint = enum(u8) {
+    sync,
+    async,
+};
+
+pub const DisposableMethodKind = enum(u8) {
+    direct,
+    async_from_sync,
+};
+
 pub const DisposableResource = struct {
     value: JSValue = JSValue.undefinedValue(),
     method: JSValue = JSValue.undefinedValue(),
     kind: DisposableResourceKind = .defer_,
-    await_result: bool = false,
+    hint: DisposalHint = .sync,
+    method_kind: DisposableMethodKind = .direct,
 
     pub fn destroy(self: DisposableResource, rt: *JSRuntime) void {
         self.value.free(rt);
@@ -3801,7 +3812,8 @@ pub const Object = extern struct {
         resource_value: JSValue,
         method: JSValue,
         kind: DisposableResourceKind,
-        await_result: bool,
+        hint: DisposalHint,
+        method_kind: DisposableMethodKind,
     ) !void {
         const payload = self.disposableStackPayload() orelse {
             std.debug.assert(self.flags.class_payload_kind == .disposable_stack);
@@ -3825,8 +3837,17 @@ pub const Object = extern struct {
             .value = resource_value.dup(),
             .method = method.dup(),
             .kind = kind,
-            .await_result = await_result,
+            .hint = hint,
+            .method_kind = method_kind,
         };
+    }
+
+    pub fn disposableStackHasAsyncHint(self: *const Object) bool {
+        const payload = self.disposableStackPayloadConst() orelse return false;
+        for (payload.resources) |resource| {
+            if (resource.hint == .async) return true;
+        }
+        return false;
     }
 
     pub fn disposableStackAsyncResolveSlot(self: *Object) *?JSValue {

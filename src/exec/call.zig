@@ -1,6 +1,5 @@
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const bytecode_opcode = @import("../bytecode.zig").opcode;
 const function_bytecode = @import("../bytecode.zig");
 const closure_mod = @import("closure.zig");
 const construct_mod = @import("construct.zig");
@@ -13,12 +12,10 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const coercion_ops = @import("coercion_ops.zig");
-const disposable_ops = @import("disposable_ops.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
-const promise_ops = @import("promise_ops.zig");
 const reflect_ops = @import("reflect_ops.zig");
 const dtoa = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
@@ -271,14 +268,6 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
 // cluster stay unused.
 pub const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
-    using_create_disposable_stack = 111,
-    using_add_sync_resource = 112,
-    using_dispose_sync_stack = 113,
-    using_dispose_sync_stack_for_throw = 114,
-    using_create_async_disposable_stack = 115,
-    using_add_async_resource = 116,
-    using_dispose_async_stack = 117,
-    using_dispose_async_stack_for_throw = 118,
     external_host = core.host_function.ids.external_host,
 };
 
@@ -305,21 +294,13 @@ const HostFunctionRecord = struct {
 };
 
 const max_host_function_id = @max(
-    @intFromEnum(HostFunction.using_dispose_async_stack_for_throw),
+    @intFromEnum(HostFunction.output),
     @intFromEnum(HostFunction.external_host),
 );
 
 const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = records: {
     var records = [_]?HostFunctionRecord{null} ** (max_host_function_id + 1);
     records[@intFromEnum(HostFunction.output)] = .{ .length = 1, .call = hostCallOutput };
-    records[@intFromEnum(HostFunction.using_create_disposable_stack)] = .{ .length = 0, .call = hostCallUsingCreateDisposableStack };
-    records[@intFromEnum(HostFunction.using_add_sync_resource)] = .{ .length = 2, .call = hostCallUsingAddSyncResource };
-    records[@intFromEnum(HostFunction.using_dispose_sync_stack)] = .{ .length = 1, .call = hostCallUsingDisposeSyncStack };
-    records[@intFromEnum(HostFunction.using_dispose_sync_stack_for_throw)] = .{ .length = 2, .call = hostCallUsingDisposeSyncStackForThrow };
-    records[@intFromEnum(HostFunction.using_create_async_disposable_stack)] = .{ .length = 0, .call = hostCallUsingCreateAsyncDisposableStack };
-    records[@intFromEnum(HostFunction.using_add_async_resource)] = .{ .length = 2, .call = hostCallUsingAddAsyncResource };
-    records[@intFromEnum(HostFunction.using_dispose_async_stack)] = .{ .length = 1, .call = hostCallUsingDisposeAsyncStack };
-    records[@intFromEnum(HostFunction.using_dispose_async_stack_for_throw)] = .{ .length = 2, .call = hostCallUsingDisposeAsyncStackForThrow };
     records[@intFromEnum(HostFunction.external_host)] = .{ .length = 0, .call = hostCallExternalHostFunction };
     break :records records;
 };
@@ -548,7 +529,6 @@ pub fn callHostFunctionObjectForVm(
 fn hostFunctionCanDispatchFromVmWithoutGlobals(kind: i32) bool {
     return switch (kind) {
         @intFromEnum(HostFunction.output),
-        @intFromEnum(HostFunction.using_create_disposable_stack)...@intFromEnum(HostFunction.using_dispose_async_stack_for_throw),
         @intFromEnum(HostFunction.external_host),
         => true,
         else => false,
@@ -577,37 +557,6 @@ fn definePredefinedExternalHostFunction(
 
 fn predefinedStringAtom(comptime name: []const u8) core.Atom {
     return comptime core.atom.predefinedId(name, .string).?;
-}
-
-fn createHostFunction(rt: *core.JSRuntime, kind: HostFunction) !*core.Object {
-    const function_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.c_function, null, 0);
-    errdefer function_object.value().free(rt);
-    function_object.hostFunctionKindSlot().* = @intFromEnum(kind);
-    return function_object;
-}
-
-pub fn internalUsingHelperFunction(rt: *core.JSRuntime, subtype: u8) !?core.JSValue {
-    const helper = internalUsingHelperForSubtype(subtype) orelse return null;
-    if (rt.internal_using_helpers[helper.slot]) |cached| return cached.dup();
-    const function_object = try createHostFunction(rt, helper.kind);
-    const value = function_object.value();
-    rt.internal_using_helpers[helper.slot] = value;
-    return value.dup();
-}
-
-fn internalUsingHelperForSubtype(subtype: u8) ?struct { slot: usize, kind: HostFunction } {
-    const special = bytecode_opcode.special_object_subtype;
-    return switch (subtype) {
-        special.using_create_disposable_stack => .{ .slot = 0, .kind = .using_create_disposable_stack },
-        special.using_add_sync_resource => .{ .slot = 1, .kind = .using_add_sync_resource },
-        special.using_dispose_sync_stack => .{ .slot = 2, .kind = .using_dispose_sync_stack },
-        special.using_dispose_sync_stack_for_throw => .{ .slot = 3, .kind = .using_dispose_sync_stack_for_throw },
-        special.using_create_async_disposable_stack => .{ .slot = 4, .kind = .using_create_async_disposable_stack },
-        special.using_add_async_resource => .{ .slot = 5, .kind = .using_add_async_resource },
-        special.using_dispose_async_stack => .{ .slot = 6, .kind = .using_dispose_async_stack },
-        special.using_dispose_async_stack_for_throw => .{ .slot = 7, .kind = .using_dispose_async_stack_for_throw },
-        else => null,
-    };
 }
 
 pub fn defineObjectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
@@ -2915,46 +2864,6 @@ fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []con
 fn globalGc(ctx: *core.JSContext) core.JSValue {
     _ = ctx.runtime.runObjectCycleRemoval();
     return core.JSValue.undefinedValue();
-}
-
-fn hostCallUsingCreateDisposableStack(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(disposable_ops.qjsUsingCreateDisposableStack(call.ctx, global));
-}
-
-fn hostCallUsingAddSyncResource(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(disposable_ops.qjsUsingAddSyncResource(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallUsingDisposeSyncStack(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(disposable_ops.qjsUsingDisposeSyncStack(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallUsingDisposeSyncStackForThrow(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(disposable_ops.qjsUsingDisposeSyncStackForThrow(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallUsingCreateAsyncDisposableStack(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(promise_ops.qjsUsingCreateAsyncDisposableStack(call.ctx, global));
-}
-
-fn hostCallUsingAddAsyncResource(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(promise_ops.qjsUsingAddAsyncResource(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallUsingDisposeAsyncStack(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(promise_ops.qjsUsingDisposeAsyncStack(call.ctx, call.output, global, call.args));
-}
-
-fn hostCallUsingDisposeAsyncStackForThrow(call: HostCall) HostError!core.JSValue {
-    const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(promise_ops.qjsUsingDisposeAsyncStackForThrow(call.ctx, call.output, global, call.args));
 }
 
 fn materializeMappedArgumentsDescriptorValue(

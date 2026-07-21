@@ -6715,6 +6715,47 @@ test "Engine eval routes host output through global function calls" {
     try std.testing.expectEqualStrings("1\nx\n5 function\nok\nalias\n", stream.buffered());
 }
 
+test "using early exit before await using keeps sync disposal synchronous" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function plainBlockForUsingOpcodeCheck() { { let value = 1; return value; } }
+        \\let sameTurn = true;
+        \\async function disposeBeforeAwaitUsing() {
+        \\  try {
+        \\    outer: {
+        \\      using resource = { [Symbol.dispose]() { throw "dispose"; } };
+        \\      break outer;
+        \\      await using neverExecuted = null;
+        \\    }
+        \\  } catch (error) {
+        \\    print(error, sameTurn);
+        \\  }
+        \\}
+        \\disposeBeforeAwaitUsing();
+        \\sameTurn = false;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("dispose true\n", stream.buffered());
+
+    const plain = try globalFunctionBytecode(js, "plainBlockForUsingOpcodeCheck");
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_create_stack));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_add_resource));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(plain.byteCode(), op.using_dispose_stack_for_throw));
+
+    var disassembly_buffer: [2048]u8 = undefined;
+    var disassembly = std.Io.Writer.fixed(&disassembly_buffer);
+    const plain_view = bytecode.asBytecodeView(plain, js.runtime);
+    try bytecode.dump.dumpBytecode(&disassembly, &plain_view, .{});
+    try std.testing.expect(std.mem.indexOf(u8, disassembly.buffered(), "using_") == null);
+}
+
 test "Engine eval preserves local numeric add host output semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -316,6 +316,10 @@ pub const opcode = struct {
         pub const is_null: u8 = 241;
         pub const typeof_is_undefined: u8 = 242;
         pub const typeof_is_function: u8 = 243;
+        pub const using_create_stack: u8 = 244;
+        pub const using_add_resource: u8 = 245;
+        pub const using_dispose_stack: u8 = 246;
+        pub const using_dispose_stack_for_throw: u8 = 247;
 
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
@@ -346,7 +350,7 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 244;
+        pub const op_count: u16 = 248;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -355,7 +359,7 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    pub const op_info_len: usize = 263;
+    pub const op_info_len: usize = 267;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -623,6 +627,10 @@ pub const opcode = struct {
         .{ .name = "is_null", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [260] id 241 (short, shifted)
         .{ .name = "typeof_is_undefined", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [261] id 242 (short, shifted)
         .{ .name = "typeof_is_function", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [262] id 243 (short, shifted)
+        .{ .name = "using_create_stack", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none }, // [263] id 244
+        .{ .name = "using_add_resource", .size = 2, .n_pop = 2, .n_push = 0, .fmt = .u8 }, // [264] id 245
+        .{ .name = "using_dispose_stack", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [265] id 246
+        .{ .name = "using_dispose_stack_for_throw", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
     };
 
     pub const Kind = enum {
@@ -660,14 +668,6 @@ pub const opcode = struct {
         pub const dstr_obj_rest: u8 = 11;
         pub const dstr_close: u8 = 12;
         pub const dstr_require_iterator: u8 = 13;
-        pub const using_create_disposable_stack: u8 = 14;
-        pub const using_add_sync_resource: u8 = 15;
-        pub const using_dispose_sync_stack: u8 = 16;
-        pub const using_dispose_sync_stack_for_throw: u8 = 17;
-        pub const using_create_async_disposable_stack: u8 = 18;
-        pub const using_add_async_resource: u8 = 19;
-        pub const using_dispose_async_stack: u8 = 20;
-        pub const using_dispose_async_stack_for_throw: u8 = 21;
     };
 
     /// Final-view lookup, for bytecode after `resolve_labels`: ids in the

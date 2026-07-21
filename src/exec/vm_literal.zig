@@ -551,8 +551,6 @@ pub noinline fn specialObject(
         const value = var_object.value();
         errdefer value.free(ctx.runtime);
         try stack.pushOwned(value);
-    } else if (try object_ops.internalSpecialObjectValue(ctx.runtime, subtype)) |value| {
-        try stack.pushOwned(value);
     } else {
         try stack.pushOwned(core.JSValue.undefinedValue());
     }

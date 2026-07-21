@@ -11,7 +11,6 @@ const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const objectFromValue = object_ops.objectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
 const getValueProperty = object_ops.getValueProperty;
-const qjsDisposableStackConstructWithPrototype = object_ops.qjsDisposableStackConstructWithPrototype;
 const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
 
 pub const DisposableStackMethod = enum(u8) {
@@ -89,7 +88,7 @@ pub fn qjsDisposableStackUse(
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, caller_function, caller_frame);
     defer dispose_method.free(ctx.runtime);
     if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
-    try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, false);
+    try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
     return value.dup();
 }
 
@@ -102,7 +101,7 @@ pub fn qjsDisposableStackAdopt(
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_dispose = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (!isCallableValue(on_dispose)) return error.TypeError;
-    try stack.appendDisposableResource(rt, value, on_dispose, .adopt, false);
+    try stack.appendDisposableResource(rt, value, on_dispose, .adopt, .sync, .direct);
     return value.dup();
 }
 
@@ -114,7 +113,7 @@ pub fn qjsDisposableStackDefer(
     if (stack.disposableStackDisposed()) return error.ReferenceError;
     const on_dispose = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!isCallableValue(on_dispose)) return error.TypeError;
-    try stack.appendDisposableResource(rt, core.JSValue.undefinedValue(), on_dispose, .defer_, false);
+    try stack.appendDisposableResource(rt, core.JSValue.undefinedValue(), on_dispose, .defer_, .sync, .direct);
     return core.JSValue.undefinedValue();
 }
 
@@ -189,14 +188,6 @@ pub fn qjsDisposeDisposableStackResources(
     return core.JSValue.undefinedValue();
 }
 
-pub fn qjsUsingCreateDisposableStack(
-    ctx: *core.JSContext,
-    global: *core.Object,
-) !core.JSValue {
-    const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "DisposableStack");
-    return qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
-}
-
 pub fn qjsUsingAddSyncResource(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -213,7 +204,7 @@ pub fn qjsUsingAddSyncResource(
     const dispose_method = try getValueProperty(ctx, output, global, value, core.atom.ids.Symbol_dispose, null, null);
     defer dispose_method.free(ctx.runtime);
     if (dispose_method.isNull() or dispose_method.isUndefined() or !isCallableValue(dispose_method)) return error.TypeError;
-    try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, false);
+    try stack.appendDisposableResource(ctx.runtime, value, dispose_method, .use, .sync, .direct);
     return core.JSValue.undefinedValue();
 }
 
@@ -224,7 +215,7 @@ pub fn qjsUsingDisposeSyncStack(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const stack = try disposableStackReceiver(args[0]);
+    const stack = try parserDisposableStackReceiver(args[0]);
     return qjsDisposeDisposableStackResources(ctx, output, global, stack, null, null, null);
 }
 
@@ -235,7 +226,7 @@ pub fn qjsUsingDisposeSyncStackForThrow(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 2) return error.TypeError;
-    const stack = try disposableStackReceiver(args[0]);
+    const stack = try parserDisposableStackReceiver(args[0]);
     return qjsDisposeDisposableStackResources(ctx, output, global, stack, args[1], null, null);
 }
 

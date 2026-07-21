@@ -32,6 +32,7 @@ const vm_property_ref = @import("vm_property_ref.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const vm_property_private = @import("vm_property_private.zig");
+const using_ops = @import("using_ops.zig");
 
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
@@ -505,6 +506,26 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.special_object] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try literal_vm.specialObject(vm.ctx, vm.stack, vm.function, vm.frame, vm.global);
+        }
+    }.b);
+    t[op.using_create_stack] = h(struct {
+        fn b(vm: *Vm) HostError!void {
+            _ = try using_ops.createStackVm(vm.ctx, vm.global, vm.stack, vm.frame, vm.catch_target, vm.output);
+        }
+    }.b);
+    t[op.using_add_resource] = h(struct {
+        fn b(vm: *Vm) HostError!void {
+            _ = try using_ops.addResourceVm(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
+        }
+    }.b);
+    t[op.using_dispose_stack] = h(struct {
+        fn b(vm: *Vm) HostError!void {
+            _ = try using_ops.disposeStackVm(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target, .normal);
+        }
+    }.b);
+    t[op.using_dispose_stack_for_throw] = h(struct {
+        fn b(vm: *Vm) HostError!void {
+            _ = try using_ops.disposeStackVm(vm.ctx, vm.output, vm.global, vm.stack, vm.frame, vm.catch_target, .throw);
         }
     }.b);
     t[op.rest] = h(struct {

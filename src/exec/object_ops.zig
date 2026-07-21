@@ -1894,10 +1894,6 @@ pub fn qjsObjectGetPrototypeOfValue(
     return result;
 }
 
-pub fn internalSpecialObjectValue(rt: *core.JSRuntime, subtype: u8) !?core.JSValue {
-    return try call_mod.internalUsingHelperFunction(rt, subtype);
-}
-
 pub fn qjsDestructuringObjectRest(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
