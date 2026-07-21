@@ -3856,6 +3856,7 @@ pub const parser_core = struct {
         emit_to_function_def: bool = false,
         pending_function_name: ?Atom = null,
         pending_function_is_decl: bool = false,
+        pending_function_export_default: bool = false,
         annex_b_if_function_decl_clause: bool = false,
         function_expr_name_binding: ?Atom = null,
         in_parameter_initializer: bool = false,
@@ -3932,7 +3933,7 @@ pub const parser_core = struct {
             // the var/arg environment.  Body enter/hoist emission is a later
             // phase checkpoint, but declaration semantics need the identity
             // now.
-            try state.pushBodyScopeIdentity();
+            try state.beginFunctionBody();
             // Note: cur_func_stack starts empty; cur_func() returns &function_def when empty
             return state;
         }
@@ -4095,13 +4096,19 @@ pub const parser_core = struct {
             try self.emitEnterScope();
         }
 
-        /// Allocate the current function's ordinary body scope without
-        /// emitting its phase-1 enter marker.  QuickJS calls push_scope and
-        /// records body_scope as one operation; zjs keeps marker placement
-        /// separate until body hoists move to that canonical anchor.
-        pub fn pushBodyScopeIdentity(self: *State) Error!void {
+        /// Create the one real function-body scope and emit its marker at the
+        /// exact parser boundary consumed by `instantiate_hoisted_definitions`.
+        pub fn beginFunctionBody(self: *State) Error!void {
             try self.pushScopeIdentity();
+            errdefer self.popScopeIdentity();
             self.cur_func().body_scope = self.scope_level;
+            try self.emitEnterScope();
+        }
+
+        /// Function bodies remain the current scope through finalization, just
+        /// as in QuickJS. There is no body leave event or identity pop.
+        pub fn finishFunctionBody(self: *State) void {
+            _ = self;
         }
 
         /// Mirror `pop_scope` (`quickjs.c:23532`): restore the parent
@@ -4482,38 +4489,6 @@ pub const parser_core = struct {
                 .scope_level = 0,
                 .var_name = name,
             }) catch return error.OutOfMemory;
-        }
-
-        fn assignPendingGlobalFunctionVarCpool(self: *State, fd: *function_def_mod.FunctionDef, name: Atom, cpool_idx: u16) bool {
-            _ = self;
-            var idx = fd.global_vars.len;
-            while (idx > 0) {
-                idx -= 1;
-                const gv = &fd.global_vars[idx];
-                if (gv.var_name != name or gv.is_lexical or !gv.force_init or gv.cpool_idx >= 0) continue;
-                gv.cpool_idx = @intCast(cpool_idx);
-                return true;
-            }
-            return false;
-        }
-
-        fn assignGlobalFunctionVarCpoolAt(
-            self: *State,
-            fd: *function_def_mod.FunctionDef,
-            global_var_idx: i32,
-            name: Atom,
-            cpool_idx: u16,
-        ) bool {
-            if (global_var_idx >= 0 and @as(usize, @intCast(global_var_idx)) < fd.global_vars.len) {
-                const gv = &fd.global_vars[@intCast(global_var_idx)];
-                if (gv.var_name == name and !gv.is_lexical and gv.cpool_idx < 0) {
-                    gv.cpool_idx = @intCast(cpool_idx);
-                    return true;
-                }
-            }
-            // Retain the name-based fallback for hand-built/legacy parser
-            // paths, but normal declarations carry the exact row index.
-            return self.assignPendingGlobalFunctionVarCpool(fd, name, cpool_idx);
         }
 
         fn emitGlobalScopePutVar(self: *State, atom_id: Atom) Error!void {
@@ -10607,11 +10582,11 @@ pub const parser_core = struct {
     fn parseFunctionBodyBlock(s: *State) Error!void {
         const direct_using_kind = blockDirectUsingDeclarationKind(s);
         try s.expectToken('{');
-        try s.pushBodyScopeIdentity();
+        try s.beginFunctionBody();
         errdefer s.popScopeIdentity();
         try parseDirectives(s);
         try parseBlockContentsAfterOpen(s, direct_using_kind);
-        s.popScopeIdentity();
+        s.finishFunctionBody();
     }
 
     /// Mirror the directive-prologue portion of `js_parse_directives`
@@ -13096,6 +13071,46 @@ pub const parser_core = struct {
         try parseFunctionParamsAndBody(s, actual_kind, source_start);
     }
 
+    /// Anonymous `export default function` is a declaration whose external
+    /// carrier is `_default_`, while its inferred function name is `default`.
+    /// QuickJS routes this through js_parse_function_decl2 as a statement;
+    /// keep it on the same declaration path instead of adapting an expression
+    /// child after parsing.
+    fn parseAnonymousDefaultFunctionDecl(
+        s: *State,
+        func_kind: ParseFunctionKind,
+        source_start: usize,
+    ) Error!void {
+        try s.advance(); // `function`
+        const is_generator = s.peekKind() == '*';
+        if (is_generator) try s.advance();
+
+        const was_generator = s.in_generator;
+        s.in_generator = is_generator;
+        defer s.in_generator = was_generator;
+
+        const was_async = s.in_async;
+        s.in_async = func_kind == .async or func_kind == .async_generator;
+        defer s.in_async = was_async;
+
+        const actual_kind: ParseFunctionKind = if (is_generator)
+            if (func_kind == .async) .async_generator else .generator
+        else
+            func_kind;
+        const saved_pending_name = s.pending_function_name;
+        const saved_pending_decl = s.pending_function_is_decl;
+        const saved_export_default = s.pending_function_export_default;
+        s.pending_function_name = atom_default;
+        s.pending_function_is_decl = true;
+        s.pending_function_export_default = true;
+        defer {
+            s.pending_function_name = saved_pending_name;
+            s.pending_function_is_decl = saved_pending_decl;
+            s.pending_function_export_default = saved_export_default;
+        }
+        try parseFunctionParamsAndBody(s, actual_kind, source_start);
+    }
+
     /// Parse function parameters and body
     /// Shared by function declarations, expressions, and methods
     fn deinitParserList(comptime T: type, s: *State, list: *std.ArrayList(T)) void {
@@ -13110,6 +13125,29 @@ pub const parser_core = struct {
         fn deinit(self: *FunctionParameters, s: *State) void {
             deinitParserList(Atom, s, &self.simple_names);
         }
+    };
+
+    const FunctionDeclPlan = struct {
+        const OuterCarrier = enum {
+            none,
+            local,
+            global,
+            eval_var_object,
+        };
+
+        active: bool = false,
+        binding_name: Atom = atom_module.null_atom,
+        global_declaration: bool = false,
+        body_declaration: bool = false,
+        lexical_var_idx: i32 = -1,
+        annex_b_var_idx: i32 = -1,
+        outer_carrier: OuterCarrier = .none,
+        scope_entry_init: bool = false,
+        emit_inline: bool = false,
+        skip_init: bool = false,
+        force_local_init: bool = false,
+        emit_global_inline: bool = false,
+        emit_eval_var_inline: bool = false,
     };
 
     fn parseFunctionParameters(
@@ -13350,6 +13388,7 @@ pub const parser_core = struct {
         s.last_function_child_index = null;
         const parent_fd = s.cur_func();
         const capture_child = s.cur_func_stack.len > 0 or s.top_level_functions_as_children;
+        var function_decl_plan: FunctionDeclPlan = .{};
         // Consume the method-context marker set by emitObjectMethodFunction /
         // parseClassElementFunction so nested functions parsed inside this
         // function's parameters or body do not inherit it. Mirrors qjs
@@ -13490,7 +13529,7 @@ pub const parser_core = struct {
                 // Mirrors qjs per-class-scope resolution of
                 // JS_ATOM_class_fields_init (quickjs.c:25702 + 25185).
                 const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
-                parent_fd.vars[fields_init_var_idx].is_captured = true;
+                child_fd.parent_class_fields_init_var_idx = fields_init_var_idx;
                 _ = try child_fd.addClosureVar(.{
                     .closure_type = .local,
                     .is_lexical = true,
@@ -13513,7 +13552,12 @@ pub const parser_core = struct {
                 }
             }
             if (s.pending_function_is_decl) {
-                const name = s.pending_function_name orelse s.function.name;
+                const name = if (s.pending_function_export_default)
+                    atom_star_default
+                else
+                    s.pending_function_name orelse s.function.name;
+                function_decl_plan.active = true;
+                function_decl_plan.binding_name = name;
                 if (s.cur_func_stack.len == 0 and
                     s.top_level_functions_as_children and
                     parent_fd.scope_level == parent_fd.body_scope and
@@ -13521,37 +13565,10 @@ pub const parser_core = struct {
                     !s.annex_b_if_function_decl_clause and
                     s.findFunctionScopeVar(name) == null)
                 {
-                    const is_script_global_fn = !s.lex.is_module and s.cur_func_stack.len == 0 and (!s.is_eval or s.eval_global_var_bindings);
-                    if (is_script_global_fn) {
-                        // Script / indirect-eval global code: a top-level function
-                        // declaration is a *global var* (qjs is_global_var →
-                        // add_global_var, quickjs.c:36980). It is installed as a plain
-                        // global-object property from the global_vars hoist table (like
-                        // a top-level `var`); its references resolve to a dynamic
-                        // OP_get_var global lookup (resolve_scope_var, quickjs.c:33272),
-                        // so `globalThis.f = x` is observable. Do NOT create a closure
-                        // var_ref cell (that becomes a lexical binding get_var reads,
-                        // shadowing the property, and caused a captured-cell staleness).
-                        child_fd.child_decl_global_var_idx = @intCast(parent_fd.global_vars.len);
-                        try s.addGlobalVar(name, false, false);
-                        child_fd.child_decl_emit_global_inline = true;
-                    } else if (s.is_eval and !s.eval_global_var_bindings) {
-                        // Sloppy function/parameter eval declarations live solely in
-                        // `_var_` / `_arg_var_`. Keep the child flag so the cpool index
-                        // is attached to the GlobalVar record, but leave the closure
-                        // index absent: EDI installs the function into the variable
-                        // object and all references reach it through dynamic probes.
-                        child_fd.child_decl_global_var_idx = @intCast(parent_fd.global_vars.len);
-                        try s.addGlobalVar(name, false, false);
-                        child_fd.emit_top_level_closure_init = true;
-                    } else {
-                        // Module top-level functions are GlobalVar rows first;
-                        // add_global_variables later creates their module-decl
-                        // carriers, exactly like QuickJS.
-                        child_fd.child_decl_global_var_idx = @intCast(parent_fd.global_vars.len);
-                        try s.addGlobalVar(name, false, false);
-                        child_fd.emit_top_level_closure_init = true;
-                    }
+                    // The child must exist before the declaration carrier gets
+                    // its cpool index.  All script/module/eval top-level cases
+                    // append their GlobalVar in the post-child half below.
+                    function_decl_plan.global_declaration = true;
                 } else {
                     _ = parent_code_len_before_child;
                     // Early-error: check for duplicate lexical declaration in the
@@ -13587,7 +13604,7 @@ pub const parser_core = struct {
                     // block's OP_enter_scope.  Annex-B single-statement `if`
                     // functions are conditional source-position assignments,
                     // not scope-entry declarations.
-                    child_fd.child_decl_scope_entry_init =
+                    function_decl_plan.scope_entry_init =
                         is_block_level_function_decl and !s.annex_b_if_function_decl_clause;
                     const arguments_blocks_annex_b = atomNameEquals(s, name, "arguments") and
                         (!s.is_eval or
@@ -13632,59 +13649,55 @@ pub const parser_core = struct {
                             s.cur_func_stack.len == 0 and
                             ((is_top_level_annex_b_if_scope and !s.is_eval) or s.eval_global_var_bindings);
                         if (emit_global_annex_b_if) {
-                            try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
-                        }
-                        if (emit_global_annex_b_if) {
-                            child_fd.child_decl_emit_inline = true;
-                            child_fd.child_decl_emit_global_inline = true;
+                            function_decl_plan.outer_carrier = .global;
+                            function_decl_plan.emit_inline = true;
+                            function_decl_plan.emit_global_inline = true;
                             break :blk switch (try s.defineVar(name, .function_decl)) {
                                 .local => |idx| idx,
                                 else => unreachable,
                             };
                         }
                         if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
-                            if (!s.findGlobalVar(name)) try s.addDirectEvalVarObjectVar(name);
-                            child_fd.child_decl_emit_inline = true;
-                            child_fd.child_decl_emit_eval_var_inline = true;
+                            function_decl_plan.outer_carrier = .eval_var_object;
+                            function_decl_plan.emit_inline = true;
+                            function_decl_plan.emit_eval_var_inline = true;
                             break :blk switch (try s.defineVar(name, .function_decl)) {
                                 .local => |idx| idx,
                                 else => unreachable,
                             };
                         }
-                        const annex_b_var_idx = try s.ensureFunctionScopeVar(name);
-                        child_fd.child_decl_annex_b_var_idx = annex_b_var_idx;
-                        child_fd.child_decl_emit_inline = true;
+                        function_decl_plan.outer_carrier = .local;
+                        function_decl_plan.emit_inline = true;
                         break :blk switch (try s.defineVar(name, .function_decl)) {
                             .local => |idx| idx,
                             else => unreachable,
                         };
                     } else if (s.annex_b_if_function_decl_clause and func_kind == .normal) blk: {
-                        child_fd.child_decl_emit_inline = true;
-                        child_fd.child_decl_skip_init = true;
+                        function_decl_plan.emit_inline = true;
+                        function_decl_plan.skip_init = true;
                         break :blk 0;
                     } else if (annex_b_block_function_var) blk: {
                         const emit_global_annex_b_block = s.cur_func_stack.len == 0 and
                             (s.eval_global_var_bindings or (!s.is_eval and s.top_level_functions_as_children));
                         if (emit_global_annex_b_block) {
-                            try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings);
-                            child_fd.child_decl_emit_inline = true;
-                            child_fd.child_decl_emit_global_inline = true;
+                            function_decl_plan.outer_carrier = .global;
+                            function_decl_plan.emit_inline = true;
+                            function_decl_plan.emit_global_inline = true;
                             break :blk switch (try s.defineVar(name, .function_decl)) {
                                 .local => |idx| idx,
                                 else => unreachable,
                             };
                         } else if (s.is_eval and !s.eval_global_var_bindings and s.cur_func_stack.len == 0) {
-                            if (!s.findGlobalVar(name)) try s.addDirectEvalVarObjectVar(name);
-                            child_fd.child_decl_emit_inline = true;
-                            child_fd.child_decl_emit_eval_var_inline = true;
+                            function_decl_plan.outer_carrier = .eval_var_object;
+                            function_decl_plan.emit_inline = true;
+                            function_decl_plan.emit_eval_var_inline = true;
                             break :blk switch (try s.defineVar(name, .function_decl)) {
                                 .local => |idx| idx,
                                 else => unreachable,
                             };
                         } else {
-                            const annex_b_var_idx = try s.ensureFunctionScopeVar(name);
-                            child_fd.child_decl_annex_b_var_idx = annex_b_var_idx;
-                            child_fd.child_decl_emit_inline = true;
+                            function_decl_plan.outer_carrier = .local;
+                            function_decl_plan.emit_inline = true;
                             break :blk switch (try s.defineVar(name, .function_decl)) {
                                 .local => |idx| idx,
                                 else => unreachable,
@@ -13697,8 +13710,8 @@ pub const parser_core = struct {
                         (is_block_level_function_decl and s.in_switch_case_block_scope) or
                         duplicate_hoisted_block_func)
                     blk: {
-                        child_fd.child_decl_force_local_init = is_block_level_function_decl and name_blocks_annex_b_parameter_rule;
-                        if (child_fd.child_decl_force_local_init) {
+                        function_decl_plan.force_local_init = is_block_level_function_decl and name_blocks_annex_b_parameter_rule;
+                        if (function_decl_plan.force_local_init) {
                             if (findCurrentScopeVar(s, name)) |idx| {
                                 parent_fd.vars[idx].tdz_emitted_at_decl = true;
                                 break :blk idx;
@@ -13711,19 +13724,12 @@ pub const parser_core = struct {
                             .local => |local_idx| local_idx,
                             else => unreachable,
                         };
-                        if (child_fd.child_decl_force_local_init) parent_fd.vars[idx].tdz_emitted_at_decl = true;
+                        if (function_decl_plan.force_local_init) parent_fd.vars[idx].tdz_emitted_at_decl = true;
                         break :blk idx;
                     } else blk: {
                         if (!is_block_level_function_decl) {
-                            break :blk switch (try s.defineVar(name, .var_)) {
-                                .local => |idx| idx,
-                                // The cpool initializer is attached to the
-                                // argument after child parsing, exactly as
-                                // instantiate_hoisted_definitions walks args
-                                // before vars in QuickJS.
-                                .argument => -1,
-                                .global => -1,
-                            };
+                            function_decl_plan.body_declaration = true;
+                            break :blk -1;
                         }
                         // Non-Annex-B block declarations are lexical.  Async
                         // and generator declarations carry NEW_FUNCTION_DECL;
@@ -13736,12 +13742,12 @@ pub const parser_core = struct {
                             else => unreachable,
                         };
                     };
-                    child_fd.child_decl_var_idx = function_decl_idx;
-                    child_fd.child_decl_emit_inline = child_fd.child_decl_emit_inline or
+                    function_decl_plan.lexical_var_idx = function_decl_idx;
+                    function_decl_plan.emit_inline = function_decl_plan.emit_inline or
                         duplicate_hoisted_block_func or
                         (is_block_level_function_decl and
-                            !child_fd.child_decl_force_local_init and
-                            !child_fd.child_decl_emit_global_inline and
+                            !function_decl_plan.force_local_init and
+                            !function_decl_plan.emit_global_inline and
                             parent_fd.vars[@intCast(function_decl_idx)].is_lexical);
                 }
             }
@@ -13766,8 +13772,10 @@ pub const parser_core = struct {
 
         const function_pending_name = s.pending_function_name;
         const function_pending_decl = s.pending_function_is_decl;
+        const function_pending_export_default = s.pending_function_export_default;
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
+        s.pending_function_export_default = false;
 
         // qjs emits OP_check_ctor at the class-constructor function entry,
         // before parameter initializers and independently of whether the body
@@ -13855,6 +13863,7 @@ pub const parser_core = struct {
 
         s.pending_function_name = function_pending_name;
         s.pending_function_is_decl = function_pending_decl;
+        s.pending_function_export_default = function_pending_export_default;
 
         if (capture_child) {
             if (source_start) |start| try s.captureFunctionSource(s.cur_func(), start);
@@ -13873,33 +13882,40 @@ pub const parser_core = struct {
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
-            const emit_child_decl_inline = child_ptr.child_decl_emit_inline;
-            const emit_child_decl_var_inline = child_ptr.child_decl_emit_var_inline;
-            const child_decl_skip_init = child_ptr.child_decl_skip_init;
-            const child_decl_scope_entry_init = child_ptr.child_decl_scope_entry_init;
-            const emit_child_decl_global_inline = child_ptr.child_decl_emit_global_inline;
-            const emit_child_decl_eval_var_inline = child_ptr.child_decl_emit_eval_var_inline;
-            const child_decl_var_idx = child_ptr.child_decl_var_idx;
-            const child_decl_global_var_idx = child_ptr.child_decl_global_var_idx;
-            const child_decl_annex_b_var_idx = child_ptr.child_decl_annex_b_var_idx;
             child_ptr.parent_cpool_idx = child_cpool_idx;
-            // QuickJS stores the hoisted initializer on the argument/local
-            // binding itself. Duplicate declarations overwrite that field;
-            // walking args/vars later therefore emits only the final one.
-            if (s.pending_function_is_decl and
-                (!emit_child_decl_inline or child_decl_scope_entry_init) and
-                (!emit_child_decl_global_inline or child_decl_scope_entry_init) and
-                !child_ptr.emit_top_level_closure_init and
-                child_ptr.func_type == .statement)
-            {
-                const arg_idx = if (child_decl_scope_entry_init or child_ptr.child_decl_force_local_init)
-                    -1
-                else
-                    parent_fd.findArg(child_ptr.func_name);
-                if (arg_idx >= 0) {
-                    parent_fd.args[@intCast(arg_idx)].func_pool_idx = @intCast(child_cpool_idx);
-                } else if (child_decl_var_idx >= 0 and @as(usize, @intCast(child_decl_var_idx)) < parent_fd.vars.len) {
-                    parent_fd.vars[@intCast(child_decl_var_idx)].func_pool_idx = @intCast(child_cpool_idx);
+
+            // QuickJS creates declaration carriers only after the child has a
+            // constant-pool index (js_parse_function_decl2, `done:`).  Keeping
+            // this plan on the parser stack avoids making the child FunctionDef
+            // a side channel into its parent finalizer.
+            if (function_decl_plan.active) {
+                const name = function_decl_plan.binding_name;
+                if (function_decl_plan.global_declaration) {
+                    const global_idx = parent_fd.global_vars.len;
+                    try s.addGlobalVar(name, false, false);
+                    parent_fd.global_vars[global_idx].cpool_idx = @intCast(child_cpool_idx);
+                } else if (function_decl_plan.body_declaration) {
+                    switch (try s.defineVar(name, .var_)) {
+                        .argument => |arg_idx| parent_fd.args[arg_idx].func_pool_idx = @intCast(child_cpool_idx),
+                        .local => |var_idx| parent_fd.vars[var_idx].func_pool_idx = @intCast(child_cpool_idx),
+                        .global => {
+                            if (parent_fd.global_vars.len == 0) return Error.UnexpectedToken;
+                            parent_fd.global_vars[parent_fd.global_vars.len - 1].cpool_idx = @intCast(child_cpool_idx);
+                        },
+                    }
+                } else if (function_decl_plan.lexical_var_idx >= 0 and
+                    function_decl_plan.scope_entry_init)
+                {
+                    const var_idx: usize = @intCast(function_decl_plan.lexical_var_idx);
+                    if (var_idx >= parent_fd.vars.len) return Error.UnexpectedToken;
+                    parent_fd.vars[var_idx].func_pool_idx = @intCast(child_cpool_idx);
+                }
+
+                switch (function_decl_plan.outer_carrier) {
+                    .none => {},
+                    .global => try s.addGlobalAnnexBFunctionVar(name, s.eval_global_var_bindings),
+                    .eval_var_object => if (!s.findGlobalVar(name)) try s.addDirectEvalVarObjectVar(name),
+                    .local => function_decl_plan.annex_b_var_idx = try s.ensureFunctionScopeVar(name),
                 }
             }
             try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
@@ -13909,69 +13925,51 @@ pub const parser_core = struct {
             if (!s.pending_function_is_decl) {
                 try s.emitFClosure(child_cpool_idx);
                 s.last_anonymous_function_expr = s.pending_function_name == null;
-            } else if (emit_child_decl_global_inline and !emit_child_decl_inline) {
-                const name = s.pending_function_name orelse s.function.name;
-                if (!s.assignGlobalFunctionVarCpoolAt(parent_fd, child_decl_global_var_idx, name, child_cpool_idx)) {
-                    try s.emitFClosure(child_cpool_idx);
-                    try s.emitGlobalScopePutVar(name);
-                }
-            } else if (emit_child_decl_inline) {
-                if (child_decl_skip_init) return;
-                std.debug.assert(child_decl_var_idx >= 0);
+            } else if (function_decl_plan.emit_inline) {
+                if (function_decl_plan.skip_init) return;
+                std.debug.assert(function_decl_plan.lexical_var_idx >= 0);
                 try s.emitFClosure(child_cpool_idx);
-                if (child_decl_scope_entry_init) {
+                if (function_decl_plan.scope_entry_init) {
                     // OP_enter_scope already initialized the lexical function
                     // binding from VarDef.func_pool_idx.  The source-position
                     // closure is retained only for QuickJS's Annex B copy (or
                     // as the otherwise-discarded declaration value).
-                    if (emit_child_decl_var_inline) {
+                    if (function_decl_plan.annex_b_var_idx >= 0) {
                         try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc, @intCast(child_decl_var_idx));
+                        try s.emitOpU16(opcode.op.put_loc, @intCast(function_decl_plan.annex_b_var_idx));
                     }
-                    if (child_decl_annex_b_var_idx >= 0) {
+                    if (function_decl_plan.emit_global_inline) {
                         try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc, @intCast(child_decl_annex_b_var_idx));
+                        try s.emitGlobalScopePutVar(function_decl_plan.binding_name);
                     }
-                    if (emit_child_decl_global_inline) {
+                    if (function_decl_plan.emit_eval_var_inline) {
                         try s.emitOp(opcode.op.dup);
-                        const name = s.pending_function_name orelse s.function.name;
-                        try s.emitGlobalScopePutVar(name);
-                    }
-                    if (emit_child_decl_eval_var_inline) {
-                        try s.emitOp(opcode.op.dup);
-                        const name = s.pending_function_name orelse s.function.name;
-                        try s.emitEvalVarObjectScopePutVar(name);
+                        try s.emitEvalVarObjectScopePutVar(function_decl_plan.binding_name);
                     }
                     try s.emitOp(opcode.op.drop);
                 } else {
-                    if (emit_child_decl_global_inline) try s.emitOp(opcode.op.dup);
-                    if (emit_child_decl_eval_var_inline) try s.emitOp(opcode.op.dup);
-                    if (emit_child_decl_var_inline) {
-                        try s.emitOpU16(opcode.op.put_loc, @intCast(child_decl_var_idx));
-                    } else {
-                        if (child_decl_annex_b_var_idx >= 0) try s.emitOp(opcode.op.dup);
-                        try s.emitOpU16(opcode.op.put_loc_check_init, @intCast(child_decl_var_idx));
+                    if (function_decl_plan.emit_global_inline) try s.emitOp(opcode.op.dup);
+                    if (function_decl_plan.emit_eval_var_inline) try s.emitOp(opcode.op.dup);
+                    if (function_decl_plan.annex_b_var_idx >= 0) try s.emitOp(opcode.op.dup);
+                    // zjs also emits this opcode for Annex-B source-position
+                    // copies, so retain the existing declaration-class gate:
+                    // #7's once-only derived-this rule is not universal here.
+                    try s.emitOpU16(opcode.op.put_loc_check_init, @intCast(function_decl_plan.lexical_var_idx));
+                    if (function_decl_plan.annex_b_var_idx >= 0) {
+                        try s.emitOpU16(opcode.op.put_loc, @intCast(function_decl_plan.annex_b_var_idx));
                     }
-                    if (!emit_child_decl_var_inline and child_decl_annex_b_var_idx >= 0) {
-                        try s.emitOpU16(opcode.op.put_loc, @intCast(child_decl_annex_b_var_idx));
+                    if (function_decl_plan.emit_global_inline) {
+                        try s.emitGlobalScopePutVar(function_decl_plan.binding_name);
                     }
-                    if (emit_child_decl_global_inline) {
-                        const name = s.pending_function_name orelse s.function.name;
-                        try s.emitGlobalScopePutVar(name);
-                    }
-                    if (emit_child_decl_eval_var_inline) {
-                        const name = s.pending_function_name orelse s.function.name;
-                        try s.emitEvalVarObjectScopePutVar(name);
+                    if (function_decl_plan.emit_eval_var_inline) {
+                        try s.emitEvalVarObjectScopePutVar(function_decl_plan.binding_name);
                     }
                 }
-            } else if (child_decl_scope_entry_init) {
+            } else if (function_decl_plan.scope_entry_init) {
                 // The binding itself is initialized at OP_enter_scope; retain
                 // QuickJS's source-position declaration closure/drop pair.
                 try s.emitFClosure(child_cpool_idx);
                 try s.emitOp(opcode.op.drop);
-            } else if (child_ptr.emit_top_level_closure_init) {
-                const name = s.pending_function_name orelse s.function.name;
-                _ = s.assignGlobalFunctionVarCpoolAt(parent_fd, child_decl_global_var_idx, name, child_cpool_idx);
             }
             if (s.namespace_export) {
                 if (s.current_namespace_atom) |ns_atom| {
@@ -14340,7 +14338,7 @@ pub const parser_core = struct {
                 }
             }
         } else {
-            try s.pushBodyScopeIdentity();
+            try s.beginFunctionBody();
             errdefer s.popScopeIdentity();
             // Expression body. Deliberate spec-over-qjs divergence: ES6
             // ConciseBody[?In] inherits the no-`in` restriction (so
@@ -14350,7 +14348,7 @@ pub const parser_core = struct {
             // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
             try s.emitOp(if (is_async) opcode.op.return_async else opcode.op.@"return");
-            s.popScopeIdentity();
+            s.finishFunctionBody();
         }
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
@@ -16594,6 +16592,10 @@ pub const parser_core = struct {
         const body_scope = child_fd.appendScope(0) catch return error.OutOfMemory;
         child_fd.body_scope = body_scope;
         child_fd.scope_level = body_scope;
+        var body_marker: [3]u8 = undefined;
+        body_marker[0] = opcode.op.enter_scope;
+        std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
+        try child_fd.appendByteCode(&body_marker);
         _ = child_fd.ensureThisBinding() catch return error.OutOfMemory;
         // The constructor closes over THIS class's `<class_fields_init>` var.
         // Resolve through the parse-state index recorded by parseClass instead
@@ -16604,7 +16606,7 @@ pub const parser_core = struct {
         // class's own scope (define_var, quickjs.c:25702) and the constructor
         // resolves it lexically (emit_class_field_init, quickjs.c:25185).
         const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
-        parent_fd.vars[fields_init_var_idx].is_captured = true;
+        child_fd.parent_class_fields_init_var_idx = fields_init_var_idx;
         _ = try child_fd.addClosureVar(.{
             .closure_type = .local,
             .is_lexical = true,
@@ -16855,35 +16857,11 @@ pub const parser_core = struct {
         });
     }
 
-    fn ensureModuleDefaultExportBinding(s: *State, is_function: bool) Error!i32 {
-        const global_idx: i32 = @intCast(s.cur_func().global_vars.len);
-        if (!is_function) {
-            return switch (try s.defineVar(atom_star_default, .let_)) {
-                .global => global_idx,
-                .local, .argument => Error.UnexpectedToken,
-            };
+    fn ensureModuleDefaultExportBinding(s: *State) Error!void {
+        switch (try s.defineVar(atom_star_default, .let_)) {
+            .global => {},
+            .local, .argument => return Error.UnexpectedToken,
         }
-        // Anonymous default functions follow js_parse_function_decl2's
-        // is_global_var arm: it calls add_global_var directly and marks the
-        // resulting declaration as a function carrier, not a lexical LET.
-        try s.addGlobalVar(atom_star_default, false, false);
-        return global_idx;
-    }
-
-    fn hoistLastAnonymousDefaultFunctionExport(s: *State, default_global_idx: i32) Error!void {
-        const child_idx = s.last_function_child_index orelse return Error.UnexpectedToken;
-        if (child_idx >= s.cur_func().child_list.len) return Error.UnexpectedToken;
-        const child = s.cur_func().child_list[child_idx];
-        s.function.atoms.replace(&child.func_name, atom_default);
-        child.emit_top_level_closure_init = true;
-        if (default_global_idx < 0 or @as(usize, @intCast(default_global_idx)) >= s.cur_func().global_vars.len) {
-            return Error.UnexpectedToken;
-        }
-        const global_idx: usize = @intCast(default_global_idx);
-        const gv = &s.cur_func().global_vars[global_idx];
-        if (gv.var_name != atom_star_default or gv.is_lexical or gv.cpool_idx >= 0) return Error.UnexpectedToken;
-        child.child_decl_global_var_idx = default_global_idx;
-        gv.cpool_idx = child.parent_cpool_idx;
     }
 
     fn addModuleIndirectExport(s: *State, request_index: u32, export_name: Atom, import_name: Atom) Error!void {
@@ -16979,7 +16957,7 @@ pub const parser_core = struct {
                         s.pending_function_is_decl = saved_pending_decl;
                     }
                     try parseClass(s, false);
-                    _ = try ensureModuleDefaultExportBinding(s, false);
+                    try ensureModuleDefaultExportBinding(s);
                     try s.emitScopePutVarInit(atom_star_default);
                     try addModuleExportName(s, atom_default, atom_star_default);
                 }
@@ -16991,11 +16969,8 @@ pub const parser_core = struct {
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
                     const source_start = s.currentTokenStartOffset();
-                    try parseFunctionExpr(s, .normal, source_start);
-                    const default_global_idx = try ensureModuleDefaultExportBinding(s, true);
-                    try hoistLastAnonymousDefaultFunctionExport(s, default_global_idx);
+                    try parseAnonymousDefaultFunctionDecl(s, .normal, source_start);
                     try addModuleExportName(s, atom_default, atom_star_default);
-                    try s.emitOp(opcode.op.drop);
                 }
                 return;
             } else if (s.peekKind() == tok.TOK_IDENT and s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION) {
@@ -17005,17 +16980,14 @@ pub const parser_core = struct {
                     try parseFunctionDecl(s, .async, source_start);
                     try addModuleExportName(s, atom_default, name_atom);
                 } else {
-                    try parseFunctionExpr(s, .async, source_start);
-                    const default_global_idx = try ensureModuleDefaultExportBinding(s, true);
-                    try hoistLastAnonymousDefaultFunctionExport(s, default_global_idx);
+                    try parseAnonymousDefaultFunctionDecl(s, .async, source_start);
                     try addModuleExportName(s, atom_default, atom_star_default);
-                    try s.emitOp(opcode.op.drop);
                 }
                 return;
             } else {
                 try parseAssignExpr(s);
                 try emitAnonymousDefaultName(s, atom_default);
-                _ = try ensureModuleDefaultExportBinding(s, false);
+                try ensureModuleDefaultExportBinding(s);
                 try s.emitScopePutVarInit(atom_star_default);
                 try addModuleExportName(s, atom_default, atom_star_default);
             }
@@ -17270,263 +17242,6 @@ pub const parser_core = struct {
         try s.expectToken('}');
     }
 
-    fn closureVarSameCapture(a: function_def_mod.ClosureVar, b: function_def_mod.ClosureVar) bool {
-        return a.closureType() == b.closureType() and
-            a.var_idx == b.var_idx;
-    }
-
-    fn findFunctionDefClosureVarCaptureIndex(fd: *const function_def_mod.FunctionDef, cv: function_def_mod.ClosureVar) ?u16 {
-        for (fd.closure_var, 0..) |existing, idx| {
-            if (closureVarSameCapture(existing, cv)) return @intCast(idx);
-        }
-        return null;
-    }
-
-    fn closureVarNeedsDirectEvalCapture(cv: function_def_mod.ClosureVar) bool {
-        return switch (cv.closureType()) {
-            // qjs add_closure_variables deliberately drops the complete
-            // global family. A nested direct eval resolves those names from
-            // its global environment; converting GLOBAL_DECL to REF would
-            // create a second, non-qjs capture path. Module cells remain
-            // forwardable live bindings.
-            .global, .global_ref, .global_decl => false,
-            else => true,
-        };
-    }
-
-    fn childOnPathToTarget(
-        source: *function_def_mod.FunctionDef,
-        target: *function_def_mod.FunctionDef,
-    ) ?*function_def_mod.FunctionDef {
-        var child: ?*function_def_mod.FunctionDef = null;
-        var cursor: ?*function_def_mod.FunctionDef = target;
-        while (cursor) |node| {
-            if (node == source) return child;
-            child = node;
-            cursor = node.parent;
-        }
-        return null;
-    }
-
-    fn addOrReuseClosureVar(
-        fd: *function_def_mod.FunctionDef,
-        cv: function_def_mod.ClosureVar,
-    ) Error!u16 {
-        // QuickJS get_closure_var deduplicates solely by the parent's binding
-        // identity `(closure_type,var_idx)`. Name participates later in
-        // lookup-first-match, never in capture identity.
-        if (findFunctionDefClosureVarCaptureIndex(fd, cv)) |existing| return existing;
-        return @intCast(fd.addClosureVar(cv.toInit()) catch return error.OutOfMemory);
-    }
-
-    fn ensureDirectEvalClosureChain(
-        target: *function_def_mod.FunctionDef,
-        source_owner: *function_def_mod.FunctionDef,
-        source: function_def_mod.ClosureVar,
-    ) Error!void {
-        switch (source.closureType()) {
-            .local => if (source.var_idx < source_owner.vars.len) {
-                source_owner.vars[source.var_idx].is_captured = true;
-            },
-            .arg => if (source.var_idx < source_owner.args.len) {
-                source_owner.args[source.var_idx].is_captured = true;
-            },
-            else => {},
-        }
-
-        var owner = source_owner;
-        var parent_ref_idx: ?u16 = null;
-        while (owner != target) {
-            const child = childOnPathToTarget(owner, target) orelse return Error.UnexpectedToken;
-            const cv = if (owner == source_owner) source else function_def_mod.ClosureVar.init(.{
-                .closure_type = .ref,
-                .is_lexical = source.isLexical(),
-                .is_const = source.isConst(),
-                .var_kind = source.varKind(),
-                .var_idx = parent_ref_idx orelse return Error.UnexpectedToken,
-                .var_name = source.var_name,
-            });
-            parent_ref_idx = try addOrReuseClosureVar(child, cv);
-            owner = child;
-        }
-    }
-
-    fn captureDirectEvalParentBinding(
-        target: *function_def_mod.FunctionDef,
-        source_owner: *function_def_mod.FunctionDef,
-        source_value: function_def_mod.ClosureVar.Init,
-    ) Error!void {
-        const source = function_def_mod.ClosureVar.init(source_value);
-        try ensureDirectEvalClosureChain(target, source_owner, source);
-    }
-
-    fn directEvalUsesArgumentEnvironmentOnly(
-        fd: *const function_def_mod.FunctionDef,
-        start_scope: i32,
-    ) bool {
-        if (!fd.has_parameter_expressions or start_scope <= 0) return false;
-        var scope_level = start_scope;
-        var visited: usize = 0;
-        while (scope_level >= 0 and @as(usize, @intCast(scope_level)) < fd.scopes.len) {
-            if (visited >= fd.scopes.len) return false;
-            visited += 1;
-            const parent_scope = fd.scopes[@intCast(scope_level)].parent;
-            if (parent_scope < 0) return scope_level != 0;
-            scope_level = parent_scope;
-        }
-        return false;
-    }
-
-    fn directEvalVarIsInArgumentScope(vd: function_def_mod.VarDef) bool {
-        return vd.var_name == atom_module.ids.home_object or
-            vd.var_name == atom_this_active_func or
-            vd.var_name == atom_new_target or
-            vd.var_name == atom_this or
-            vd.var_name == atom_arg_var_object or
-            vd.var_kind == .function_name;
-    }
-
-    fn captureDirectEvalParentLocal(
-        target: *function_def_mod.FunctionDef,
-        parent: *function_def_mod.FunctionDef,
-        var_idx: usize,
-    ) Error!void {
-        if (var_idx >= parent.vars.len or var_idx > std.math.maxInt(u16)) return error.UnexpectedToken;
-        const vd = parent.vars[var_idx];
-        try captureDirectEvalParentBinding(target, parent, .{
-            .closure_type = .local,
-            .is_lexical = vd.is_lexical,
-            .is_const = vd.is_const,
-            .var_kind = vd.var_kind,
-            .var_idx = @intCast(var_idx),
-            .var_name = vd.var_name,
-        });
-    }
-
-    fn captureVisibleParentVarsForDirectEval(
-        target: *function_def_mod.FunctionDef,
-        parent: *function_def_mod.FunctionDef,
-        visible_scope_level: i32,
-    ) Error!void {
-        const argument_environment_only = directEvalUsesArgumentEnvironmentOnly(parent, visible_scope_level);
-
-        // qjs rebuilds scope_next before add_eval_variables, then walks the
-        // active lexical chain from the innermost scope outwards. A flat
-        // reverse VarDef scan is not equivalent: a later outer declaration
-        // can have a larger index than an earlier inner shadow.
-        var scope_level = visible_scope_level;
-        var visited_scopes: usize = 0;
-        while (scope_level >= 0) {
-            if (@as(usize, @intCast(scope_level)) >= parent.scopes.len or
-                visited_scopes >= parent.scopes.len) return error.UnexpectedToken;
-            visited_scopes += 1;
-
-            var var_idx = parent.scopes[@intCast(scope_level)].first;
-            var visited_vars: usize = 0;
-            while (var_idx >= 0) {
-                if (@as(usize, @intCast(var_idx)) >= parent.vars.len or
-                    visited_vars >= parent.vars.len) return error.UnexpectedToken;
-                visited_vars += 1;
-                const vd = parent.vars[@intCast(var_idx)];
-                if (vd.scope_level != scope_level) break;
-                try captureDirectEvalParentLocal(target, parent, @intCast(var_idx));
-                var_idx = vd.scope_next;
-            }
-            scope_level = parent.scopes[@intCast(scope_level)].parent;
-        }
-
-        if (!argument_environment_only) {
-            for (parent.args, 0..) |arg, arg_idx| {
-                if (arg.var_name == atom_module.null_atom) continue;
-                try captureDirectEvalParentBinding(target, parent, .{
-                    .closure_type = .arg,
-                    .is_lexical = false,
-                    .is_const = false,
-                    .var_kind = arg.var_kind,
-                    .var_idx = @intCast(arg_idx),
-                    .var_name = arg.var_name,
-                });
-            }
-        }
-
-        // qjs follows the scoped chain with its ascending unscoped VarDef
-        // pass. This also picks up lazy appendVar bindings (arguments and a
-        // named-function self binding) that are not in zjs parser scope lists.
-        for (parent.vars, 0..) |vd, var_idx| {
-            if (vd.scope_level != 0 or vd.var_name == atom_module.ids.ret or vd.var_name == atom_module.null_atom) continue;
-            if (argument_environment_only and !directEvalVarIsInArgumentScope(vd)) continue;
-            try captureDirectEvalParentLocal(target, parent, var_idx);
-        }
-
-        for (parent.closure_var, 0..) |cv, idx| {
-            if (!closureVarNeedsDirectEvalCapture(cv)) continue;
-            try captureDirectEvalParentBinding(target, parent, .{
-                .closure_type = .ref,
-                .is_lexical = cv.isLexical(),
-                .is_const = cv.isConst(),
-                .var_kind = cv.varKind(),
-                .var_idx = @intCast(idx),
-                .var_name = cv.var_name,
-            });
-        }
-    }
-
-    fn captureAllVisibleDirectEvalBindings(fd: *function_def_mod.FunctionDef) Error!void {
-        var maybe_parent = fd.parent;
-        var visible_scope_level = fd.parent_scope_level;
-        var has_this_binding = fd.has_this_binding;
-        var has_arguments_binding = fd.has_arguments_binding;
-        while (maybe_parent) |parent| {
-            // QuickJS stages the first enclosing ThisBinding family as one
-            // ordered unit before it captures any visible parent locals.
-            if (!has_this_binding and parent.has_this_binding) {
-                _ = parent.ensureThisBinding() catch return error.OutOfMemory;
-                _ = parent.ensureNewTargetBinding() catch return error.OutOfMemory;
-                if (parent.is_derived_class_constructor) {
-                    _ = parent.ensureThisActiveFunctionBinding() catch return error.OutOfMemory;
-                }
-                if (parent.has_home_object) {
-                    _ = parent.ensureHomeObjectBinding() catch return error.OutOfMemory;
-                }
-                has_this_binding = true;
-            }
-            if (!has_arguments_binding and parent.has_arguments_binding) {
-                _ = parent.ensureArgumentsBinding() catch return error.OutOfMemory;
-                has_arguments_binding = true;
-            }
-            // add_eval_variables calls add_func_var unconditionally for every
-            // enclosing named expression. A newer ordinary same-name binding
-            // can still win lookup; it does not erase this staged identity.
-            if (parent.is_named_func_expr) {
-                _ = try parent.ensureFuncExprSelfBinding();
-            }
-            try captureVisibleParentVarsForDirectEval(
-                fd,
-                parent,
-                visible_scope_level,
-            );
-            visible_scope_level = parent.parent_scope_level;
-            maybe_parent = parent.parent;
-        }
-    }
-
-    /// Chain-visible same-name *var* scan (no args): the guard used before
-    /// lazily materializing a function-expression self-binding once parsing
-    /// has moved past the def (direct-eval conservative paths).
-    fn hasVisibleSameNameVar(
-        fd: *const function_def_mod.FunctionDef,
-        atom_id: Atom,
-        visible_scope_level: i32,
-    ) bool {
-        var index = fd.vars.len;
-        while (index > 0) {
-            index -= 1;
-            const vd = fd.vars[index];
-            if (vd.var_name == atom_id and State.scopeChainContains(fd, visible_scope_level, vd.scope_level)) return true;
-        }
-        return false;
-    }
-
     fn ensureParameterArgumentsLocals(fd: *function_def_mod.FunctionDef) Error!void {
         if (fd.func_type == .arrow or fd.func_type == .class_static_init) return;
         _ = fd.ensureArgumentsBinding() catch return error.OutOfMemory;
@@ -17534,280 +17249,6 @@ pub const parser_core = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidScope => return error.UnexpectedToken,
         };
-    }
-
-    /// Mirror QuickJS add_eval_variables append order. This runs after parsing
-    /// has produced the complete ordinary VarDef list but before any child is
-    /// finalized, so no operand remap or later list permutation is needed.
-    fn stageOwnEvalPseudoBindings(fd: *function_def_mod.FunctionDef) Error!void {
-        if (fd.has_eval_call and fd.parent != null and !fd.is_eval and !fd.is_strict_mode) {
-            // The root FunctionDef is still a zjs global-script seam. Until it
-            // becomes a real QuickJS-style eval root, never give it a private
-            // function variable object.
-            if (fd.var_object_idx < 0) {
-                fd.var_object_idx = fd.appendVar(.{
-                    .var_name = atom_var_object,
-                    .scope_level = 0,
-                    .var_kind = .normal,
-                }) catch return error.OutOfMemory;
-            }
-            if (fd.has_parameter_expressions and fd.arg_var_object_idx < 0) {
-                fd.arg_var_object_idx = fd.appendVar(.{
-                    .var_name = atom_arg_var_object,
-                    .scope_level = 0,
-                    .var_kind = .normal,
-                }) catch return error.OutOfMemory;
-            }
-        }
-
-        if (fd.has_eval_call) {
-            if (fd.has_this_binding) {
-                _ = fd.ensureThisBinding() catch return error.OutOfMemory;
-                _ = fd.ensureNewTargetBinding() catch return error.OutOfMemory;
-                if (fd.is_derived_class_constructor) {
-                    _ = fd.ensureThisActiveFunctionBinding() catch return error.OutOfMemory;
-                }
-                if (fd.has_home_object) {
-                    _ = fd.ensureHomeObjectBinding() catch return error.OutOfMemory;
-                }
-            }
-            if (fd.has_arguments_binding) {
-                _ = fd.ensureArgumentsBinding() catch return error.OutOfMemory;
-                if (fd.has_parameter_expressions and !fd.is_strict_mode) {
-                    fd.ensureArgumentsArgumentBinding() catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.InvalidScope => return error.UnexpectedToken,
-                    };
-                }
-            }
-            if (fd.is_named_func_expr) {
-                _ = fd.ensureFuncExprSelfBinding() catch return error.OutOfMemory;
-            }
-        }
-
-        for (fd.child_list) |child| {
-            try stageOwnEvalPseudoBindings(child);
-        }
-    }
-
-    fn markDirectEvalVisibleOwnBindings(
-        fd: *function_def_mod.FunctionDef,
-        root_function: ?*const bytecode_function.Bytecode,
-    ) Error!void {
-        // Only the still-transitional class-field marker occupies an operand
-        // bit. The former parameter-environment marker used 0x4000, but that
-        // environment is now represented by the ARG_SCOPE_END chain sentinel;
-        // 0x4000 is ordinary scope-index data again.
-        const eval_scope_mask: u16 = ~eval_class_field_initializer_flag;
-        // Child functions use FunctionDef.byte_code like qjs. zjs keeps the
-        // root parser stream in a separate mutable Bytecode, so the root seam
-        // must explicitly scan that real stream instead of treating the empty
-        // FunctionDef buffer as malformed and conservatively capturing every
-        // local.
-        const code = if (root_function) |function| function.code else fd.byte_code;
-        const atom_operands = if (root_function) |function| function.atom_operands else fd.atom_operands;
-        var pc: usize = 0;
-        var atom_index: usize = 0;
-        var found_eval = false;
-        var malformed = false;
-        while (pc < code.len) {
-            const op_id = code[pc];
-            const instr = parserPhaseInstruction(code, atom_operands, pc, atom_index);
-            if (instr.size == 0 or pc + instr.size > code.len) {
-                malformed = true;
-                break;
-            }
-            const scope_level: ?i32 = switch (op_id) {
-                opcode.op.eval => if (instr.size >= 5)
-                    @intCast(std.mem.readInt(u16, code[pc + 3 ..][0..2], .little) & eval_scope_mask)
-                else
-                    null,
-                opcode.op.apply_eval => if (instr.size >= 3)
-                    @intCast(std.mem.readInt(u16, code[pc + 1 ..][0..2], .little) & eval_scope_mask)
-                else
-                    null,
-                else => null,
-            };
-            if (scope_level) |visible_scope| {
-                found_eval = true;
-                // The eval source may reference the enclosing named function
-                // expression's own name: materialize the self-binding for this
-                // eval site unless a chain-visible same-name var already
-                // resolves it (add_eval_variables quickjs.c:33649-33650).
-                // Materialize before the capture scan below so the new var is
-                // marked captured by its `.function_name` arm.
-                if (fd.is_named_func_expr and
-                    !hasVisibleSameNameVar(fd, fd.func_name, visible_scope))
-                {
-                    _ = try fd.ensureFuncExprSelfBinding();
-                }
-                for (fd.vars) |*vd| {
-                    // qjs add_eval_variables/mark_eval_captured_variables do
-                    // not close the top-level completion slot.
-                    if (vd.var_name == atom_module.ids.ret or vd.var_name == atom_module.null_atom) continue;
-                    if (vd.var_kind == .function_name or State.scopeChainContains(fd, visible_scope, vd.scope_level)) {
-                        vd.is_captured = true;
-                    }
-                }
-                // Formal parameters belong to the function environment and
-                // are visible from every direct-eval call in the body.
-                for (fd.args) |*arg| arg.is_captured = true;
-            }
-            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += instr.size;
-        }
-
-        // Parser-produced streams are expected to decode completely. Keep a
-        // conservative fallback for hand-built FunctionDefs so an understated
-        // open-ref table can never turn into a dangling/boxed-slot mismatch.
-        if (!found_eval or malformed) {
-            // Defensive arm (understated/hand-built streams): keep eval
-            // conservatism — materialize the self-binding too unless any
-            // same-name var exists at all (flat: visibility unknown here).
-            if (fd.is_named_func_expr and fd.findVar(fd.func_name) < 0) {
-                _ = try fd.ensureFuncExprSelfBinding();
-            }
-            for (fd.vars) |*vd| {
-                if (vd.var_name == atom_module.ids.ret or vd.var_name == atom_module.null_atom) continue;
-                vd.is_captured = true;
-            }
-            for (fd.args) |*arg| arg.is_captured = true;
-        }
-    }
-
-    fn prepareDirectEvalAndGlobalClosures(
-        fd: *function_def_mod.FunctionDef,
-        root_function: ?*const bytecode_function.Bytecode,
-    ) Error!void {
-        if (fd.has_eval_call) {
-            // Reserve open references only for the union of bindings visible
-            // at real eval call scopes. Sibling block lexicals remain bare.
-            try markDirectEvalVisibleOwnBindings(fd, root_function);
-            try captureAllVisibleDirectEvalBindings(fd);
-        }
-        // qjs js_create_function prepares one FunctionDef at a time:
-        // add_eval_variables(current), add_global_variables(current), then
-        // recursively js_create_function(children). In particular, a child
-        // containing direct eval must see its parent's MODULE_DECL rows while
-        // add_eval_variables walks the enclosing eval FunctionDef.
-        try addOwnGlobalDeclarationClosures(fd);
-        for (fd.child_list) |child| {
-            try prepareDirectEvalAndGlobalClosures(child, null);
-        }
-    }
-
-    fn clearCaptureHints(fd: *function_def_mod.FunctionDef) void {
-        for (fd.vars) |*vd| vd.is_captured = false;
-        for (fd.args) |*arg| arg.is_captured = false;
-        for (fd.child_list) |child| clearCaptureHints(child);
-    }
-
-    /// Rebuild zjs scope-entry close hints after the direct-eval prefix,
-    /// declaration carriers, and child capture topology are final. These bits
-    /// only predict which lexical scope entries need a fresh cell on re-entry;
-    /// open-binding indices remain owned by the real capture events.
-    fn rebuildCaptureHints(
-        fd: *function_def_mod.FunctionDef,
-        root_function: ?*const bytecode_function.Bytecode,
-    ) Error!void {
-        if (fd.has_eval_call) try markDirectEvalVisibleOwnBindings(fd, root_function);
-        for (fd.child_list) |child| {
-            for (child.closure_var) |cv| switch (cv.closureType()) {
-                .local => {
-                    if (cv.var_idx < fd.vars.len) fd.vars[cv.var_idx].is_captured = true;
-                },
-                .arg => {
-                    if (cv.var_idx < fd.args.len) fd.args[cv.var_idx].is_captured = true;
-                },
-                .ref, .global_ref, .global_decl, .global, .module_decl, .module_import => {},
-            };
-            try rebuildCaptureHints(child, null);
-        }
-    }
-
-    /// QuickJS `add_global_variables`: append one declaration carrier for each
-    /// GlobalVar, after the already-created eval/import prefix.  Parser
-    /// bytecode contains only name+scope operations, so no table permutation
-    /// or operand remapping is needed.
-    fn appendGlobalDeclarationClosures(
-        fd: *function_def_mod.FunctionDef,
-        declaration_type: function_def_mod.ClosureType,
-    ) Error!void {
-        const first_closure_idx = fd.closure_var.len;
-        for (fd.global_vars, 0..) |gv, global_idx| {
-            if (global_idx > std.math.maxInt(u16) or
-                first_closure_idx + global_idx > std.math.maxInt(u16))
-            {
-                return Error.UnexpectedToken;
-            }
-            const var_kind: function_def_mod.VarKind = if (gv.cpool_idx >= 0 and !gv.is_lexical)
-                .global_function_decl
-            else
-                .normal;
-            const appended = fd.addClosureVar(.{
-                .closure_type = declaration_type,
-                .is_lexical = gv.is_lexical,
-                .is_const = gv.is_const,
-                .var_kind = var_kind,
-                .var_idx = @intCast(global_idx),
-                .var_name = gv.var_name,
-            }) catch return error.OutOfMemory;
-            if (appended < 0 or @as(usize, @intCast(appended)) != first_closure_idx + global_idx) {
-                return Error.UnexpectedToken;
-            }
-        }
-
-        // A hoisted child stores the stable GlobalVar row at parse time.  Its
-        // final closure index is the prefix length plus that row number.
-        for (fd.child_list) |child| {
-            if (!child.emit_top_level_closure_init or child.child_decl_global_var_idx < 0) continue;
-            const global_idx: usize = @intCast(child.child_decl_global_var_idx);
-            if (global_idx >= fd.global_vars.len) return Error.UnexpectedToken;
-            child.top_level_closure_var_idx = @intCast(first_closure_idx + global_idx);
-        }
-    }
-
-    /// QuickJS `add_global_variables`: materialize one declaration carrier per
-    /// GlobalVar after eval captures exist and before child FunctionDefs are
-    /// finalized. Duplicates remain distinct rows in GlobalVar order.
-    fn addOwnGlobalDeclarationClosures(fd: *function_def_mod.FunctionDef) Error!void {
-        if (fd.is_eval and fd.global_vars.len != 0) {
-            var need_global_closures = true;
-            if (fd.is_direct_eval and !fd.is_strict_mode) {
-                for (fd.closure_var) |cv| {
-                    if (cv.var_name == atom_var_object or cv.var_name == atom_arg_var_object) {
-                        need_global_closures = false;
-                        break;
-                    }
-                }
-            }
-
-            if (need_global_closures) {
-                const declaration_type: function_def_mod.ClosureType = if (fd.is_module) .module_decl else .global_decl;
-                try appendGlobalDeclarationClosures(fd, declaration_type);
-            }
-        }
-    }
-
-    pub fn prepareFunctionDefsForFinalization(fd: *function_def_mod.FunctionDef) Error!void {
-        try stageOwnEvalPseudoBindings(fd);
-        try prepareDirectEvalAndGlobalClosures(fd, null);
-        clearCaptureHints(fd);
-        try rebuildCaptureHints(fd, null);
-    }
-
-    pub fn prepareFunctionDefsForFinalizationWithRoot(
-        fd: *function_def_mod.FunctionDef,
-        root_function: *bytecode_function.Bytecode,
-    ) Error!void {
-        try stageOwnEvalPseudoBindings(fd);
-        try prepareDirectEvalAndGlobalClosures(fd, root_function);
-        clearCaptureHints(fd);
-        try rebuildCaptureHints(fd, root_function);
-    }
-
-    pub fn prepareDirectEvalFunctionDefs(fd: *function_def_mod.FunctionDef) Error!void {
-        return prepareFunctionDefsForFinalization(fd);
     }
 
     pub const ParseState = State;
@@ -18131,7 +17572,6 @@ pub const compile_entry = struct {
             if (needs_return) try state.emitReturnUndefined();
         }
 
-        try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, function);
         try bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, rt);
         features.* = state.features;
         function.flags.is_strict = function.flags.is_strict or state.function_def.is_strict_mode;

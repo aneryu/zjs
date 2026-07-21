@@ -146,11 +146,12 @@ test "script or module metadata owns each bytecode transfer" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, display_filename);
     var fd_alive = true;
     defer if (fd_alive) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
     fd.atoms.replace(&fd.script_or_module, referrer);
     try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
     try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     var fb_alive = true;
     defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
@@ -245,6 +246,20 @@ const pipeline = bytecode.pipeline;
 const pc2line = pipeline.pc2line;
 const stack_size = pipeline.stack_size;
 const function_def = bytecode.function_def;
+
+/// Hand-built FunctionDefs in this suite bypass Parser.State, which normally
+/// creates scope zero. Give those fixtures the same mandatory root scope
+/// before exercising the production finalizer.
+fn createTestFunctionBytecode(
+    fd: *function_def.FunctionDef,
+    rt: *core.JSRuntime,
+) ![]bytecode.FunctionBytecode {
+    if (fd.scopes.len == 0) {
+        const root_scope = try fd.appendScope(-1);
+        if (root_scope != 0) return error.TestUnexpectedResult;
+    }
+    return pipeline.finalize.createFunctionBytecode(fd, rt);
+}
 
 fn resolveEvalDeclarationPlan(
     rt: *core.JSRuntime,
@@ -546,8 +561,6 @@ test "resolve_variables preserves three-byte apply_eval with nonzero scope high 
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
-    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-    defer fd.deinit(rt);
 
     const op = bytecode.opcode.op;
     const raw_scope_idx = @as(u16, op.eval) << 8;
@@ -555,7 +568,7 @@ test "resolve_variables preserves three-byte apply_eval with nonzero scope high 
     std.mem.writeInt(u16, input[1..3], raw_scope_idx, .little);
 
     try bc.setCode(&input);
-    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try pipeline.resolve_variables.run(&ctx);
 
     try std.testing.expectEqualSlices(u8, &input, bc.code);
@@ -1990,11 +2003,13 @@ test "resolve_variables: const local write lowers to throw_error" {
     _ = try fd.addScopeVar(x_atom, .normal, body_scope, true, true);
 
     const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 8;
-    input[0] = op.scope_put_var;
-    std.mem.writeInt(u32, input[1..5], x_atom, .little);
-    std.mem.writeInt(u16, input[5..7], @intCast(body_scope), .little);
-    input[7] = op.return_undef;
+    var input = [_]u8{0} ** 11;
+    input[0] = op.enter_scope;
+    std.mem.writeInt(u16, input[1..3], @intCast(body_scope), .little);
+    input[3] = op.scope_put_var;
+    std.mem.writeInt(u32, input[4..8], x_atom, .little);
+    std.mem.writeInt(u16, input[8..10], @intCast(body_scope), .little);
+    input[10] = op.return_undef;
 
     try bc.setCode(&input);
     try bc.retainAtomOperand(x_atom);
@@ -3501,7 +3516,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     });
     try fd.appendPrivateBoundName(private_name);
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -3608,7 +3623,7 @@ test "final bytecode vardefs are compact arguments plus locals" {
     _ = try fd.appendVar(.{ .var_name = local_name, .scope_level = 0 });
     try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -3685,7 +3700,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         fd.has_simple_parameter_list = true;
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3704,7 +3719,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         fd.is_strict_mode = true;
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3732,7 +3747,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         fd.has_simple_parameter_list = true;
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3757,7 +3772,7 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
             bytecode.opcode.op.return_undef,
         });
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3794,22 +3809,41 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
         fd.has_simple_parameter_list = true;
         fd.is_strict_mode = mode.strict;
         if (mode.arrow) fd.func_type = .arrow;
+        _ = try fd.appendScope(-1);
         _ = try fd.appendArg(.{
             .var_name = rt.atoms.dup(arg_name),
             .scope_level = 0,
             .is_lexical = false,
         });
         // A captured PARAMETER opens a cell window at frame setup, which the
-        // leaf constructor cannot build — publication must reject it. Record
-        // a real capture event; parser-era boolean hints are deliberately not
-        // an index-allocation source anymore.
+        // leaf constructor cannot build — publication must reject it. Let a
+        // real child lookup deliver that capture during the production DFS;
+        // parser-era boolean hints are deliberately not an allocation source.
         if (mode.captured_arg) {
-            fd.open_binding_resolution_started = true;
-            try fd.captureArg(0);
+            const child = try rt.memory.create(function_def.FunctionDef);
+            var child_owned = true;
+            errdefer if (child_owned) {
+                child.deinit(rt);
+                rt.memory.destroy(function_def.FunctionDef, child);
+            };
+            child.* = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+            _ = try child.appendScope(-1);
+            var child_code = [_]u8{0} ** 9;
+            child_code[0] = bytecode.opcode.op.scope_get_var;
+            std.mem.writeInt(u32, child_code[1..5], arg_name, .little);
+            std.mem.writeInt(u16, child_code[5..7], 0, .little);
+            child_code[7] = bytecode.opcode.op.drop;
+            child_code[8] = bytecode.opcode.op.return_undef;
+            try child.appendByteCode(&child_code);
+            try child.appendAtomOperand(arg_name);
+            child.parent_scope_level = 0;
+            child.parent_cpool_idx = @intCast(try fd.appendCpool(core.JSValue.undefinedValue()));
+            try fd.addChild(child);
+            child_owned = false;
         }
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3829,7 +3863,7 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
         fd.func_kind = .normal;
         fd.has_simple_parameter_list = true;
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3873,7 +3907,7 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         });
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3894,7 +3928,7 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         fd.func_kind = .normal;
         fd.has_simple_parameter_list = true;
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3920,7 +3954,7 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
             .var_name = capture_name,
         });
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -3945,7 +3979,7 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
             .var_name = capture_name,
         });
         try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4064,7 +4098,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         fd.is_strict_mode = mode.strict;
         if (mode.arrow) fd.func_type = .arrow;
         try fd.appendByteCode(&unbalanced_body);
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4080,7 +4114,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         fd.func_kind = .normal;
         fd.has_simple_parameter_list = true;
         try fd.appendByteCode(&balanced_body);
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4102,7 +4136,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
             .is_lexical = false,
         });
         try fd.appendByteCode(&unbalanced_body);
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4122,7 +4156,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
             .var_name = capture_name,
         });
         try fd.appendByteCode(&unbalanced_body);
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4162,7 +4196,7 @@ test "implicit arguments get_var rescue reserves mapped arg aliases" {
         std.mem.writeInt(u16, code[1..3], 0, .little);
         try fd.appendByteCode(&code);
 
-        const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
         const view = bytecode.asBytecodeView(fb, rt);
@@ -4203,11 +4237,13 @@ test "direct eval reserves identity for visible function-scope locals and argume
     // finalize gates the direct-eval binding walk on it.
     fd.has_eval_call = true;
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expectEqual(@as(u16, 2), fb.open_var_ref_count);
+    // add_eval_variables captures the argument first, then every scope-zero
+    // local in index order, including its newly appended `<var>` object.
+    try std.testing.expectEqual(@as(u16, 3), fb.open_var_ref_count);
     try std.testing.expect(fb.varDefs()[0].isCaptured());
     // qjs add_eval_variables calls capture_var for own arguments before
     // scope-zero locals. The open-cell index records that event order; it is
@@ -4243,7 +4279,7 @@ test "surviving local references reserve compact open VarRef storage" {
     try fd.appendByteCode(&code);
     try fd.appendAtomOperand(local_name);
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -4284,7 +4320,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     try fd.appendByteCode(&code);
     try fd.appendAtomOperand(function_name);
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -4337,7 +4373,7 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     try fd.appendByteCode(&code);
     try fd.appendAtomOperand(arg_name);
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -4449,7 +4485,7 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
         .var_name = global_name,
     });
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
@@ -4491,7 +4527,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     @memset(source, 'x');
     fd.source_text = source;
 
-    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
 
     const heap_bytes = fb.heapByteSize();

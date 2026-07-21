@@ -1084,7 +1084,6 @@ pub const vm_helpers = struct {
         }
         try state.finalizeEvalReturn();
 
-        try parser_core.prepareFunctionDefsForFinalizationWithRoot(&state.function_def, &function);
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
         helpers.registerStandardGlobalsBare(rt);
@@ -6146,6 +6145,24 @@ test "Engine eval preserves global lexical write fast path semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+}
+
+test "Engine nested functions retain ancestor with environments during finalization" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var outer = 1;
+        \\var environment = { outer: "initial" };
+        \\with (environment) {
+        \\  (function () { outer = "updated"; })();
+        \\}
+        \\assert.sameValue(outer, 1);
+        \\assert.sameValue(environment.outer, "updated");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Engine eval preserves selected with references during updates" {

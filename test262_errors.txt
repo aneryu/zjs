@@ -19,11 +19,7 @@ test262/test/language/expressions/compound-assignment/S11.13.2_A6.7_T1.js
 test262/test/language/expressions/compound-assignment/S11.13.2_A6.8_T1.js
 test262/test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js
-test262/test/language/expressions/function/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
-test262/test/language/expressions/generators/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
 test262/test/language/identifier-resolution/assign-to-global-undefined.js
 test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js
-test262/test/language/statements/function/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
-test262/test/language/statements/generators/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
 test262/test/staging/sm/Function/arguments-parameter-shadowing.js
 test262/test/staging/sm/lexical-environment/block-scoped-functions-annex-b-if.js
