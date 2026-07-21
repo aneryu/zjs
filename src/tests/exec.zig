@@ -6444,6 +6444,31 @@ test "Engine constructor parameter defaults use the initialized this binding" {
     try std.testing.expectEqualStrings("hello\ntrue hello\nReferenceError\n", stream.buffered());
 }
 
+test "Engine heritage closures retain the initialized inner class-name binding" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var expressionProbe;
+        \\var expressionClass = class InnerExpression extends (
+        \\  expressionProbe = function () { return InnerExpression; }, Object
+        \\) {};
+        \\assert.sameValue(expressionProbe(), expressionClass);
+        \\var declarationProbe;
+        \\var declarationClass;
+        \\{
+        \\  class InnerDeclaration extends (
+        \\    declarationProbe = function () { return InnerDeclaration; }, Object
+        \\  ) {}
+        \\  declarationClass = InnerDeclaration;
+        \\}
+        \\assert.sameValue(declarationProbe(), declarationClass);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

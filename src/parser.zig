@@ -3592,6 +3592,7 @@ pub const parser_core = struct {
 
     const ReturnFinallyFrame = struct {
         finally_label: ParserLabelRef,
+        scope_level: i32,
         catch_marker_depth: u32,
         break_depth: usize,
         continue_depth: usize,
@@ -4078,11 +4079,20 @@ pub const parser_core = struct {
         /// Mirror `push_scope` (`quickjs.c:23486`): allocate a new
         /// `VarScope` whose parent is the current scope, then switch
         /// `scope_level` to it. Call on entry to a new lexical block.
-        pub fn pushScope(self: *State) Error!void {
+        pub fn pushScopeIdentity(self: *State) Error!void {
             const parent = self.scope_level;
             const new_scope = self.cur_func().appendScope(parent) catch return error.OutOfMemory;
             self.scope_level = new_scope;
             self.cur_func().scope_level = new_scope;
+        }
+
+        /// Allocate a lexical scope and emit its phase-1 entry event.  Parser
+        /// state restoration on emission failure is identity-only: a failed
+        /// parse must not manufacture a runtime leave event.
+        pub fn pushScope(self: *State) Error!void {
+            try self.pushScopeIdentity();
+            errdefer self.popScopeIdentity();
+            try self.emitEnterScope();
         }
 
         /// Allocate the current function's ordinary body scope without
@@ -4090,7 +4100,7 @@ pub const parser_core = struct {
         /// records body_scope as one operation; zjs keeps marker placement
         /// separate until body hoists move to that canonical anchor.
         pub fn pushBodyScopeIdentity(self: *State) Error!void {
-            try self.pushScope();
+            try self.pushScopeIdentity();
             self.cur_func().body_scope = self.scope_level;
         }
 
@@ -4098,7 +4108,7 @@ pub const parser_core = struct {
         /// scope. Also updates `function_def.scope_first` to the outer
         /// scope's first lexical var so subsequent lookups see the
         /// correct chain.
-        pub fn popScope(self: *State) void {
+        pub fn popScopeIdentity(self: *State) void {
             if (self.scope_level < 0) return;
             const parent = self.cur_func().scopes[@intCast(self.scope_level)].parent;
             self.scope_level = parent;
@@ -4115,6 +4125,13 @@ pub const parser_core = struct {
                 }
                 scope = self.cur_func().scopes[@intCast(scope)].parent;
             }
+        }
+
+        /// Emit the current lexical scope's phase-1 exit event, then restore
+        /// the parent scope identity.
+        pub fn popScope(self: *State) Error!void {
+            try self.emitLeaveScope(self.scope_level);
+            self.popScopeIdentity();
         }
 
         /// Register a variable declaration in `function_def.vars`.
@@ -4715,8 +4732,7 @@ pub const parser_core = struct {
         }
 
         fn emitLabelledBreak(s: *State, atom_id: Atom) Error!void {
-            if (try emitCapturedControlThroughFinally(s, .{ .kind = .@"break", .label_atom = atom_id })) return;
-            try s.emitLabelledBreakNoFinallyCapture(atom_id);
+            try emitControlThroughFinally(s, .{ .kind = .@"break", .label_atom = atom_id });
         }
 
         fn emitLabelledBreakNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
@@ -4735,8 +4751,7 @@ pub const parser_core = struct {
         }
 
         fn emitLabelledContinue(s: *State, atom_id: Atom) Error!void {
-            if (try emitCapturedControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = atom_id })) return;
-            try s.emitLabelledContinueNoFinallyCapture(atom_id);
+            try emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = atom_id });
         }
 
         fn emitLabelledContinueNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
@@ -9714,6 +9729,41 @@ pub const parser_core = struct {
         try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
     }
 
+    /// Put a real break/continue target in the same ordered environment chain
+    /// that already carries iterator and shared-finally-body cleanup.  Jump
+    /// operands remain owned by the existing fixup lists; the non-negative
+    /// label fields mean that this environment has the corresponding target.
+    fn pushControlBlock(
+        s: *State,
+        block: *BlockEnv,
+        label_name: ?Atom,
+        has_break_target: bool,
+        has_continue_target: bool,
+        is_regular_stmt: bool,
+        scope_level: i32,
+        drop_count: i32,
+        has_iterator: bool,
+    ) void {
+        block.* = .{
+            .prev = s.top_break,
+            .label_name = label_name orelse atom_module.null_atom,
+            .label_break = if (has_break_target) 0 else -1,
+            .label_cont = if (has_continue_target) 0 else -1,
+            .drop_count = drop_count,
+            .label_finally = -1,
+            .scope_level = scope_level,
+            .catch_marker_depth = s.active_catch_marker_depth,
+            .has_iterator = has_iterator,
+            .is_regular_stmt = is_regular_stmt,
+        };
+        s.top_break = block;
+    }
+
+    fn popControlBlock(s: *State, block: *BlockEnv) void {
+        std.debug.assert(s.top_break == block);
+        s.top_break = block.prev;
+    }
+
     fn setCurrentBreakCleanupDrops(s: *State, drops: u8) void {
         if (s.break_frame_cleanup_drops.items.len == 0) return;
         s.break_frame_cleanup_drops.items[s.break_frame_cleanup_drops.items.len - 1] = drops;
@@ -9769,8 +9819,7 @@ pub const parser_core = struct {
 
     fn emitUnlabelledBreak(s: *State) Error!void {
         if (s.break_frame_lens.items.len == 0) return;
-        if (try emitCapturedControlThroughFinally(s, .{ .kind = .@"break" })) return;
-        try emitUnlabelledBreakNoFinallyCapture(s);
+        try emitControlThroughFinally(s, .{ .kind = .@"break" });
     }
 
     fn emitUnlabelledBreakNoFinallyCapture(s: *State) Error!void {
@@ -9782,8 +9831,7 @@ pub const parser_core = struct {
 
     fn emitUnlabelledContinue(s: *State) Error!void {
         if (s.continue_frame_lens.items.len == 0) return;
-        if (try emitCapturedControlThroughFinally(s, .{ .kind = .@"continue" })) return;
-        try emitUnlabelledContinueNoFinallyCapture(s);
+        try emitControlThroughFinally(s, .{ .kind = .@"continue" });
     }
 
     fn emitUnlabelledContinueNoFinallyCapture(s: *State) Error!void {
@@ -10548,10 +10596,9 @@ pub const parser_core = struct {
         }
 
         try s.pushScope();
-        errdefer s.popScope();
-        try s.emitEnterScope();
+        errdefer s.popScopeIdentity();
         try parseBlockContentsAfterOpen(s, direct_using_kind);
-        s.popScope();
+        try s.popScope();
     }
 
     /// Mirror the distinct function-body path in QuickJS
@@ -10561,10 +10608,10 @@ pub const parser_core = struct {
         const direct_using_kind = blockDirectUsingDeclarationKind(s);
         try s.expectToken('{');
         try s.pushBodyScopeIdentity();
-        errdefer s.popScope();
+        errdefer s.popScopeIdentity();
         try parseDirectives(s);
         try parseBlockContentsAfterOpen(s, direct_using_kind);
-        s.popScope();
+        s.popScopeIdentity();
     }
 
     /// Mirror the directive-prologue portion of `js_parse_directives`
@@ -10812,7 +10859,7 @@ pub const parser_core = struct {
         if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
             try s.advance(); // consume '.'
 
-            try s.pushScope();
+            try s.pushScopeIdentity();
             const saved_in_namespace = s.in_namespace;
             const saved_namespace_atom = s.current_namespace_atom;
             s.in_namespace = true;
@@ -10820,7 +10867,7 @@ pub const parser_core = struct {
             defer {
                 s.in_namespace = saved_in_namespace;
                 s.current_namespace_atom = saved_namespace_atom;
-                s.popScope();
+                s.popScopeIdentity();
             }
 
             try parseNamespaceDeclarationWithIdent(s);
@@ -10843,7 +10890,7 @@ pub const parser_core = struct {
         }
 
         try s.expectToken('{');
-        try s.pushScope();
+        try s.pushScopeIdentity();
         const saved_in_namespace = s.in_namespace;
         const saved_namespace_atom = s.current_namespace_atom;
         s.in_namespace = true;
@@ -10851,7 +10898,7 @@ pub const parser_core = struct {
         defer {
             s.in_namespace = saved_in_namespace;
             s.current_namespace_atom = saved_namespace_atom;
-            s.popScope();
+            s.popScopeIdentity();
         }
 
         while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
@@ -10933,6 +10980,10 @@ pub const parser_core = struct {
 
             const label_frame = try s.pushLabelFrame(label_atom, false);
             errdefer s.popLabelFrame(label_frame);
+            var label_block: BlockEnv = undefined;
+            pushControlBlock(s, &label_block, label_atom, true, false, true, s.scope_level, 0, false);
+            var label_block_active = true;
+            defer if (label_block_active) popControlBlock(s, &label_block);
             if (labelled_kind == tok.TOK_CLASS or
                 (labelled_kind == tok.TOK_FUNCTION and s.peekNextKind() == @as(tok.TokenKind, @intCast('*'))) or
                 (labelled_kind == tok.TOK_IDENT and s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION))
@@ -10944,6 +10995,8 @@ pub const parser_core = struct {
             else
                 DeclMask{};
             try parseStatementOrDecl(s, mask);
+            popControlBlock(s, &label_block);
+            label_block_active = false;
             try s.patchLabelBreaks(label_frame);
             s.popLabelFrame(label_frame);
             return;
@@ -11099,8 +11152,7 @@ pub const parser_core = struct {
                 // QuickJS creates one wrapper scope for the whole IfStatement,
                 // before the condition. Both Annex-B clauses share it.
                 try s.pushScope();
-                errdefer s.popScope();
-                try s.emitEnterScope();
+                errdefer s.popScopeIdentity();
                 try s.setEvalReturnUndefined();
                 try s.expectToken('(');
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = true });
@@ -11136,7 +11188,7 @@ pub const parser_core = struct {
                     // No else: patch if_false to land just past the then block.
                     try patchForwardJump(s, if_false_off);
                 }
-                s.popScope();
+                try s.popScope();
             },
             tok.TOK_WHILE => {
                 try s.advance();
@@ -11151,6 +11203,10 @@ pub const parser_core = struct {
                 try s.expectToken(')');
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
+                var loop_block: BlockEnv = undefined;
+                pushControlBlock(s, &loop_block, loop_label, true, true, false, s.scope_level, 0, false);
+                var loop_block_active = true;
+                defer if (loop_block_active) popControlBlock(s, &loop_block);
                 try parseStatementOrDecl(s, DeclMask{});
                 try patchContinueFrame(s);
                 if (label_frame) |idx| try s.patchLabelContinues(idx);
@@ -11158,6 +11214,8 @@ pub const parser_core = struct {
                 try emitBackwardJump(s, opcode.op.goto, top_pc);
                 // Patch the if_false exit to land here.
                 try patchForwardJump(s, exit_off);
+                popControlBlock(s, &loop_block);
+                loop_block_active = false;
                 try popBreakFrameAndPatch(s);
                 if (label_frame) |idx| {
                     try s.patchLabelBreaks(idx);
@@ -11174,6 +11232,10 @@ pub const parser_core = struct {
                 const body_pc: u32 = @intCast(s.currentCodeLen());
                 try pushBreakFrame(s);
                 const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
+                var loop_block: BlockEnv = undefined;
+                pushControlBlock(s, &loop_block, loop_label, true, true, false, s.scope_level, 0, false);
+                var loop_block_active = true;
+                defer if (loop_block_active) popControlBlock(s, &loop_block);
                 try parseStatementOrDecl(s, DeclMask{});
                 try patchContinueFrame(s);
                 if (label_frame) |idx| try s.patchLabelContinues(idx);
@@ -11184,6 +11246,8 @@ pub const parser_core = struct {
                 // Back-edge: re-enter body when the test is truthy.
                 try emitBackwardJump(s, opcode.op.if_true, body_pc);
                 if (s.isPunct(';')) try s.advance();
+                popControlBlock(s, &loop_block);
+                loop_block_active = false;
                 try popBreakFrameAndPatch(s);
                 if (label_frame) |idx| {
                     try s.patchLabelBreaks(idx);
@@ -11225,7 +11289,7 @@ pub const parser_core = struct {
                     errdefer {
                         if (for_using_frame_active) _ = s.using_block_frames.pop();
                         if (for_using_catch_active) s.active_catch_marker_depth -= 1;
-                        if (for_scope_pushed) s.popScope();
+                        if (for_scope_pushed) s.popScopeIdentity();
                     }
                     // C-style `for (init ; test ; update) body`. Lower as:
                     //   init
@@ -11237,7 +11301,6 @@ pub const parser_core = struct {
                     // even when the initializer is empty or non-lexical.
                     try s.pushScope();
                     for_scope_pushed = true;
-                    try s.emitEnterScope();
                     if (directUsingDeclarationKind(s)) |using_kind| {
                         for_using_kind = using_kind;
                         for_head_is_lexical = true;
@@ -11330,12 +11393,16 @@ pub const parser_core = struct {
                     // Body.
                     try pushBreakFrame(s);
                     const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
+                    var loop_block: BlockEnv = undefined;
+                    pushControlBlock(s, &loop_block, loop_label, true, true, false, s.scope_level, 0, false);
+                    var loop_block_active = true;
+                    defer if (loop_block_active) popControlBlock(s, &loop_block);
                     try parseStatementOrDecl(s, DeclMask{});
 
                     // Update: run after normal body completion and continue paths.
+                    try s.closeScopes(s.scope_level, block_scope_level);
                     try patchContinueFrame(s);
                     if (label_frame) |idx| try s.patchLabelContinues(idx);
-                    try s.closeScopes(s.scope_level, block_scope_level);
                     if (saved_update.len != 0) {
                         try s.appendMovedCodeWithAtoms(saved_update, saved_update_atoms, update_start);
                     }
@@ -11345,6 +11412,8 @@ pub const parser_core = struct {
 
                     // Patch the `if_false` exit to land here.
                     try patchForwardJump(s, exit_off);
+                    popControlBlock(s, &loop_block);
+                    loop_block_active = false;
                     try popBreakFrameAndPatch(s);
                     if (label_frame) |idx| {
                         try s.patchLabelBreaks(idx);
@@ -11363,9 +11432,8 @@ pub const parser_core = struct {
                         _ = s.using_block_frames.pop();
                         for_using_frame_active = false;
                     }
-                    try s.closeScopes(s.scope_level, block_scope_level);
                     if (for_scope_pushed) {
-                        s.popScope();
+                        try s.popScope();
                         for_scope_pushed = false;
                     }
                 }
@@ -11411,8 +11479,7 @@ pub const parser_core = struct {
                 try s.expectToken(')');
                 try s.expectToken('{');
                 try s.pushScope();
-                errdefer s.popScope();
-                try s.emitEnterScope();
+                errdefer s.popScopeIdentity();
                 const saved_switch_case_block_scope = s.in_switch_case_block_scope;
                 s.in_switch_case_block_scope = true;
                 defer s.in_switch_case_block_scope = saved_switch_case_block_scope;
@@ -11421,6 +11488,10 @@ pub const parser_core = struct {
                 enterSwitchContinueCleanup(s);
                 defer leaveSwitchContinueCleanup(s);
                 const label_frame = if (switch_label) |atom_id| try s.pushLabelFrame(atom_id, false) else null;
+                var switch_block: BlockEnv = undefined;
+                pushControlBlock(s, &switch_block, switch_label, true, false, false, s.scope_level, 1, false);
+                var switch_block_active = true;
+                defer if (switch_block_active) popControlBlock(s, &switch_block);
 
                 // Keep unmatched case-test exits separate from matched
                 // fallthrough jumps: once a case has matched, later case tests
@@ -11532,13 +11603,15 @@ pub const parser_core = struct {
                     }
                 }
                 if (fallthrough_jump) |off| try patchForwardJump(s, off);
+                popControlBlock(s, &switch_block);
+                switch_block_active = false;
                 try popBreakOnlyFrameAndPatch(s);
                 if (label_frame) |idx| {
                     try s.patchLabelBreaks(idx);
                     s.popLabelFrame(idx);
                 }
                 try s.emitOp(opcode.op.drop);
-                s.popScope();
+                try s.popScope();
             },
             tok.TOK_TRY => {
                 try s.advance();
@@ -11579,8 +11652,7 @@ pub const parser_core = struct {
 
                     try s.pushScope();
                     var catch_binding_scope_active = true;
-                    errdefer if (catch_binding_scope_active) s.popScope();
-                    try s.emitEnterScope();
+                    errdefer if (catch_binding_scope_active) s.popScopeIdentity();
                     if (s.peekKind() == '{') {
                         try s.emitOpNoSource(opcode.op.drop);
                     } else {
@@ -11630,16 +11702,15 @@ pub const parser_core = struct {
                     // block's own scope.
                     try s.pushScope();
                     var catch_wrapper_scope_active = true;
-                    errdefer if (catch_wrapper_scope_active) s.popScope();
-                    try s.emitEnterScope();
+                    errdefer if (catch_wrapper_scope_active) s.popScopeIdentity();
                     try parseBlock(s);
 
                     popReturnFinallyFrame(s, catch_frame);
                     catch_frame_active = false;
                     s.active_catch_marker_depth = catch_body_outer_depth;
-                    s.popScope();
+                    try s.popScope();
                     catch_wrapper_scope_active = false;
-                    s.popScope();
+                    try s.popScope();
                     catch_binding_scope_active = false;
 
                     if (isLiveCode(s)) {
@@ -11832,6 +11903,7 @@ pub const parser_core = struct {
         if (catch_marker_depth > s.active_catch_marker_depth) return Error.UnexpectedToken;
         try s.return_finally_frames.append(s.function.memory.allocator, .{
             .finally_label = finally_label,
+            .scope_level = s.scope_level,
             .catch_marker_depth = catch_marker_depth,
             .break_depth = s.break_frame_lens.items.len,
             .continue_depth = s.continue_frame_lens.items.len,
@@ -12083,140 +12155,24 @@ pub const parser_core = struct {
         };
     }
 
-    fn blockOccursBeforeBoundary(cursor: ?*BlockEnv, needle: *BlockEnv, boundary: ?*BlockEnv) bool {
-        var block = cursor;
-        while (block) |current| : (block = current.prev) {
-            if (current == boundary) return false;
-            if (current == needle) return true;
+    fn controlBlockMatchesTarget(block: *const BlockEnv, target: FinallyControlTarget) bool {
+        if (target.label_atom) |atom_id| {
+            return switch (target.kind) {
+                .@"break" => block.label_break >= 0 and block.label_name == atom_id,
+                .@"continue" => block.label_cont >= 0 and block.label_name == atom_id,
+            };
         }
-        return false;
+        return switch (target.kind) {
+            .@"break" => block.label_break >= 0 and !block.is_regular_stmt,
+            .@"continue" => block.label_cont >= 0,
+        };
     }
 
-    fn advanceControlBlockCursorUntil(cursor: *?*BlockEnv, boundary: ?*BlockEnv) Error!void {
-        while (cursor.*) |current| {
-            if (current == boundary) return;
-            cursor.* = current.prev;
-        }
-        if (boundary != null) return Error.UnexpectedToken;
-    }
-
-    fn emitControlVectorCleanupTo(
-        s: *State,
-        kind: FinallyControlKind,
-        cursor: *usize,
-        boundary_depth: usize,
-        catch_marker_depth: *u32,
-    ) Error!void {
-        if (cursor.* < boundary_depth) return Error.UnexpectedToken;
-        while (cursor.* > boundary_depth) {
-            cursor.* -= 1;
-            switch (kind) {
-                .@"break" => {
-                    try emitCatchMarkerDropsFromDepth(
-                        s,
-                        catch_marker_depth,
-                        s.break_frame_catch_marker_depths.items[cursor.*],
-                    );
-                    try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[cursor.*]);
-                },
-                .@"continue" => {
-                    try emitCatchMarkerDropsFromDepth(
-                        s,
-                        catch_marker_depth,
-                        s.continue_frame_catch_marker_depths.items[cursor.*],
-                    );
-                    const break_frame_index = s.continue_frame_break_frame_indices.items[cursor.*];
-                    try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[break_frame_index]);
-                },
-            }
-        }
-    }
-
-    fn emitFinallyBodyControlEvent(
+    fn emitResolvedControlJump(
         s: *State,
         target: FinallyControlTarget,
-        frame: FinallyBodyControlFrame,
-        vector_cursor: *usize,
-        block_cursor: *?*BlockEnv,
-        catch_marker_depth: *u32,
+        resolved: ResolvedFinallyControlTarget,
     ) Error!void {
-        const boundary_depth = switch (target.kind) {
-            .@"break" => frame.break_depth,
-            .@"continue" => frame.continue_depth,
-        };
-        try emitControlVectorCleanupTo(s, target.kind, vector_cursor, boundary_depth, catch_marker_depth);
-        try emitCatchMarkerDropsFromDepth(s, catch_marker_depth, frame.catch_marker_depth);
-        try advanceControlBlockCursorUntil(block_cursor, frame.block);
-        try s.emitOpNoSource(opcode.op.drop);
-        try s.emitOpNoSource(opcode.op.drop);
-        block_cursor.* = frame.block.prev;
-    }
-
-    fn emitControlThroughFinally(s: *State, target: FinallyControlTarget) Error!void {
-        const resolved = try resolveFinallyControlTarget(s, target);
-        var vector_cursor = switch (target.kind) {
-            .@"break" => s.break_frame_lens.items.len,
-            .@"continue" => s.continue_frame_lens.items.len,
-        };
-        var block_cursor = s.top_break;
-        var catch_marker_depth = s.active_catch_marker_depth;
-        var body_index = s.finally_body_control_frames.items.len;
-
-        var return_index = s.return_finally_frames.items.len;
-        while (return_index != 0) {
-            return_index -= 1;
-            if (!try controlTargetCrossesFinallyFrame(s, target, return_index)) continue;
-            const return_frame = s.return_finally_frames.items[return_index];
-
-            while (body_index != 0) {
-                const candidate_index = body_index - 1;
-                if (!try controlTargetCrossesFinallyBody(s, target, candidate_index)) break;
-                const body_frame = s.finally_body_control_frames.items[candidate_index];
-                if (!blockOccursBeforeBoundary(block_cursor, body_frame.block, return_frame.block_boundary)) break;
-                try emitFinallyBodyControlEvent(
-                    s,
-                    target,
-                    body_frame,
-                    &vector_cursor,
-                    &block_cursor,
-                    &catch_marker_depth,
-                );
-                body_index -= 1;
-            }
-
-            const boundary_depth = switch (target.kind) {
-                .@"break" => return_frame.break_depth,
-                .@"continue" => return_frame.continue_depth,
-            };
-            try emitControlVectorCleanupTo(s, target.kind, &vector_cursor, boundary_depth, &catch_marker_depth);
-            try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
-            try advanceControlBlockCursorUntil(&block_cursor, return_frame.block_boundary);
-            try s.emitOpNoSource(opcode.op.undefined);
-            try emitParserLabelJumpNoSource(s, opcode.op.gosub, return_frame.finally_label);
-            try s.emitOpNoSource(opcode.op.drop);
-        }
-
-        while (body_index != 0) {
-            const candidate_index = body_index - 1;
-            if (!try controlTargetCrossesFinallyBody(s, target, candidate_index)) break;
-            try emitFinallyBodyControlEvent(
-                s,
-                target,
-                s.finally_body_control_frames.items[candidate_index],
-                &vector_cursor,
-                &block_cursor,
-                &catch_marker_depth,
-            );
-            body_index -= 1;
-        }
-
-        try emitControlVectorCleanupTo(s, target.kind, &vector_cursor, resolved.depth, &catch_marker_depth);
-        try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, resolved.catch_marker_depth);
-        switch (target.kind) {
-            .@"break" => try emitUnlabelledBreakCleanup(s, resolved.cleanup_drops),
-            .@"continue" => try emitCrossFrameCleanup(s, resolved.cleanup_drops),
-        }
-
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
         if (resolved.label_frame_index) |label_index| {
             switch (target.kind) {
@@ -12227,6 +12183,106 @@ pub const parser_core = struct {
             .@"break" => try s.break_fixups.append(s.function.memory.allocator, off),
             .@"continue" => try s.continue_fixups.append(s.function.memory.allocator, off),
         }
+    }
+
+    fn emitCrossedControlBlockCleanup(s: *State, block: *const BlockEnv) Error!void {
+        var dropped: i32 = 0;
+        if (block.has_iterator) {
+            try s.emitOpNoSource(opcode.op.iterator_close);
+            dropped = 3;
+        }
+        while (dropped < block.drop_count) : (dropped += 1) {
+            try s.emitOpNoSource(opcode.op.drop);
+        }
+        if (block.label_finally >= 0) {
+            try s.emitOpNoSource(opcode.op.undefined);
+            try emitParserLabelJumpNoSource(
+                s,
+                opcode.op.gosub,
+                .{ .id = @intCast(block.label_finally) },
+            );
+            try s.emitOpNoSource(opcode.op.drop);
+        }
+    }
+
+    /// Walk ordered control environments up to `boundary`.  Scope exits are
+    /// emitted before each target test, exactly like QuickJS `emit_break`;
+    /// crossed iterator/drop/finally cleanup follows that environment's scope
+    /// exits before the walker advances to its parent.
+    fn emitControlBlocksUntil(
+        s: *State,
+        target: FinallyControlTarget,
+        resolved: ResolvedFinallyControlTarget,
+        block_cursor: *?*BlockEnv,
+        boundary: ?*BlockEnv,
+        scope_cursor: *i32,
+        catch_marker_depth: *u32,
+    ) Error!bool {
+        while (block_cursor.*) |current| {
+            if (current == boundary) return false;
+
+            try s.closeScopes(scope_cursor.*, current.scope_level);
+            scope_cursor.* = current.scope_level;
+            if (controlBlockMatchesTarget(current, target)) {
+                try emitCatchMarkerDropsFromDepth(s, catch_marker_depth, resolved.catch_marker_depth);
+                // zjs's array-backed fixups do not all land on a QuickJS-style
+                // physical break label before the target epilogue. Preserve
+                // the target frame's established stack cleanup while the
+                // BlockEnv walker owns only crossed-environment cleanup.
+                switch (target.kind) {
+                    .@"break" => try emitUnlabelledBreakCleanup(s, resolved.cleanup_drops),
+                    .@"continue" => {},
+                }
+                try emitResolvedControlJump(s, target, resolved);
+                return true;
+            }
+
+            try emitCatchMarkerDropsFromDepth(s, catch_marker_depth, current.catch_marker_depth);
+            try emitCrossedControlBlockCleanup(s, current);
+            block_cursor.* = current.prev;
+        }
+        if (boundary != null) return Error.UnexpectedToken;
+        return false;
+    }
+
+    fn emitControlThroughFinally(s: *State, target: FinallyControlTarget) Error!void {
+        const resolved = try resolveFinallyControlTarget(s, target);
+        var block_cursor = s.top_break;
+        var scope_cursor = s.scope_level;
+        var catch_marker_depth = s.active_catch_marker_depth;
+
+        var return_index = s.return_finally_frames.items.len;
+        while (return_index != 0) {
+            return_index -= 1;
+            if (!try controlTargetCrossesFinallyFrame(s, target, return_index)) continue;
+            const return_frame = s.return_finally_frames.items[return_index];
+            if (try emitControlBlocksUntil(
+                s,
+                target,
+                resolved,
+                &block_cursor,
+                return_frame.block_boundary,
+                &scope_cursor,
+                &catch_marker_depth,
+            )) return;
+            try s.closeScopes(scope_cursor, return_frame.scope_level);
+            scope_cursor = return_frame.scope_level;
+            try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
+            try s.emitOpNoSource(opcode.op.undefined);
+            try emitParserLabelJumpNoSource(s, opcode.op.gosub, return_frame.finally_label);
+            try s.emitOpNoSource(opcode.op.drop);
+        }
+
+        if (try emitControlBlocksUntil(
+            s,
+            target,
+            resolved,
+            &block_cursor,
+            null,
+            &scope_cursor,
+            &catch_marker_depth,
+        )) return;
+        return Error.UnexpectedToken;
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
@@ -12477,8 +12533,7 @@ pub const parser_core = struct {
         try s.expectToken(')');
 
         try s.pushScope();
-        errdefer s.popScope();
-        try s.emitEnterScope();
+        errdefer s.popScopeIdentity();
         const with_atom = atom_module.ids.with_object;
         const with_idx: u16 = switch (try s.defineVar(with_atom, .with_)) {
             .local => |idx| idx,
@@ -12494,7 +12549,7 @@ pub const parser_core = struct {
         }
         try s.setEvalReturnUndefined();
         try parseStatementOrDecl(s, DeclMask{});
-        s.popScope();
+        try s.popScope();
     }
 
     fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
@@ -12521,10 +12576,9 @@ pub const parser_core = struct {
         var iteration_using_value_loc: ?u16 = null;
 
         var pushed_for_scope = false;
-        errdefer if (pushed_for_scope) s.popScope();
+        errdefer if (pushed_for_scope) s.popScopeIdentity();
         try s.pushScope();
         pushed_for_scope = true;
-        try s.emitEnterScope();
 
         // Initial entry skips the target. Each successful iterator step later
         // branches to this exact one-pass target block with its value on TOS.
@@ -12713,23 +12767,20 @@ pub const parser_core = struct {
         }
         const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
 
-        var loop_block = BlockEnv{
-            .prev = s.top_break,
-            .label_name = loop_label orelse atom_module.null_atom,
-            .label_break = -1,
-            .label_cont = -1,
-            .drop_count = if (is_for_of) 3 else 1,
-            .label_finally = -1,
-            .scope_level = s.scope_level,
-            .catch_marker_depth = s.active_catch_marker_depth,
-            .has_iterator = is_for_of,
-            .is_regular_stmt = false,
-        };
-        s.top_break = &loop_block;
+        var loop_block: BlockEnv = undefined;
+        pushControlBlock(
+            s,
+            &loop_block,
+            loop_label,
+            true,
+            true,
+            false,
+            block_scope_level,
+            if (is_for_of) 3 else 1,
+            is_for_of,
+        );
         var loop_block_active = true;
-        defer if (loop_block_active) {
-            s.top_break = loop_block.prev;
-        };
+        defer if (loop_block_active) popControlBlock(s, &loop_block);
 
         var iteration_using_stack_loc: ?u16 = null;
         var iteration_using_catch_off: ?usize = null;
@@ -12780,14 +12831,11 @@ pub const parser_core = struct {
             try patchForwardJump(s, iteration_end_off);
             _ = s.using_block_frames.pop();
             iteration_using_frame_active = false;
-            try patchContinueFrame(s);
-            if (label_frame) |idx| try s.patchLabelContinues(idx);
-        } else {
-            try patchContinueFrame(s);
-            if (label_frame) |idx| try s.patchLabelContinues(idx);
         }
 
         try s.closeScopes(s.scope_level, block_scope_level);
+        try patchContinueFrame(s);
+        if (label_frame) |idx| try s.patchLabelContinues(idx);
         try patchForwardJump(s, next_jump_off);
         if (is_for_of) {
             if (is_for_await) {
@@ -12825,11 +12873,10 @@ pub const parser_core = struct {
             s.popLabelFrame(idx);
         }
 
-        s.top_break = loop_block.prev;
+        popControlBlock(s, &loop_block);
         loop_block_active = false;
-        try s.closeScopes(s.scope_level, block_scope_level);
         if (pushed_for_scope) {
-            s.popScope();
+            try s.popScope();
             pushed_for_scope = false;
         }
     }
@@ -14294,7 +14341,7 @@ pub const parser_core = struct {
             }
         } else {
             try s.pushBodyScopeIdentity();
-            errdefer s.popScope();
+            errdefer s.popScopeIdentity();
             // Expression body. Deliberate spec-over-qjs divergence: ES6
             // ConciseBody[?In] inherits the no-`in` restriction (so
             // `for (x => 0 in 1;;)` is a SyntaxError, test262
@@ -14303,7 +14350,7 @@ pub const parser_core = struct {
             // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
             try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
             try s.emitOp(if (is_async) opcode.op.return_async else opcode.op.@"return");
-            s.popScope();
+            s.popScopeIdentity();
         }
         s.leaveControlBoundary(saved_control_frames);
         control_boundary_active = false;
@@ -16287,13 +16334,6 @@ pub const parser_core = struct {
         try s.emitOpU16(opcode.op.put_loc_check_init, fields_init_local_idx);
     }
 
-    fn emitClassDeclLocalInitFromClassStack(s: *State, class_local_idx: u16, fields_init_local_idx: u16, class_fields_init_child_index: ?u16) Error!void {
-        try emitClassFieldsInitLocalInitFromClassStack(s, fields_init_local_idx, class_fields_init_child_index);
-        try s.emitOp(opcode.op.drop);
-        try s.emitOpU16(opcode.op.set_loc, class_local_idx);
-        try s.emitCloseLoc(fields_init_local_idx);
-    }
-
     fn emitClassDefineOperands(s: *State, cpool_idx: u16) Error!void {
         try s.emitOpU32(opcode.op.push_const, cpool_idx);
     }
@@ -16343,8 +16383,8 @@ pub const parser_core = struct {
         var class_private_scope_pushed = false;
         var class_name_local_idx: ?u16 = null;
         errdefer {
-            if (class_private_scope_pushed) s.popScope();
-            if (class_outer_scope_pushed) s.popScope();
+            if (class_private_scope_pushed) s.popScopeIdentity();
+            if (class_outer_scope_pushed) s.popScopeIdentity();
             s.truncateClassPrivateElements(saved_class_private_elements_len);
             s.truncateClassPrivateBoundNames(saved_class_private_bound_names_len);
             s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
@@ -16376,7 +16416,6 @@ pub const parser_core = struct {
         // completed scope chain still makes a named class TDZ-visible there.
         try s.pushScope();
         class_outer_scope_pushed = true;
-        try s.emitEnterScope();
         try parseClassHeritage(s);
         if (class_name) |class_atom| {
             class_name_local_idx = switch (try s.defineVar(class_atom, .const_)) {
@@ -16388,7 +16427,6 @@ pub const parser_core = struct {
         try s.expectToken('{');
         try s.pushScope();
         class_private_scope_pushed = true;
-        try s.emitEnterScope();
         class_fields_init_local_idx = switch (try s.defineVar(atom_class_fields_init, .const_)) {
             .local => |idx| idx,
             else => unreachable,
@@ -16423,12 +16461,14 @@ pub const parser_core = struct {
         const default_constructor_name = class_name orelse if (is_decl) s.function.name else atom_module.ids.empty_string;
         const class_constructor_cpool_idx = s.class_constructor_cpool_idx orelse
             try appendDefaultClassConstructor(s, default_constructor_name);
+        const class_private_scope_level = s.scope_level;
         if (class_private_scope_pushed) {
-            s.popScope();
+            s.popScopeIdentity();
             class_private_scope_pushed = false;
         }
+        const class_outer_scope_level = s.scope_level;
         if (class_outer_scope_pushed) {
-            s.popScope();
+            s.popScopeIdentity();
             class_outer_scope_pushed = false;
         }
         try s.setChildFunctionSourceByCpoolIndex(class_constructor_cpool_idx, class_source_start, class_source_end);
@@ -16476,22 +16516,21 @@ pub const parser_core = struct {
             try s.emitOpAtomU8(opcode.op.define_class, name_atom, if (class_has_extends) 1 else 0);
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
+            const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
+            try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
+            try s.emitOp(opcode.op.drop);
+            // Parsing restores the outer scope identity before emitting this
+            // deferred class runtime sequence so the declaration binding is
+            // defined in its containing scope. Keep the runtime exits at the
+            // canonical QuickJS position: after the private/name locals are
+            // initialized, before the outer class-statement binding is stored.
+            try s.emitLeaveScope(class_private_scope_level);
+            try s.emitLeaveScope(class_outer_scope_level);
             if (class_decl_local_idx) |local_idx| {
-                const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
-                try emitClassDeclLocalInitFromClassStack(s, local_idx, fields_idx, parsed_class_fields_init_child_index);
-            } else if (top_level_class_binding) {
-                // Script top-level class cell (no frame slot): set up
-                // `<class_fields_init>`, drop the class prototype `define_class`
-                // pushed, and leave the constructor on the stack for the scope
-                // store below. Mirrors the frame-local path's stack
-                // discipline (emitClassDeclLocalInitFromClassStack) minus the
-                // `set_loc` into the (non-existent) outer frame slot.
-                const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
-                try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
-                try s.emitOp(opcode.op.drop);
-                try s.emitCloseLoc(fields_idx);
+                try s.emitOpU16(opcode.op.set_loc, local_idx);
+            } else if (!top_level_class_binding) {
+                return Error.UnexpectedToken;
             }
-            if (class_name_local_idx) |local_idx| try s.emitCloseLoc(local_idx);
             if (top_level_class_binding) {
                 try s.emitScopePutVarInit(name_atom);
             } else {
@@ -16516,6 +16555,10 @@ pub const parser_core = struct {
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
             try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
             try s.emitOp(opcode.op.drop);
+            // Like QuickJS js_parse_class, leave both inner class scopes only
+            // after their deferred initialization and static runtime work.
+            try s.emitLeaveScope(class_private_scope_level);
+            try s.emitLeaveScope(class_outer_scope_level);
             s.last_anonymous_function_expr = class_name == null and s.pending_function_name == null and !class_static_name_seen;
         }
     }

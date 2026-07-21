@@ -4122,6 +4122,443 @@ test "Object literal: spread" {
 // These tests cover the FunctionDef-side data that the finalize pipeline
 // consumes, without depending on full bytecode emission.
 
+const Phase1ScopeEventKind = enum { enter, leave };
+
+const Phase1ScopeEvent = struct {
+    kind: Phase1ScopeEventKind,
+    scope: u16,
+    pc: usize,
+};
+
+const ExpectedPhase1ScopeEvent = struct {
+    kind: Phase1ScopeEventKind,
+    scope: u16,
+};
+
+fn tracePhase1ScopeEvents(code: []const u8, storage: []Phase1ScopeEvent) ![]const Phase1ScopeEvent {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(opcode_id));
+        if (size == 0 or pc + size > code.len) return error.TestUnexpectedResult;
+        if (opcode_id == op.enter_scope or opcode_id == op.leave_scope) {
+            if (count == storage.len or size < 3) return error.TestUnexpectedResult;
+            storage[count] = .{
+                .kind = if (opcode_id == op.enter_scope) .enter else .leave,
+                .scope = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                .pc = pc,
+            };
+            count += 1;
+        }
+        pc += size;
+    }
+    return storage[0..count];
+}
+
+fn expectPhase1ScopeEvents(code: []const u8, expected: []const ExpectedPhase1ScopeEvent) !void {
+    var storage: [128]Phase1ScopeEvent = undefined;
+    const actual = try tracePhase1ScopeEvents(code, &storage);
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (actual, expected) |event, want| {
+        try std.testing.expectEqual(want.kind, event.kind);
+        try std.testing.expectEqual(want.scope, event.scope);
+    }
+}
+
+fn findPhase1Opcode(code: []const u8, opcode_id: u8, start_pc: usize) !?usize {
+    var pc = start_pc;
+    while (pc < code.len) {
+        const current = code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(current));
+        if (size == 0 or pc + size > code.len) return error.TestUnexpectedResult;
+        if (current == opcode_id) return pc;
+        pc += size;
+    }
+    return null;
+}
+
+fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("scope-events");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    return function;
+}
+
+fn parseRawTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("scope-events-ts");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    return function;
+}
+
+test "M-SCOPE event producers: ordinary scopes match QuickJS phase-1 events" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawStatement(&env, "{}");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{});
+    }
+    {
+        var function = try parseRawStatement(&env, "{;}");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    {
+        var function = try parseRawStatement(&env, "if (true) ;");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    {
+        var function = try parseRawStatement(&env, "for (;;) ;");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    {
+        var function = try parseRawStatement(&env, "for (let i = 0;;) ;");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    inline for (.{
+        "for (let value of []) ;",
+        "for (let key in {}) ;",
+    }) |source| {
+        var function = try parseRawStatement(&env, source);
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+}
+
+test "M-SCOPE event producers: switch with and class layers are eventful" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    inline for (.{
+        "switch (0) { default: ; }",
+        "with ({}) ;",
+    }) |source| {
+        var function = try parseRawStatement(&env, source);
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+
+    var class_function = try parseRawStatement(&env, "class C {}");
+    defer class_function.deinit(env.rt);
+    try expectPhase1ScopeEvents(class_function.code, &.{
+        .{ .kind = .enter, .scope = 2 },
+        .{ .kind = .enter, .scope = 3 },
+        .{ .kind = .leave, .scope = 3 },
+        .{ .kind = .leave, .scope = 2 },
+    });
+
+    var heritage_function = try parseRawStatement(
+        &env,
+        "var cls = class C extends (probe = function () { return C; }, Object) {};",
+    );
+    defer heritage_function.deinit(env.rt);
+    var event_storage: [8]Phase1ScopeEvent = undefined;
+    const heritage_events = try tracePhase1ScopeEvents(heritage_function.code, &event_storage);
+    try std.testing.expectEqual(@as(usize, 4), heritage_events.len);
+
+    const define_class_pc = (try findPhase1Opcode(heritage_function.code, op.define_class, 0)) orelse
+        return error.TestUnexpectedResult;
+    var last_class_init_pc: ?usize = null;
+    var pc = define_class_pc;
+    while (pc < heritage_function.code.len) {
+        const opcode_id = heritage_function.code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(opcode_id));
+        if (size == 0 or pc + size > heritage_function.code.len) return error.TestUnexpectedResult;
+        if (opcode_id == op.put_loc_check_init) last_class_init_pc = pc;
+        pc += size;
+    }
+    const init_pc = last_class_init_pc orelse return error.TestUnexpectedResult;
+    // QuickJS closes the private and class-name scopes only after both
+    // deferred class locals have been initialized. Closing the class-name
+    // scope earlier detaches a heritage closure from the still-TDZ slot.
+    try std.testing.expect(heritage_events[2].pc > init_pc);
+    try std.testing.expect(heritage_events[3].pc > heritage_events[2].pc);
+}
+
+test "M-SCOPE event producers: catch binding wrapper and body leave in LIFO order" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawStatement(&env, "try {} catch (caught) {;}");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .enter, .scope = 3 },
+            .{ .kind = .enter, .scope = 4 },
+            .{ .kind = .leave, .scope = 4 },
+            .{ .kind = .leave, .scope = 3 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    {
+        var function = try parseRawStatement(&env, "try {} catch (caught) {}");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .enter, .scope = 3 },
+            .{ .kind = .leave, .scope = 3 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+    }
+    {
+        var function = try parseRawStatement(&env, "try {} catch (caught) {;} finally {;}");
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .enter, .scope = 3 },
+            .{ .kind = .enter, .scope = 4 },
+            .{ .kind = .leave, .scope = 4 },
+            .{ .kind = .leave, .scope = 3 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .enter, .scope = 5 },
+            .{ .kind = .leave, .scope = 5 },
+        });
+    }
+}
+
+test "M-SCOPE event producers: structural body and namespace scopes stay identity-only" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var root = try parseRawStatement(&env, ";");
+        defer root.deinit(env.rt);
+        try expectPhase1ScopeEvents(root.code, &.{});
+    }
+    {
+        var namespace = try parseRawTSProgram(&env, "namespace N { let value = 1; }");
+        defer namespace.deinit(env.rt);
+        try expectPhase1ScopeEvents(namespace.code, &.{});
+    }
+
+    const name = try env.rt.internAtom("scope-body-identities");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+    var lex = QjsLexer.init(
+        std.testing.allocator,
+        &env.rt.atoms,
+        "function body(){;} function params(value = 1){} const concise = () => 1; class C { field = 1; }",
+    );
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    configureScriptRoot(&state);
+    state.top_level_functions_as_children = true;
+    try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    var saw_body = false;
+    var saw_params = false;
+    var saw_concise = false;
+    var saw_default_constructor = false;
+    for (state.function_def.child_list) |child| {
+        const child_name = env.rt.atoms.name(child.func_name) orelse "";
+        if (std.mem.eql(u8, child_name, "body")) {
+            saw_body = true;
+            try expectPhase1ScopeEvents(child.byte_code, &.{});
+        } else if (std.mem.eql(u8, child_name, "params")) {
+            saw_params = true;
+            try expectPhase1ScopeEvents(child.byte_code, &.{
+                .{ .kind = .enter, .scope = 1 },
+                .{ .kind = .leave, .scope = 1 },
+            });
+        } else if (child.func_type == .arrow) {
+            saw_concise = true;
+            try expectPhase1ScopeEvents(child.byte_code, &.{});
+        } else if (child.func_type == .class_constructor or child.func_type == .derived_class_constructor) {
+            saw_default_constructor = true;
+            try expectPhase1ScopeEvents(child.byte_code, &.{});
+        }
+    }
+    try std.testing.expect(saw_body);
+    try std.testing.expect(saw_params);
+    try std.testing.expect(saw_concise);
+    try std.testing.expect(saw_default_constructor);
+}
+
+test "M-SCOPE abrupt control: labelled break and continue close nested scopes at the source" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    inline for (.{
+        "outer: while (true) { { break outer; } }",
+        "outer: while (true) { { continue outer; } }",
+    }) |source| {
+        var function = try parseRawStatement(&env, source);
+        defer function.deinit(env.rt);
+        try expectPhase1ScopeEvents(function.code, &.{
+            .{ .kind = .enter, .scope = 2 },
+            .{ .kind = .enter, .scope = 3 },
+            .{ .kind = .leave, .scope = 3 },
+            .{ .kind = .leave, .scope = 2 },
+            .{ .kind = .leave, .scope = 3 },
+            .{ .kind = .leave, .scope = 2 },
+        });
+
+        const jump_pc = (try findPhase1Opcode(function.code, op.goto, 0)) orelse return error.TestExpectedEqual;
+        var storage: [16]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(function.code, &storage);
+        var before_jump: usize = 0;
+        for (events) |event| {
+            try std.testing.expect(event.scope != 1);
+            if (event.pc < jump_pc) before_jump += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 4), before_jump);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[before_jump - 2].kind);
+        try std.testing.expectEqual(@as(u16, 3), events[before_jump - 2].scope);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[before_jump - 1].kind);
+        try std.testing.expectEqual(@as(u16, 2), events[before_jump - 1].scope);
+    }
+}
+
+test "M-SCOPE abrupt control: classic and for-of continue targets follow the body leave" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        var function = try parseRawStatement(&env, "outer: for (;;) { { continue outer; } }");
+        defer function.deinit(env.rt);
+        var storage: [32]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(function.code, &storage);
+        try std.testing.expectEqual(@as(usize, 9), events.len);
+        const source_jump_pc = events[4].pc + 3;
+        try std.testing.expectEqual(op.goto, function.code[source_jump_pc]);
+        const continue_target = std.mem.readInt(u32, function.code[source_jump_pc + 1 ..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, @intCast(events[7].pc + 3)), continue_target);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[7].kind);
+        try std.testing.expectEqual(@as(u16, 2), events[7].scope);
+    }
+
+    {
+        var function = try parseRawStatement(&env, "outer: for (const value of []) { { continue outer; } }");
+        defer function.deinit(env.rt);
+        var storage: [32]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(function.code, &storage);
+        try std.testing.expectEqual(@as(usize, 11), events.len);
+        const source_jump_pc = events[6].pc + 3;
+        try std.testing.expectEqual(op.goto, function.code[source_jump_pc]);
+        const continue_target = std.mem.readInt(u32, function.code[source_jump_pc + 1 ..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, @intCast(events[9].pc + 3)), continue_target);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[9].kind);
+        try std.testing.expectEqual(@as(u16, 2), events[9].scope);
+    }
+}
+
+test "M-SCOPE abrupt control: crossed finally sees scope leaves before gosub" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    inline for (.{
+        "outer: while (true) { try { { break outer; } } finally { ; } }",
+        "outer: while (true) { try { { continue outer; } } finally { ; } }",
+    }) |source| {
+        var function = try parseRawStatement(&env, source);
+        defer function.deinit(env.rt);
+        const gosub_pc = (try findPhase1Opcode(function.code, op.gosub, 0)) orelse return error.TestExpectedEqual;
+        var storage: [32]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(function.code, &storage);
+        var before_gosub: usize = 0;
+        for (events) |event| {
+            if (event.pc < gosub_pc) before_gosub += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 5), before_gosub);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[before_gosub - 2].kind);
+        try std.testing.expectEqual(@as(u16, 4), events[before_gosub - 2].scope);
+        try std.testing.expectEqual(Phase1ScopeEventKind.leave, events[before_gosub - 1].kind);
+        try std.testing.expectEqual(@as(u16, 3), events[before_gosub - 1].scope);
+    }
+}
+
+test "M-SCOPE negative contract: return cleanup and throw synthesize no scope leave" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    {
+        const name = try env.rt.internAtom("return-scope-events");
+        defer env.rt.atoms.free(name);
+        var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+        defer function.deinit(env.rt);
+        var lex = QjsLexer.init(
+            std.testing.allocator,
+            &env.rt.atoms,
+            "function f(){ for (const value of []) { try { return value; } finally { ; } } }",
+        );
+        var state = try ParseState.init(&lex, &function);
+        defer state.deinit(env.rt);
+        configureScriptRoot(&state);
+        state.top_level_functions_as_children = true;
+        try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+        try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
+        const child = state.function_def.child_list[0];
+
+        const gosub_pc = (try findPhase1Opcode(child.byte_code, op.gosub, 0)) orelse return error.TestExpectedEqual;
+        const iterator_close_pc = (try findPhase1Opcode(child.byte_code, op.iterator_close, gosub_pc)) orelse return error.TestExpectedEqual;
+        const return_pc = (try findPhase1Opcode(child.byte_code, op.@"return", iterator_close_pc)) orelse return error.TestExpectedEqual;
+        try std.testing.expect(gosub_pc < iterator_close_pc);
+        try std.testing.expect(iterator_close_pc < return_pc);
+
+        var storage: [64]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(child.byte_code, &storage);
+        for (events) |event| {
+            try std.testing.expect(!(event.kind == .leave and event.pc > gosub_pc and event.pc < return_pc));
+        }
+    }
+
+    {
+        var function = try parseRawStatement(&env, "try { { throw 1; } } catch (caught) {}");
+        defer function.deinit(env.rt);
+        const throw_pc = (try findPhase1Opcode(function.code, op.throw, 0)) orelse return error.TestExpectedEqual;
+        var storage: [32]Phase1ScopeEvent = undefined;
+        const events = try tracePhase1ScopeEvents(function.code, &storage);
+        for (events) |event| {
+            try std.testing.expect(!(event.kind == .leave and event.pc < throw_pc));
+        }
+    }
+}
+
 test "F10.1a FunctionDef: program root has var scope 0 and body scope 1" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
