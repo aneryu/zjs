@@ -2776,6 +2776,21 @@ test "resident generator resumes preserve nested catch and finally targets" {
         \\assert.sameValue(iterator.next().value, 1);
         \\try { iterator.throw(9); } catch (error) { caught = error; }
         \\assert.sameValue(caught, 9);
+        \\let delegateReturnCount = 0;
+        \\const missingThrow = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: 10, done: false }; },
+        \\  return() { delegateReturnCount++; return { done: true }; },
+        \\};
+        \\function* catchYieldStarHostError() {
+        \\  try { yield* missingThrow; }
+        \\  catch (error) { yield error instanceof TypeError; }
+        \\}
+        \\iterator = catchYieldStarHostError();
+        \\assert.sameValue(iterator.next().value, 10);
+        \\assert.sameValue(iterator.throw(11).value, true);
+        \\assert.sameValue(delegateReturnCount, 1);
+        \\assert.sameValue(iterator.next().done, true);
     );
     defer result.free(js.runtime);
 
@@ -10907,17 +10922,13 @@ test "generator parameter eval cells close before body resume" {
     try std.testing.expectEqualStrings("inside inside inside inside inside\n", stream.buffered());
 }
 
-test "generator return runs an add_loc-terminated finally to its stop boundary" {
+test "generator return executes an add_loc-terminated shared finally before completing" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Regression: op_add_loc_cold lacked the local_fast_blocked publishing arm
-    // (its register-resident body ends in `cont`, which skips coldNext's
-    // maybeStop). A `.return()`-driven finally resume arms stop_before_pc =
-    // finally_range.stop, and the peephole fuses the finally body's trailing
-    // `s += 1` into add_loc — the finally range's LAST op. Blowing past the
-    // stop boundary executed the post-finally `s += 100; yield s` eagerly and
-    // it.return(42) threw instead of returning {value: 42, done: true}.
+    // The pending completion and gosub return PC now live on the resident
+    // operand stack. An add_loc-terminated finalizer must reach `ret`, resume
+    // the compiled return leg and never execute the post-finalizer body.
     var output_buffer: [128]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
@@ -11329,6 +11340,35 @@ test "async generator return closes an inner iterator before its enclosing final
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("return,finally 9 true\n", stream.buffered());
+}
+
+test "async generator return awaits its value once before a yielding finalizer" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let awaitCount = 0;
+        \\const returned = { then(resolve) { awaitCount++; resolve(7); } };
+        \\async function* values() {
+        \\  try { yield 1; }
+        \\  finally { yield 2; }
+        \\}
+        \\const iterator = values();
+        \\iterator.next().then(function() {
+        \\  return iterator.return(returned);
+        \\}).then(function(finalizerYield) {
+        \\  print(finalizerYield.value, finalizerYield.done, awaitCount);
+        \\  return iterator.next();
+        \\}).then(function(completion) {
+        \\  print(completion.value, completion.done, awaitCount);
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2 false 1\n7 true 1\n", stream.buffered());
 }
 
 test "Engine eval preserves simple for-in mutation semantics" {
@@ -12100,6 +12140,19 @@ test "eval L0 completion falls off onto the op.return sentinel" {
     const repl_value = try js.evalWithOptions("40 + 2", .{ .filename = "<repl>" });
     defer repl_value.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 42), repl_value.asInt32());
+}
+
+test "eval preserves completion through nested shared finalizers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(eval("1; try { 2; } finally { 3; }"), 2);
+        \\assert.sameValue(eval("1; try { try { 2; } finally { 3; } } finally { 4; }"), 2);
+        \\assert.sameValue(eval("1; try { throw 5; } catch (error) { error + 1; } finally { 7; }"), 6);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
 }
 
 test "module top-level branch-to-end gets a terminator (no fall-off)" {

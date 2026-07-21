@@ -986,12 +986,10 @@ pub const SuspendedExecutionStorage = struct {
 pub const SuspendedExecutionState = struct {
     pc: usize = 0,
     storage: SuspendedExecutionStorage = .{},
-    /// Catch target observed when the frame was parked. `maxInt(u32)` is the
-    /// null sentinel; bytecode offsets are u32-addressable. This diagnostic
-    /// snapshot is not authoritative after a completion crosses a yielding
-    /// finally leg: resume reconstructs control state from `pc` and bytecode.
-    /// Keeping it in the struct's former tail padding does not grow
-    /// GeneratorExecutionState.
+    /// Authoritative dynamic catch target observed when the frame was parked.
+    /// `maxInt(u32)` is the null sentinel; bytecode offsets are u32-addressable.
+    /// A shared finalizer PC has multiple possible incoming catch states, so
+    /// resume must restore this scalar instead of inferring it from `pc`.
     catch_target_pc: u32 = no_suspended_catch_target,
     /// A resident frame exists even when every window is zero length and pc is
     /// zero. This is the zjs counterpart of qjs `func_state != NULL`; neither
@@ -5429,10 +5427,9 @@ pub const Object = extern struct {
         return false;
     }
 
-    pub fn addGeneratorNextFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addGeneratorNextFunction(self: *Object, rt: *JSRuntime) !void {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.generator_next = true;
-        return true;
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {

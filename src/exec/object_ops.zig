@@ -270,7 +270,7 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Ob
     defer next.free(rt);
     const next_object = property_ops.expectObject(next) catch return error.TypeError;
     next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
-    if (!next_object.addGeneratorNextFunction(rt)) return error.TypeError;
+    try next_object.addGeneratorNextFunction(rt);
     try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));

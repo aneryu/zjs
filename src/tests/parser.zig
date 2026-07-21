@@ -6236,6 +6236,77 @@ fn countFunctionClosures(code: []const u8) usize {
     return countOpcode(code, qop.fclosure) + countOpcode(code, qop.fclosure8);
 }
 
+test "try finally parses one shared finalizer body for every abrupt exit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(rt,
+        \\function outer(kind) {
+        \\  outerLoop: while (true) {
+        \\    try {
+        \\      if (kind === 0) return 0;
+        \\      if (kind === 1) break outerLoop;
+        \\      if (kind === 2) continue outerLoop;
+        \\      throw kind;
+        \\    } catch (error) {
+        \\      if (kind === 3) return error;
+        \\      if (kind === 4) continue outerLoop;
+        \\      break outerLoop;
+        \\    } finally {
+        \\      sink.singleFinalizerAtom = function singleFinalizerChild() { return 1; };
+        \\    }
+        \\  }
+        \\}
+    , .{ .mode = .script, .filename = "single-finalizer-body.js" });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed.function, rt, "outer") orelse
+        return error.TestExpectedEqual;
+
+    var finalizer_child_count: usize = 0;
+    for (outer.cpoolSlice()) |value| {
+        const child = functionBytecodeFromValue(value) orelse continue;
+        if (std.mem.eql(u8, rt.atoms.name(child.func_name) orelse "", "singleFinalizerChild")) {
+            finalizer_child_count += 1;
+        }
+    }
+
+    var finalizer_atom_count: usize = 0;
+    var atom_it = outer.atomOperandIterator();
+    while (atom_it.next()) |atom_id| {
+        if (std.mem.eql(u8, rt.atoms.name(atom_id) orelse "", "singleFinalizerAtom")) {
+            finalizer_atom_count += 1;
+        }
+    }
+
+    // Every normal/throw/return/break/continue edge calls one shared body.
+    // The body's child, constant-pool entry, atom-bearing store, code and ret
+    // therefore occur once even though several gosub sites target it.
+    try std.testing.expect(countOpcode(outer.byteCode(), qop.gosub) >= 4);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(outer.byteCode(), qop.ret));
+    try std.testing.expectEqual(@as(usize, 1), countFunctionClosures(outer.byteCode()));
+    try std.testing.expectEqual(@as(usize, 1), finalizer_child_count);
+    try std.testing.expectEqual(@as(usize, 1), finalizer_atom_count);
+}
+
+test "try catch fixed topology removes calls to its empty finalizer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try parser.compile(
+        rt,
+        "function noFinally(value) { try { if (value) return 1; throw 2; } catch (error) { return error; } }",
+        .{ .mode = .script, .filename = "empty-finalizer.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const function = findFunctionConstantNamed(&parsed.function, rt, "noFinally") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
+}
+
 fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {
     if (fb.flags.func_kind == kind) return true;
     for (fb.cpoolSlice()) |value| {

@@ -1572,7 +1572,7 @@ fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c
 /// `cold_table[pc[0]]` hop (op_if_false8 pattern — LLVM can't devirtualize it, so the
 /// fast leaf stays prologue-free).
 pub fn op_drop_fast(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    // Generator/eval stop boundary: during a generator's parameter-init phase the
+    // Generator parameter/body stop boundary: during parameter initialization the
     // cold path's coldNext runs maybeStop (suspend at the body-start pc). `cont`
     // skips that check, so a `drop` that is the last param-init op would blow past the
     // suspend and execute the generator body eagerly (corrupting generator state — the
@@ -2769,7 +2769,8 @@ pub fn op_mod_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
 /// `compareAt` runs register-resident (no publish round-trip) and the handler writes
 /// the result into sp[-2] + pops one, exactly like the int32 fast arm. The win
 /// matters for float-counter loops (`for (var x=0.5; x<n; x++)`), whose `x < n`
-/// misses the int32 arm every iteration. At a generator/eval stop boundary
+/// misses the int32 arm every iteration. At the generator parameter/body stop
+/// boundary
 /// (local_fast_blocked) it falls back to the publishing path so coldNext's maybeStop
 /// can still suspend at stop_before_pc.
 pub fn op_compare_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -2995,14 +2996,11 @@ pub fn op_add_loc(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// runs the exact same full `addLocal` (int+float stays with object/BigInt), unhopped.
 pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) {
-        // Generator/eval stop boundary (same arm as op_update_loc_cold /
+        // Generator parameter/body stop boundary (same arm as op_update_loc_cold /
         // op_mod_cold / op_compare_cold): use the publishing path so coldNext's
         // maybeStop fires when this op ends exactly at stop_before_pc. Without
         // it the register-resident body below ends in `cont`, skipping the
-        // boundary check — a `.return()`-driven finally range whose LAST op is
-        // the fused `s += x` add_loc then blows past finally_range.stop and
-        // eagerly executes the code after the finally (observed: it.return()
-        // throws instead of returning {value, done:true}).
+        // parameter/body boundary and eagerly entering the generator body.
         vm.publish(pc, sp);
         _ = arith_vm.addLocalVm(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.catch_target, vm.output) catch |e| return vm.fail(e);
         return coldNext(var_buf, vm);

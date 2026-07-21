@@ -308,14 +308,10 @@ noinline fn resumeExecutionStateRaw(
     const resident_frame = execution.frameUsesCombinedStorage();
     if (state.storage.frame.open_var_refs.len != @as(usize, function.open_var_ref_count)) return error.InvalidBytecode;
     installSuspendedExecutionStorage(stack, frame, state, resident_stack, resident_frame);
-    // The interpreter's catch target is a control-flow cursor, not frame
-    // ownership state.  A suspension can resume in a different leg of a
-    // nested try/finally after the saved scalar was produced (notably after a
-    // completion is injected and the finally body yields).  Reconstruct the
-    // active target from the bytecode at the resumed pc, as QuickJS does when
-    // restoring the execution cursor, instead of letting a stale cached
-    // target swallow the completion on the next resume.
-    const catch_target = activeCatchTargetForPc(function, resume_pc);
+    // The parked target is the authoritative dynamic control state. A shared
+    // finalizer PC can be entered from several differently nested catch legs,
+    // so its bytecode address alone cannot reconstruct the active target.
+    const catch_target = state.catchTarget();
 
     if (!generator_started) return .{ .catch_target = catch_target };
     if (was_yield_star_suspended) {
@@ -390,12 +386,10 @@ pub fn stopBeforePc(
     const stop_pc = stop_before_pc orelse return null;
     if (frame.pc != stop_pc) return null;
     if (generator) |generator_object| {
-        // QuickJS closes parameter-environment refs at the body boundary while
-        // keeping arg_buf resident. zjs-side adaptation: args and locals share
-        // one open-ref table, so retain entries whose pvalue targets the stable
-        // resident arg backing and close only the parameter-environment refs.
-        // Later finally-return stops belong to an already-started generator and
-        // must keep every open alias parked across the suspension.
+        // The only non-null stop is the generator parameter/body boundary.
+        // QuickJS closes parameter-environment refs there while keeping
+        // arg_buf resident. zjs shares one open-ref table for args and locals,
+        // so close only the parameter-environment entries before parking.
         if (!generator_object.generatorStarted()) try frame.closeParameterEnvironmentVarRefs(ctx.runtime);
         try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc, catch_target);
         generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
@@ -668,28 +662,6 @@ fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await:
     // quickjs.c:21446/21670).
     if (stop_on_yield and function.flags.is_async) return .raw;
     return .none;
-}
-
-/// Recover the innermost catch/finally target whose protected range contains
-/// `start_pc`.  Catch opcodes are nested in emission order, so the last active
-/// target encountered before the resume pc is authoritative.
-fn activeCatchTargetForPc(function: *const bytecode.Bytecode, start_pc: usize) ?usize {
-    var pc: usize = 0;
-    var found: ?usize = null;
-    while (pc < start_pc and pc < function.code.len) {
-        const op_id = function.code[pc];
-        if (op_id == bytecode.opcode.op.@"catch") {
-            if (pc + 5 > function.code.len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, function.code[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= function.code.len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
 }
 
 fn closeIteratorForPendingError(

@@ -269,7 +269,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
     t[op.mod] = td.op_mod_cold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
-    // publishing h_compare path internally at a generator stop boundary. Reached via
+    // publishing h_compare path internally at the generator parameter/body stop. Reached via
     // the same indirect cold_table dispatch the compare fast handlers always used
     // (direct routing would perturb the int32 fast-path codegen).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.op_compare_cold;
@@ -304,7 +304,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.post_inc] = h_post(op.post_inc);
     t[op.post_dec] = h_post(op.post_dec);
     // Register-resident cold inc_loc/dec_loc (float counters), publishing fallback at
-    // a generator stop boundary — installed indirectly to avoid perturbing the int32
+    // the generator parameter/body stop — installed indirectly to avoid perturbing the int32
     // fast-path codegen (see op_update_loc_cold).
     t[op.inc_loc] = td.op_update_loc_cold;
     t[op.dec_loc] = td.op_update_loc_cold;

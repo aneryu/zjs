@@ -3591,30 +3591,12 @@ pub const parser_core = struct {
     };
 
     const ReturnFinallyFrame = struct {
-        value_loc: u16,
+        finally_label: ParserLabelRef,
         catch_marker_depth: u32,
         break_depth: usize,
         continue_depth: usize,
         label_depth: usize,
         block_boundary: ?*BlockEnv,
-        fixups: std.ArrayList(usize) = .empty,
-        break_fixups: std.ArrayList(usize) = .empty,
-        continue_fixups: std.ArrayList(usize) = .empty,
-        labelled_break_fixups: std.ArrayList(LabelledFinallyControlFixup) = .empty,
-        labelled_continue_fixups: std.ArrayList(LabelledFinallyControlFixup) = .empty,
-
-        fn deinit(self: *ReturnFinallyFrame, allocator: std.mem.Allocator) void {
-            self.fixups.deinit(allocator);
-            self.break_fixups.deinit(allocator);
-            self.continue_fixups.deinit(allocator);
-            self.labelled_break_fixups.deinit(allocator);
-            self.labelled_continue_fixups.deinit(allocator);
-        }
-    };
-
-    const LabelledFinallyControlFixup = struct {
-        off: usize,
-        atom_id: Atom,
     };
 
     const UsingStackKind = enum {
@@ -3643,19 +3625,16 @@ pub const parser_core = struct {
 
     const ReturnFinallyBoundary = struct {
         frames: std.ArrayList(ReturnFinallyFrame),
-        suppress_capture: u32,
-        suppress_capture_depth: usize,
-        suppress_capture_end: usize,
-        pending_abrupt_frames: std.ArrayList(FinallyPendingAbruptFrame),
+        finally_body_control_frames: std.ArrayList(FinallyBodyControlFrame),
     };
 
-    const ReturnFinallyCaptureSuppression = struct {
-        count: u32,
-        depth: usize,
-        end: usize,
-    };
-
-    const FinallyPendingAbruptFrame = struct {
+    /// Minimal adapter for abrupt control emitted while parsing a shared
+    /// finalizer body. The finalizer's own ReturnFinallyFrame is already
+    /// popped, so crossing this boundary must discard its
+    /// `[completion, gosub_pc]` pair exactly once.
+    const FinallyBodyControlFrame = struct {
+        block: *BlockEnv,
+        catch_marker_depth: u32,
         break_depth: usize,
         continue_depth: usize,
         label_depth: usize,
@@ -3908,10 +3887,7 @@ pub const parser_core = struct {
         label_frames: std.ArrayList(LabelFrame) = .empty,
         pending_label_atom: ?Atom = null,
         return_finally_frames: std.ArrayList(ReturnFinallyFrame) = .empty,
-        suppress_return_finally_capture: u32 = 0,
-        suppress_return_finally_capture_depth: usize = 0,
-        suppress_return_finally_capture_end: usize = 0,
-        finally_pending_abrupt_frames: std.ArrayList(FinallyPendingAbruptFrame) = .empty,
+        finally_body_control_frames: std.ArrayList(FinallyBodyControlFrame) = .empty,
         using_block_frames: std.ArrayList(UsingBlockFrame) = .empty,
         class_private_elements: std.ArrayList(ClassPrivateElement) = .empty,
         class_private_bound_names: std.ArrayList(Atom) = .empty,
@@ -4016,11 +3992,8 @@ pub const parser_core = struct {
                 frame.deinit(self.function.memory.allocator);
             }
             self.label_frames.deinit(self.function.memory.allocator);
-            for (self.return_finally_frames.items) |*frame| {
-                frame.deinit(self.function.memory.allocator);
-            }
             self.return_finally_frames.deinit(self.function.memory.allocator);
-            self.finally_pending_abrupt_frames.deinit(self.function.memory.allocator);
+            self.finally_body_control_frames.deinit(self.function.memory.allocator);
             self.using_block_frames.deinit(self.function.memory.allocator);
             self.truncateClassPrivateElements(0);
             self.class_private_elements.deinit(self.function.memory.allocator);
@@ -4579,9 +4552,21 @@ pub const parser_core = struct {
             const idx = try self.appendFunctionVarAtOrigin(eval_ret_atom, 0);
             self.eval_ret_idx = idx;
             self.cur_func().eval_ret_idx = idx;
-            // Emit the initialiser:  undefined ; scope_put_var <ret>.
+            // Emit the initialiser directly by slot. Every syntactic finally
+            // adds another same-named `<ret>` save slot, so name lookup would
+            // become ambiguous after the first one.
             try self.emitOp(opcode.op.undefined);
-            try self.emitScopePutVar(eval_ret_atom);
+            try self.emitEvalRetPut();
+        }
+
+        fn emitEvalRetGet(self: *State) Error!void {
+            if (self.eval_ret_idx < 0) return;
+            try self.emitOpU16(opcode.op.get_loc, @intCast(self.eval_ret_idx));
+        }
+
+        fn emitEvalRetPut(self: *State) Error!void {
+            if (self.eval_ret_idx < 0) return;
+            try self.emitOpU16(opcode.op.put_loc, @intCast(self.eval_ret_idx));
         }
 
         /// Mirror the tail of `js_parse_program` (`quickjs.c:31459`):
@@ -4590,7 +4575,7 @@ pub const parser_core = struct {
         /// for `vm.run` to return. No-op when not in eval mode.
         pub fn finalizeEvalReturn(self: *State) Error!void {
             if (self.eval_ret_idx < 0) return;
-            try self.emitScopeGetVar(eval_ret_atom);
+            try self.emitEvalRetGet();
         }
 
         /// Mirror QuickJS `set_eval_ret_undefined` (`quickjs.c:28219-28226`):
@@ -4599,7 +4584,7 @@ pub const parser_core = struct {
         pub fn setEvalReturnUndefined(self: *State) Error!void {
             if (self.eval_ret_idx < 0) return;
             try self.emitOp(opcode.op.undefined);
-            try self.emitScopePutVar(eval_ret_atom);
+            try self.emitEvalRetPut();
         }
 
         pub fn emitReturnUndefined(self: *State) Error!void {
@@ -4736,7 +4721,6 @@ pub const parser_core = struct {
 
         fn emitLabelledBreakNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
             const frame_index = findLabelFrame(s, atom_id) orelse return Error.UnexpectedToken;
-            try emitPendingAbruptDropsForLabel(s, frame_index);
             try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
             var frame_depth = s.break_frame_cleanup_drops.items.len;
             while (frame_depth > s.label_frames.items[frame_index].break_frame_depth) {
@@ -4758,7 +4742,6 @@ pub const parser_core = struct {
         fn emitLabelledContinueNoFinallyCapture(s: *State, atom_id: Atom) Error!void {
             const frame_index = findLabelFrame(s, atom_id) orelse return Error.UnexpectedToken;
             if (!s.label_frames.items[frame_index].allow_continue) return Error.UnexpectedToken;
-            try emitPendingAbruptDropsForLabel(s, frame_index);
             try emitCatchMarkerDropsToDepth(s, s.label_frames.items[frame_index].catch_marker_depth);
             var frame_depth = s.continue_frame_lens.items.len;
             while (frame_depth > s.label_frames.items[frame_index].control_frame_depth) {
@@ -7286,10 +7269,7 @@ pub const parser_core = struct {
                 }
                 try s.emitOp(opcode.op.yield);
                 const normal_resume = try emitForwardJump(s, opcode.op.if_false);
-                if (!try emitStackTopReturnThroughFinally(s)) {
-                    try emitBlockEnvReturnCleanup(s);
-                    try s.emitOp(opcode.op.return_async);
-                }
+                try emitReturnValue(s, s.in_async and s.in_generator);
                 try patchForwardJump(s, normal_resume);
             }
             return;
@@ -7388,10 +7368,7 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.nip);
         try s.emitOp(opcode.op.nip);
         if (is_async) try s.emitOp(opcode.op.await);
-        if (!try emitStackTopReturnThroughFinally(s)) {
-            try emitBlockEnvReturnCleanup(s);
-            try s.emitOp(opcode.op.return_async);
-        }
+        try emitReturnValue(s, false);
 
         try patchForwardJump(s, label_throw);
         try s.emitOpU8(opcode.op.iterator_call, 1);
@@ -7415,24 +7392,6 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.nip);
         try s.emitOp(opcode.op.nip);
         try s.emitOp(opcode.op.nip);
-    }
-
-    fn emitStackTopReturnThroughFinally(s: *State) Error!bool {
-        const frame_index = nearestReturnFinallyFrameForReturn(s, null) orelse return false;
-        try emitStackTopReturnThroughFinallyFrame(s, frame_index, shouldDropPendingAbruptForCapture(s, frame_index));
-        return true;
-    }
-
-    fn emitStackTopReturnThroughFinallyFrame(s: *State, frame_index: usize, drop_pending_abrupt: bool) Error!void {
-        const return_frame = s.return_finally_frames.items[frame_index];
-        var catch_marker_depth = s.active_catch_marker_depth;
-        try emitBlockEnvReturnCleanupUntil(s, return_frame.block_boundary, &catch_marker_depth);
-        try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
-        const value_loc = return_frame.value_loc;
-        try s.emitOpU16(opcode.op.put_loc, value_loc);
-        if (drop_pending_abrupt) try emitPendingAbruptDropsForReturn(s);
-        const off = try emitForwardJump(s, opcode.op.goto);
-        try s.return_finally_frames.items[frame_index].fixups.append(s.function.memory.allocator, off);
     }
 
     /// Emit `this` for a super-property receiver. In inline static-field
@@ -9518,18 +9477,37 @@ pub const parser_core = struct {
         return .{ .id = id };
     }
 
-    fn emitGotoParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
+    fn emitParserLabelJump(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
+        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.UnexpectedToken;
         var bytes: [5]u8 = undefined;
-        bytes[0] = opcode.op.goto;
+        bytes[0] = op_id;
+        std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
+        const loc = s.currentSourcePosition();
+        try s.appendBytesAt(&bytes, loc.line_num, loc.col_num);
+    }
+
+    fn emitParserLabelJumpNoSource(s: *State, op_id: u8, label: ParserLabelRef) Error!void {
+        if (opcode.formatOf(op_id) != .label or op_id == opcode.op.label) return Error.UnexpectedToken;
+        var bytes: [5]u8 = undefined;
+        bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         try s.emitOpcodeBytesNoSource(&bytes);
     }
 
-    fn emitGotoParserLabelNoSourceAssumeCapacity(s: *State, label: ParserLabelRef) void {
+    fn emitParserLabelJumpNoSourceAssumeCapacity(s: *State, op_id: u8, label: ParserLabelRef) void {
+        std.debug.assert(opcode.formatOf(op_id) == .label and op_id != opcode.op.label);
         var bytes: [5]u8 = undefined;
-        bytes[0] = opcode.op.goto;
+        bytes[0] = op_id;
         std.mem.writeInt(u32, bytes[1..5], opcode.op.parser_label_tag | label.id, .little);
         s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+    }
+
+    fn emitGotoParserLabelNoSource(s: *State, label: ParserLabelRef) Error!void {
+        try emitParserLabelJumpNoSource(s, opcode.op.goto, label);
+    }
+
+    fn emitGotoParserLabelNoSourceAssumeCapacity(s: *State, label: ParserLabelRef) void {
+        emitParserLabelJumpNoSourceAssumeCapacity(s, opcode.op.goto, label);
     }
 
     /// Raw labels preserve the preceding real opcode as call/delete
@@ -9763,12 +9741,18 @@ pub const parser_core = struct {
         }
     }
 
-    fn emitCatchMarkerDropsToDepth(s: *State, target_depth: u32) Error!void {
-        var remaining = s.active_catch_marker_depth;
-        while (remaining > target_depth) : (remaining -= 1) {
+    fn emitCatchMarkerDropsFromDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
+        if (current_depth.* < target_depth) return Error.UnexpectedToken;
+        while (current_depth.* > target_depth) {
             try s.emitOpNoSource(opcode.op.drop);
-            try emitUsingDisposesForCatchMarkerDepth(s, remaining);
+            try emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
+            current_depth.* -= 1;
         }
+    }
+
+    fn emitCatchMarkerDropsToDepth(s: *State, target_depth: u32) Error!void {
+        var current_depth = s.active_catch_marker_depth;
+        try emitCatchMarkerDropsFromDepth(s, &current_depth, target_depth);
     }
 
     fn emitUsingDisposesForCatchMarkerDepth(s: *State, depth: u32) Error!void {
@@ -9790,7 +9774,6 @@ pub const parser_core = struct {
     }
 
     fn emitUnlabelledBreakNoFinallyCapture(s: *State) Error!void {
-        try emitPendingAbruptDropsForUnlabelledBreak(s);
         try emitCatchMarkerDropsToDepth(s, s.break_frame_catch_marker_depths.getLast());
         try emitUnlabelledBreakCleanup(s, s.break_frame_cleanup_drops.getLast());
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
@@ -9804,37 +9787,10 @@ pub const parser_core = struct {
     }
 
     fn emitUnlabelledContinueNoFinallyCapture(s: *State) Error!void {
-        try emitPendingAbruptDropsForUnlabelledContinue(s);
         try emitCatchMarkerDropsToDepth(s, s.continue_frame_catch_marker_depths.getLast());
         try emitCrossFrameCleanup(s, s.continue_frame_cleanup_drops.getLast());
         const off = try emitForwardJumpNoSource(s, opcode.op.goto);
         try s.continue_fixups.append(s.function.memory.allocator, off);
-    }
-
-    fn emitPendingAbruptDropsForUnlabelledBreak(s: *State) Error!void {
-        const target_depth = s.break_frame_lens.items.len;
-        for (s.finally_pending_abrupt_frames.items) |frame| {
-            if (target_depth <= frame.break_depth) try s.emitOpNoSource(opcode.op.drop);
-        }
-    }
-
-    fn emitPendingAbruptDropsForUnlabelledContinue(s: *State) Error!void {
-        const target_depth = s.continue_frame_lens.items.len;
-        for (s.finally_pending_abrupt_frames.items) |frame| {
-            if (target_depth <= frame.continue_depth) try s.emitOpNoSource(opcode.op.drop);
-        }
-    }
-
-    fn emitPendingAbruptDropsForReturn(s: *State) Error!void {
-        for (s.finally_pending_abrupt_frames.items) |_| {
-            try s.emitOpNoSource(opcode.op.drop);
-        }
-    }
-
-    fn emitPendingAbruptDropsForLabel(s: *State, label_frame_index: usize) Error!void {
-        for (s.finally_pending_abrupt_frames.items) |frame| {
-            if (label_frame_index < frame.label_depth) try s.emitOpNoSource(opcode.op.drop);
-        }
     }
 
     fn enterSwitchContinueCleanup(s: *State) void {
@@ -9879,6 +9835,31 @@ pub const parser_core = struct {
             => false,
             else => true,
         };
+    }
+
+    /// QuickJS `js_is_live_code`: only the straight-line predecessor matters
+    /// while constructing a statement's fixed control-flow topology.
+    fn isLiveCode(s: *State) bool {
+        const op_id = lastNonCleanupOpcode(s.currentCode(), s.currentAtomOperands()) orelse return true;
+        const terminal = switch (op_id) {
+            opcode.op.goto,
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.return_async,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.throw,
+            opcode.op.throw_error,
+            opcode.op.ret,
+            => true,
+            else => false,
+        };
+        if (!terminal) return true;
+        // zjs patches loop/branch exits to the current absolute byte offset
+        // instead of emitting a physical OP_label at every merge. Such an
+        // incoming edge makes the merge live even when the preceding linear
+        // instruction is a back-edge or return.
+        return hasAbsoluteJumpToCurrentEnd(s.currentCode(), s.currentAtomOperands());
     }
 
     fn lastOpcode(code: []const u8, atoms: []const Atom) ?u8 {
@@ -9957,6 +9938,28 @@ pub const parser_core = struct {
             if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
                 const target = std.mem.readInt(u32, code[offset..][0..4], .little);
                 if (target >= tail_start) return true;
+            }
+            if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        return false;
+    }
+
+    /// Statement-local variant used by `isLiveCode`. Tagged parser labels may
+    /// name handlers emitted later and therefore are not incoming edges to the
+    /// current merge; already-patched absolute loop/branch exits are.
+    fn hasAbsoluteJumpToCurrentEnd(code: []const u8, atoms: []const Atom) bool {
+        const tail_start = trailingCleanupStart(code, atoms);
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const instr = parserPhaseInstruction(code, atoms, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > code.len) return true;
+            if (parserPhaseLabelOperandOffset(op_id, pc, instr.is_temp)) |offset| {
+                const target = std.mem.readInt(u32, code[offset..][0..4], .little);
+                if ((target & opcode.op.parser_label_tag) == 0 and target >= tail_start) return true;
             }
             if (parserPhaseInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
             pc += size;
@@ -10586,7 +10589,7 @@ pub const parser_core = struct {
             }
             if (expressionStatementKeepsCompletion(s)) {
                 try emitStringLiteralValue(s, str_payload.bytes);
-                try s.emitScopePutVar(State.eval_ret_atom);
+                try s.emitEvalRetPut();
             }
             directive_contains_legacy_escape = directive_contains_legacy_escape or str_payload.contains_legacy_escape;
             try s.advance();
@@ -10953,7 +10956,7 @@ pub const parser_core = struct {
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
                 _ = try s.expectSemicolon();
                 if (keep_completion) {
-                    try s.emitScopePutVar(State.eval_ret_atom);
+                    try s.emitEvalRetPut();
                 } else {
                     try s.emitOpNoSource(opcode.op.drop);
                 }
@@ -11046,7 +11049,7 @@ pub const parser_core = struct {
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
                 _ = try s.expectSemicolon();
                 if (keep_completion) {
-                    try s.emitScopePutVar(State.eval_ret_atom);
+                    try s.emitEvalRetPut();
                 } else {
                     try s.emitOpNoSource(opcode.op.drop);
                 }
@@ -11062,7 +11065,7 @@ pub const parser_core = struct {
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
                 _ = try s.expectSemicolon();
                 if (keep_completion) {
-                    try s.emitScopePutVar(State.eval_ret_atom);
+                    try s.emitEvalRetPut();
                 } else {
                     try s.emitOpNoSource(opcode.op.drop);
                 }
@@ -11074,7 +11077,7 @@ pub const parser_core = struct {
                     try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
                     _ = try s.expectSemicolon();
                     if (keep_completion) {
-                        try s.emitScopePutVar(State.eval_ret_atom);
+                        try s.emitEvalRetPut();
                     } else {
                         try s.emitOpNoSource(opcode.op.drop);
                     }
@@ -11540,21 +11543,46 @@ pub const parser_core = struct {
             tok.TOK_TRY => {
                 try s.advance();
                 try s.setEvalReturnUndefined();
-                const has_finally = try tryStatementHasFinally(s);
-                const return_finally_frame = if (has_finally) try pushReturnFinallyFrame(s) else null;
-                const catch_off = try emitForwardJump(s, opcode.op.@"catch");
+
+                const label_catch = newParserLabel(s);
+                const label_catch2 = newParserLabel(s);
+                const label_finally = newParserLabel(s);
+                const label_end = newParserLabel(s);
+
+                try emitParserLabelJump(s, opcode.op.@"catch", label_catch);
+                const outer_catch_depth = s.active_catch_marker_depth;
                 s.active_catch_marker_depth += 1;
+                const try_frame = try pushReturnFinallyFrame(s, label_finally, outer_catch_depth);
+                var try_frame_active = true;
+                errdefer {
+                    if (try_frame_active) popReturnFinallyFrame(s, try_frame);
+                    s.active_catch_marker_depth = outer_catch_depth;
+                }
+
                 try parseBlock(s);
-                s.active_catch_marker_depth -= 1;
-                try s.emitOp(opcode.op.drop);
-                const end_off = try emitForwardJump(s, opcode.op.goto);
+
+                popReturnFinallyFrame(s, try_frame);
+                try_frame_active = false;
+                s.active_catch_marker_depth = outer_catch_depth;
+
+                if (isLiveCode(s)) {
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try s.emitOpNoSource(opcode.op.undefined);
+                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
+                }
+
                 if (s.peekKind() == tok.TOK_CATCH) {
                     try s.advance();
-                    try patchForwardJump(s, catch_off);
+                    try emitParserLabelNoSource(s, label_catch);
+
                     try s.pushScope();
+                    var catch_binding_scope_active = true;
+                    errdefer if (catch_binding_scope_active) s.popScope();
                     try s.emitEnterScope();
                     if (s.peekKind() == '{') {
-                        try s.emitOp(opcode.op.drop);
+                        try s.emitOpNoSource(opcode.op.drop);
                     } else {
                         try s.expectToken('(');
                         if (s.peekKind() == '[' or s.peekKind() == '{') {
@@ -11586,56 +11614,60 @@ pub const parser_core = struct {
                         }
                         try s.expectToken(')');
                     }
-                    const rethrow_off = try emitForwardJump(s, opcode.op.@"catch");
+
+                    try emitParserLabelJump(s, opcode.op.@"catch", label_catch2);
+                    const catch_body_outer_depth = s.active_catch_marker_depth;
                     s.active_catch_marker_depth += 1;
+                    const catch_frame = try pushReturnFinallyFrame(s, label_finally, catch_body_outer_depth);
+                    var catch_frame_active = true;
+                    errdefer {
+                        if (catch_frame_active) popReturnFinallyFrame(s, catch_frame);
+                        s.active_catch_marker_depth = catch_body_outer_depth;
+                    }
+
                     // QuickJS owns a wrapper scope for the catch statement in
                     // addition to the catch-binding scope and the ordinary
-                    // block's own scope. This exact +2 topology is consumed by
-                    // define_var's catch-name redeclaration rule.
+                    // block's own scope.
                     try s.pushScope();
+                    var catch_wrapper_scope_active = true;
+                    errdefer if (catch_wrapper_scope_active) s.popScope();
                     try s.emitEnterScope();
                     try parseBlock(s);
-                    s.active_catch_marker_depth -= 1;
-                    try s.emitOp(opcode.op.drop);
-                    const catch_end_off = try emitForwardJump(s, opcode.op.goto);
-                    try patchForwardJump(s, rethrow_off);
-                    if (has_finally and s.peekKind() == tok.TOK_FINALLY) {
-                        const before_finally = takeParserSnapshot(s);
-                        try s.advance();
-                        try parseFinallyBlockForAbruptPath(s, return_finally_frame orelse return Error.UnexpectedToken);
-                        restoreParserLexerSnapshot(s, before_finally);
+
+                    popReturnFinallyFrame(s, catch_frame);
+                    catch_frame_active = false;
+                    s.active_catch_marker_depth = catch_body_outer_depth;
+                    s.popScope();
+                    catch_wrapper_scope_active = false;
+                    s.popScope();
+                    catch_binding_scope_active = false;
+
+                    if (isLiveCode(s)) {
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try s.emitOpNoSource(opcode.op.undefined);
+                        try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                        try s.emitOpNoSource(opcode.op.drop);
+                        try emitParserLabelJumpNoSource(s, opcode.op.goto, label_end);
                     }
-                    try s.emitOp(opcode.op.throw);
-                    try patchForwardJump(s, end_off);
-                    try patchForwardJump(s, catch_end_off);
-                    s.popScope();
-                    s.popScope();
+
+                    try emitParserLabelNoSource(s, label_catch2);
+                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try s.emitOpNoSource(opcode.op.throw);
                 } else if (s.peekKind() == tok.TOK_FINALLY) {
-                    const normal_finally_off = end_off;
-                    try patchForwardJump(s, catch_off);
-                    try s.advance();
-                    const finally_snapshot = takeParserSnapshot(s);
-                    try parseFinallyBlockForAbruptPath(s, return_finally_frame orelse return Error.UnexpectedToken);
-                    try s.emitOp(opcode.op.throw);
-                    if (return_finally_frame) |idx| try emitControlFinallyCopies(s, idx, finally_snapshot);
-                    if (return_finally_frame) |idx| try emitReturnFinallyCopy(s, idx, finally_snapshot);
-                    try patchForwardJump(s, normal_finally_off);
-                    restoreParserLexerSnapshot(s, finally_snapshot);
-                    try parseFinallyBlockForReturnPath(s, return_finally_frame orelse return Error.UnexpectedToken);
-                    if (return_finally_frame) |idx| popReturnFinallyFrame(s, idx);
-                    return;
+                    try emitParserLabelNoSource(s, label_catch);
+                    try emitParserLabelJumpNoSource(s, opcode.op.gosub, label_finally);
+                    try s.emitOpNoSource(opcode.op.throw);
                 } else {
                     return Error.UnexpectedToken;
                 }
+
+                try emitParserLabelNoSource(s, label_finally);
                 if (s.peekKind() == tok.TOK_FINALLY) {
                     try s.advance();
-                    const finally_snapshot = takeParserSnapshot(s);
-                    if (return_finally_frame) |idx| try emitControlFinallyCopies(s, idx, finally_snapshot);
-                    if (return_finally_frame) |idx| try emitReturnFinallyCopy(s, idx, finally_snapshot);
-                    restoreParserLexerSnapshot(s, finally_snapshot);
-                    try parseFinallyBlockForReturnPath(s, return_finally_frame orelse return Error.UnexpectedToken);
-                    if (return_finally_frame) |idx| popReturnFinallyFrame(s, idx);
+                    try parseSharedFinallyBlock(s);
                 }
+                try s.emitOpNoSource(opcode.op.ret);
+                try emitParserLabelNoSource(s, label_end);
             },
             tok.TOK_DEBUGGER => {
                 try s.advance();
@@ -11658,7 +11690,7 @@ pub const parser_core = struct {
                 try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
                 _ = try s.expectSemicolon();
                 if (keep_completion) {
-                    try s.emitScopePutVar(State.eval_ret_atom);
+                    try s.emitEvalRetPut();
                 } else {
                     try s.emitOpNoSource(opcode.op.drop);
                 }
@@ -11786,130 +11818,21 @@ pub const parser_core = struct {
         try parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = keep_completion });
         _ = try s.expectSemicolon();
         if (keep_completion) {
-            try s.emitScopePutVar(State.eval_ret_atom);
+            try s.emitEvalRetPut();
         } else {
             try s.emitOpNoSource(opcode.op.drop);
         }
     }
 
-    fn tryStatementHasFinally(s: *State) Error!bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-        try skipBlockForTryScan(s);
-        if (s.peekKind() == tok.TOK_CATCH) {
-            try s.advance();
-            if (s.peekKind() == '(') {
-                try skipBalancedDelimitedForTryScan(s, '(', ')');
-            }
-            try skipBlockForTryScan(s);
-        }
-        return s.peekKind() == tok.TOK_FINALLY;
-    }
-
-    fn skipBlockForTryScan(s: *State) Error!void {
-        if (s.peekKind() != '{') return Error.UnexpectedToken;
-        try skipBalancedDelimitedForTryScan(s, '{', '}');
-    }
-
-    fn skipBalancedDelimitedForTryScan(s: *State, open: tok.TokenKind, close: tok.TokenKind) Error!void {
-        if (s.peekKind() != open) return Error.UnexpectedToken;
-        var depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
-        while (true) {
-            const kind = s.peekKind();
-            if (kind == tok.TOK_EOF) return Error.UnexpectedToken;
-            if (kind == tok.TOK_TEMPLATE) {
-                try skipTemplateInPredeclareScan(s, s.token);
-                try s.advance();
-                previous_token_kind = tok.TOK_TEMPLATE;
-                continue;
-            }
-            if (tokenCanStartSlashRegexp(kind)) {
-                if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
-                    try s.advance();
-                    previous_token_kind = tok.TOK_REGEXP;
-                    continue;
-                }
-            }
-            if (kind == open) depth += 1;
-            if (kind == close) {
-                depth -= 1;
-                try s.advance();
-                previous_token_kind = kind;
-                if (depth == 0) return;
-                continue;
-            }
-            try s.advance();
-            previous_token_kind = kind;
-        }
-    }
-
-    fn skipFunctionDeclarationInTokenScan(s: *State) Error!void {
-        if (s.peekKind() != tok.TOK_FUNCTION) return Error.UnexpectedToken;
-        while (s.peekKind() != tok.TOK_EOF and s.peekKind() != @as(tok.TokenKind, @intCast('{'))) {
-            try s.advance();
-        }
-        if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-            try skipBalancedDelimitedForTryScan(s, '{', '}');
-        }
-    }
-
-    fn skipSingleStatementInTokenScan(s: *State) Error!void {
-        switch (s.peekKind()) {
-            ';' => try s.advance(),
-            @as(tok.TokenKind, @intCast('{')) => try skipBalancedDelimitedForTryScan(s, '{', '}'),
-            tok.TOK_FUNCTION => try skipFunctionDeclarationInTokenScan(s),
-            tok.TOK_IF => _ = try skipAnnexBIfFunctionDeclarationsInScan(s),
-            else => {
-                while (s.peekKind() != tok.TOK_EOF and
-                    s.peekKind() != @as(tok.TokenKind, @intCast(';')) and
-                    s.peekKind() != tok.TOK_ELSE and
-                    s.peekKind() != tok.TOK_CASE and
-                    s.peekKind() != tok.TOK_DEFAULT and
-                    s.peekKind() != @as(tok.TokenKind, @intCast('}')))
-                {
-                    if (s.peekKind() == tok.TOK_TEMPLATE) {
-                        try skipTemplateInPredeclareScan(s, s.token);
-                        try s.advance();
-                        continue;
-                    }
-                    try s.advance();
-                }
-                if (s.peekKind() == @as(tok.TokenKind, @intCast(';'))) try s.advance();
-            },
-        }
-    }
-
-    fn skipAnnexBIfFunctionDeclarationsInScan(s: *State) Error!bool {
-        if (s.peekKind() != tok.TOK_IF) return false;
-        try s.advance();
-        try skipBalancedDelimitedForTryScan(s, '(', ')');
-        if (s.peekKind() == tok.TOK_FUNCTION) {
-            try skipFunctionDeclarationInTokenScan(s);
-        } else {
-            try skipSingleStatementInTokenScan(s);
-        }
-        if (s.peekKind() == tok.TOK_ELSE) {
-            try s.advance();
-            if (s.peekKind() == tok.TOK_FUNCTION) {
-                try skipFunctionDeclarationInTokenScan(s);
-            } else {
-                try skipSingleStatementInTokenScan(s);
-            }
-        }
-        return true;
-    }
-
-    fn pushReturnFinallyFrame(s: *State) Error!usize {
-        const temp_name = try std.fmt.allocPrint(s.function.memory.allocator, "__finally_return_{d}", .{s.with_scope_id});
-        defer s.function.memory.allocator.free(temp_name);
-        s.with_scope_id += 1;
-        const temp_atom = try s.function.atoms.internString(temp_name);
-        defer s.function.atoms.free(temp_atom);
-        const value_loc = try s.appendFunctionVarAtOrigin(temp_atom, 0);
+    fn pushReturnFinallyFrame(
+        s: *State,
+        finally_label: ParserLabelRef,
+        catch_marker_depth: u32,
+    ) Error!usize {
+        if (catch_marker_depth > s.active_catch_marker_depth) return Error.UnexpectedToken;
         try s.return_finally_frames.append(s.function.memory.allocator, .{
-            .value_loc = value_loc,
-            .catch_marker_depth = s.active_catch_marker_depth,
+            .finally_label = finally_label,
+            .catch_marker_depth = catch_marker_depth,
             .break_depth = s.break_frame_lens.items.len,
             .continue_depth = s.continue_frame_lens.items.len,
             .label_depth = s.label_frames.items.len,
@@ -11920,168 +11843,142 @@ pub const parser_core = struct {
 
     fn popReturnFinallyFrame(s: *State, frame_index: usize) void {
         std.debug.assert(frame_index + 1 == s.return_finally_frames.items.len);
-        s.return_finally_frames.items[frame_index].deinit(s.function.memory.allocator);
         _ = s.return_finally_frames.pop().?;
     }
 
     fn enterReturnFinallyFunctionBoundary(s: *State) ReturnFinallyBoundary {
         const saved = ReturnFinallyBoundary{
             .frames = s.return_finally_frames,
-            .suppress_capture = s.suppress_return_finally_capture,
-            .suppress_capture_depth = s.suppress_return_finally_capture_depth,
-            .suppress_capture_end = s.suppress_return_finally_capture_end,
-            .pending_abrupt_frames = s.finally_pending_abrupt_frames,
+            .finally_body_control_frames = s.finally_body_control_frames,
         };
         s.return_finally_frames = .empty;
-        s.suppress_return_finally_capture = 0;
-        s.suppress_return_finally_capture_depth = 0;
-        s.suppress_return_finally_capture_end = 0;
-        s.finally_pending_abrupt_frames = .empty;
+        s.finally_body_control_frames = .empty;
         return saved;
     }
 
     fn leaveReturnFinallyFunctionBoundary(s: *State, saved: *const ReturnFinallyBoundary) void {
-        for (s.return_finally_frames.items) |*frame| {
-            frame.deinit(s.function.memory.allocator);
-        }
         s.return_finally_frames.deinit(s.function.memory.allocator);
         s.return_finally_frames = saved.frames;
-        s.suppress_return_finally_capture = saved.suppress_capture;
-        s.suppress_return_finally_capture_depth = saved.suppress_capture_depth;
-        s.suppress_return_finally_capture_end = saved.suppress_capture_end;
-        s.finally_pending_abrupt_frames.deinit(s.function.memory.allocator);
-        s.finally_pending_abrupt_frames = saved.pending_abrupt_frames;
+        s.finally_body_control_frames.deinit(s.function.memory.allocator);
+        s.finally_body_control_frames = saved.finally_body_control_frames;
     }
 
-    fn emitReturnFinallyCopy(s: *State, frame_index: usize, finally_snapshot: ParserSnapshot) Error!void {
-        if (s.return_finally_frames.items[frame_index].fixups.items.len == 0) return;
-        const skip_return_off = try emitForwardJump(s, opcode.op.goto);
-        for (s.return_finally_frames.items[frame_index].fixups.items) |off| {
-            try patchForwardJump(s, off);
+    fn controlTargetCrossesFinallyFrame(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
+        const frame = s.return_finally_frames.items[frame_index];
+        if (target.label_atom) |atom_id| {
+            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) {
+                return Error.UnexpectedToken;
+            }
+            return label_frame_index < frame.label_depth;
         }
-        restoreParserLexerSnapshot(s, finally_snapshot);
-        try parseFinallyBlockForReturnPath(s, frame_index);
-        try emitReturnAfterFinallyCopy(s, frame_index);
-        try patchForwardJump(s, skip_return_off);
-    }
-
-    fn emitControlFinallyCopies(s: *State, frame_index: usize, finally_snapshot: ParserSnapshot) Error!void {
-        try emitOneControlFinallyCopy(s, frame_index, finally_snapshot, .{ .kind = .@"continue" });
-        try emitOneControlFinallyCopy(s, frame_index, finally_snapshot, .{ .kind = .@"break" });
-        try emitLabelledControlFinallyCopies(s, frame_index, finally_snapshot, .@"continue");
-        try emitLabelledControlFinallyCopies(s, frame_index, finally_snapshot, .@"break");
-    }
-
-    fn emitOneControlFinallyCopy(
-        s: *State,
-        frame_index: usize,
-        finally_snapshot: ParserSnapshot,
-        target: FinallyControlTarget,
-    ) Error!void {
-        const fixups = switch (target.kind) {
-            .@"break" => s.return_finally_frames.items[frame_index].break_fixups.items,
-            .@"continue" => s.return_finally_frames.items[frame_index].continue_fixups.items,
+        return switch (target.kind) {
+            .@"break" => s.break_frame_lens.items.len <= frame.break_depth,
+            .@"continue" => s.continue_frame_lens.items.len <= frame.continue_depth,
         };
-        if (fixups.len == 0) return;
-        const skip_control_off = try emitForwardJump(s, opcode.op.goto);
-        for (fixups) |off| {
-            try patchForwardJump(s, off);
-        }
-        restoreParserLexerSnapshot(s, finally_snapshot);
-        try parseFinallyBlockForReturnPath(s, frame_index);
-        try emitControlAfterFinallyCopy(s, frame_index, target);
-        try patchForwardJump(s, skip_control_off);
     }
 
-    fn emitLabelledControlFinallyCopies(
-        s: *State,
-        frame_index: usize,
-        finally_snapshot: ParserSnapshot,
-        kind: FinallyControlKind,
-    ) Error!void {
-        const fixups = switch (kind) {
-            .@"break" => s.return_finally_frames.items[frame_index].labelled_break_fixups.items,
-            .@"continue" => s.return_finally_frames.items[frame_index].labelled_continue_fixups.items,
+    fn controlTargetCrossesFinallyBody(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
+        const frame = s.finally_body_control_frames.items[frame_index];
+        if (target.label_atom) |atom_id| {
+            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) {
+                return Error.UnexpectedToken;
+            }
+            return label_frame_index < frame.label_depth;
+        }
+        return switch (target.kind) {
+            .@"break" => s.break_frame_lens.items.len <= frame.break_depth,
+            .@"continue" => s.continue_frame_lens.items.len <= frame.continue_depth,
         };
-        for (fixups) |fixup| {
-            const skip_control_off = try emitForwardJump(s, opcode.op.goto);
-            try patchForwardJump(s, fixup.off);
-            restoreParserLexerSnapshot(s, finally_snapshot);
-            try parseFinallyBlockForReturnPath(s, frame_index);
-            try emitControlAfterFinallyCopy(s, frame_index, .{
-                .kind = kind,
-                .label_atom = fixup.atom_id,
-            });
-            try patchForwardJump(s, skip_control_off);
+    }
+
+    /// Parse the syntactic finalizer once. Its BlockEnv is the ordered seam
+    /// used by return/control walkers to discard the completion and gosub PC
+    /// only when an abrupt completion crosses out of this body.
+    fn parseSharedFinallyBlock(s: *State) Error!void {
+        var block = BlockEnv{
+            .prev = s.top_break,
+            .label_name = atom_module.null_atom,
+            .label_break = -1,
+            .label_cont = -1,
+            .drop_count = 2,
+            .label_finally = -1,
+            .scope_level = s.scope_level,
+            .catch_marker_depth = s.active_catch_marker_depth,
+            .has_iterator = false,
+            .is_regular_stmt = false,
+        };
+        s.top_break = &block;
+        defer {
+            std.debug.assert(s.top_break == &block);
+            s.top_break = block.prev;
+        }
+
+        try s.finally_body_control_frames.append(s.function.memory.allocator, .{
+            .block = &block,
+            .catch_marker_depth = s.active_catch_marker_depth,
+            .break_depth = s.break_frame_lens.items.len,
+            .continue_depth = s.continue_frame_lens.items.len,
+            .label_depth = s.label_frames.items.len,
+        });
+        defer _ = s.finally_body_control_frames.pop().?;
+
+        var saved_eval_ret_idx: ?u16 = null;
+        if (s.eval_ret_idx >= 0) {
+            const idx = try s.appendFunctionVarAtOrigin(State.eval_ret_atom, 0);
+            saved_eval_ret_idx = idx;
+            try s.emitEvalRetGet();
+            try s.emitOpU16(opcode.op.put_loc, idx);
+            try s.setEvalReturnUndefined();
+        }
+
+        try parseBlock(s);
+
+        if (saved_eval_ret_idx) |idx| {
+            try s.emitOpU16(opcode.op.get_loc, idx);
+            try s.emitEvalRetPut();
         }
     }
 
-    fn emitReturnAfterFinallyCopy(s: *State, current_frame_index: usize) Error!void {
-        if (nearestReturnFinallyFrameForReturn(s, current_frame_index)) |target_frame_index| {
-            try s.emitOpU16(opcode.op.get_loc, s.return_finally_frames.items[current_frame_index].value_loc);
-            try emitStackTopReturnThroughFinallyFrame(s, target_frame_index, true);
-            return;
+    /// Emit a return whose value is already on TOS. The mutable BlockEnv and
+    /// catch cursors ensure each iterator/catch record is unwound once while
+    /// all active finalizers share the same gosub target.
+    fn emitReturnValue(s: *State, await_before_unwind: bool) Error!void {
+        if (await_before_unwind) try s.emitOp(opcode.op.await);
+
+        var block_cursor = s.top_break;
+        var catch_marker_depth = s.active_catch_marker_depth;
+        var frame_index = s.return_finally_frames.items.len;
+        while (frame_index != 0) {
+            frame_index -= 1;
+            const frame = s.return_finally_frames.items[frame_index];
+            try emitBlockEnvReturnCleanupUntil(s, &block_cursor, frame.block_boundary, &catch_marker_depth);
+            try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, frame.catch_marker_depth);
+            try emitParserLabelJumpNoSource(s, opcode.op.gosub, frame.finally_label);
         }
-        try emitPendingAbruptDropsForReturn(s);
-        try emitActiveIteratorCloses(s);
-        try s.emitOpU16(opcode.op.get_loc, s.return_finally_frames.items[current_frame_index].value_loc);
+        try emitBlockEnvReturnCleanupUntil(s, &block_cursor, null, &catch_marker_depth);
+        try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, 0);
         try emitFunctionReturn(s, true);
     }
 
-    fn emitControlAfterFinallyCopy(s: *State, current_frame_index: usize, target: FinallyControlTarget) Error!void {
-        if (try nearestReturnFinallyFrameForControl(s, target, current_frame_index)) |target_frame_index| {
-            try emitCapturedControlThroughFinallyFrame(s, target_frame_index, target, true);
+    /// Complete a return after its optional expression has been parsed exactly
+    /// once. Async-generator explicit values await before any cleanup, matching
+    /// QuickJS emit_return.
+    fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
+        const needs_value = has_expr or
+            s.in_async or
+            s.in_generator or
+            s.return_finally_frames.items.len != 0 or
+            s.finally_body_control_frames.items.len != 0 or
+            s.top_break != null or
+            s.active_catch_marker_depth != 0;
+        if (!needs_value) {
+            try emitFunctionReturn(s, false);
             return;
         }
-        switch (target.kind) {
-            .@"break" => if (target.label_atom) |atom_id|
-                try s.emitLabelledBreakNoFinallyCapture(atom_id)
-            else
-                try emitUnlabelledBreakNoFinallyCapture(s),
-            .@"continue" => if (target.label_atom) |atom_id|
-                try s.emitLabelledContinueNoFinallyCapture(atom_id)
-            else
-                try emitUnlabelledContinueNoFinallyCapture(s),
-        }
-    }
-
-    fn emitCapturedReturnThroughFinally(s: *State, has_expr: bool) Error!bool {
-        const frame_index = nearestReturnFinallyFrameForReturn(s, null) orelse return false;
-        if (has_expr) {
-            // Async generator explicit `return value;` awaits the value (qjs
-            // emit_return OP_await, quickjs.c:28401-28404) before the finally
-            // unwinding. An implicit return (no expr, `undefined` above) does not.
-            if (s.in_async and s.in_generator) try s.emitOp(opcode.op.await);
-        } else {
-            try s.emitOp(opcode.op.undefined);
-        }
-        try emitStackTopReturnThroughFinallyFrame(s, frame_index, shouldDropPendingAbruptForCapture(s, frame_index));
-        return true;
-    }
-
-    /// Complete a return after its optional expression has been parsed exactly
-    /// once. This is the parser-side counterpart of QuickJS `emit_return`: the
-    /// expression value is preserved while catch/iterator cleanup runs, and all
-    /// return kinds converge on one final opcode selection.
-    fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
-        if (try emitCapturedReturnThroughFinally(s, has_expr)) return;
-
-        if (has_expr and s.in_async and s.in_generator) {
-            try s.emitOp(opcode.op.await);
-        }
-
-        if (has_expr and (hasActiveIteratorCloses(s) or s.active_catch_marker_depth > 0)) {
-            const return_tmp = try appendTempLocal(s);
-            try s.emitOpU16(opcode.op.put_loc, return_tmp);
-            try emitCatchMarkerDropsToDepth(s, 0);
-            try emitActiveIteratorCloses(s);
-            try s.emitOpU16(opcode.op.get_loc, return_tmp);
-        } else if (!has_expr) {
-            if (s.active_catch_marker_depth > 0) try emitCatchMarkerDropsToDepth(s, 0);
-            try emitActiveIteratorCloses(s);
-        }
-
-        try emitFunctionReturn(s, has_expr);
+        if (!has_expr) try s.emitOp(opcode.op.undefined);
+        try emitReturnValue(s, has_expr and s.in_async and s.in_generator);
     }
 
     fn emitFunctionReturn(s: *State, has_value: bool) Error!void {
@@ -12110,151 +12007,226 @@ pub const parser_core = struct {
     }
 
     fn emitCapturedControlThroughFinally(s: *State, target: FinallyControlTarget) Error!bool {
-        const frame_index = (try nearestReturnFinallyFrameForControl(s, target, null)) orelse return false;
-        try emitCapturedControlThroughFinallyFrame(s, frame_index, target, shouldDropPendingAbruptForCapture(s, frame_index));
-        return true;
-    }
-
-    fn emitCapturedControlThroughFinallyFrame(s: *State, frame_index: usize, target: FinallyControlTarget, drop_pending_abrupt: bool) Error!void {
-        try emitCatchMarkerDropsToDepth(s, s.return_finally_frames.items[frame_index].catch_marker_depth);
-        if (drop_pending_abrupt) try emitPendingAbruptDropsForControlTarget(s, target);
-        const off = try emitForwardJump(s, opcode.op.goto);
-        switch (target.kind) {
-            .@"break" => if (target.label_atom) |atom_id|
-                try s.return_finally_frames.items[frame_index].labelled_break_fixups.append(s.function.memory.allocator, .{
-                    .off = off,
-                    .atom_id = atom_id,
-                })
-            else
-                try s.return_finally_frames.items[frame_index].break_fixups.append(s.function.memory.allocator, off),
-            .@"continue" => if (target.label_atom) |atom_id|
-                try s.return_finally_frames.items[frame_index].labelled_continue_fixups.append(s.function.memory.allocator, .{
-                    .off = off,
-                    .atom_id = atom_id,
-                })
-            else
-                try s.return_finally_frames.items[frame_index].continue_fixups.append(s.function.memory.allocator, off),
+        var frame_index = s.return_finally_frames.items.len;
+        while (frame_index != 0) {
+            frame_index -= 1;
+            if (try controlTargetCrossesFinallyFrame(s, target, frame_index)) {
+                try emitControlThroughFinally(s, target);
+                return true;
+            }
         }
+        var body_index = s.finally_body_control_frames.items.len;
+        while (body_index != 0) {
+            body_index -= 1;
+            if (try controlTargetCrossesFinallyBody(s, target, body_index)) {
+                try emitControlThroughFinally(s, target);
+                return true;
+            }
+        }
+        return false;
     }
 
-    fn emitPendingAbruptDropsForControlTarget(s: *State, target: FinallyControlTarget) Error!void {
+    const ResolvedFinallyControlTarget = struct {
+        depth: usize,
+        catch_marker_depth: u32,
+        cleanup_drops: u8,
+        label_frame_index: ?usize,
+    };
+
+    fn resolveFinallyControlTarget(s: *State, target: FinallyControlTarget) Error!ResolvedFinallyControlTarget {
         if (target.label_atom) |atom_id| {
-            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
-            try emitPendingAbruptDropsForLabel(s, label_frame_index);
-            return;
+            const label_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
+            const label_frame = s.label_frames.items[label_index];
+            return switch (target.kind) {
+                .@"break" => .{
+                    .depth = label_frame.break_frame_depth,
+                    .catch_marker_depth = label_frame.catch_marker_depth,
+                    .cleanup_drops = if (label_frame.allow_continue and label_frame.break_frame_depth > 0)
+                        s.break_frame_cleanup_drops.items[label_frame.break_frame_depth - 1]
+                    else
+                        0,
+                    .label_frame_index = label_index,
+                },
+                .@"continue" => blk: {
+                    if (!label_frame.allow_continue or label_frame.control_frame_depth == 0) {
+                        return Error.UnexpectedToken;
+                    }
+                    break :blk .{
+                        .depth = label_frame.control_frame_depth,
+                        .catch_marker_depth = label_frame.catch_marker_depth,
+                        .cleanup_drops = s.continue_frame_cleanup_drops.items[label_frame.control_frame_depth - 1],
+                        .label_frame_index = label_index,
+                    };
+                },
+            };
         }
-        switch (target.kind) {
-            .@"break" => try emitPendingAbruptDropsForUnlabelledBreak(s),
-            .@"continue" => try emitPendingAbruptDropsForUnlabelledContinue(s),
-        }
-    }
 
-    fn nearestReturnFinallyFrameForReturn(s: *State, exclude_frame_index: ?usize) ?usize {
-        var i = s.return_finally_frames.items.len;
-        while (i != 0) {
-            i -= 1;
-            if (exclude_frame_index != null and i == exclude_frame_index.?) continue;
-            if (returnFinallyFrameSuppressed(s, i)) continue;
-            return i;
-        }
-        return null;
-    }
-
-    fn nearestReturnFinallyFrameForControl(s: *State, target: FinallyControlTarget, exclude_frame_index: ?usize) Error!?usize {
-        var i = s.return_finally_frames.items.len;
-        while (i != 0) {
-            i -= 1;
-            if (exclude_frame_index != null and i == exclude_frame_index.?) continue;
-            if (returnFinallyFrameSuppressed(s, i)) continue;
-            if (try controlTargetCrossesFinallyFrame(s, target, i)) return i;
-        }
-        return null;
-    }
-
-    fn controlTargetCrossesFinallyFrame(s: *State, target: FinallyControlTarget, frame_index: usize) Error!bool {
-        const frame = s.return_finally_frames.items[frame_index];
-        if (target.label_atom) |atom_id| {
-            const label_frame_index = s.findLabelFrame(atom_id) orelse return Error.UnexpectedToken;
-            if (target.kind == .@"continue" and !s.label_frames.items[label_frame_index].allow_continue) return Error.UnexpectedToken;
-            return label_frame_index < frame.label_depth;
-        }
         return switch (target.kind) {
-            .@"break" => s.break_frame_lens.items.len <= frame.break_depth,
-            .@"continue" => s.continue_frame_lens.items.len <= frame.continue_depth,
+            .@"break" => blk: {
+                if (s.break_frame_lens.items.len == 0) return Error.UnexpectedToken;
+                break :blk .{
+                    .depth = s.break_frame_lens.items.len,
+                    .catch_marker_depth = s.break_frame_catch_marker_depths.getLast(),
+                    .cleanup_drops = s.break_frame_cleanup_drops.getLast(),
+                    .label_frame_index = null,
+                };
+            },
+            .@"continue" => blk: {
+                if (s.continue_frame_lens.items.len == 0) return Error.UnexpectedToken;
+                break :blk .{
+                    .depth = s.continue_frame_lens.items.len,
+                    .catch_marker_depth = s.continue_frame_catch_marker_depths.getLast(),
+                    .cleanup_drops = s.continue_frame_cleanup_drops.getLast(),
+                    .label_frame_index = null,
+                };
+            },
         };
     }
 
-    fn returnFinallyFrameSuppressed(s: *const State, frame_index: usize) bool {
-        return s.suppress_return_finally_capture != 0 and
-            frame_index >= s.suppress_return_finally_capture_depth and
-            frame_index < s.suppress_return_finally_capture_end;
+    fn blockOccursBeforeBoundary(cursor: ?*BlockEnv, needle: *BlockEnv, boundary: ?*BlockEnv) bool {
+        var block = cursor;
+        while (block) |current| : (block = current.prev) {
+            if (current == boundary) return false;
+            if (current == needle) return true;
+        }
+        return false;
     }
 
-    fn shouldDropPendingAbruptForCapture(s: *const State, frame_index: usize) bool {
-        if (s.finally_pending_abrupt_frames.items.len == 0) return false;
-        if (s.suppress_return_finally_capture == 0) return true;
-        return frame_index < s.suppress_return_finally_capture_depth;
+    fn advanceControlBlockCursorUntil(cursor: *?*BlockEnv, boundary: ?*BlockEnv) Error!void {
+        while (cursor.*) |current| {
+            if (current == boundary) return;
+            cursor.* = current.prev;
+        }
+        if (boundary != null) return Error.UnexpectedToken;
     }
 
-    fn enterReturnFinallyFrameSuppression(s: *State, frame_index: usize) ReturnFinallyCaptureSuppression {
-        std.debug.assert(frame_index < s.return_finally_frames.items.len);
-        const saved = ReturnFinallyCaptureSuppression{
-            .count = s.suppress_return_finally_capture,
-            .depth = s.suppress_return_finally_capture_depth,
-            .end = s.suppress_return_finally_capture_end,
+    fn emitControlVectorCleanupTo(
+        s: *State,
+        kind: FinallyControlKind,
+        cursor: *usize,
+        boundary_depth: usize,
+        catch_marker_depth: *u32,
+    ) Error!void {
+        if (cursor.* < boundary_depth) return Error.UnexpectedToken;
+        while (cursor.* > boundary_depth) {
+            cursor.* -= 1;
+            switch (kind) {
+                .@"break" => {
+                    try emitCatchMarkerDropsFromDepth(
+                        s,
+                        catch_marker_depth,
+                        s.break_frame_catch_marker_depths.items[cursor.*],
+                    );
+                    try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[cursor.*]);
+                },
+                .@"continue" => {
+                    try emitCatchMarkerDropsFromDepth(
+                        s,
+                        catch_marker_depth,
+                        s.continue_frame_catch_marker_depths.items[cursor.*],
+                    );
+                    const break_frame_index = s.continue_frame_break_frame_indices.items[cursor.*];
+                    try emitCrossFrameCleanup(s, s.break_frame_cross_cleanup_drops.items[break_frame_index]);
+                },
+            }
+        }
+    }
+
+    fn emitFinallyBodyControlEvent(
+        s: *State,
+        target: FinallyControlTarget,
+        frame: FinallyBodyControlFrame,
+        vector_cursor: *usize,
+        block_cursor: *?*BlockEnv,
+        catch_marker_depth: *u32,
+    ) Error!void {
+        const boundary_depth = switch (target.kind) {
+            .@"break" => frame.break_depth,
+            .@"continue" => frame.continue_depth,
         };
-        if (s.suppress_return_finally_capture == 0) {
-            s.suppress_return_finally_capture_depth = frame_index;
-            s.suppress_return_finally_capture_end = frame_index + 1;
-        } else {
-            s.suppress_return_finally_capture_depth = @min(s.suppress_return_finally_capture_depth, frame_index);
-            s.suppress_return_finally_capture_end = @max(s.suppress_return_finally_capture_end, frame_index + 1);
+        try emitControlVectorCleanupTo(s, target.kind, vector_cursor, boundary_depth, catch_marker_depth);
+        try emitCatchMarkerDropsFromDepth(s, catch_marker_depth, frame.catch_marker_depth);
+        try advanceControlBlockCursorUntil(block_cursor, frame.block);
+        try s.emitOpNoSource(opcode.op.drop);
+        try s.emitOpNoSource(opcode.op.drop);
+        block_cursor.* = frame.block.prev;
+    }
+
+    fn emitControlThroughFinally(s: *State, target: FinallyControlTarget) Error!void {
+        const resolved = try resolveFinallyControlTarget(s, target);
+        var vector_cursor = switch (target.kind) {
+            .@"break" => s.break_frame_lens.items.len,
+            .@"continue" => s.continue_frame_lens.items.len,
+        };
+        var block_cursor = s.top_break;
+        var catch_marker_depth = s.active_catch_marker_depth;
+        var body_index = s.finally_body_control_frames.items.len;
+
+        var return_index = s.return_finally_frames.items.len;
+        while (return_index != 0) {
+            return_index -= 1;
+            if (!try controlTargetCrossesFinallyFrame(s, target, return_index)) continue;
+            const return_frame = s.return_finally_frames.items[return_index];
+
+            while (body_index != 0) {
+                const candidate_index = body_index - 1;
+                if (!try controlTargetCrossesFinallyBody(s, target, candidate_index)) break;
+                const body_frame = s.finally_body_control_frames.items[candidate_index];
+                if (!blockOccursBeforeBoundary(block_cursor, body_frame.block, return_frame.block_boundary)) break;
+                try emitFinallyBodyControlEvent(
+                    s,
+                    target,
+                    body_frame,
+                    &vector_cursor,
+                    &block_cursor,
+                    &catch_marker_depth,
+                );
+                body_index -= 1;
+            }
+
+            const boundary_depth = switch (target.kind) {
+                .@"break" => return_frame.break_depth,
+                .@"continue" => return_frame.continue_depth,
+            };
+            try emitControlVectorCleanupTo(s, target.kind, &vector_cursor, boundary_depth, &catch_marker_depth);
+            try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
+            try advanceControlBlockCursorUntil(&block_cursor, return_frame.block_boundary);
+            try s.emitOpNoSource(opcode.op.undefined);
+            try emitParserLabelJumpNoSource(s, opcode.op.gosub, return_frame.finally_label);
+            try s.emitOpNoSource(opcode.op.drop);
         }
-        s.suppress_return_finally_capture += 1;
-        return saved;
-    }
 
-    fn leaveReturnFinallyFrameSuppression(s: *State, saved: ReturnFinallyCaptureSuppression) void {
-        s.suppress_return_finally_capture = saved.count;
-        s.suppress_return_finally_capture_depth = saved.depth;
-        s.suppress_return_finally_capture_end = saved.end;
-    }
-
-    fn parseFinallyBlockForReturnPath(s: *State, frame_index: usize) Error!void {
-        const saved_suppression = enterReturnFinallyFrameSuppression(s, frame_index);
-        defer leaveReturnFinallyFrameSuppression(s, saved_suppression);
-        try parseFinallyBlockPreservingNormalEvalRet(s);
-    }
-
-    fn parseFinallyBlockForAbruptPath(s: *State, frame_index: usize) Error!void {
-        try s.finally_pending_abrupt_frames.append(s.function.memory.allocator, .{
-            .break_depth = s.break_frame_lens.items.len,
-            .continue_depth = s.continue_frame_lens.items.len,
-            .label_depth = s.label_frames.items.len,
-        });
-        defer _ = s.finally_pending_abrupt_frames.pop().?;
-        try parseFinallyBlockForReturnPath(s, frame_index);
-    }
-
-    fn parseFinallyBlockPreservingNormalEvalRet(s: *State) Error!void {
-        if (s.eval_ret_idx < 0) {
-            try parseBlock(s);
-            return;
+        while (body_index != 0) {
+            const candidate_index = body_index - 1;
+            if (!try controlTargetCrossesFinallyBody(s, target, candidate_index)) break;
+            try emitFinallyBodyControlEvent(
+                s,
+                target,
+                s.finally_body_control_frames.items[candidate_index],
+                &vector_cursor,
+                &block_cursor,
+                &catch_marker_depth,
+            );
+            body_index -= 1;
         }
 
-        const temp_name = try std.fmt.allocPrint(s.function.memory.allocator, "__finally_ret_{d}", .{s.with_scope_id});
-        defer s.function.memory.allocator.free(temp_name);
-        s.with_scope_id += 1;
-        const temp_atom = try s.function.atoms.internString(temp_name);
-        defer s.function.atoms.free(temp_atom);
-        _ = try s.appendFunctionVarAtOrigin(temp_atom, 0);
+        try emitControlVectorCleanupTo(s, target.kind, &vector_cursor, resolved.depth, &catch_marker_depth);
+        try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, resolved.catch_marker_depth);
+        switch (target.kind) {
+            .@"break" => try emitUnlabelledBreakCleanup(s, resolved.cleanup_drops),
+            .@"continue" => try emitCrossFrameCleanup(s, resolved.cleanup_drops),
+        }
 
-        try s.emitScopeGetVar(State.eval_ret_atom);
-        try s.emitScopePutVar(temp_atom);
-        try s.setEvalReturnUndefined();
-        try parseBlock(s);
-        try s.emitScopeGetVar(temp_atom);
-        try s.emitScopePutVar(State.eval_ret_atom);
+        const off = try emitForwardJumpNoSource(s, opcode.op.goto);
+        if (resolved.label_frame_index) |label_index| {
+            switch (target.kind) {
+                .@"break" => try s.label_frames.items[label_index].break_fixups.append(s.function.memory.allocator, off),
+                .@"continue" => try s.label_frames.items[label_index].continue_fixups.append(s.function.memory.allocator, off),
+            }
+        } else switch (target.kind) {
+            .@"break" => try s.break_fixups.append(s.function.memory.allocator, off),
+            .@"continue" => try s.continue_fixups.append(s.function.memory.allocator, off),
+        }
     }
 
     fn patchForwardJump(s: *State, operand_offset: usize) Error!void {
@@ -14732,6 +14704,7 @@ pub const parser_core = struct {
     /// catch depth at iterator creation and emits the equivalent marker walk.
     fn emitBlockEnvReturnCleanupUntil(
         s: *State,
+        block_cursor: *?*BlockEnv,
         boundary: ?*BlockEnv,
         catch_marker_depth: *u32,
     ) Error!void {
@@ -14740,44 +14713,54 @@ pub const parser_core = struct {
             atom_module.predefinedId("return", .string) orelse return Error.UnexpectedToken
         else
             atom_module.null_atom;
-        var block = s.top_break;
-        while (block) |current| : (block = current.prev) {
+        while (block_cursor.*) |current| {
             if (current == boundary) return;
-            if (!current.has_iterator) continue;
-            try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
-            try s.emitOp(opcode.op.nip_catch);
-            if (async_generator) {
-                // QuickJS emit_return (quickjs.c:28422-28440): discard the
-                // cached next method, call iterator.return(), require an
-                // Object result, await it, then restore the injected return
-                // value for the next enclosing cleanup / OP_return_async.
+            block_cursor.* = current.prev;
+
+            var is_finally_body = false;
+            for (s.finally_body_control_frames.items) |frame| {
+                if (frame.block == current) {
+                    is_finally_body = true;
+                    break;
+                }
+            }
+            if (is_finally_body) {
+                // Preserve the return completion while discarding this
+                // finalizer's completion and gosub return-PC slots.
                 try s.emitOp(opcode.op.nip);
-                try s.emitOp(opcode.op.swap);
-                try s.emitOpAtom(opcode.op.get_field2, return_atom);
-                try s.emitOp(opcode.op.dup);
-                try s.emitOp(opcode.op.is_undefined_or_null);
-                const no_return = try emitForwardJump(s, opcode.op.if_true);
-                try s.emitOpU16(opcode.op.call_method, 0);
-                try s.emitOp(opcode.op.iterator_check_object);
-                try s.emitOp(opcode.op.await);
-                const closed = try emitForwardJump(s, opcode.op.goto);
-                try patchForwardJump(s, no_return);
-                try s.emitOp(opcode.op.drop);
-                try patchForwardJump(s, closed);
-                try s.emitOp(opcode.op.drop);
-            } else {
-                try s.emitOp(opcode.op.rot3r);
-                try s.emitOp(opcode.op.undefined);
-                try s.emitOp(opcode.op.iterator_close);
+                try s.emitOp(opcode.op.nip);
+                continue;
+            }
+            if (current.has_iterator) {
+                try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
+                try s.emitOp(opcode.op.nip_catch);
+                if (async_generator) {
+                    // QuickJS emit_return (quickjs.c:28422-28440): discard the
+                    // cached next method, call iterator.return(), require an
+                    // Object result, await it, then restore the injected return
+                    // value for the next enclosing cleanup / OP_return_async.
+                    try s.emitOp(opcode.op.nip);
+                    try s.emitOp(opcode.op.swap);
+                    try s.emitOpAtom(opcode.op.get_field2, return_atom);
+                    try s.emitOp(opcode.op.dup);
+                    try s.emitOp(opcode.op.is_undefined_or_null);
+                    const no_return = try emitForwardJump(s, opcode.op.if_true);
+                    try s.emitOpU16(opcode.op.call_method, 0);
+                    try s.emitOp(opcode.op.iterator_check_object);
+                    try s.emitOp(opcode.op.await);
+                    const closed = try emitForwardJump(s, opcode.op.goto);
+                    try patchForwardJump(s, no_return);
+                    try s.emitOp(opcode.op.drop);
+                    try patchForwardJump(s, closed);
+                    try s.emitOp(opcode.op.drop);
+                } else {
+                    try s.emitOp(opcode.op.rot3r);
+                    try s.emitOp(opcode.op.undefined);
+                    try s.emitOp(opcode.op.iterator_close);
+                }
             }
         }
         if (boundary != null) return Error.UnexpectedToken;
-    }
-
-    fn emitBlockEnvReturnCleanup(s: *State) Error!void {
-        var catch_marker_depth = s.active_catch_marker_depth;
-        try emitBlockEnvReturnCleanupUntil(s, null, &catch_marker_depth);
-        try emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, 0);
     }
 
     fn parseArrayPatternBody(s: *State, mode: PatternMode) Error!void {

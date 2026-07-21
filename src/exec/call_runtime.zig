@@ -4406,17 +4406,6 @@ pub fn qjsGeneratorNext(
         defer done_result.free(ctx.runtime);
         return done_result.dup();
     }
-    if (takeGeneratorPendingReturn(object)) |pending| {
-        // Suspended at a yield inside a finally block entered via .return(v): finish
-        // the finally range, then complete with the pending return value (qjs
-        // js_generator_next GEN_MAGIC_RETURN, quickjs.c:21077).
-        const step = try resumeGeneratorPendingReturnStep(ctx, output, generator_global, receiver, object, pending, args);
-        if (!step.done and (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object))) {
-            return step.value;
-        }
-        defer step.value.free(ctx.runtime);
-        return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
-    }
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
     const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
@@ -4493,10 +4482,6 @@ pub fn qjsSyncGeneratorStep(
     if (payload.executing) return error.TypeError;
     const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     if (payload.done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    // Pending return completion stashed by .return(v) suspended in a finally block:
-    // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
-    // and threads the completion through the finally.
-    if (payload.resume_completion_type == 1) return null;
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
     const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
@@ -4598,106 +4583,6 @@ pub fn resumeGeneratorYieldStarCompletion(
     return try createIteratorResult(ctx.runtime, global, result, done);
 }
 
-/// Pending return completion stash. When `.return(v)` enters a finally block and the
-/// finally itself yields, the pending return completion must survive the suspension so
-/// the following `.next()` can complete `{value: v, done: true}`. Mirror qjs
-/// js_generator_next GEN_MAGIC_RETURN (quickjs.c:21109: `sf->cur_sp[-1] = ret;
-/// sf->cur_sp[0] = JS_NewInt32(ctx, magic)` — the completion value and its magic live
-/// on the generator's own saved stack): the value plus an int32 stop-pc marker are
-/// pushed onto the generator's saved operand stack (GC-traced and freed with the
-/// generator payload) and `resume_completion_type` is set to 1 = GEN_MAGIC_RETURN.
-/// Every resume entry point must consume the stash first (`takeGeneratorPendingReturn`)
-/// so the saved stack regains the exact shape the suspended bytecode expects.
-pub fn stashGeneratorPendingReturn(
-    rt: *core.JSRuntime,
-    generator: *core.Object,
-    pending_value: core.JSValue,
-    stop_pc: usize,
-) !void {
-    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
-    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stackSize(), 2, generator.generatorStackUsesCombinedStorage());
-    const values = saved_stack.values;
-    values.ptr[values.len] = pending_value.dup();
-    values.ptr[values.len + 1] = core.JSValue.int32(@intCast(stop_pc));
-    saved_stack.values = values.ptr[0 .. values.len + 2];
-    generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
-}
-
-pub const GeneratorPendingReturn = struct {
-    /// Owned by the caller.
-    value: core.JSValue,
-    stop_pc: usize,
-};
-
-/// Pop the pending return completion stashed by `stashGeneratorPendingReturn`, if any.
-/// Outside an active resume, `resume_completion_type == 1` only ever means a stashed
-/// pending return (the transient yield-star magic is consumed within the same resume,
-/// guarded by the executing flag).
-pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
-    if (generator.generatorResumeCompletionType() != 1) return null;
-    generator.generatorResumeCompletionTypeSlot().* = 0;
-    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
-    const values = saved_stack.values;
-    std.debug.assert(values.len >= 2);
-    const marker = values[values.len - 1];
-    const value = values[values.len - 2];
-    saved_stack.values = values.ptr[0 .. values.len - 2];
-    return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
-}
-
-/// Resume a generator suspended at a yield INSIDE a finally block that was entered via
-/// `.return(v)`: run the rest of the finally range and complete with the pending return
-/// value once the range finishes (qjs threads this natively through OP_return / OP_ret
-/// with the completion on the generator stack, js_generator_next quickjs.c:21077).
-/// Takes ownership of `pending.value`; the returned value is owned by the caller.
-fn resumeGeneratorPendingReturnStep(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    generator_global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    pending: GeneratorPendingReturn,
-    args: []const core.JSValue,
-) !GeneratorValueDone {
-    const pending_value = pending.value;
-    defer pending_value.free(ctx.runtime);
-    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-    const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
-    const result = callFunctionBytecodeModeState(
-        ctx,
-        function_value,
-        current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.generatorCaptures(),
-        output,
-        generator_global,
-        false,
-        object,
-        resume_value,
-        pending.stop_pc,
-        core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
-    ) catch |err| {
-        object.completeGeneratorExecution(ctx.runtime);
-        return err;
-    };
-    defer result.free(ctx.runtime);
-    if (object.generatorJustYielded()) {
-        // Suspended again inside the finally (plain yield or yield* delegation):
-        // keep the pending return completion stashed. This is safe because every
-        // resume entry point pops the stash before restoring the saved stack.
-        try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
-        return .{ .value = result.dup(), .done = false };
-    }
-    object.completeGeneratorExecution(ctx.runtime);
-    const value = if (result.isUndefined()) pending_value.dup() else result.dup();
-    return .{ .value = value, .done = true };
-}
-
 pub fn qjsGeneratorReturn(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4710,17 +4595,13 @@ pub fn qjsGeneratorReturn(
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
         // Mirrors js_async_generator_next GEN_MAGIC_RETURN (quickjs.c:21706):
-        // enqueue and return the request promise; the argument is awaited by
-        // the queue machine before the finally range runs / the request settles.
+        // enqueue and return the request promise; the compiled return leg
+        // awaits the argument before finalizer cleanup and settlement.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
     const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
-    // A fresh .return(v) replaces any pending return completion stashed by an earlier
-    // return that suspended inside a finally block (qjs: the new completion resumes at
-    // the yield and the old stack slots unwind with the frame).
-    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
@@ -4787,13 +4668,13 @@ pub fn resumeGeneratorCatchForRuntimeError(
 ) !?core.JSValue {
     if (object.class_id == core.class.ids.async_generator) return null;
     if (object.generatorPc() == 0 or !object.generatorStarted()) return null;
+    const execution = object.generatorPayloadPtr().execution orelse return null;
+    if (execution.suspended.catchTarget() == null) return null;
     const function_value = object.generatorFunctionBytecode() orelse return null;
-    const fb = functionBytecodeFromValue(function_value) orelse return null;
-    const catch_target = findEnclosingCatchTarget(fb, @intCast(object.generatorPc())) orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
     defer thrown.free(ctx.runtime);
     const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    object.generatorPcSlot().* = catch_target;
+    object.generatorResumeCompletionTypeSlot().* = 2;
     object.generatorJustYieldedSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
@@ -4969,11 +4850,6 @@ pub fn qjsGeneratorThrow(
     if (payload.executing) return error.TypeError;
     const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    // A throw injected at a yield inside a finally block discards any pending return
-    // completion stashed there (qjs: the exception unwinds the frame and the stacked
-    // completion slots are freed with it).
-    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
-
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);
     }
@@ -5022,36 +4898,33 @@ pub fn qjsGeneratorThrow(
 
     if (object.generatorPc() != 0 and object.generatorStarted()) {
         const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (findEnclosingCatchTarget(fb, @intCast(object.generatorPc()))) |catch_target| {
-            const current_function_value = object.generatorCurrentFunction() orelse receiver;
-            object.generatorPcSlot().* = catch_target;
-            object.generatorJustYieldedSlot().* = false;
-            const result = callFunctionBytecodeModeState(
-                ctx,
-                function_value,
-                current_function_value,
-                object.generatorThis() orelse core.JSValue.undefinedValue(),
-                object.generatorArgs(),
-                object.generatorCaptures(),
-                output,
-                generator_global,
-                false,
-                object,
-                thrown,
-                null,
-                core.JSValue.undefinedValue(),
-                core.JSValue.undefinedValue(),
-            ) catch |err| {
-                object.completeGeneratorExecution(ctx.runtime);
-                return err;
-            };
-            defer result.free(ctx.runtime);
-            const done = !object.generatorJustYielded();
-            if (done) object.completeGeneratorExecution(ctx.runtime);
-            const result_value = generatorCatchResumeResultValue(result);
-            return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
-        }
+        const current_function_value = object.generatorCurrentFunction() orelse receiver;
+        object.generatorResumeCompletionTypeSlot().* = 2;
+        object.generatorJustYieldedSlot().* = false;
+        const result = callFunctionBytecodeModeState(
+            ctx,
+            function_value,
+            current_function_value,
+            object.generatorThis() orelse core.JSValue.undefinedValue(),
+            object.generatorArgs(),
+            object.generatorCaptures(),
+            output,
+            generator_global,
+            false,
+            object,
+            thrown,
+            null,
+            core.JSValue.undefinedValue(),
+            core.JSValue.undefinedValue(),
+        ) catch |err| {
+            object.completeGeneratorExecution(ctx.runtime);
+            return err;
+        };
+        defer result.free(ctx.runtime);
+        const done = !object.generatorJustYielded();
+        if (done) object.completeGeneratorExecution(ctx.runtime);
+        const result_value = generatorCatchResumeResultValue(result);
+        return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
     }
 
     object.completeGeneratorExecution(ctx.runtime);
@@ -5070,142 +4943,6 @@ pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize
     const size = bytecode.opcode.sizeOf(op_id);
     if (size == 0 or pc + size > fb.byteCode().len) return null;
     return pc + size;
-}
-
-pub const GeneratorReturnFinallyRange = struct {
-    start: usize,
-    stop: usize,
-};
-
-pub fn findGeneratorReturnFinallyTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?GeneratorReturnFinallyRange {
-    var pc: usize = 0;
-    var found: ?GeneratorReturnFinallyRange = null;
-    while (pc < start_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byteCode().len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byteCode().len) {
-                if (findGeneratorReturnFinallyTargetFromCatch(fb, pc + 5, @intCast(target))) |candidate| {
-                    if (found == null or candidate.stop > found.?.stop) {
-                        found = candidate;
-                    }
-                }
-            }
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findGeneratorReturnFinallyTargetFromCatch(
-    fb: *const bytecode.FunctionBytecode,
-    protected_start: usize,
-    catch_target: usize,
-) ?GeneratorReturnFinallyRange {
-    // A compiled try/finally has a normal-completion jump at the end of the
-    // protected range. Its target is the duplicated normal finally body, and
-    // the instruction immediately before that target is the synthetic rethrow
-    // terminating the exceptional copy. Use that structural marker instead of
-    // the first throw in the exceptional copy: an explicit throw inside the
-    // finally body must execute and override a pending generator return.
-    if (findForwardGotoTargetInRange(fb, protected_start, catch_target)) |normal_finally_target| {
-        if (normal_finally_target > catch_target and
-            normal_finally_target <= fb.byteCode().len and
-            normal_finally_target > 0 and
-            normal_finally_target - 1 > catch_target and
-            fb.byteCode()[normal_finally_target - 1] == op.throw)
-        {
-            return .{ .start = catch_target, .stop = normal_finally_target - 1 };
-        }
-    }
-
-    const rethrow_pc = findThrowFrom(fb, catch_target) orelse return null;
-    if (rethrow_pc <= catch_target) return null;
-    if (findForwardGotoTargetInRange(fb, catch_target, rethrow_pc)) |normal_finally_target| {
-        if (normal_finally_target > rethrow_pc) {
-            return .{ .start = normal_finally_target, .stop = fb.byteCode().len };
-        }
-    }
-    return .{ .start = catch_target, .stop = rethrow_pc };
-}
-
-pub fn findForwardGotoTargetInRange(fb: *const bytecode.FunctionBytecode, start_pc: usize, end_pc: usize) ?usize {
-    var pc = start_pc;
-    var found: ?usize = null;
-    while (pc < end_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (forwardGotoTarget(fb, pc)) |target| {
-            if (target > pc and target <= fb.byteCode().len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findEnclosingCatchTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?usize {
-    var pc: usize = 0;
-    var found: ?usize = null;
-    while (pc < start_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byteCode().len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byteCode().len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return null;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findThrowFrom(fb: *const bytecode.FunctionBytecode, start_pc: usize) ?usize {
-    var pc = start_pc;
-    while (pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.throw) return pc;
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return null;
-        pc += size;
-    }
-    return null;
-}
-
-pub fn forwardGotoTarget(fb: *const bytecode.FunctionBytecode, pc: usize) ?u32 {
-    const op_id = fb.byteCode()[pc];
-    return switch (op_id) {
-        op.goto8 => blk: {
-            if (pc + 1 >= fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff: i8 = @bitCast(fb.byteCode()[operand_pc]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        op.goto16 => blk: {
-            if (pc + 3 > fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff = readInt(i16, fb.byteCode()[operand_pc..][0..2]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        op.goto => blk: {
-            if (pc + 5 > fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        else => null,
-    };
 }
 
 pub fn qjsIteratorCallForNativeRecord(

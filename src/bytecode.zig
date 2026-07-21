@@ -7085,7 +7085,8 @@ pub const pipeline_resolve_labels = struct {
         return op_id == opcode.op.if_false or
             op_id == opcode.op.if_true or
             op_id == opcode.op.goto or
-            op_id == opcode.op.@"catch";
+            op_id == opcode.op.@"catch" or
+            op_id == opcode.op.gosub;
     }
 
     fn isAtomLabelU8Op(op_id: u8) bool {
@@ -7187,7 +7188,7 @@ pub const pipeline_resolve_labels = struct {
     }
 
     fn jumpSizeForOffset(op_id: u8, diff: i64, use_short_opcodes: bool) usize {
-        if (op_id == opcode.op.@"catch") return 5;
+        if (op_id == opcode.op.@"catch" or op_id == opcode.op.gosub) return 5;
         if (use_short_opcodes) {
             if (diff >= std.math.minInt(i8) and diff <= std.math.maxInt(i8)) return 2;
             if (op_id == opcode.op.goto and diff >= std.math.minInt(i16) and diff <= std.math.maxInt(i16)) return 3;
@@ -7357,33 +7358,6 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
-    fn isFinallyNormalCompletionMarker(code: []const u8, goto_pc: usize) bool {
-        if (goto_pc >= code.len or code[goto_pc] != opcode.op.goto) return false;
-        const normal_finally_target = jumpTarget(code, goto_pc) catch return false;
-        if (normal_finally_target <= goto_pc) return false;
-
-        // The parser emits a catch marker before a try body and an otherwise
-        // unreachable normal-completion goto immediately before the exceptional
-        // finally copy. Generator return-through-finally discovery needs that
-        // jump even when the protected body already terminated.
-        var pc: usize = 0;
-        while (pc < goto_pc) {
-            const op_id = code[pc];
-            if (op_id == opcode.op.@"catch") {
-                const exceptional_finally_target = jumpTarget(code, pc) catch return false;
-                if (exceptional_finally_target > goto_pc and
-                    exceptional_finally_target < normal_finally_target)
-                {
-                    return true;
-                }
-            }
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or pc + size > code.len) return false;
-            pc += size;
-        }
-        return false;
-    }
-
     fn deadCodePastTerminalSize(code: []const u8, pc: usize) ?usize {
         if (pc >= code.len or !canSkipDeadCodeAfter(code[pc])) return null;
         const terminal_size = instrSize(code[pc]);
@@ -7392,15 +7366,6 @@ pub const pipeline_resolve_labels = struct {
         while (scan_pc < code.len) {
             if (hasJumpTargetTo(code, scan_pc)) break;
             const op_id = code[scan_pc];
-            // Generator return-through-finally discovery treats the synthetic
-            // rethrow opcode as an implicit control-flow marker (it is found by
-            // scanning from the catch target, not by a bytecode jump).  Never
-            // erase that marker merely because a preceding finally arm returns.
-            if (op_id == opcode.op.throw) break;
-            // Likewise preserve the parser's normal-completion jump over the
-            // exceptional finally copy. It bounds that copy when the finally
-            // body itself contains an explicit throw.
-            if (isFinallyNormalCompletionMarker(code, scan_pc)) break;
             const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
             if (size == 0 or scan_pc + size > code.len) return null;
             scan_pc += size;
@@ -7872,9 +7837,11 @@ pub const pipeline_resolve_labels = struct {
             const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
             if (size == 0 or scan_pc + size > code.len) return false;
             if (isJumpOp(op_id)) {
-                if ((jumpTarget(code, scan_pc) catch return false) == target_pc) return true;
+                const target = jumpTarget(code, scan_pc) catch return false;
+                if (target == target_pc or (skipLabels(code, target) catch return false) == target_pc) return true;
             } else if (isAtomLabelU8Op(op_id)) {
-                if ((atomLabelTarget(code, scan_pc) catch return false) == target_pc) return true;
+                const target = atomLabelTarget(code, scan_pc) catch return false;
+                if (target == target_pc or (skipLabels(code, target) catch return false) == target_pc) return true;
             }
             scan_pc += size;
         }
@@ -8026,6 +7993,16 @@ pub const pipeline_resolve_labels = struct {
         return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
     }
 
+    /// QuickJS removes a call whose finalizer contains only `ret`.  The parser
+    /// still emits the uniform try/catch topology for a syntactic try/catch;
+    /// removing the empty `gosub` here keeps that topology free of runtime cost.
+    fn isEmptyGosub(code: []const u8, pc: usize) bool {
+        if (pc >= code.len or code[pc] != opcode.op.gosub) return false;
+        const target = jumpTarget(code, pc) catch return false;
+        const target_pc = skipLabels(code, target) catch return false;
+        return target_pc < code.len and code[target_pc] == opcode.op.ret;
+    }
+
     fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
         const code = ctx.function.code;
         @memset(positions, 0);
@@ -8050,6 +8027,8 @@ pub const pipeline_resolve_labels = struct {
                 if (pc + in_size > code.len) return error.InvalidBytecode;
 
                 const new_size: usize = if (op == opcode.op.label)
+                    0
+                else if (isEmptyGosub(code, pc))
                     0
                 else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
                     1
@@ -8296,6 +8275,8 @@ pub const pipeline_resolve_labels = struct {
             const op = func.code[i];
             if (op == opcode.op.label) {
                 i += 5;
+            } else if (isEmptyGosub(func.code, i)) {
+                i += instrSize(op);
             } else if (matchGetLengthPeephole(func.code, i, use_short_opcodes)) |input_size| {
                 output[out_idx] = opcode.op.get_length;
                 out_idx += 1;

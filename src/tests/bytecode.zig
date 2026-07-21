@@ -3103,7 +3103,7 @@ test "resolve_labels preserves dead code reached by an external jump" {
     try std.testing.expectEqualSlices(core.Atom, &.{live_atom}, bc.atom_operands);
 }
 
-test "resolve_labels preserves implicit generator rethrow markers" {
+test "resolve_labels relocates gosub directly to its finalizer" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -3114,36 +3114,18 @@ test "resolve_labels preserves implicit generator rethrow markers" {
     fd.use_short_opcodes = true;
 
     const op = bytecode.opcode.op;
-    const input = [_]u8{ op.get_loc0, op.@"return", op.throw };
-    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer bc.deinit(rt);
-    try bc.setCode(&input);
-
-    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
-    try pipeline.resolve_labels.run(&ctx);
-    try std.testing.expectEqualSlices(u8, &input, bc.code);
-}
-
-test "resolve_labels preserves a try-finally normal jump after a terminal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const name = try rt.internAtom("test");
-    defer rt.atoms.free(name);
-
-    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-    defer fd.deinit(rt);
-    fd.use_short_opcodes = true;
-
-    const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 14;
-    input[0] = op.@"catch";
-    std.mem.writeInt(u32, input[1..5], 12, .little);
-    input[5] = op.throw;
+    var input = [_]u8{0} ** 20;
+    input[0] = op.undefined;
+    input[1] = op.gosub;
+    std.mem.writeInt(u32, input[2..6], 12, .little);
     input[6] = op.drop;
     input[7] = op.goto;
-    std.mem.writeInt(u32, input[8..12], 13, .little);
-    input[12] = op.throw;
-    input[13] = op.return_undef;
+    std.mem.writeInt(u32, input[8..12], 19, .little);
+    input[12] = op.label;
+    std.mem.writeInt(u32, input[13..17], 1, .little);
+    input[17] = op.nop;
+    input[18] = op.ret;
+    input[19] = op.return_undef;
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
@@ -3152,11 +3134,57 @@ test "resolve_labels preserves a try-finally normal jump after a terminal" {
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 10), bc.code.len);
-    try std.testing.expectEqual(op.throw, bc.code[5]);
-    try std.testing.expectEqual(op.goto8, bc.code[6]);
-    try std.testing.expectEqual(op.throw, bc.code[8]);
-    try std.testing.expectEqual(op.return_undef, bc.code[9]);
+    try std.testing.expectEqual(op.gosub, bc.code[1]);
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, bc.code[2..6], .little));
+    try std.testing.expectEqual(op.nop, bc.code[9]);
+    try std.testing.expectEqual(op.ret, bc.code[10]);
+}
+
+test "resolve_labels removes gosub to an empty finalizer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 13;
+    input[0] = op.undefined;
+    input[1] = op.gosub;
+    std.mem.writeInt(u32, input[2..6], 7, .little);
+    input[6] = op.drop;
+    input[7] = op.label;
+    std.mem.writeInt(u32, input[8..12], 1, .little);
+    input[12] = op.ret;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+    try std.testing.expectEqualSlices(u8, &.{ op.undefined, op.drop, op.ret }, bc.code);
+}
+
+test "stack_size accepts nested gosub return PCs" {
+    const op = bytecode.opcode.op;
+    var code = [_]u8{0} ** 16;
+    code[0] = op.undefined;
+    code[1] = op.gosub;
+    std.mem.writeInt(i32, code[2..6], 6, .little); // target pc 8
+    code[6] = op.drop;
+    code[7] = op.return_undef;
+    code[8] = op.gosub;
+    std.mem.writeInt(i32, code[9..13], 5, .little); // target pc 14
+    code[13] = op.ret;
+    code[14] = op.nop;
+    code[15] = op.ret;
+
+    try std.testing.expectEqual(@as(u16, 3), try stack_size.compute(&code, .{}));
+}
+
+test "stack_size rejects ret without a gosub return PC" {
+    const op = bytecode.opcode.op;
+    try std.testing.expectError(error.StackUnderflow, stack_size.compute(&.{op.ret}, .{}));
 }
 
 test "M1.1: resolve_variables lowers private-field temp opcodes" {
