@@ -610,6 +610,15 @@ pub fn directEvalThisValue(
     if (classStaticThisAtom(caller_function, caller_frame)) |atom_id| {
         if (classStaticThisValue(caller_function, outer_frame, atom_id)) |value| return value;
     }
+    if (caller_function) |function| {
+        if (function.flags.is_derived_class_constructor) {
+            const local_count = @min(function.vardefs.len, outer_frame.locals.len);
+            for (function.vardefs[0..local_count], 0..) |vd, idx| {
+                if (vd.var_name == core.atom.ids.this_) return outer_frame.locals[idx];
+            }
+            return error.InvalidBytecode;
+        }
+    }
     return object_ops.materializeFrameThisBinding(ctx, global, outer_frame);
 }
 

@@ -37,8 +37,6 @@ const constructDynamicFunctionFromSource = call_runtime.constructDynamicFunction
 const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
 const currentArrowFunctionObject = object_ops.currentArrowFunctionObject;
 const defineClassFieldDataProperty = object_ops.defineClassFieldDataProperty;
-const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
-const functionObjectFromValue = object_ops.functionObjectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
 const isErrorConstructorName = exception_ops.isErrorConstructorName;
 const objectFromValue = object_ops.objectFromValue;
@@ -251,25 +249,6 @@ pub fn initializeClassInstanceElements(
     if (init_function) |initializer| {
         const result = try callValueOrBytecode(ctx, output, global, instance, initializer, &.{}, caller_function, caller_frame);
         result.free(ctx.runtime);
-    }
-}
-
-pub fn initializeCurrentConstructorClassInstanceElements(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: *frame_mod.Frame,
-) !void {
-    if (caller_frame.this_value.isUninitialized()) return;
-    if (functionObjectFromValue(caller_frame.current_function)) |function_object| {
-        const function_value = function_object.functionBytecode() orelse return;
-        const fb = functionBytecodeFromValue(function_value) orelse return;
-        try initializeClassInstanceElements(ctx, output, global, caller_frame.current_function, caller_frame.this_value, fb, caller_function, caller_frame);
-        return;
-    }
-    if (functionBytecodeFromValue(caller_frame.current_function)) |fb| {
-        try initializeClassInstanceElements(ctx, output, global, caller_frame.current_function, caller_frame.this_value, fb, caller_function, caller_frame);
     }
 }
 

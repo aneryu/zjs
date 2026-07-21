@@ -2148,7 +2148,6 @@ pub const Machine = struct {
         } else if (open_var_ref_count != 0) {
             try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
         }
-        try vm_call.linkDerivedConstructorThisLocal(ctx, function, &entry.frame);
         if (borrow_var_refs) {
             // Alias the closure's captures (mutable slice; no merge replaced it).
             // The function object stays alive via

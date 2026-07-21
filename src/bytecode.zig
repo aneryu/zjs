@@ -9429,11 +9429,6 @@ pub const pipeline_finalize = struct {
         // and every identity consumer use this metadata; there is no
         // address-search or "extra capacity" fallback.
         if (fd_mut) |def| {
-            if (def.is_derived_class_constructor) {
-                for (def.vars, 0..) |vd, local_idx| {
-                    if (vd.var_name == atom.ids.this_) try def.captureLocal(local_idx);
-                }
-            }
             // resolve_variables marks each direct-eval chain in bytecode order
             // while converting its parser scope operand to the final chain head.
             const mapped_arguments = !def.is_strict_mode and

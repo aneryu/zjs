@@ -1993,8 +1993,10 @@ pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 }
 
 /// Initializing plain lexical locals (qjs CASE(OP_put_loc_check_init),
-/// quickjs.c:18755-18766). Derived constructors keep the cold path because its
-/// derived-`this` double-init check and explicit this_value Adapter are observable.
+/// quickjs.c:18755-18766). Derived constructors keep the cold path because the
+/// derived-`this` once-only init check ("'this' can be initialized only once")
+/// is observable; every other put_loc_check_init just writes the local (the
+/// opcode is also emitted for AnnexB block-function var copies that overwrite).
 pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     if (vm.function.flags.is_derived_class_constructor) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });

@@ -218,23 +218,23 @@ pub noinline fn checkedLocVm(
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         },
         op.put_loc_check_init => {
+            // Only derived `this` has once-only init semantics (double-super ->
+            // "'this' can be initialized only once"). put_loc_check_init is also
+            // emitted for other lexical inits (e.g. AnnexB block-function var
+            // copies) that legitimately overwrite an already-set slot, so the
+            // once-only error must stay gated on the derived-this binding.
             const is_derived_this = function.flags.is_derived_class_constructor and
                 idx < function.vardefs.len and
                 function.vardefs[idx].var_name == core.atom.ids.this_;
             if (is_derived_this and !frame.locals[idx].isUninitialized()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-                return error.ReferenceError;
+                _ = exception_ops.throwReferenceErrorMessage(ctx, global, "'this' can be initialized only once") catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                unreachable;
             }
             const value = try stack.pop();
-            const constructor_this = if (is_derived_this)
-                value.dup()
-            else
-                core.JSValue.undefinedValue();
-            defer constructor_this.free(ctx.runtime);
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
-            if (!constructor_this.isUndefined()) {
-                slot_ops.replaceAdapterOwned(ctx, &frame.this_value, constructor_this.dup());
-            }
         },
         else => unreachable,
     }

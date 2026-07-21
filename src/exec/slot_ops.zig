@@ -236,7 +236,8 @@ pub fn execPutVarRef(
         const current = cell.varRefValue();
         if (!current.isUninitialized()) {
             value.free(ctx.runtime);
-            return error.ReferenceError;
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| return err;
+            unreachable;
         }
     }
     if (opc == op.put_var_ref_check) {

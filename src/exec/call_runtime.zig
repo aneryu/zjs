@@ -100,12 +100,8 @@ pub fn execCall(
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
     // Fast path FIRST: a plain bytecode-to-bytecode call resolves to an inline
-    // target. resolveInlineTarget returns null for class constructors, so a super()
-    // call (whose callee is always a constructor) never resolves here — an inline
-    // result is provably NOT a super-constructor invocation, so the
-    // isCurrentSuperConstructor check below is unnecessary on this path. `this`
-    // binds undefined (arrow targets override with their lexical `this` inside
-    // resolveInlineTarget). A non-bytecode callee (host fn / ctor) falls through to
+    // target. `this` binds undefined (arrow targets override with their lexical
+    // `this` inside resolveInlineTarget). A non-bytecode callee falls through to
     // the general dispatch, which handles host-output (console.log) like any other
     // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
@@ -115,27 +111,10 @@ pub fn execCall(
         }
     }
 
-    const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
-    const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_super_this) |value| value.free(ctx.runtime);
-    const arrow_constructor_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowConstructorThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
-    const is_arrow_super_constructor = is_super_constructor and arrow_super_this != null;
-    const super_this = if (is_super_constructor and frame.function.flags.is_derived_class_constructor)
-        frame.constructorThisValue()
-    else if (arrow_constructor_this) |value|
-        value
-    else if (arrow_super_this) |value|
-        value
-    else
-        core.JSValue.undefinedValue();
-    const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, super_this, func, args, function, frame, is_super_constructor) catch |err| {
+    // OP_call is never a constructor call. Legal super() is emitted as
+    // call_constructor (or apply(1)); superclass identity alone cannot grant a
+    // normal call permission to invoke a class constructor.
+    const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame, false) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
@@ -144,46 +123,6 @@ pub fn execCall(
         return err;
     };
     popOwnedStackRegion(ctx.runtime, stack, region_base);
-    if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
-        defer result.free(ctx.runtime);
-        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
-            class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
-                    return .continue_loop;
-                }
-                return err;
-            };
-        } else {
-            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
-                return .continue_loop;
-            }
-            return error.ReferenceError;
-        }
-        try array_ops.pushAdapterValue(stack, frame.this_value);
-        return .done;
-    }
-    if (is_arrow_super_constructor) {
-        defer result.free(ctx.runtime);
-        if (arrow_super_this) |this_value_for_arrow| {
-            if (!this_value_for_arrow.isUninitialized()) {
-                if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
-                    return .continue_loop;
-                }
-                return error.ReferenceError;
-            }
-        }
-        const next_this = if (result.isObject())
-            result
-        else if (arrow_constructor_this) |value|
-            value
-        else
-            result;
-        try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
-        stack.pushAssumeCapacity(next_this);
-        return .done;
-    }
     stack.pushOwnedAssumeCapacity(result);
     return .done;
 }

@@ -27,6 +27,65 @@ fn localIndexNamed(rt: *core.JSRuntime, function: *const bytecode.FunctionByteco
     return null;
 }
 
+fn derivedThisLocalIndex(function: *const bytecode.FunctionBytecode) ?usize {
+    for (function.varDefs(), 0..) |vd, idx| {
+        if (vd.var_name == core.atom.ids.this_) return idx;
+    }
+    return null;
+}
+
+fn globalFunctionBytecode(js: *helpers.TestEngine, name: []const u8) !*const bytecode.FunctionBytecode {
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const name_atom = try js.runtime.internAtom(name);
+    defer js.runtime.atoms.free(name_atom);
+    const function_value = global.getProperty(name_atom);
+    defer function_value.free(js.runtime);
+    const function_object = try property_ops.expectObject(function_value);
+    const stored_bytecode = function_object.functionBytecode() orelse return error.InvalidFunctionBytecode;
+    return engine.exec.call_runtime.functionBytecodeFromValue(stored_bytecode) orelse error.InvalidFunctionBytecode;
+}
+
+fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
+    var count: usize = 0;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.InvalidFunctionBytecode;
+        if (op_id == wanted) count += 1;
+        pc += size;
+    }
+    return count;
+}
+
+fn expectSingleDerivedThisArrowCapture(function: *const bytecode.FunctionBytecode) !void {
+    const this_idx = derivedThisLocalIndex(function) orelse return error.InvalidFunctionBytecode;
+    const this_vardef = function.varDefs()[this_idx];
+    try std.testing.expect(this_vardef.isCaptured());
+    try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 0), this_vardef.var_ref_idx);
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(function.byteCode(), op.close_loc));
+
+    var arrow: ?*const bytecode.FunctionBytecode = null;
+    var arrow_count: usize = 0;
+    for (function.cpoolSlice()) |constant| {
+        const child = engine.exec.call_runtime.functionBytecodeFromValue(constant) orelse continue;
+        if (!child.flags.is_arrow_function) continue;
+        arrow = child;
+        arrow_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), arrow_count);
+
+    var this_capture_count: usize = 0;
+    for (arrow.?.closureVar()) |capture| {
+        if (capture.var_name != core.atom.ids.this_) continue;
+        this_capture_count += 1;
+        try std.testing.expectEqual(function_def.ClosureType.local, capture.closureType());
+        try std.testing.expectEqual(@as(u16, @intCast(this_idx)), capture.var_idx);
+    }
+    try std.testing.expectEqual(@as(usize, 1), this_capture_count);
+}
+
 test "var-ref growth promotes borrowed captures to owned cells" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -1121,48 +1180,105 @@ test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
     try std.testing.expect(result == null);
 }
 
-test "VM roots frame this symbol before derived constructor var-ref allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
+test "derived constructor without nested this references has no owner cell" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
-    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    const result = try js.eval(
+        \\globalThis.__derivedNoCapture = class DerivedNoCapture extends Object {
+        \\  constructor() { super(); }
+        \\};
+        \\new globalThis.__derivedNoCapture();
+    );
+    defer result.free(js.runtime);
 
-    const this_name = try rt.internAtom("this");
-    defer rt.atoms.free(this_name);
+    const constructor = try globalFunctionBytecode(&js, "__derivedNoCapture");
+    try std.testing.expect(constructor.flags.is_derived_class_constructor);
+    try std.testing.expectEqual(@as(u16, 0), constructor.open_var_ref_count);
+    const this_idx = derivedThisLocalIndex(constructor) orelse return error.InvalidFunctionBytecode;
+    try std.testing.expect(!constructor.varDefs()[this_idx].isCaptured());
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(constructor.byteCode(), op.close_loc));
+}
 
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    function.flags.is_derived_class_constructor = true;
-    function.var_count = 1;
-    function.stack_size = 1;
-    function.vardefs = try rt.memory.alloc(engine.bytecode.function_bytecode.BytecodeVarDef, 1);
-    function.vardefs[0] = engine.bytecode.function_bytecode.BytecodeVarDef.init(.{
-        .var_name = rt.atoms.dup(this_name),
-        .is_captured = true,
-        .var_ref_idx = 0,
-    });
-    function.open_var_ref_count = 1;
-    try helpers.setCodeAndStackSize(&function, &.{ op.get_loc0, op.drop, op.return_undef });
+test "derived constructor arrow creates exactly one owner this cell" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
-    const this_symbol = try rt.atoms.newValueSymbol("gc-vm-frame-this-before-roots");
-    rt.setGCThreshold(0);
+    const result = try js.eval(
+        \\globalThis.__derivedArrowCapture = class DerivedArrowCapture extends Object {
+        \\  constructor() { const read = () => this; super(); if (read() !== this) throw new Error("this mismatch"); }
+        \\};
+        \\new globalThis.__derivedArrowCapture();
+    );
+    defer result.free(js.runtime);
 
-    var stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
-    defer stack.deinit(rt);
+    try expectSingleDerivedThisArrowCapture(try globalFunctionBytecode(&js, "__derivedArrowCapture"));
+}
 
-    const result = try engine.exec.zjs_vm.runWithCallEnv(.{
-        .ctx = ctx,
-        .stack = &stack,
-        .function = &function,
-        .initial_this_value = try rt.symbolValue(this_symbol),
-        .global = global,
-    });
-    defer result.free(rt);
+test "derived constructor parameter default arrow captures this by binding identity" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
 
-    try std.testing.expectEqual(this_symbol, result.asSymbolAtom().?);
-    try std.testing.expect(rt.atoms.name(this_symbol) != null);
+    const result = try js.eval(
+        \\globalThis.__derivedParameterArrow = class DerivedParameterArrow extends Object {
+        \\  constructor({ read = () => this } = {}) { super(); if (read() !== this) throw new Error("this mismatch"); }
+        \\};
+        \\new globalThis.__derivedParameterArrow();
+    );
+    defer result.free(js.runtime);
+
+    try expectSingleDerivedThisArrowCapture(try globalFunctionBytecode(&js, "__derivedParameterArrow"));
+}
+
+test "direct eval captures derived this while indirect eval does not" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\globalThis.__derivedDirectEval = class DerivedDirectEval extends Object {
+        \\  constructor() { super(); if (eval("this") !== this) throw new Error("this mismatch"); }
+        \\};
+        \\globalThis.__derivedIndirectEval = class DerivedIndirectEval extends Object {
+        \\  constructor() { (0, eval)("this"); super(); }
+        \\};
+        \\new globalThis.__derivedDirectEval();
+        \\new globalThis.__derivedIndirectEval();
+    );
+    defer result.free(js.runtime);
+
+    const direct = try globalFunctionBytecode(&js, "__derivedDirectEval");
+    const direct_this_idx = derivedThisLocalIndex(direct) orelse return error.InvalidFunctionBytecode;
+    const direct_this = direct.varDefs()[direct_this_idx];
+    try std.testing.expect(direct_this.isCaptured());
+    try std.testing.expect(direct_this.var_ref_idx < direct.open_var_ref_count);
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(direct.byteCode(), op.close_loc));
+
+    const indirect = try globalFunctionBytecode(&js, "__derivedIndirectEval");
+    const indirect_this_idx = derivedThisLocalIndex(indirect) orelse return error.InvalidFunctionBytecode;
+    try std.testing.expect(!indirect.varDefs()[indirect_this_idx].isCaptured());
+    try std.testing.expectEqual(@as(u16, 0), indirect.open_var_ref_count);
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(indirect.byteCode(), op.close_loc));
+}
+
+test "ordinary calls to the current superclass do not initialize derived this" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\class OrdinaryCallBase {}
+        \\class OrdinaryCallDerived extends OrdinaryCallBase {
+        \\  constructor(spread) {
+        \\    let caught;
+        \\    try { if (spread) OrdinaryCallBase(...[]); else OrdinaryCallBase(); }
+        \\    catch (error) { caught = error; }
+        \\    if (!(caught instanceof TypeError)) throw new Error("ordinary call became super");
+        \\    super();
+        \\  }
+        \\}
+        \\new OrdinaryCallDerived(false);
+        \\new OrdinaryCallDerived(true);
+    );
+    defer result.free(js.runtime);
 }
 
 test "derived constructor arrow and direct eval observe the same this value" {

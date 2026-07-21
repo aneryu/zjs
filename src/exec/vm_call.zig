@@ -12,10 +12,7 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const class_init_ops = @import("class_init_ops.zig");
 const inline_calls = @import("inline_calls.zig");
 const object_ops = @import("object_ops.zig");
-const slot_ops = @import("slot_ops.zig");
-const value_slot = @import("value_slot.zig");
 const stack_mod = @import("stack.zig");
-const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
 
@@ -116,18 +113,6 @@ pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
         null;
     if (rt.opcode_profile) |profile| profile.recordCallFrame();
     return .{ .rt = rt, .previous = previous };
-}
-
-pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    if (!function.flags.is_derived_class_constructor) return;
-    const count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..count], 0..) |vd, idx| {
-        if (!value_ops.atomNameEql(ctx.runtime, vd.var_name, "this")) continue;
-        value_slot.replaceBorrowed(ctx.runtime, &frame.locals[idx], slot_ops.adapterValueBorrow(frame.this_value));
-        const this_cell = try frame.captureLocal(ctx.runtime, idx);
-        value_slot.replaceOwned(ctx.runtime, &frame.this_value, this_cell.valueRef());
-        return;
-    }
 }
 
 pub inline fn initFrameLocals(
@@ -630,26 +615,10 @@ pub noinline fn apply(
     defer func.free(ctx.runtime);
     const apply_args = try collection_vm.argsFromArray(ctx.runtime, array_value);
     defer call_runtime.freeArgs(ctx.runtime, apply_args);
-    const allow_class_constructor_call = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
-    const arrow_super_this = if (allow_class_constructor_call and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_super_this) |value| value.free(ctx.runtime);
-    const arrow_constructor_this = if (allow_class_constructor_call and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowConstructorThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
-    const is_arrow_super_constructor = allow_class_constructor_call and arrow_super_this != null;
-    const effective_this = if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor)
-        frame.constructorThisValue()
-    else if (arrow_constructor_this) |value|
-        value
-    else if (arrow_super_this) |value|
-        value
-    else
-        this_value;
+    // Only parser-emitted apply(1) is a constructor invocation. In particular,
+    // an ordinary spread call must not become `super()` merely because its
+    // callee has the current superclass's identity.
+    const allow_class_constructor_call = is_new != 0 and class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
     const result = if (is_new != 0) blk: {
         if (allow_class_constructor_call) {
             break :blk call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
@@ -661,7 +630,7 @@ pub noinline fn apply(
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-    } else call_runtime.callValueOrBytecodeClassMode(ctx, output, global, effective_this, func, apply_args, function, frame, allow_class_constructor_call) catch |err| {
+    } else call_runtime.callValueOrBytecodeClassMode(ctx, output, global, this_value, func, apply_args, function, frame, false) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -693,37 +662,6 @@ pub noinline fn apply(
         return .done;
     }
     defer result.free(ctx.runtime);
-    if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
-        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
-            class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
-                return err;
-            };
-        } else {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-            return error.ReferenceError;
-        }
-        try collection_vm.pushAdapterValue(stack, frame.this_value);
-        return .done;
-    } else if (is_arrow_super_constructor) {
-        if (arrow_super_this) |this_value_for_arrow| {
-            if (!this_value_for_arrow.isUninitialized()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-                return error.ReferenceError;
-            }
-        }
-        const next_this = if (result.isObject())
-            result
-        else if (arrow_constructor_this) |value|
-            value
-        else
-            result;
-        try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
-        try stack.push(next_this);
-        return .done;
-    }
     try stack.push(result);
     return .done;
 }
