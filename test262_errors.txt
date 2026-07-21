@@ -1,2 +1,29 @@
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-in-lhs.js
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-compound-assignment.js
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-postfix-update.js
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-prefix-update.js
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression.js
+test262/test/annexB/language/expressions/assignmenttargettype/cover-callexpression-and-asyncarrowhead.js
+test262/test/language/expressions/assignment/S11.13.1_A6_T1.js
+test262/test/language/expressions/assignment/S11.13.1_A6_T2.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.10_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.11_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.1_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.2_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.3_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.4_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.5_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.6_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.7_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.8_T1.js
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js
+test262/test/language/expressions/function/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
+test262/test/language/expressions/generators/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
+test262/test/language/identifier-resolution/assign-to-global-undefined.js
 test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js
+test262/test/language/statements/function/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
+test262/test/language/statements/generators/arguments-with-arguments-fn.js  # deferred to W1b2.5h M-BODY-HOIST-ANCHOR
+test262/test/staging/sm/Function/arguments-parameter-shadowing.js
+test262/test/staging/sm/lexical-environment/block-scoped-functions-annex-b-if.js

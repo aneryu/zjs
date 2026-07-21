@@ -1,2 +1,29 @@
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-in-lhs.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-compound-assignment.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-postfix-update.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression-in-prefix-update.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/callexpression.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/annexB/language/expressions/assignmenttargettype/cover-callexpression-and-asyncarrowhead.js	SyntaxError	SyntaxError: InvalidAssignmentTarget
+test262/test/language/expressions/assignment/S11.13.1_A6_T1.js	Test262Error	Test262Error: #1: innerX === undefined. Actual: 1
+test262/test/language/expressions/assignment/S11.13.1_A6_T2.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 1
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.10_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 5
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.11_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 5
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.1_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 12
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.2_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 5
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.3_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 3
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.4_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 4
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.5_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 4
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.6_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 8
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.7_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 4
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.8_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 4
+test262/test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 1
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js	TypeError	TypeError: $DONE() not called
+test262/test/language/expressions/function/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
+test262/test/language/expressions/generators/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
+test262/test/language/identifier-resolution/assign-to-global-undefined.js	Empty	
 test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js	TypeError	TypeError: $DONE() not called
+test262/test/language/statements/function/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
+test262/test/language/statements/generators/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
+test262/test/staging/sm/Function/arguments-parameter-shadowing.js	Test262Error	Test262Error: Expected SameValue(«true», «false») to be true
+test262/test/staging/sm/lexical-environment/block-scoped-functions-annex-b-if.js	TypeError	TypeError

@@ -257,6 +257,16 @@ pub fn getRefValue(
     }
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
+    const object = try property_ops.expectObject(obj);
+    const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
+    if (!still_exists) {
+        if (function.flags.is_strict or function.flags.runtime_strict) {
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "binding is not defined") catch |err| return err;
+            return error.ReferenceError;
+        }
+        try stack.push(core.JSValue.undefinedValue());
+        return;
+    }
     const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);

@@ -6603,6 +6603,34 @@ test "generic for-of accepts complete parenthesized and indexed member targets" 
     }
 }
 
+test "for-of contextual async lookahead follows QuickJS grammar" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var invalid = try parser.compile(
+        rt,
+        "var async; for (async of [1]) ;",
+        .{ .mode = .script, .filename = "for-of-async-invalid.js" },
+    );
+    defer invalid.deinit();
+    try std.testing.expect(invalid.syntax_error != null);
+
+    const valid_cases = [_][]const u8{
+        "var async; for ((async) of [1]) ;",
+        "var i = 0; for (async of => {}; i < 1; ++i) {}",
+        "async function f() { var async; for await (async of [1]) ; }",
+    };
+    for (valid_cases) |source| {
+        var parsed = try parser.compile(
+            rt,
+            source,
+            .{ .mode = .script, .filename = "for-of-async-valid.js" },
+        );
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
 test "generic for-of parses computed target exactly once in source order" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

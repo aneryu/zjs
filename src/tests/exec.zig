@@ -6049,6 +6049,34 @@ test "Engine eval preserves selected with references during updates" {
     try std.testing.expectEqualStrings("6 0\n1 7 5 false\n", stream.buffered());
 }
 
+test "with compound assignment rechecks proxy binding before get and set" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var log = [];
+        \\var target = { p: 0 };
+        \\var proxy = new Proxy(target, {
+        \\  has: function(t, key) { log.push("has:" + String(key)); return Reflect.has(t, key); },
+        \\  get: function(t, key, receiver) { log.push("get:" + String(key)); return Reflect.get(t, key, receiver); },
+        \\  set: function(t, key, value, receiver) { log.push("set:" + String(key)); return Reflect.set(t, key, value, receiver); },
+        \\  getOwnPropertyDescriptor: function(t, key) { log.push("getOwnPropertyDescriptor:" + String(key)); return Reflect.getOwnPropertyDescriptor(t, key); },
+        \\  defineProperty: function(t, key, desc) { log.push("defineProperty:" + String(key)); return Reflect.defineProperty(t, key, desc); }
+        \\});
+        \\with (proxy) { p += 1; }
+        \\print(log.join("|"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "has:p|get:Symbol(Symbol.unscopables)|has:p|get:p|has:p|set:p|getOwnPropertyDescriptor:p|defineProperty:p\n",
+        stream.buffered(),
+    );
+}
+
 test "Engine destructuring snapshots with binding references before property reads" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -7334,6 +7362,22 @@ test "implicit arguments runtime rescue preserves mapped aliases" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("42\n5\n7\n5:7\n9\n43\nafter\n", output.buffered());
+}
+
+test "body function named arguments does not create a synthetic lexical collision" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [16]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function bodyCollision() { return typeof arguments; function arguments() {} }
+        \\print(bodyCollision());
+    , &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("function\n", output.buffered());
 }
 
 test "resident mapped arguments share one open bare arg slot" {

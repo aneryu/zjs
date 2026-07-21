@@ -5007,6 +5007,31 @@ pub const parser_core = struct {
             return peek_token.val;
         }
 
+        fn peekNextIsOfToken(s: *State) bool {
+            const saved_pos = s.lex.pos;
+            const saved_line = s.lex.line;
+            const saved_col = s.lex.col;
+            const saved_got_lf = s.lex.got_lf;
+            const saved_mark_pos = s.lex.mark_pos;
+            const saved_mark_line = s.lex.mark_line;
+            const saved_mark_col = s.lex.mark_col;
+            defer {
+                s.lex.pos = saved_pos;
+                s.lex.line = saved_line;
+                s.lex.col = saved_col;
+                s.lex.got_lf = saved_got_lf;
+                s.lex.mark_pos = saved_mark_pos;
+                s.lex.mark_line = saved_mark_line;
+                s.lex.mark_col = saved_mark_col;
+            }
+            var peek_token = s.lex.next() catch return false;
+            defer s.lex.freeToken(&peek_token);
+            if (peek_token.val == tok.TOK_OF) return true;
+            return peek_token.val == tok.TOK_IDENT and
+                !peek_token.payload.ident.has_escape and
+                atomNameEquals(s, peek_token.payload.ident.atom, "of");
+        }
+
         fn peekNextKindNoLineTerminator(s: *State, expected: tok.TokenKind) bool {
             const saved_pos = s.lex.pos;
             const saved_line = s.lex.line;
@@ -8865,14 +8890,6 @@ pub const parser_core = struct {
                 if (argumentsIdentifierIsForbidden(s) and atomNameEquals(s, ident, "arguments")) {
                     return Error.UnexpectedToken;
                 }
-                if (atomNameEquals(s, ident, "arguments") and
-                    s.return_depth > 0 and
-                    !hasCurrentFunctionBinding(s, ident) and
-                    try remainingBlockHasDirectFunctionDeclarationName(s, ident))
-                {
-                    const idx = @as(u16, @intCast(try s.addScopeVar(ident, .function_decl, true, false)));
-                    s.cur_func().vars[idx].tdz_emitted_at_decl = true;
-                }
                 // Identifier production is independent of its consumer.
                 // Assignment and call sites rewrite this exact last opcode
                 // after the complete operand has been parsed.
@@ -12128,46 +12145,6 @@ pub const parser_core = struct {
         }
     }
 
-    fn remainingBlockHasDirectFunctionDeclarationName(s: *State, target: Atom) Error!bool {
-        const snapshot = takeParserSnapshot(s);
-        defer restoreParserLexerSnapshot(s, snapshot);
-
-        var depth: usize = 0;
-        while (s.peekKind() != tok.TOK_EOF) {
-            const kind = s.peekKind();
-            if (kind == @as(tok.TokenKind, @intCast('}'))) {
-                if (depth == 0) return false;
-                depth -= 1;
-                s.advance() catch return false;
-                continue;
-            }
-            if (kind == @as(tok.TokenKind, @intCast('{'))) {
-                depth += 1;
-                s.advance() catch return false;
-                continue;
-            }
-            if (kind == tok.TOK_TEMPLATE) {
-                skipTemplateInPredeclareScan(s, s.token) catch return false;
-                s.advance() catch return false;
-                continue;
-            }
-            if (depth == 0 and kind == tok.TOK_FUNCTION) {
-                s.advance() catch return false;
-                if (s.peekKind() == @as(tok.TokenKind, @intCast('*'))) s.advance() catch return false;
-                if (isIdentifierLikeToken(s) and identifierLikeAtom(s) == target) return true;
-                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != @as(tok.TokenKind, @intCast('{'))) {
-                    s.advance() catch return false;
-                }
-                if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-                    skipBalancedDelimitedForTryScan(s, '{', '}') catch return false;
-                }
-                continue;
-            }
-            s.advance() catch return false;
-        }
-        return false;
-    }
-
     fn skipFunctionDeclarationInTokenScan(s: *State) Error!void {
         if (s.peekKind() != tok.TOK_FUNCTION) return Error.UnexpectedToken;
         while (s.peekKind() != tok.TOK_EOF and s.peekKind() != @as(tok.TokenKind, @intCast('{'))) {
@@ -12982,8 +12959,13 @@ pub const parser_core = struct {
         try s.pushScope();
         pushed_for_scope = true;
         try s.emitEnterScope();
+        // QuickJS `for ( [lookahead != let] LeftHandSideExpression of ...)`:
+        // a bare `let` may never begin a for-of LHS, so `let` is only treated
+        // as an identifier reference when the head is a for-in (`let in obj`),
+        // never when the contextual `of` keyword follows (that stays a decl and
+        // errors, matching quickjs "expected 'of' or 'in'").
         const let_as_identifier = var_tok == tok.TOK_LET and !s.is_strict and !s.cur_func().is_strict_mode and
-            (s.peekNextKind() == tok.TOK_IN or s.peekNextKind() == tok.TOK_OF);
+            s.peekNextKind() == tok.TOK_IN;
         const direct_using_kind = directUsingDeclarationKind(s);
         const parse_using_decl = if (direct_using_kind) |using_kind|
             using_kind == .async or !usingDeclarationBindingIsOf(s, using_kind)
@@ -13158,7 +13140,7 @@ pub const parser_core = struct {
             if (!is_for_await and var_tok == tok.TOK_IDENT and
                 !s.token.payload.ident.has_escape and
                 atomNameEquals(s, s.token.payload.ident.atom, "async") and
-                s.peekNextKind() == tok.TOK_OF)
+                s.peekNextIsOfToken())
             {
                 return Error.UnexpectedToken;
             }
