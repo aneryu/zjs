@@ -781,7 +781,7 @@ pub const Machine = struct {
     /// would redo the chunk multiply for nothing.
     fn pushFrame(self: *Machine, comptime setup_path: FrameSetupPath, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
         try vm_call.enterInlineCallDepth(self.ctx, global);
-        errdefer self.ctx.call_depth -= 1;
+        errdefer self.ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         // Generic calls own an ordinary `.next` continuation immediately.
         // The moved and borrowed-iterator instances are reached only through
@@ -1208,7 +1208,7 @@ pub const Machine = struct {
             std.debug.assert(isSimpleInlineFrame(target, source));
         }
         try vm_call.enterInlineCallDepth(self.ctx, global);
-        errdefer self.ctx.call_depth -= 1;
+        errdefer self.ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1264,7 +1264,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
+        errdefer ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1324,7 +1324,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
+        errdefer ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1379,7 +1379,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
+        errdefer ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1441,7 +1441,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
+        errdefer ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1830,7 +1830,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function);
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1841,7 +1841,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1873,7 +1873,7 @@ pub const Machine = struct {
         assertExactArgsLeafEligible(leaf_this, function);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1884,7 +1884,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1916,7 +1916,7 @@ pub const Machine = struct {
         assertCaptureLeafEligible(leaf_this, function);
         std.debug.assert(captures.len != 0);
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1927,7 +1927,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1967,7 +1967,7 @@ pub const Machine = struct {
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1978,7 +1978,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2607,7 +2607,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function);
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2618,7 +2618,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2700,7 +2700,7 @@ pub const Machine = struct {
             dying.deinitReturned(self.ctx)
         else
             dying.deinit(self.ctx);
-        self.ctx.call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
@@ -2733,7 +2733,7 @@ pub const Machine = struct {
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
         // outline behind the rc==0 branch).
         dying.deinitEmptyLeafInline(self.ctx);
-        self.ctx.call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -2747,7 +2747,7 @@ pub const Machine = struct {
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         dying.deinitExactArgsLeafInline(self.ctx);
-        self.ctx.call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -2763,7 +2763,7 @@ pub const Machine = struct {
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
         dying.deinitForwardedLeafInline(self.ctx);
-        self.ctx.call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;
     }

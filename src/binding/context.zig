@@ -29,7 +29,7 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
 
 pub const JSContext = struct {
     /// Stable heap identity; this pointer owns the initial RealmRef returned by
-    /// `core.JSContext.createWithOptions` until `deinit`/`destroy`.
+    /// `core.JSContext.createConstructingWithOptions` until `deinit`/`destroy`.
     core: *core.JSContext,
 
     /// Non-owning facade for callbacks whose ABI already carries the stable
@@ -46,13 +46,25 @@ pub const JSContext = struct {
         const ctx = try rt.memory.create(JSContext);
         errdefer rt.memory.destroy(JSContext, ctx);
         ensureStandardGlobalsRegistered(rt);
-        ctx.core = try core.JSContext.createWithOptions(rt, options);
+        // Public construction now completes intrinsic bootstrap before
+        // publication. That bootstrap may run GC and tune its next threshold;
+        // preserve the embedder's configured Runtime threshold across this
+        // formerly-lazy construction boundary.
+        const gc_threshold = rt.gcThreshold();
+        defer rt.setGCThreshold(gc_threshold);
+        ctx.core = try core.JSContext.createConstructingWithOptions(rt, options);
+        errdefer ctx.core.destroy();
+        _ = try ctx.core.globalObject();
         return ctx;
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
         ensureStandardGlobalsRegistered(rt);
-        self.* = .{ .core = try core.JSContext.createWithOptions(rt, options) };
+        const gc_threshold = rt.gcThreshold();
+        defer rt.setGCThreshold(gc_threshold);
+        self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
+        errdefer self.core.destroy();
+        _ = try self.core.globalObject();
     }
 
     pub fn deinit(self: *JSContext) void {

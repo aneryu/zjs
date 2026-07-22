@@ -863,25 +863,37 @@ test "production embedding can create independent realms" {
     const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
-    const realm = try ctx.createRealm();
-    defer realm.free(rt);
+    const retained = blk: {
+        const realm = try ctx.createRealm();
+        defer realm.free(rt);
 
-    const realm_global = try ctx.realmGlobal(realm);
-    defer realm_global.free(rt);
-    try std.testing.expect(realm_global.isObject());
+        const realm_global = try ctx.realmGlobal(realm);
+        defer realm_global.free(rt);
+        try std.testing.expect(realm_global.isObject());
 
-    const realm_global_object = try ctx.realmGlobalObject(realm);
-    try std.testing.expect(realm_global_object.isGlobal());
+        const realm_global_object = try ctx.realmGlobalObject(realm);
+        try std.testing.expect(realm_global_object.isGlobal());
 
-    const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
-    defer realm_global_this.free(rt);
-    try std.testing.expect(realm_global_this.sameValue(realm_global));
+        const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
+        defer realm_global_this.free(rt);
+        try std.testing.expect(realm_global_this.sameValue(realm_global));
 
-    const current_array = try ctx.eval("Array", .{});
-    defer current_array.free(rt);
-    const realm_array = try ctx.getProperty(realm_global, "Array");
-    defer realm_array.free(rt);
-    try std.testing.expect(!realm_array.sameValue(current_array));
+        const current_array = try ctx.eval("Array", .{});
+        defer current_array.free(rt);
+        const realm_array = try ctx.getProperty(realm_global, "Array");
+        defer realm_array.free(rt);
+        try std.testing.expect(!realm_array.sameValue(current_array));
+
+        break :blk .{ try ctx.createValueHandle(realm_global), realm_global_object };
+    };
+
+    var realm_global_handle = retained[0];
+    defer realm_global_handle.deinit();
+    const realm_global_object = retained[1];
+    try std.testing.expect(rt.contextForGlobal(realm_global_object) == null);
+    const retained_global_this = try ctx.getProperty(realm_global_handle.get(), "globalThis");
+    defer retained_global_this.free(rt);
+    try std.testing.expect(retained_global_this.sameValue(realm_global_handle.get()));
 }
 
 test "production embedding can eval script source in explicit function realms" {

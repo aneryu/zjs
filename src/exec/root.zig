@@ -69,14 +69,14 @@ pub const Vm = struct {
     pub fn init(ctx: *core.JSContext) Vm {
         return .{
             .ctx = ctx,
-            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit()),
         };
     }
 
     pub fn initWithOutput(ctx: *core.JSContext, output: *std.Io.Writer) Vm {
         return .{
             .ctx = ctx,
-            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit()),
             .output = output,
         };
     }

@@ -7,6 +7,8 @@ const Object = object_mod.Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
 const gc = @import("gc.zig");
 const runtime_mod = @import("runtime.zig");
+const property = @import("property.zig");
+const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -388,13 +390,16 @@ pub const PendingPromiseJob = struct {
     sequence: u64 = 0,
     value: JSValue = JSValue.undefinedValue(),
     value_symbol_rooted: bool = false,
+    realm: RealmRef = .{},
 
     pub fn init(ctx: *JSContext, sequence: u64, value: JSValue) !PendingPromiseJob {
         var job = PendingPromiseJob{
             .sequence = sequence,
             .value = value.dup(),
+            .realm = RealmRef.retain(ctx),
         };
         errdefer job.value.free(ctx.runtime);
+        errdefer job.realm.deinit();
         job.value_symbol_rooted = try ctx.runtime.registerExternalValueSymbolRoot(value);
         return job;
     }
@@ -402,6 +407,8 @@ pub const PendingPromiseJob = struct {
     pub fn deinit(self: PendingPromiseJob, rt: *JSRuntime) void {
         if (self.value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.value);
         self.value.free(rt);
+        var realm = self.realm;
+        realm.deinit();
     }
 
     pub fn traceRoots(self: *PendingPromiseJob, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
@@ -410,6 +417,12 @@ pub const PendingPromiseJob = struct {
 };
 
 const class_prototype_inline_capacity: usize = class.ids.init_count;
+
+pub const RealmPublicationState = enum {
+    constructing,
+    live,
+    finalizing,
+};
 
 /// One tracked unhandled rejection: the rejected promise (undefined when the
 /// producer had no promise object at hand) plus its reason. Mirrors the qjs
@@ -443,6 +456,10 @@ pub const JSContext = struct {
     /// header links above are reserved exclusively for the collector.
     runtime_prev: ?*JSContext = null,
     runtime_next: ?*JSContext = null,
+    construction_prev: ?*JSContext = null,
+    construction_next: ?*JSContext = null,
+    publication_state: RealmPublicationState = .constructing,
+    construction_complete: bool = false,
     /// Not-yet-handled rejected promises, in rejection order. Mirrors the qjs
     /// CLI host tracker list (js_std_promise_rejection_tracker's
     /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
@@ -452,31 +469,22 @@ pub const JSContext = struct {
     /// same promise later gets handled; every remaining entry is reported.
     unhandled_rejections: []UnhandledRejectionEntry = &.{},
     unhandled_rejections_capacity: usize = 0,
-    stack_limit: usize = 0,
-    /// Logical JS call depth (recursive interpreter entries + inline frames).
-    call_depth: usize = 0,
-    /// Native interpreter recursion depth only (excludes inline frames, which
-    /// consume no native stack). Guards against native stack exhaustion.
-    native_call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
     /// contexts enable it; validation and embedding-style contexts keep it off.
     track_unhandled_rejections: bool = false,
-    formatting_error_stack: bool = false,
-    backtrace_frames: []BacktraceFrame = &.{},
-    backtrace_capacity: usize = 0,
-    current_backtrace_frame: ?*ActiveBacktraceFrame = null,
-    /// Exec-owned, stack-local state for the currently running typed native
-    /// function. Core deliberately keeps this opaque: native cproto handlers
-    /// receive their public ABI arguments directly, while exec can recover
-    /// realm/VM state without putting an exec-specific argument pack in the
-    /// runtime record table. Nested native calls save and restore this link.
-    active_native_call: ?*const anyopaque = null,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
     cached_function_proto: ?*Object = null,
     cached_promise_proto: ?*Object = null,
     cached_values: [@intFromEnum(object_mod.RealmValueSlot.count)]?JSValue = @splat(null),
+    /// QuickJS's five context-owned initial shapes. Values live in each fresh
+    /// object's property cells; the realm owns only these immutable layouts.
+    array_shape: ?*shape.Shape = null,
+    arguments_shape: ?*shape.Shape = null,
+    mapped_arguments_shape: ?*shape.Shape = null,
+    regexp_shape: ?*shape.Shape = null,
+    regexp_result_shape: ?*shape.Shape = null,
     shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
     regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
     random_state: u64 = 0x1234_5678_9abc_def0,
@@ -497,8 +505,6 @@ pub const JSContext = struct {
     dynamic_import_callback: ?DynamicImportCallback = null,
     dynamic_import_userdata: ?*anyopaque = null,
     host_event_loop: ?HostEventLoop = null,
-    pending_promise_jobs: []PendingPromiseJob = &.{},
-    pending_promise_jobs_capacity: usize = 0,
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn create(rt: *JSRuntime) !*JSContext {
@@ -507,17 +513,30 @@ pub const JSContext = struct {
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+        return createWithPublication(rt, options, true);
+    }
+
+    /// Engine bootstrap constructor: the GC header is registered immediately,
+    /// but the realm stays off every public/live traversal until `publishLive`.
+    pub fn createConstructingWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+        return createWithPublication(rt, options, false);
+    }
+
+    fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*JSContext {
         const ctx = try rt.createRuntime(JSContext);
-        errdefer rt.destroyRuntime(JSContext, ctx);
-        try ctx.init(rt, options);
+        var initialized = false;
+        errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(JSContext, ctx);
+        try ctx.initConstructing(rt, options);
+        initialized = true;
+        if (publish_immediately) try ctx.finishConstruction();
         return ctx;
     }
 
-    fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+    fn initConstructing(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+        if (options.stack_size) |stack_size| rt.setStackSize(stack_size);
         self.* = .{
             .header = .{},
             .runtime = rt,
-            .stack_limit = options.stack_size orelse rt.stackSize(),
             .track_unhandled_rejections = options.track_unhandled_rejections,
             .dynamic_import_callback = options.dynamic_import_callback,
             .dynamic_import_userdata = options.dynamic_import_userdata,
@@ -532,18 +551,39 @@ pub const JSContext = struct {
             @memset(prototypes, JSValue.nullValue());
             self.class_prototypes = prototypes;
         }
-        var provider_registered = false;
-        var context_linked = false;
-        errdefer {
-            if (context_linked) rt.unlinkContext(self);
-            if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
-            self.deinitClassPrototypeSlots();
-        }
-        try rt.registerRootProvider(self.rootProvider());
-        provider_registered = true;
-        rt.linkContext(self);
-        context_linked = true;
+        errdefer self.deinitClassPrototypeSlots();
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
+        rt.linkConstructingContext(self);
+    }
+
+    pub fn publishLive(self: *JSContext) !void {
+        switch (self.publication_state) {
+            .live => return,
+            .constructing => {},
+            .finalizing => return error.InvalidBuiltinRegistry,
+        }
+        if (!self.construction_complete) return error.InvalidBuiltinRegistry;
+        // This is the sole fallible step. If it triggers collection, the realm
+        // remains absent from every live traversal.
+        try self.runtime.registerRootProvider(self.rootProvider());
+        self.runtime.unlinkConstructingContext(self);
+        self.publication_state = .live;
+        self.runtime.linkContext(self);
+    }
+
+    pub fn finishConstruction(self: *JSContext) !void {
+        if (self.publication_state == .live) return;
+        if (self.publication_state != .constructing) return error.InvalidBuiltinRegistry;
+        self.construction_complete = true;
+        try self.publishLive();
+    }
+
+    pub fn publicationState(self: *const JSContext) RealmPublicationState {
+        return self.publication_state;
+    }
+
+    pub fn isLive(self: *const JSContext) bool {
+        return self.publication_state == .live;
     }
 
     pub fn runtimePtr(self: *JSContext) *JSRuntime {
@@ -551,11 +591,11 @@ pub const JSContext = struct {
     }
 
     pub fn setStackLimit(self: *JSContext, size: usize) void {
-        self.stack_limit = size;
+        self.runtime.setStackSize(size);
     }
 
     pub fn stackLimit(self: JSContext) usize {
-        return self.stack_limit;
+        return self.runtime.stackSize();
     }
 
     pub fn setTrackUnhandledRejections(self: *JSContext, enabled: bool) void {
@@ -655,10 +695,77 @@ pub const JSContext = struct {
         return @fieldParentPtr("header", header);
     }
 
+    pub fn initializeInitialShapes(
+        self: *JSContext,
+        object_prototype: ?*Object,
+        array_prototype: ?*Object,
+        regexp_prototype: ?*Object,
+    ) !void {
+        if (self.array_shape != null) return;
+        std.debug.assert(self.arguments_shape == null);
+        std.debug.assert(self.mapped_arguments_shape == null);
+        std.debug.assert(self.regexp_shape == null);
+        std.debug.assert(self.regexp_result_shape == null);
+
+        const data_hidden = property.Flags.data(true, false, true).bits();
+        const arguments_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.length, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("Symbol.iterator", .symbol).?, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = property.Flags.accessorFlags(false, false).bits() },
+        };
+        const mapped_arguments_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.length, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("Symbol.iterator", .symbol).?, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = data_hidden },
+        };
+        const regexp_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.lastIndex, .flags = property.Flags.data(true, false, false).bits() },
+        };
+        // Array length is scalar storage in zjs, so the array and RegExp-result
+        // shapes omit QuickJS's ordinary length cell while preserving the same
+        // realm-owned shape identities and named-property order.
+        const regexp_result_properties = [_]shape.InitialProperty{
+            .{ .atom_id = comptime atom.predefinedId("index", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+            .{ .atom_id = comptime atom.predefinedId("input", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+            .{ .atom_id = comptime atom.predefinedId("groups", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+        };
+
+        const array_shape = try self.runtime.shapes.createInitialShape(array_prototype, &.{});
+        errdefer self.runtime.shapes.release(array_shape);
+        const arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &arguments_properties);
+        errdefer self.runtime.shapes.release(arguments_shape);
+        const mapped_arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &mapped_arguments_properties);
+        errdefer self.runtime.shapes.release(mapped_arguments_shape);
+        const regexp_shape = try self.runtime.shapes.createInitialShape(regexp_prototype, &regexp_properties);
+        errdefer self.runtime.shapes.release(regexp_shape);
+        const regexp_result_shape = try self.runtime.shapes.createInitialShape(array_prototype, &regexp_result_properties);
+        errdefer self.runtime.shapes.release(regexp_result_shape);
+
+        self.array_shape = array_shape;
+        self.arguments_shape = arguments_shape;
+        self.mapped_arguments_shape = mapped_arguments_shape;
+        self.regexp_shape = regexp_shape;
+        self.regexp_result_shape = regexp_result_shape;
+    }
+
+    fn releaseInitialShape(self: *JSContext, slot: *?*shape.Shape) void {
+        const owned = slot.* orelse return;
+        slot.* = null;
+        if (self.runtime.gc.phase == .remove_cycles and owned.header.metaConst().flags.cycle_visited) return;
+        self.runtime.shapes.release(owned);
+    }
+
     fn deinitResources(self: *JSContext) void {
         const rt = self.runtime;
-        rt.unlinkContext(self);
-        rt.unregisterRootProvider(self.rootProvider());
+        switch (self.publication_state) {
+            .constructing => rt.unlinkConstructingContext(self),
+            .live => {
+                rt.unlinkContext(self);
+                rt.unregisterRootProvider(self.rootProvider());
+            },
+            .finalizing => unreachable,
+        }
+        self.publication_state = .finalizing;
         self.host_event_loop = null;
         self.clearUnhandledRejection();
         const old_eval = self.eval_function;
@@ -670,22 +777,6 @@ pub const JSContext = struct {
         old_eval.free(rt);
         if (old_lexicals) |lexicals| lexicals.value().free(rt);
         if (old_global) |global| global.value().free(rt);
-        const pending_promise_jobs = self.pending_promise_jobs;
-        const pending_promise_jobs_capacity = self.pending_promise_jobs_capacity;
-        self.pending_promise_jobs = &.{};
-        self.pending_promise_jobs_capacity = 0;
-        for (pending_promise_jobs) |job| job.deinit(rt);
-        if (pending_promise_jobs_capacity != 0) rt.memory.free(PendingPromiseJob, pending_promise_jobs.ptr[0..pending_promise_jobs_capacity]);
-        const backtrace_frames = self.backtrace_frames;
-        const backtrace_capacity = self.backtrace_capacity;
-        self.backtrace_frames = &.{};
-        self.backtrace_capacity = 0;
-        for (backtrace_frames) |frame| {
-            rt.atoms.free(frame.function_name);
-            rt.atoms.free(frame.filename);
-            frame.function_value.free(rt);
-        }
-        if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         if (self.cached_function_proto) |prototype| prototype.value().free(rt);
         self.cached_function_proto = null;
         if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
@@ -694,6 +785,11 @@ pub const JSContext = struct {
             if (slot.*) |value| value.free(rt);
             slot.* = null;
         }
+        self.releaseInitialShape(&self.array_shape);
+        self.releaseInitialShape(&self.arguments_shape);
+        self.releaseInitialShape(&self.mapped_arguments_shape);
+        self.releaseInitialShape(&self.regexp_shape);
+        self.releaseInitialShape(&self.regexp_result_shape);
         if (self.shared_lazy_native_functions) |cache| {
             for (cache) |*slot| {
                 if (slot.*) |value| value.free(rt);
@@ -748,6 +844,7 @@ pub const JSContext = struct {
     }
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        if (self.publication_state != .live) return;
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
@@ -779,9 +876,6 @@ pub const JSContext = struct {
         }
         try visitor.optionalObject(&self.global);
         try visitor.optionalObject(&self.lexicals);
-        for (self.pending_promise_jobs) |*job| {
-            try job.traceRoots(visitor);
-        }
         if (self.host_event_loop) |host_event_loop| {
             try host_event_loop.traceRoots(visitor);
         }
@@ -791,6 +885,7 @@ pub const JSContext = struct {
     /// runtime context-list link is deliberately absent: it is membership, not
     /// ownership.
     pub fn traceChildEdgesNoFail(self: *JSContext, visitor: anytype) void {
+        if (self.publication_state != .live) return;
         for (self.unhandled_rejections) |*entry| {
             visitor.visitValue(&entry.promise);
             visitor.visitValue(&entry.reason);
@@ -800,6 +895,11 @@ pub const JSContext = struct {
         for (self.class_prototypes) |*prototype| visitor.visitValue(prototype);
         visitor.visitObject(&self.cached_function_proto);
         visitor.visitObject(&self.cached_promise_proto);
+        if (self.array_shape) |owned| visitor.visitShape(owned);
+        if (self.arguments_shape) |owned| visitor.visitShape(owned);
+        if (self.mapped_arguments_shape) |owned| visitor.visitShape(owned);
+        if (self.regexp_shape) |owned| visitor.visitShape(owned);
+        if (self.regexp_result_shape) |owned| visitor.visitShape(owned);
         for (&self.cached_values) |*slot| if (slot.*) |*value| visitor.visitValue(value);
         if (self.shared_lazy_native_functions) |cache| {
             for (cache) |*slot| if (slot.*) |*value| visitor.visitValue(value);
@@ -814,9 +914,6 @@ pub const JSContext = struct {
         }
         visitor.visitObject(&self.global);
         visitor.visitObject(&self.lexicals);
-        for (self.pending_promise_jobs) |*job| {
-            visitor.visitValue(&job.value);
-        }
     }
 
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
@@ -836,39 +933,39 @@ pub const JSContext = struct {
     }
 
     pub fn ensurePendingPromiseJobCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.pending_promise_jobs_capacity >= min_capacity) return;
-        var next_capacity = if (self.pending_promise_jobs_capacity == 0) @as(usize, 4) else self.pending_promise_jobs_capacity * 2;
+        if (self.runtime.pending_promise_jobs_capacity >= min_capacity) return;
+        var next_capacity = if (self.runtime.pending_promise_jobs_capacity == 0) @as(usize, 4) else self.runtime.pending_promise_jobs_capacity * 2;
         while (next_capacity < min_capacity) : (next_capacity *= 2) {}
         const next = try self.runtime.memory.alloc(PendingPromiseJob, next_capacity);
         errdefer self.runtime.memory.free(PendingPromiseJob, next);
-        const old_jobs = self.pending_promise_jobs;
-        const old_capacity = self.pending_promise_jobs_capacity;
+        const old_jobs = self.runtime.pending_promise_jobs;
+        const old_capacity = self.runtime.pending_promise_jobs_capacity;
         @memcpy(next[0..old_jobs.len], old_jobs);
-        self.pending_promise_jobs = next[0..old_jobs.len];
-        self.pending_promise_jobs_capacity = next_capacity;
+        self.runtime.pending_promise_jobs = next[0..old_jobs.len];
+        self.runtime.pending_promise_jobs_capacity = next_capacity;
         if (old_capacity != 0) {
             self.runtime.memory.free(PendingPromiseJob, old_jobs.ptr[0..old_capacity]);
         }
     }
 
     pub fn peekPendingPromiseJobSequence(self: JSContext) ?u64 {
-        if (self.pending_promise_jobs.len == 0) return null;
-        return self.pending_promise_jobs[0].sequence;
+        if (self.runtime.pending_promise_jobs.len == 0) return null;
+        return self.runtime.pending_promise_jobs[0].sequence;
     }
 
     pub fn takePendingPromiseJob(self: *JSContext) ?PendingPromiseJob {
-        if (self.pending_promise_jobs.len == 0) return null;
-        const job = self.pending_promise_jobs[0];
-        const old_len = self.pending_promise_jobs.len;
+        if (self.runtime.pending_promise_jobs.len == 0) return null;
+        const job = self.runtime.pending_promise_jobs[0];
+        const old_len = self.runtime.pending_promise_jobs.len;
         if (old_len == 1) {
-            const old_jobs = self.pending_promise_jobs.ptr[0..self.pending_promise_jobs_capacity];
-            self.pending_promise_jobs = &.{};
-            self.pending_promise_jobs_capacity = 0;
+            const old_jobs = self.runtime.pending_promise_jobs.ptr[0..self.runtime.pending_promise_jobs_capacity];
+            self.runtime.pending_promise_jobs = &.{};
+            self.runtime.pending_promise_jobs_capacity = 0;
             self.runtime.memory.free(PendingPromiseJob, old_jobs);
             return job;
         }
-        @memmove(self.pending_promise_jobs[0 .. old_len - 1], self.pending_promise_jobs[1..old_len]);
-        self.pending_promise_jobs = self.pending_promise_jobs.ptr[0 .. old_len - 1];
+        @memmove(self.runtime.pending_promise_jobs[0 .. old_len - 1], self.runtime.pending_promise_jobs[1..old_len]);
+        self.runtime.pending_promise_jobs = self.runtime.pending_promise_jobs.ptr[0 .. old_len - 1];
         return job;
     }
 
@@ -1013,13 +1110,13 @@ pub const JSContext = struct {
     }
 
     pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        frame.previous = self.current_backtrace_frame;
-        self.current_backtrace_frame = frame;
+        frame.previous = self.runtime.current_backtrace_frame;
+        self.runtime.current_backtrace_frame = frame;
     }
 
     pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        std.debug.assert(self.current_backtrace_frame == frame);
-        self.current_backtrace_frame = frame.previous;
+        std.debug.assert(self.runtime.current_backtrace_frame == frame);
+        self.runtime.current_backtrace_frame = frame.previous;
         frame.previous = null;
     }
 
@@ -1030,7 +1127,7 @@ pub const JSContext = struct {
         // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
         {
-            var active = self.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
@@ -1041,11 +1138,11 @@ pub const JSContext = struct {
             }
         }
 
-        const total = self.backtrace_frames.len + active_count;
+        const total = self.runtime.backtrace_frames.len + active_count;
         if (total == 0) return &.{};
         const frames = try self.runtime.memory.alloc(BacktraceFrame, total);
 
-        for (self.backtrace_frames, 0..) |frame, idx| {
+        for (self.runtime.backtrace_frames, 0..) |frame, idx| {
             frames[idx] = self.dupBacktraceFrame(frame);
         }
 
@@ -1054,13 +1151,13 @@ pub const JSContext = struct {
         // order the previous per-node walk produced.
         var active_index = active_count;
         {
-            var active = self.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
                     if (snapshot.backtrace_barrier) break :fill;
                     active_index -= 1;
-                    frames[self.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
+                    frames[self.runtime.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
                 }
                 active = frame.previous;
             }
@@ -1118,19 +1215,19 @@ pub const JSContext = struct {
         location_resolver: ?BacktraceLocationResolver,
         function_value: JSValue,
     ) !void {
-        if (self.backtrace_frames.len == self.backtrace_capacity) {
-            var next_capacity: usize = if (self.backtrace_capacity == 0) 16 else self.backtrace_capacity * 2;
-            if (next_capacity < self.backtrace_frames.len + 1) next_capacity = self.backtrace_frames.len + 1;
+        if (self.runtime.backtrace_frames.len == self.runtime.backtrace_capacity) {
+            var next_capacity: usize = if (self.runtime.backtrace_capacity == 0) 16 else self.runtime.backtrace_capacity * 2;
+            if (next_capacity < self.runtime.backtrace_frames.len + 1) next_capacity = self.runtime.backtrace_frames.len + 1;
             const next = try self.runtime.memory.alloc(BacktraceFrame, next_capacity);
-            const old_frames = self.backtrace_frames;
-            const old_capacity = self.backtrace_capacity;
+            const old_frames = self.runtime.backtrace_frames;
+            const old_capacity = self.runtime.backtrace_capacity;
             @memcpy(next[0..old_frames.len], old_frames);
-            self.backtrace_frames = next[0..old_frames.len];
-            self.backtrace_capacity = next_capacity;
+            self.runtime.backtrace_frames = next[0..old_frames.len];
+            self.runtime.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
         const stored_function_value = if (function_value.isObject()) function_value.dup() else JSValue.undefinedValue();
-        self.backtrace_frames.ptr[self.backtrace_frames.len] = .{
+        self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
             .function_name = self.runtime.atoms.dup(function_name),
             .filename = self.runtime.atoms.dup(filename),
             .line_num = line_num,
@@ -1139,38 +1236,38 @@ pub const JSContext = struct {
             .location_resolver = location_resolver,
             .function_value = stored_function_value,
         };
-        self.backtrace_frames = self.backtrace_frames.ptr[0 .. self.backtrace_frames.len + 1];
+        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0 .. self.runtime.backtrace_frames.len + 1];
     }
 
     pub fn popBacktraceFrame(self: *JSContext) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        const entry = self.backtrace_frames[idx];
-        self.backtrace_frames = self.backtrace_frames.ptr[0..idx];
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        const entry = self.runtime.backtrace_frames[idx];
+        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0..idx];
         self.runtime.atoms.free(entry.function_name);
         self.runtime.atoms.free(entry.filename);
         entry.function_value.free(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        self.backtrace_frames[idx].pc_source = null;
-        self.backtrace_frames[idx].pc = pc;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        self.runtime.backtrace_frames[idx].pc_source = null;
+        self.runtime.backtrace_frames[idx].pc = pc;
     }
 
     pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
-        if (self.backtrace_frames.len == 0) return;
-        self.backtrace_frames[self.backtrace_frames.len - 1].pc_source = pc_source;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        self.runtime.backtrace_frames[self.runtime.backtrace_frames.len - 1].pc_source = pc_source;
     }
 
     pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        self.backtrace_frames[idx].pc_source = null;
-        self.backtrace_frames[idx].pc = pc;
-        self.backtrace_frames[idx].line_num = line_num;
-        self.backtrace_frames[idx].col_num = col_num;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        self.runtime.backtrace_frames[idx].pc_source = null;
+        self.runtime.backtrace_frames[idx].pc = pc;
+        self.runtime.backtrace_frames[idx].line_num = line_num;
+        self.runtime.backtrace_frames[idx].col_num = col_num;
     }
 
     pub fn takePendingException(self: *JSContext) JSValue {

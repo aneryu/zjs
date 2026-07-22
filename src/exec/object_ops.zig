@@ -662,8 +662,8 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    ctx.formatting_error_stack = true;
-    defer ctx.formatting_error_stack = false;
+    ctx.runtime.formatting_error_stack = true;
+    defer ctx.runtime.formatting_error_stack = false;
 
     const aggregate_value = try qjsAggregateErrorConstructWithPrototype(ctx, null, global, null, &args, null, null);
     var aggregate_alive = true;
@@ -891,8 +891,8 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
-    ctx.formatting_error_stack = true;
-    defer ctx.formatting_error_stack = false;
+    ctx.runtime.formatting_error_stack = true;
+    defer ctx.runtime.formatting_error_stack = false;
 
     const error_value = try qjsErrorConstructWithPrototype(ctx, null, global, "Error", null, &args, null, null);
     var error_alive = true;
@@ -2331,58 +2331,16 @@ pub fn qjsIteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name:
     return iter_vm.qjsIteratorPrototype(rt, global, tag_name);
 }
 
-fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime mapped: bool) !*core.Object {
-    const cached = try global.cachedRealmValueSlot(
-        rt,
-        if (mapped) .mapped_arguments_template else .unmapped_arguments_template,
-    );
-    if (cached.*) |stored| return core.Object.expect(stored);
-
-    // qjs prepares `ctx->arguments_shape` once per realm and every later
-    // `js_build_arguments` call supplies only the three property values. Keep a
-    // realm-owned template solely to pin that final shape and its fixed slots;
-    // the template is never exposed to JavaScript.
-    const template = try core.Object.createWithOwnPropertyCapacity(
-        rt,
-        if (mapped) core.class.ids.mapped_arguments else core.class.ids.arguments,
+fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime mapped: bool) !*core.Shape {
+    const ctx = rt.contextForGlobal(global) orelse return error.TypeError;
+    const current = if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape;
+    if (current) |initial| return initial;
+    try ctx.initializeInitialShapes(
         objectPrototypeFromGlobal(rt, global),
-        3,
+        arrayPrototypeFromGlobal(rt, global),
+        constructorPrototypeFromGlobal(rt, global, "RegExp"),
     );
-    defer template.value().free(rt);
-
-    if (mapped) {
-        try template.defineOwnProperty(
-            rt,
-            core.atom.ids.length,
-            core.Descriptor.data(core.JSValue.int32(0), true, false, true),
-        );
-    } else {
-        try template.defineOwnPropertyAssumingNew(
-            rt,
-            core.atom.ids.length,
-            core.Descriptor.data(core.JSValue.int32(0), true, false, true),
-        );
-    }
-    if (try arrayPrototypeValuesFromGlobal(rt, global)) |values| {
-        defer values.free(rt);
-        const iterator_key = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
-        if (mapped) {
-            try template.defineOwnProperty(rt, iterator_key, core.Descriptor.data(values, true, false, true));
-        } else {
-            try template.defineOwnPropertyAssumingNew(rt, iterator_key, core.Descriptor.data(values, true, false, true));
-        }
-    }
-    const callee_key = (comptime core.atom.predefinedId("callee", .string)) orelse return error.TypeError;
-    if (mapped) {
-        try template.defineOwnProperty(rt, callee_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, false, true));
-    } else {
-        const thrower = try throwTypeErrorIntrinsicForGlobal(rt, global);
-        defer thrower.free(rt);
-        try template.defineOwnPropertyAssumingNew(rt, callee_key, core.Descriptor.accessor(thrower, thrower, false, false));
-    }
-
-    try global.setOptionalValueSlot(rt, cached, template.value().dup());
-    return core.Object.expect(cached.*.?);
+    return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
 
 pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
@@ -2407,26 +2365,30 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     else
         frame.args[0..@min(frame.actual_arg_count, frame.args.len)];
     const object = blk: {
-        const template = if (mapped)
+        const initial_shape = if (mapped)
             try argumentsPropertyTemplate(ctx.runtime, global, true)
         else
             try argumentsPropertyTemplate(ctx.runtime, global, false);
-        const out = try core.Object.createFromPropertyTemplate(ctx.runtime, template);
-        out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
-            ctx.runtime,
-            0,
-            core.JSValue.int32(@intCast(args.len)),
-        );
+        const iterator_value = (try arrayPrototypeValuesFromGlobal(ctx.runtime, global)) orelse core.JSValue.undefinedValue();
+        defer iterator_value.free(ctx.runtime);
         if (mapped) {
-            const callee_key = (comptime core.atom.predefinedId("callee", .string)) orelse return error.TypeError;
-            const callee_index = template.findProperty(callee_key) orelse return error.TypeError;
-            out.replaceOwnDataPropertyValueAtAssumingShapeOwned(
-                ctx.runtime,
-                callee_index,
-                frame.current_function.dup(),
-            );
+            const entries = [_]core.property.Entry{
+                .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
+                .{ .slot = .{ .data = iterator_value } },
+                .{ .slot = .{ .data = frame.current_function } },
+            };
+            break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.mapped_arguments, initial_shape, &entries);
         }
-        break :blk out;
+        const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
+        defer thrower.free(ctx.runtime);
+        const callee_accessor = core.property.Accessor.fromBorrowedValues(thrower, thrower);
+        defer callee_accessor.destroy(ctx.runtime);
+        const entries = [_]core.property.Entry{
+            .{ .slot = .{ .data = core.JSValue.int32(@intCast(args.len)) } },
+            .{ .slot = .{ .data = iterator_value } },
+            .{ .slot = .{ .accessor = callee_accessor } },
+        };
+        break :blk try core.Object.createFromShape(ctx.runtime, core.class.ids.arguments, initial_shape, &entries);
     };
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
 

@@ -1087,11 +1087,12 @@ pub const PreparedPromiseReactionJobs = struct {
         ctx.runtime.memory.free(core.JSValue, reactions);
 
         for (self.jobs[0..self.initialized]) |job| {
-            const index = ctx.pending_promise_jobs.len;
-            ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0 .. index + 1];
-            ctx.pending_promise_jobs[index] = .{
+            const index = ctx.runtime.pending_promise_jobs.len;
+            ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0 .. index + 1];
+            ctx.runtime.pending_promise_jobs[index] = .{
                 .sequence = ctx.runtime.nextJobSequence(),
                 .value = job,
+                .realm = core.RealmRef.retain(ctx),
             };
         }
 
@@ -1182,7 +1183,7 @@ pub fn qjsPreparePromiseReactionJobs(
         rooted_prepared_jobs = prepared.jobs[0..prepared.initialized];
     }
 
-    try ctx.ensurePendingPromiseJobCapacity(ctx.pending_promise_jobs.len + prepared.initialized);
+    try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + prepared.initialized);
     return prepared;
 }
 
@@ -1216,7 +1217,7 @@ pub fn qjsPromiseSettleValue(
     prepared_root.init(ctx.runtime, &prepared_reactions);
     defer prepared_root.deinit();
     if (needs_callback_job) {
-        try ctx.ensurePendingPromiseJobCapacity(ctx.pending_promise_jobs.len + prepared_reactions.initialized + 1);
+        try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + prepared_reactions.initialized + 1);
     }
 
     const next_result = value.dup();
@@ -1303,8 +1304,8 @@ test "qjsPromiseSettleValue roots direct symbol result while preparing reaction 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const result = promise.promiseResult() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
-    try std.testing.expectEqual(@as(usize, 1), ctx.pending_promise_jobs.len);
-    const job_object = objectFromValue(ctx.pending_promise_jobs[0].value) orelse return error.TypeError;
+    try std.testing.expectEqual(@as(usize, 1), ctx.runtime.pending_promise_jobs.len);
+    const job_object = objectFromValue(ctx.runtime.pending_promise_jobs[0].value) orelse return error.TypeError;
     const job_value = job_object.functionPromiseReactionValue() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, job_value.asSymbolAtom().?);
 
@@ -2655,7 +2656,7 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
     const result_value = try value_ops.createStringValue(ctx.runtime, result);
     var result_value_owned = true;
     errdefer if (result_value_owned) result_value.free(ctx.runtime);
-    try ctx.ensurePendingPromiseJobCapacity(ctx.pending_promise_jobs.len + 1);
+    try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + 1);
 
     const result_slot = promise_object.promiseResultSlot();
 
@@ -3888,6 +3889,8 @@ pub fn drainOnePendingJob(
     if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
         var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
         defer cleanup_job.deinit(ctx.runtime);
+        const job_ctx = cleanup_job.realm.borrow() orelse ctx;
+        const job_global = if (cleanup_job.realm.borrow() != null) job_ctx.global orelse return error.InvalidBuiltinRegistry else global;
         var root_values = [_]core.runtime.ValueRootValue{
             .{ .value = &cleanup_job.callback },
             .{ .value = &cleanup_job.held_value },
@@ -3899,42 +3902,44 @@ pub fn drainOnePendingJob(
         ctx.runtime.active_value_roots = &root_frame;
         defer ctx.runtime.active_value_roots = root_frame.previous;
 
-        const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
-        result.free(ctx.runtime);
-        try pollGCSafePoint(ctx);
+        const result = try callValueOrBytecode(job_ctx, output, job_global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
+        result.free(job_ctx.runtime);
+        try pollGCSafePoint(job_ctx);
         return true;
     }
 
     var pending_job = ctx.takePendingPromiseJob().?;
     defer pending_job.deinit(ctx.runtime);
+    const job_ctx = pending_job.realm.borrow() orelse unreachable;
+    const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     const job = pending_job.value;
     const promise = objectFromValue(job) orelse {
         if (isCallableValue(job)) {
-            const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-            result.free(ctx.runtime);
-            try pollGCSafePoint(ctx);
+            const result = try callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null);
+            result.free(job_ctx.runtime);
+            try pollGCSafePoint(job_ctx);
         }
         return true;
     };
     if (promise.class_id == core.class.ids.promise) {
-        try settlePendingPromiseReaction(ctx, output, global, promise);
-        try pollGCSafePoint(ctx);
+        try settlePendingPromiseReaction(job_ctx, output, job_global, promise);
+        try pollGCSafePoint(job_ctx);
         return true;
     }
     if (isCallableValue(job)) {
-        const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
-        result.free(ctx.runtime);
-        try pollGCSafePoint(ctx);
+        const result = try callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null);
+        result.free(job_ctx.runtime);
+        try pollGCSafePoint(job_ctx);
     }
     return true;
 }
 
 pub fn enqueuePendingPromiseJob(ctx: *core.JSContext, promise: core.JSValue) !void {
-    const index = ctx.pending_promise_jobs.len;
+    const index = ctx.runtime.pending_promise_jobs.len;
     try ctx.ensurePendingPromiseJobCapacity(index + 1);
     const job = try core.context.PendingPromiseJob.init(ctx, ctx.runtime.nextJobSequence(), promise);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0 .. index + 1];
-    ctx.pending_promise_jobs[index] = job;
+    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0 .. index + 1];
+    ctx.runtime.pending_promise_jobs[index] = job;
 }
 
 pub fn awaitThenableValue(
@@ -3978,7 +3983,7 @@ pub fn awaitThenableValue(
     // (js_promise_resolve_function_call -> JS_EnqueueJob). This helper serves
     // the drain-model await paths (async generators / module TLA), which
     // synchronously run the pending queue until the awaited promise settles.
-    if (promise_object.promiseResultSlot().* == null and ctx.pending_promise_jobs.len != 0) {
+    if (promise_object.promiseResultSlot().* == null and ctx.runtime.pending_promise_jobs.len != 0) {
         try drainPendingPromiseJobs(ctx, output, global);
     }
     return try finishAwaitedPromise(ctx, promise_object);

@@ -2038,7 +2038,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     var parsed = try engine.parser.compile(rt, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3292,7 +3292,7 @@ test "number native builtin records cover static and prototype dispatch" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3343,7 +3343,7 @@ test "string static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3400,7 +3400,7 @@ test "string prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3489,7 +3489,7 @@ test "date static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3554,7 +3554,7 @@ test "date constructor native builtin records ignore dispatch names" {
         \\print(Reflect.construct(fakeDateConstructor, [3], Date).getTime());
     , .{ .mode = .script, .filename = "date-constructor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3635,7 +3635,7 @@ test "date prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3710,7 +3710,7 @@ test "array static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3813,7 +3813,7 @@ test "array prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -3938,7 +3938,7 @@ test "collection native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4103,7 +4103,7 @@ test "buffer native builtin records ignore dispatch names" {
         \\print(fakeDataViewByteLength.call(v));
     , .{ .mode = .script, .filename = "buffer-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4197,7 +4197,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
         \\print(fakeTypedArrayTag.call({}));
     , .{ .mode = .script, .filename = "typed-array-accessor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4251,7 +4251,7 @@ test "regexp static native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4367,7 +4367,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
 
     var parsed = try engine.parser.compile(rt, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4509,7 +4509,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
         \\print(fakeRegExpSplit.call(r, 'cat').join('|'));
     , .{ .mode = .script, .filename = "regexp-symbol-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -4593,7 +4593,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
         \\print(fakeRegExpGlobalGetter.call(r));
     , .{ .mode = .script, .filename = "regexp-accessor-native-record-dispatch.js" });
     defer parsed.deinit();
-    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stack_limit);
+    var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -8690,7 +8690,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // A fresh Machine has neither Entry nor arena backing. The speculative
     // arm must miss without consuming the source or changing call depth.
@@ -8699,13 +8699,13 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
     const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Entry and arena chunks are now warm. A second exact call must publish
@@ -8731,7 +8731,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
@@ -8747,7 +8747,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
@@ -8814,7 +8814,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // A fresh Machine has neither Entry nor arena backing. The speculative
     // arm must miss without consuming EITHER owned source slot (target and
@@ -8826,7 +8826,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
     region_start[1].free(rt);
@@ -8837,7 +8837,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
     try std.testing.expect(primed.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm hit: allocation-free, publishes the forwarded-leaf teardown shape
@@ -8862,7 +8862,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
     machine.popReturnedForwardedLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // An oversized operand window cannot use the active arena chunk. The
@@ -8875,7 +8875,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
     region_start[0].free(rt);
@@ -9088,7 +9088,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
     const baseline_rc = receiver_object.header.meta().rc;
 
     // Fresh Machine: the speculative arm must miss without consuming either
@@ -9099,7 +9099,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
 
@@ -9114,7 +9114,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
     machine.popReturnedEmptyLeaf();
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm hit: same leaf shape, allocation-free, same ownership movement.
@@ -9148,7 +9148,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, &oversized, region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
@@ -9273,7 +9273,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // Authoritative constructor: `this` stays undefined and borrowed (no rc
     // traffic), matching setupSimpleInlineEntryImpl's strict plain arm.
@@ -9285,7 +9285,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expect(first.frame.this_value.isUndefined());
     try std.testing.expect(first.frame.ownership.this_value == .borrowed);
     machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm arm publishes the same strict shape allocation-free.
@@ -9303,7 +9303,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -11247,10 +11247,12 @@ test "started generator resumes preserve unmapped arguments from parked locals" 
     try std.testing.expect(result.isUndefined());
 }
 
-test "iterator results reuse the realm shape without intermediate property growth" {
+test "iterator results use ordinary transitions without a sixth realm shape" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    try std.testing.expect(!@hasField(core.RealmContext, "iterator_result_shape"));
 
     const warm = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(1), false);
     warm.free(js.runtime);
@@ -11259,10 +11261,12 @@ test "iterator results reuse the realm shape without intermediate property growt
     const result = try engine.exec.call_runtime.createIteratorResult(js.runtime, global, core.JSValue.int32(2), true);
     defer result.free(js.runtime);
 
-    // One GC object plus its final two-entry property array. In particular,
-    // there is no intermediate one-entry property allocation.
+    // QuickJS's js_create_iterator_result performs the ordinary `value` then
+    // `done` transitions. With no realm-pinned iterator layout, zjs likewise
+    // creates the object and the transient one-property Shape; the property
+    // array remains pre-sized in one allocation.
     try std.testing.expectEqual(alloc_calls + 1, js.runtime.memory.alloc_calls);
-    try std.testing.expectEqual(create_calls + 1, js.runtime.memory.create_calls);
+    try std.testing.expectEqual(create_calls + 2, js.runtime.memory.create_calls);
     const object = try core.Object.expect(result);
     try std.testing.expectEqual(@as(?i32, 2), object.asDataAt(0).?.asInt32());
     try std.testing.expect(object.asDataAt(1).?.asBool().?);

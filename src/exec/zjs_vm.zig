@@ -178,7 +178,10 @@ pub fn runModuleWithOutputAndVarRefsStateAtPc(
 /// methods) plus generic host helpers such as `print` and `console`;
 /// keeping it cached avoids paying that cost on every eval call.
 pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
-    if (ctx.global) |existing| return existing;
+    if (ctx.global) |existing| {
+        if (!ctx.isLive()) try ctx.publishLive();
+        return existing;
+    }
     const global_object = try core.Object.createWithOwnPropertyCapacity(
         ctx.runtime,
         core.class.ids.global_object,
@@ -187,8 +190,9 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     );
     errdefer global_object.value().free(ctx.runtime);
     _ = try global_object.ensureGlobalPayload(ctx.runtime);
-    // Publish the context/global association before intrinsic bootstrap: realm
-    // cache accessors now resolve state through the runtime context list.
+    // Associate the global while the Realm remains construction-only. Bootstrap
+    // accessors can resolve that private association, but public Runtime/GC
+    // traversal cannot observe it until finishConstruction's commit below.
     ctx.global = global_object;
     errdefer ctx.global = null;
     try call_mod.installHostGlobals(ctx.runtime, global_object);
@@ -211,6 +215,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     const old_eval = ctx.eval_function;
     ctx.eval_function = next_eval;
     old_eval.free(ctx.runtime);
+    try ctx.finishConstruction();
     return global_object;
 }
 

@@ -13,8 +13,8 @@ fn constructCompiledLiteralInRealm(
     if (!compiled_value.isString()) return error.TypeError;
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TypeError;
     if (compiled_string.isWide() or compiled_string.len() == 0) return error.TypeError;
-    const template_value = global.cachedRealmValue(rt, .regexp_instance_template) orelse return error.TypeError;
-    const template = try core.Object.expect(template_value);
+    const realm = rt.contextForGlobal(global) orelse return error.TypeError;
+    const initial_shape = realm.regexp_shape orelse return error.TypeError;
 
     var source_val = source;
     var compiled_root = compiled_value;
@@ -29,7 +29,7 @@ fn constructCompiledLiteralInRealm(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.createRegExpFromPropertyTemplate(rt, template);
+    const object = try core.Object.createRegExpFromShape(rt, initial_shape);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.setRegexpSource(rt, source_val);
     try object.setRegexpCompiledBytecodeString(rt, compiled_string);

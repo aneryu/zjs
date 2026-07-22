@@ -796,7 +796,7 @@ pub fn evalFileModuleGraphWithOutput(
     // measures against a precise base. The construction-time baseline already
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
-    if (context.call_depth == 0) runtime.updateNativeStackTop();
+    if (context.runtime.call_depth == 0) runtime.updateNativeStackTop();
     const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
     defer allocator.free(normalized_filename);
 
@@ -899,7 +899,7 @@ pub fn initializeModuleFunctionDeclarations(
     module_var_refs_root.init(runtime, &module_var_refs);
     defer module_var_refs_root.deinit();
 
-    var stack = exec.stack.Stack.init(&runtime.memory, context.stack_limit);
+    var stack = exec.stack.Stack.init(&runtime.memory, context.stackLimit());
     defer stack.deinit(runtime);
     const result = try exec.zjs_vm.runModuleInstantiationWithVarRefs(
         context,
@@ -1149,7 +1149,7 @@ fn evalPreloadedFileModuleStep(
     };
     errdefer owned_continuation.free(runtime);
     const continuation = try exec.property_ops.expectObject(owned_continuation);
-    var stack = exec.stack.Stack.init(&runtime.memory, context.stack_limit);
+    var stack = exec.stack.Stack.init(&runtime.memory, context.stackLimit());
     defer stack.deinit(runtime);
     const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return moduleResolutionError(err);
     if (continuation.generatorJustYielded() and !continuation.generatorDone()) {

@@ -873,18 +873,6 @@ fn installStandardConstructor(
             constructor.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.regexp, @intFromEnum(regexp_builtin.ConstructorMethod.construct)));
             const cached = try global.cachedRealmValueSlot(rt, .regexp_constructor);
             try global.setOptionalValueSlot(rt, cached, constructor.value().dup());
-            // QuickJS pins `ctx->regexp_shape` during intrinsic setup: one
-            // writable, non-enumerable, non-configurable `lastIndex` slot with
-            // the intrinsic RegExp prototype. Keep the equivalent prepared
-            // layout in the realm so ordinary construction starts from that
-            // shape instead of replaying a property transition per instance.
-            const regexp_prototype_object = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
-            const template = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, regexp_prototype_object, 1);
-            defer template.value().free(rt);
-            try template.initializeRegExpLastIndex(rt);
-            const template_slot = try global.cachedRealmValueSlot(rt, .regexp_instance_template);
-            try global.setOptionalValueSlot(rt, template_slot, template.value().dup());
-            try regexp_builtin.installRegExpResultPropertyTemplate(rt, global);
             try installRegExpExtras(rt, constructor);
         },
         .promise => try installPromiseExtras(rt, global, constructor),
@@ -1036,6 +1024,13 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try defineGlobalLazyNativeFunction(rt, global, "queueMicrotask", 1, .host, @intFromEnum(core.function.HostGlobalMethod.queue_microtask));
     try defineGlobalLazyNativeFunction(rt, global, "gc", 0, .host, @intFromEnum(core.function.HostGlobalMethod.gc));
     try wireAllNativeFunctionPrototypes(rt, global, &installed_constructors);
+
+    const array_ctor = installedConstructor(&installed_constructors, .array) orelse return error.InvalidBuiltinRegistry;
+    const regexp_ctor = installedConstructor(&installed_constructors, .regexp) orelse return error.InvalidBuiltinRegistry;
+    const array_proto = constructorPrototypeObject(rt, array_ctor) orelse return error.InvalidBuiltinRegistry;
+    const regexp_proto = constructorPrototypeObject(rt, regexp_ctor) orelse return error.InvalidBuiltinRegistry;
+    const ctx = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    try ctx.initializeInitialShapes(object_proto, array_proto, regexp_proto);
 }
 
 fn bindNumberGlobalNativeRecords(rt: *core.JSRuntime, global: *core.Object) !void {

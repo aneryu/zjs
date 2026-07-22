@@ -6,7 +6,7 @@ pub const MaxArgs = 5;
 pub const Func = *const fn (*core.JSContext, []const core.JSValue) core.JSValue;
 
 pub const Job = struct {
-    context: *core.JSContext,
+    realm: core.RealmRef,
     func: Func,
     argc: u3 = 0,
     argv: [MaxArgs]core.JSValue = [_]core.JSValue{core.JSValue.undefinedValue()} ** MaxArgs,
@@ -15,7 +15,7 @@ pub const Job = struct {
     pub fn init(context: *core.JSContext, func: Func, args: []const core.JSValue) !Job {
         if (args.len > MaxArgs) return error.TooManyJobArgs;
         var job = Job{
-            .context = context,
+            .realm = core.RealmRef.retain(context),
             .func = func,
             .argc = @intCast(args.len),
         };
@@ -30,6 +30,7 @@ pub const Job = struct {
     }
 
     pub fn deinit(self: *Job) void {
+        const context = self.realm.borrow() orelse unreachable;
         const argc = self.argc;
         self.argc = 0;
         var index: usize = 0;
@@ -37,15 +38,16 @@ pub const Job = struct {
             const value = self.argv[index];
             self.argv[index] = core.JSValue.undefinedValue();
             if ((self.symbol_arg_mask & (@as(u5, 1) << @intCast(index))) != 0) {
-                self.context.runtime.unregisterExternalValueSymbolRoot(value);
+                context.runtime.unregisterExternalValueSymbolRoot(value);
             }
-            value.free(self.context.runtime);
+            value.free(context.runtime);
         }
         self.symbol_arg_mask = 0;
+        self.realm.deinit();
     }
 
     pub fn run(self: *Job) core.JSValue {
-        return self.func(self.context, self.argv[0..self.argc]);
+        return self.func(self.realm.borrow() orelse unreachable, self.argv[0..self.argc]);
     }
 
     pub fn traceRoots(self: *Job, visitor: anytype) !void {
@@ -100,8 +102,9 @@ pub const Queue = struct {
         while (self.jobs.len != 0) {
             var job = self.jobs[0];
             self.removeFirst();
+            const context = job.realm.borrow() orelse unreachable;
             const result = job.run();
-            result.free(job.context.runtime);
+            result.free(context.runtime);
             job.deinit();
         }
     }

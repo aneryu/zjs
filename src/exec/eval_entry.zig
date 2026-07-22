@@ -34,7 +34,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // outermost base. Doing it here — on the thread that will run the parser and
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
-    if (ctx.call_depth == 0) rt.updateNativeStackTop();
+    if (ctx.runtime.call_depth == 0) rt.updateNativeStackTop();
     const parse_start = monotonicNanos();
     var compiled = try parser.compile(rt, source_text, .{
         .mode = parserMode(options.mode),
@@ -108,7 +108,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         break :blk value;
     } else blk: {
         const vm_start = monotonicNanos();
-        var stack = stack_mod.Stack.init(&rt.memory, ctx.stack_limit);
+        var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
         defer stack.deinit(rt);
         try stack.reserveAdditional(compiled.function.stack_size);
         // `.eval_direct`/`.eval_indirect` run through the EVAL runner contract
@@ -166,7 +166,7 @@ fn runEvalModuleWithVarRefs(
     };
 
     while (true) {
-        var stack = stack_mod.Stack.init(&rt.memory, ctx.stack_limit);
+        var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
         defer stack.deinit(rt);
         const vm_start = monotonicNanos();
         const result = zjs_vm.runModuleWithOutputAndVarRefsState(

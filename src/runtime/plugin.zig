@@ -433,7 +433,7 @@ fn installHostClasses(ctx: *core.JSContext, plugin: *InstalledPlugin) !void {
     }
 
     for (descriptors, 0..) |*descriptor, index| {
-        const class_id = rt.newClassId(core.class.invalid_class_id);
+        const class_id = try rt.newClassId(core.class.invalid_class_id);
         var class_registered = false;
         errdefer if (class_registered) rt.classes.unregisterDynamic(class_id);
 
@@ -1298,7 +1298,7 @@ test "runtime Plugin host class release frees prototypes and unregisters classes
         .owner = .js,
         .finalizer = Hooks.finalize,
     });
-    const class_id = rt.newClassId(core.class.invalid_class_id);
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.ensureContextClassPrototypeCapacity(class_id);
     try rt.classes.register(class_id, .{
         .class_name = descriptor.name.slice(),

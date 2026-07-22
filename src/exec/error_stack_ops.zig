@@ -45,14 +45,14 @@ pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value
 }
 
 pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue {
-    if (ctx.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
+    if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
 
     if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
         defer prepare.free(ctx.runtime);
         const sites = try buildCallSiteArray(ctx, global, skip_name);
         defer sites.free(ctx.runtime);
-        ctx.formatting_error_stack = true;
-        defer ctx.formatting_error_stack = false;
+        ctx.runtime.formatting_error_stack = true;
+        defer ctx.runtime.formatting_error_stack = false;
         return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
                 const thrown_value = ctx.takeException();
@@ -75,14 +75,14 @@ pub fn formatCapturedErrorStackValue(
     sites_value: core.JSValue,
     site_count: usize,
 ) !core.JSValue {
-    if (ctx.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
+    if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
 
     if (try errorPrepareStackTrace(ctx.runtime, global)) |prepare| {
         defer prepare.free(ctx.runtime);
         const sites_arg = sites_value.dup();
         defer sites_arg.free(ctx.runtime);
-        ctx.formatting_error_stack = true;
-        defer ctx.formatting_error_stack = false;
+        ctx.runtime.formatting_error_stack = true;
+        defer ctx.runtime.formatting_error_stack = false;
         return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
             if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
                 const thrown_value = ctx.takeException();

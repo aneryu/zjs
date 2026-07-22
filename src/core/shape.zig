@@ -33,6 +33,11 @@ pub const Property = packed struct(u64) {
     atom_id: atom.Atom = atom.null_atom,
 };
 
+pub const InitialProperty = struct {
+    atom_id: atom.Atom,
+    flags: u6,
+};
+
 /// Byte size of a shape's inline FAM region (hash table + prop array) for a
 /// given allocated prop capacity and bucket count. Mirrors qjs get_shape_size
 /// minus `sizeof(JSShape)` (quickjs.c:5121): `hash_size*4 + prop_size*8`, with
@@ -242,6 +247,20 @@ pub const Registry = struct {
             return shape;
         }
         return self.createShapeWithPropertyCapacity(proto, property_capacity);
+    }
+
+    /// Build one context-owned initial shape without ever materializing a
+    /// hidden template Object. The returned reference belongs to the caller.
+    pub fn createInitialShape(self: *Registry, proto: ?*Object, properties: []const InitialProperty) !*Shape {
+        // Preserve the object/value-buffer invariant used by mutation clones:
+        // every non-empty shape has at least `initial_prop_size` slots.
+        var result = try self.createObjectRootWithPropertyCapacity(proto, propertyCapacityForNeeded(properties.len));
+        var owned = true;
+        errdefer if (owned) self.release(result);
+        try self.prepareUpdate(&result);
+        for (properties) |prop| try self.addProperty(&result, prop.atom_id, prop.flags);
+        owned = false;
+        return result;
     }
 
     fn createShape(self: *Registry, proto: ?*Object) !*Shape {

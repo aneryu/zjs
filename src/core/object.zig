@@ -714,19 +714,14 @@ pub const RealmValueSlot = enum(u8) {
     regexp_constructor,
     promise_constructor,
     callsite_prototype,
-    regexp_instance_template,
-    regexp_match_result_template,
-    iterator_result_template,
-    unmapped_arguments_template,
-    mapped_arguments_template,
     count,
 };
 
 const realm_value_slot_count: usize = @intFromEnum(RealmValueSlot.count);
 
-/// State belonging to the global *object*, not to the realm.  Intrinsics,
-/// prototypes, eval, lexical state, random state and construction templates
-/// are owned by `RealmContext`.
+/// State belonging to the global *object*, not to the realm. Intrinsics,
+/// prototypes, eval, lexical state, random state, and initial Shapes are owned
+/// by `RealmContext`.
 pub const GlobalPayload = struct {
     // qjs JSGlobalObject.uninitialized_vars (quickjs.c js_global_object_get_-
     // uninitialized_var, 17069-17096): side table of shared UNINITIALIZED
@@ -1881,6 +1876,50 @@ pub const Object = extern struct {
         return createPreparedPropertyTemplate(rt, template, template.propertyEntries(), .borrowed);
     }
 
+    /// Allocate from a context-owned initial Shape. The caller supplies the
+    /// per-object property cells; no hidden template Object participates.
+    pub fn createFromShape(
+        rt: *JSRuntime,
+        class_id: class.ClassId,
+        shape_ref: *shape.Shape,
+        entries: []const property.Entry,
+    ) !*Object {
+        std.debug.assert(entries.len == shape_ref.prop_count);
+        return createInternal(rt, class_id, shape_ref.proto, shape_ref.prop_size, .{
+            .shape_ref = shape_ref,
+            .entries = entries,
+        });
+    }
+
+    pub fn createArrayFromShape(rt: *JSRuntime, shape_ref: *shape.Shape, entries: []const property.Entry) !*Object {
+        const self = try createFromShape(rt, class.ids.array, shape_ref, entries);
+        self.flags.fast_array = true;
+        return self;
+    }
+
+    pub fn createRegExpFromShape(rt: *JSRuntime, shape_ref: *shape.Shape) !*Object {
+        std.debug.assert(shape_ref.prop_count == 1);
+        std.debug.assert(shape_ref.props()[0].atom_id == atom.ids.lastIndex);
+        const entries = [_]property.Entry{.{ .slot = .{ .data = JSValue.int32(0) } }};
+        return createFromShape(rt, class.ids.regexp, shape_ref, &entries);
+    }
+
+    pub fn createRegExpMatchArrayFromShape(
+        rt: *JSRuntime,
+        shape_ref: *shape.Shape,
+        match_index: i32,
+        input_value: JSValue,
+        groups_value: JSValue,
+    ) !*Object {
+        std.debug.assert(shape_ref.prop_count == 3);
+        const entries = [_]property.Entry{
+            .{ .slot = .{ .data = JSValue.int32(match_index) } },
+            .{ .slot = .{ .data = input_value } },
+            .{ .slot = .{ .data = groups_value } },
+        };
+        return createArrayFromShape(rt, shape_ref, &entries);
+    }
+
     /// Construct a RegExp result from its realm-pinned named-property layout,
     /// supplying the three per-result slots in the same allocation. QuickJS
     /// does this with `JS_NewObjectFromShape(ctx->regexp_result_shape, props)`.
@@ -2440,6 +2479,9 @@ pub const Object = extern struct {
     }
 
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        if (rt.initialArrayShapeForPrototype(prototype)) |initial_shape| {
+            return createArrayFromShape(rt, initial_shape, &.{});
+        }
         const self = try create(rt, class.ids.array, prototype);
         self.flags.fast_array = true;
         return self;
@@ -2513,7 +2555,7 @@ pub const Object = extern struct {
     }
 
     pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         if (ctx.shared_lazy_native_functions != null) return;
         const cache = try rt.createRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue);
         cache.* = @splat(null);
@@ -2531,12 +2573,12 @@ pub const Object = extern struct {
     }
 
     pub fn globalLexicals(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         return ctx.lexicals;
     }
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         ctx.lexicals = v;
     }
 
@@ -2661,12 +2703,12 @@ pub const Object = extern struct {
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         return &ctx.cached_function_proto;
     }
 
     pub fn setCachedFunctionProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
         const old_prototype = ctx.cached_function_proto;
@@ -2675,17 +2717,17 @@ pub const Object = extern struct {
     }
 
     pub fn cachedFunctionProto(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         return ctx.cached_function_proto;
     }
 
     pub fn cachedPromiseProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         return &ctx.cached_promise_proto;
     }
 
     pub fn setCachedPromiseProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
         const old_prototype = ctx.cached_promise_proto;
@@ -2694,17 +2736,17 @@ pub const Object = extern struct {
     }
 
     pub fn cachedPromiseProto(self: *const Object, rt: *const JSRuntime) ?*Object {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         return ctx.cached_promise_proto;
     }
 
     pub fn cachedRealmValueSlot(self: *Object, rt: *JSRuntime, slot: RealmValueSlot) !*?JSValue {
-        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
         return &ctx.cached_values[@intFromEnum(slot)];
     }
 
     pub fn cachedRealmValue(self: *const Object, rt: *const JSRuntime, slot: RealmValueSlot) ?JSValue {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         return ctx.cached_values[@intFromEnum(slot)];
     }
 
@@ -2718,7 +2760,7 @@ pub const Object = extern struct {
 
     fn sharedLazyNativeFunctionSlot(self: *Object, rt: *JSRuntime, slot: u8) ?*?JSValue {
         if (slot == 0 or slot > runtime_mod.shared_lazy_native_function_slots) return null;
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         const cache = ctx.shared_lazy_native_functions orelse return null;
         return &cache[slot - 1];
     }
@@ -5406,13 +5448,13 @@ pub const Object = extern struct {
     /// constructor was installed. The cache-presence check and state lookup
     /// share one RealmContext lookup, mirroring a direct JSContext field read.
     pub inline fn installedRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) ?*RegExpLegacyStatics {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
         return ctx.regexp_legacy_statics;
     }
 
     pub fn ensureInstalledRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !?*RegExpLegacyStatics {
-        const ctx = rt.contextForGlobal(self) orelse return null;
+        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
         if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
         if (ctx.regexp_legacy_statics) |legacy| return legacy;
         const legacy = try rt.createRuntime(RegExpLegacyStatics);
@@ -8149,7 +8191,14 @@ pub const Object = extern struct {
 
     fn enqueueFinalizationCleanup(rt: *JSRuntime, cleanup_callback: ?JSValue, held_value: JSValue) ObjectGraphError!void {
         const callback = cleanup_callback orelse return;
-        try rt.enqueueFinalizationJob(callback, held_value);
+        const realm = if (objectFromValue(callback)) |callback_object|
+            if (callback_object.functionRealmGlobalPtr()) |global|
+                rt.contextForGlobalIncludingConstructing(global)
+            else
+                null
+        else
+            null;
+        try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);
     }
 
     /// Returns the weak identity for `stored`, registering objects in the
@@ -8443,7 +8492,7 @@ pub const Object = extern struct {
                 count += countFunctionBytecodeValueRef(entry.promise, function_bytecode);
                 count += countFunctionBytecodeValueRef(entry.reason, function_bytecode);
             }
-            for (ctx.pending_promise_jobs) |job| count += countFunctionBytecodeValueRef(job.value, function_bytecode);
+            for (ctx.runtime.pending_promise_jobs) |job| count += countFunctionBytecodeValueRef(job.value, function_bytecode);
         }
         return count;
     }

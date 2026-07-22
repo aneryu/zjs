@@ -52,8 +52,8 @@ pub const CallDepthGuard = struct {
     ctx: *core.JSContext,
 
     pub fn deinit(self: CallDepthGuard) void {
-        self.ctx.call_depth -= 1;
-        self.ctx.native_call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
+        self.ctx.runtime.native_call_depth -= 1;
     }
 };
 
@@ -71,23 +71,23 @@ pub const CallProfileGuard = if (build_options.zjs_enable_opcode_profile) struct
 };
 
 pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
-    if (ctx.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
+    if (ctx.runtime.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.runtime.call_depth >= maxLogicalJsCallDepth(ctx)) {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
         // InternalError "stack overflow" (quickjs.c:17837, 7789-7791).
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
-    ctx.call_depth += 1;
-    ctx.native_call_depth += 1;
+    ctx.runtime.call_depth += 1;
+    ctx.runtime.native_call_depth += 1;
     return .{ .ctx = ctx };
 }
 
 /// Depth accounting for inline (same interpreter loop) call frames.
 pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
-    if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
+    if (ctx.runtime.call_depth >= maxLogicalJsCallDepth(ctx)) {
         return inlineCallDepthOverflow(ctx, global);
     }
-    ctx.call_depth += 1;
+    ctx.runtime.call_depth += 1;
 }
 
 /// Stack exhaustion is exceptional and constructs a JS error.  Keep it out of
@@ -809,7 +809,7 @@ pub noinline fn initCtorVm(
 }
 
 fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
-    return @max(@as(usize, 16), ctx.stack_limit / 16384);
+    return @max(@as(usize, 16), ctx.stackLimit() / 16384);
 }
 
 /// Headroom (in native frames) before the recursive dispatcher must stop
@@ -823,11 +823,11 @@ const native_depth_fallback_margin: usize = 8;
 /// path (which absorbs the remaining depth on the Machine at logical depth)
 /// instead of recursing. See ARCH-RECURSIVE-REWRITE.md "S2a-v3".
 pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
-    return ctx.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
+    return ctx.runtime.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
 }
 
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
-    return ctx.stack_limit;
+    return ctx.stackLimit();
 }
 
 fn maxJsCallDepth(ctx: *const core.JSContext) usize {

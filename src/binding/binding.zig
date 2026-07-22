@@ -102,6 +102,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         pub const storage = storage_spec;
 
         const Self = @This();
+        var class_id_slot: core.class.ClassIdSlot = .{};
 
         /// Context-lifetime borrowed view of this host class in one realm.
         /// The prototype is resolved through the realm's class-prototype table
@@ -216,7 +217,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
         fn installRuntime(rt: *core.JSRuntime) !void {
             if (installedClassId(rt)) |_| return;
-            const class_id = rt.newClassId(core.class.invalid_class_id);
+            const class_id = try class_id_slot.getOrAllocate();
             var runtime_state: ?*RuntimeState = null;
             if (comptime staticPropertyCount() != 0) {
                 runtime_state = try RuntimeState.create(rt);

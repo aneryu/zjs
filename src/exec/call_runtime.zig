@@ -5421,35 +5421,6 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
     try promise_ops.enqueuePendingPromiseJob(ctx, callback);
 }
 
-noinline fn initIteratorResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    const cached = try global.cachedRealmValueSlot(rt, .iterator_result_template);
-    if (cached.*) |stored| return core.Object.expect(stored);
-
-    // qjs's realm keeps the final `{ value, done }` shape and
-    // js_create_iterator_result allocates its two-slot property array in one
-    // shot. Pin an equivalent template so every generator/iterator step skips
-    // the empty -> value -> done storage-growth sequence.
-    const template = try core.Object.createWithOwnPropertyCapacity(
-        rt,
-        core.class.ids.object,
-        object_ops.objectPrototypeFromGlobal(rt, global),
-        2,
-    );
-    defer template.value().free(rt);
-    try template.defineOwnPropertyAssumingNew(
-        rt,
-        core.atom.ids.value,
-        core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true),
-    );
-    try template.defineOwnPropertyAssumingNew(
-        rt,
-        core.atom.ids.done,
-        core.Descriptor.data(core.JSValue.boolean(false), true, true, true),
-    );
-    try global.setOptionalValueSlot(rt, cached, template.value().dup());
-    return core.Object.expect(cached.*.?);
-}
-
 pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -5462,14 +5433,26 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, 
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const template = if (global.cachedRealmValue(rt, .iterator_result_template)) |stored|
-        try core.Object.expect(stored)
-    else
-        try initIteratorResultPropertyTemplate(rt, global);
-    const object = try core.Object.createFromPropertyTemplate(rt, template);
+    // QuickJS's js_create_iterator_result uses an ordinary object followed by
+    // the `value` and `done` transitions; iterator results are not one of the
+    // five initial Shapes owned by JSContext.
+    const object = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        object_ops.objectPrototypeFromGlobal(rt, global),
+        2,
+    );
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, rooted_value.dup());
-    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 1, core.JSValue.boolean(done));
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.value,
+        core.Descriptor.data(rooted_value, true, true, true),
+    );
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.done,
+        core.Descriptor.data(core.JSValue.boolean(done), true, true, true),
+    );
     return object.value();
 }
 

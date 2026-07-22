@@ -1,3 +1,4 @@
+const std = @import("std");
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
 const builtin = @import("builtin");
@@ -8,6 +9,47 @@ comptime {
 
 pub const ClassId = u16;
 pub const invalid_class_id: ClassId = 0;
+
+/// QuickJS class identities are process-global: a runtime owns the class
+/// definition registered at an id, while the id itself belongs to the caller
+/// (normally a static `JSClassID` slot).  Keep the allocator widened so the
+/// final legal u16 id is usable and exhaustion can never wrap/reuse an id.
+var dynamic_class_id_lock: std.atomic.Value(bool) = .init(false);
+var next_dynamic_class_id: u32 = ids.init_count;
+
+fn lockDynamicClassIds() void {
+    while (dynamic_class_id_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+}
+
+fn unlockDynamicClassIds() void {
+    dynamic_class_id_lock.store(false, .release);
+}
+
+fn allocateDynamicClassIdLocked() error{ClassIdExhausted}!ClassId {
+    if (next_dynamic_class_id > std.math.maxInt(ClassId)) return error.ClassIdExhausted;
+    const id: ClassId = @intCast(next_dynamic_class_id);
+    next_dynamic_class_id += 1;
+    return id;
+}
+
+pub fn allocateDynamicClassId() error{ClassIdExhausted}!ClassId {
+    lockDynamicClassIds();
+    defer unlockDynamicClassIds();
+    return allocateDynamicClassIdLocked();
+}
+
+/// Caller-owned stable class identity, mirroring `JS_NewClassID(&slot)`.
+/// Definitions remain independently registered in each `JSRuntime`.
+pub const ClassIdSlot = struct {
+    value: ClassId = invalid_class_id,
+
+    pub fn getOrAllocate(self: *ClassIdSlot) error{ClassIdExhausted}!ClassId {
+        lockDynamicClassIds();
+        defer unlockDynamicClassIds();
+        if (self.value == invalid_class_id) self.value = try allocateDynamicClassIdLocked();
+        return self.value;
+    }
+};
 
 pub const ids = struct {
     pub const object: ClassId = 1;
@@ -203,7 +245,6 @@ pub const Table = struct {
     atoms: *atom.AtomTable,
     records: []Record = &.{},
     records_inline: [ids.init_count]Record = @splat(.{}),
-    next_dynamic_id: ClassId = ids.init_count,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
         var table = Table{ .memory = account, .atoms = atoms };
@@ -249,13 +290,6 @@ pub const Table = struct {
         } else if (records.len != 0) {
             self.memory.free(Record, records);
         }
-    }
-
-    pub fn newClassId(self: *Table, requested: ClassId) ClassId {
-        if (requested != invalid_class_id) return requested;
-        const id = self.next_dynamic_id;
-        self.next_dynamic_id += 1;
-        return id;
     }
 
     pub fn register(self: *Table, id: ClassId, def: Definition) !void {
@@ -361,8 +395,10 @@ pub const Table = struct {
     }
 
     fn registerAtom(self: *Table, id: ClassId, name_atom: atom.Atom, def: Definition) !void {
-        if (id == invalid_class_id or id >= std.math.maxInt(ClassId)) return error.InvalidClassId;
-        try self.ensureCapacity(id + 1);
+        if (id == invalid_class_id) return error.InvalidClassId;
+        // `ClassId` is already u16, so 65535 is QuickJS's final legal id.
+        // Widen before adding one to avoid wrapping the capacity bound.
+        try self.ensureCapacity(@as(usize, id) + 1);
         if (self.records[id].isRegistered()) return error.DuplicateClass;
         self.records[id] = .{
             .id = id,
@@ -523,5 +559,3 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         else => .none,
     };
 }
-
-const std = @import("std");

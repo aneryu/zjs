@@ -1523,8 +1523,8 @@ pub fn qjsFunctionBindCall(
 
 pub fn createRealmObject(parent: *core.JSContext) HostError!core.JSValue {
     const rt = parent.runtime;
-    const child = try core.JSContext.createWithOptions(rt, .{
-        .stack_size = parent.stack_limit,
+    const child = try core.JSContext.createConstructingWithOptions(rt, .{
+        .stack_size = parent.stackLimit(),
         .track_unhandled_rejections = parent.track_unhandled_rejections,
         .dynamic_import_callback = parent.dynamic_import_callback,
         .dynamic_import_userdata = parent.dynamic_import_userdata,
@@ -3150,7 +3150,7 @@ pub fn qjsEvalGlobalScriptSource(
     // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
     // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
     // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.call_depth == 0) ctx.runtime.updateNativeStackTop();
+    if (ctx.runtime.call_depth == 0) ctx.runtime.updateNativeStackTop();
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;

@@ -3307,24 +3307,23 @@ pub fn createRegExpMatchArray(rt: *core.JSRuntime, global: *core.Object, input_b
     return out.value();
 }
 
-// Build and pin the fixed RegExp-result property layout once per realm. QuickJS
-// does this during RegExp intrinsic installation (`ctx->regexp_result_shape`,
-// quickjs.c:49297-49312), so keep the allocation/property-transition work out
-// of the successful-exec instruction body. The fallback remains for embedders
-// that construct a minimal global without installing the standard intrinsics.
-pub noinline fn initRegExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    const slot = try global.cachedRealmValueSlot(rt, .regexp_match_result_template);
-    if (slot.*) |stored| return core.Object.expect(stored);
-
-    const template = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    defer template.value().free(rt);
-    try template.defineRegExpMatchMetadataPropertiesAssumingNew(rt, 0, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
-    try global.setOptionalValueSlot(rt, slot, template.value().dup());
-    return core.Object.expect(slot.*.?);
+// Standard bootstrap creates all five initial shapes together. Keep this
+// fallback for minimal embedders, but publish only Shape owners on the realm.
+pub noinline fn initRegExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Shape {
+    const ctx = rt.contextForGlobal(global) orelse return error.TypeError;
+    if (ctx.regexp_result_shape) |initial| return initial;
+    try ctx.initializeInitialShapes(
+        object_ops.objectPrototypeFromGlobal(rt, global),
+        arrayPrototypeFromGlobal(rt, global),
+        constructorPrototypeFromGlobal(rt, global, "RegExp"),
+    );
+    return ctx.regexp_result_shape orelse return error.TypeError;
 }
 
-fn regExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (global.cachedRealmValue(rt, .regexp_match_result_template)) |stored| return core.Object.expect(stored);
+fn regExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Shape {
+    if (rt.contextForGlobal(global)) |ctx| {
+        if (ctx.regexp_result_shape) |initial| return initial;
+    }
     return initRegExpResultPropertyTemplate(rt, global);
 }
 
@@ -3343,7 +3342,7 @@ pub noinline fn createRegExpMatchArrayFromValue(
         null;
     const groups_value = if (groups_object) |groups| groups.value() else core.JSValue.undefinedValue();
     defer groups_value.free(rt);
-    const out = try core.Object.createRegExpMatchArrayFromPropertyTemplate(rt, template, @intCast(found.index), input_value, groups_value);
+    const out = try core.Object.createRegExpMatchArrayFromShape(rt, template, @intCast(found.index), input_value, groups_value);
     errdefer core.Object.destroyFromHeader(rt, &out.header);
 
     try initRegExpMatchArrayDenseElementsFromValue(rt, out, input_value, found, groups_object);

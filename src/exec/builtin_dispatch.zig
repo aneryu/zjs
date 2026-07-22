@@ -49,7 +49,7 @@ pub const NativeCall = struct {
 };
 
 inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
-    const opaque_ptr = ctx.active_native_call orelse return null;
+    const opaque_ptr = ctx.runtime.active_native_call orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
 }
 
@@ -212,9 +212,9 @@ pub inline fn callInternalRecordDirect(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.active_native_call;
-    ctx.active_native_call = &native_env;
-    defer ctx.active_native_call = previous_native_call;
+    const previous_native_call = ctx.runtime.active_native_call;
+    ctx.runtime.active_native_call = &native_env;
+    defer ctx.runtime.active_native_call = previous_native_call;
 
     return invokeResolvedInternalRecord(ctx, this_value, record, args) catch |err| {
         try materializeRuntimeError(ctx, global, err);
@@ -411,9 +411,9 @@ fn callConstructRecordImpl(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.active_native_call;
-    ctx.active_native_call = &native_env;
-    defer ctx.active_native_call = previous_native_call;
+    const previous_native_call = ctx.runtime.active_native_call;
+    ctx.runtime.active_native_call = &native_env;
+    defer ctx.runtime.active_native_call = previous_native_call;
 
     return invokeResolvedInternalRecord(ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
         const host_err = @as(HostError, @errorCast(err));

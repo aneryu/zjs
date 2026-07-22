@@ -413,16 +413,19 @@ pub const FinalizationJob = struct {
     callback: JSValue = JSValue.undefinedValue(),
     held_value: JSValue = JSValue.undefinedValue(),
     symbol_root_mask: u2 = 0,
+    realm: context_mod.RealmRef = .{},
 
-    pub fn init(rt: *JSRuntime, sequence: u64, callback: JSValue, held_value: JSValue) !FinalizationJob {
+    pub fn init(rt: *JSRuntime, realm: ?*context_mod.JSContext, sequence: u64, callback: JSValue, held_value: JSValue) !FinalizationJob {
         var job = FinalizationJob{
             .sequence = sequence,
             .callback = callback.dup(),
             .held_value = held_value.dup(),
+            .realm = if (realm) |ctx| context_mod.RealmRef.retain(ctx) else .{},
         };
         errdefer {
             job.callback.free(rt);
             job.held_value.free(rt);
+            job.realm.deinit();
         }
         errdefer job.unregisterSymbolRoots(rt);
         if (try rt.registerExternalValueSymbolRoot(callback)) job.symbol_root_mask |= 0b01;
@@ -434,6 +437,8 @@ pub const FinalizationJob = struct {
         self.unregisterSymbolRoots(rt);
         self.callback.free(rt);
         self.held_value.free(rt);
+        var realm = self.realm;
+        realm.deinit();
     }
 
     fn unregisterSymbolRoots(self: FinalizationJob, rt: *JSRuntime) void {
@@ -756,6 +761,10 @@ pub const JSRuntime = struct {
     /// carried by `RealmRef` and the GC header, never by these links.
     context_head: ?*context_mod.JSContext = null,
     context_tail: ?*context_mod.JSContext = null,
+    /// Construction-only membership. These realms are deliberately absent
+    /// from `context_head` and root-provider traversal until publication.
+    constructing_context_head: ?*context_mod.JSContext = null,
+    constructing_context_tail: ?*context_mod.JSContext = null,
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
@@ -811,6 +820,18 @@ pub const JSRuntime = struct {
     malloc_gc_threshold: usize = default_gc_threshold,
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
+    /// QuickJS runtime execution state. These fields describe the currently
+    /// executing stack, not a Realm, and are shared by every context belonging
+    /// to this runtime.
+    call_depth: usize = 0,
+    native_call_depth: usize = 0,
+    formatting_error_stack: bool = false,
+    backtrace_frames: []context_mod.BacktraceFrame = &.{},
+    backtrace_capacity: usize = 0,
+    current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
+    active_native_call: ?*const anyopaque = null,
+    pending_promise_jobs: []context_mod.PendingPromiseJob = &.{},
+    pending_promise_jobs_capacity: usize = 0,
     stack_size: usize = default_stack_size,
     vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
     /// Native (machine C-stack) recursion guard, mirroring QuickJS
@@ -938,6 +959,8 @@ pub const JSRuntime = struct {
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.context_head = null;
         rt.context_tail = null;
+        rt.constructing_context_head = null;
+        rt.constructing_context_tail = null;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
         rt.weak_reference_holder_head = null;
@@ -984,6 +1007,15 @@ pub const JSRuntime = struct {
         rt.malloc_gc_threshold = options.gc_threshold;
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
+        rt.call_depth = 0;
+        rt.native_call_depth = 0;
+        rt.formatting_error_stack = false;
+        rt.backtrace_frames = &.{};
+        rt.backtrace_capacity = 0;
+        rt.current_backtrace_frame = null;
+        rt.active_native_call = null;
+        rt.pending_promise_jobs = &.{};
+        rt.pending_promise_jobs_capacity = 0;
         rt.stack_size = options.stack_size;
         rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
         rt.native_stack_size = initial_native_stack_size;
@@ -1027,7 +1059,28 @@ pub const JSRuntime = struct {
     }
 
     pub fn deinit(self: *JSRuntime) void {
+        self.assertIdleForTeardown();
         self.vm_stack.deinit(&self.memory);
+        const pending_promise_jobs = self.pending_promise_jobs;
+        const pending_promise_jobs_capacity = self.pending_promise_jobs_capacity;
+        self.pending_promise_jobs = &.{};
+        self.pending_promise_jobs_capacity = 0;
+        for (pending_promise_jobs) |job| job.deinit(self);
+        if (pending_promise_jobs_capacity != 0) {
+            self.memory.free(context_mod.PendingPromiseJob, pending_promise_jobs.ptr[0..pending_promise_jobs_capacity]);
+        }
+        const backtrace_frames = self.backtrace_frames;
+        const backtrace_capacity = self.backtrace_capacity;
+        self.backtrace_frames = &.{};
+        self.backtrace_capacity = 0;
+        for (backtrace_frames) |frame| {
+            self.atoms.free(frame.function_name);
+            self.atoms.free(frame.filename);
+            frame.function_value.free(self);
+        }
+        if (backtrace_capacity != 0) {
+            self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
+        }
         const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
         current_exception.free(self);
@@ -1063,9 +1116,7 @@ pub const JSRuntime = struct {
         }
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
-        self.clearLocalRootSlots();
-        self.clearPersistentRootSlots();
-        self.clearWeakRootSlots(false);
+        self.assertNoOutstandingValueHandles();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.modules.deinit(self);
@@ -1091,6 +1142,8 @@ pub const JSRuntime = struct {
         // be released by their callers before destroying the Runtime.
         std.debug.assert(self.context_head == null);
         std.debug.assert(self.context_tail == null);
+        std.debug.assert(self.constructing_context_head == null);
+        std.debug.assert(self.constructing_context_tail == null);
         self.gc.deinit(self);
         std.debug.assert(self.weak_reference_holder_head == null);
         std.debug.assert(self.weak_reference_holder_tail == null);
@@ -1373,6 +1426,36 @@ pub const JSRuntime = struct {
         self.context_tail = ctx;
     }
 
+    pub fn linkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        std.debug.assert(ctx.runtime == self);
+        std.debug.assert(ctx.construction_prev == null and ctx.construction_next == null);
+        ctx.construction_prev = self.constructing_context_tail;
+        if (self.constructing_context_tail) |tail| {
+            tail.construction_next = ctx;
+        } else {
+            self.constructing_context_head = ctx;
+        }
+        self.constructing_context_tail = ctx;
+    }
+
+    pub fn unlinkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        if (ctx.construction_prev == null and ctx.construction_next == null and self.constructing_context_head != ctx) return;
+        if (ctx.construction_prev) |prev| {
+            prev.construction_next = ctx.construction_next;
+        } else {
+            std.debug.assert(self.constructing_context_head == ctx);
+            self.constructing_context_head = ctx.construction_next;
+        }
+        if (ctx.construction_next) |next| {
+            next.construction_prev = ctx.construction_prev;
+        } else {
+            std.debug.assert(self.constructing_context_tail == ctx);
+            self.constructing_context_tail = ctx.construction_prev;
+        }
+        ctx.construction_prev = null;
+        ctx.construction_next = null;
+    }
+
     pub fn unlinkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
         if (ctx.runtime_prev == null and ctx.runtime_next == null and self.context_head != ctx) return;
         if (ctx.runtime_prev) |prev| {
@@ -1399,6 +1482,31 @@ pub const JSRuntime = struct {
         var current = self.context_head;
         while (current) |ctx| : (current = ctx.runtime_next) {
             if (ctx.global == global) return ctx;
+        }
+        return null;
+    }
+
+    /// Bootstrap-only resolver. Public/runtime enumeration intentionally uses
+    /// `contextForGlobal`, whose list contains published realms exclusively.
+    pub fn contextForGlobalIncludingConstructing(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {
+        if (self.contextForGlobal(global)) |ctx| return ctx;
+        var current = self.constructing_context_head;
+        while (current) |ctx| : (current = ctx.construction_next) {
+            if (ctx.global == global) return ctx;
+        }
+        return null;
+    }
+
+    pub fn initialArrayShapeForPrototype(self: *const JSRuntime, prototype: ?*const Object) ?*shape.Shape {
+        var current = self.context_head;
+        while (current) |ctx| : (current = ctx.runtime_next) {
+            const initial = ctx.array_shape orelse continue;
+            if (initial.proto == prototype) return initial;
+        }
+        var constructing = self.constructing_context_head;
+        while (constructing) |ctx| : (constructing = ctx.construction_next) {
+            const initial = ctx.array_shape orelse continue;
+            if (initial.proto == prototype) return initial;
         }
         return null;
     }
@@ -1505,6 +1613,9 @@ pub const JSRuntime = struct {
         }
         for (self.deferred_weak_value_frees) |*item| {
             try visitor.value(&item.value);
+        }
+        for (self.pending_promise_jobs) |*job| {
+            try job.traceRoots(visitor);
         }
         try self.job_queue.traceRoots(visitor);
         for (self.root_providers) |provider| {
@@ -1660,32 +1771,31 @@ pub const JSRuntime = struct {
         }
     }
 
-    pub fn clearPersistentRootSlots(self: *JSRuntime) void {
-        const slots = self.persistent_root_slots;
-        const capacity = self.persistent_root_slots_capacity;
-        self.persistent_root_slots = &.{};
-        self.persistent_root_slots_capacity = 0;
-
-        for (slots) |slot| {
-            const value = slot.value;
-            slot.value = JSValue.undefinedValue();
-            value.free(self);
-            self.memory.destroy(RootSlot, slot);
+    /// Runtime teardown is not an owner for public handles. Clearing these
+    /// arrays here would leave the caller's handle pointing into freed memory;
+    /// every scope/persistent/weak owner must close its edge first.
+    fn assertNoOutstandingValueHandles(self: *const JSRuntime) void {
+        if (self.local_root_slots.len != 0 or
+            self.persistent_root_slots.len != 0 or
+            self.weak_root_slots.len != 0)
+        {
+            @panic("JSRuntime destroyed with outstanding value handles");
         }
-        if (capacity != 0) self.memory.free(*RootSlot, slots.ptr[0..capacity]);
     }
 
-    fn clearWeakRootSlots(self: *JSRuntime, notify: bool) void {
-        const slots = self.weak_root_slots;
-        const capacity = self.weak_root_slots_capacity;
-        self.weak_root_slots = &.{};
-        self.weak_root_slots_capacity = 0;
-
-        for (slots) |slot| {
-            self.clearWeakRootSlot(slot, notify);
-            self.memory.destroy(WeakRootSlot, slot);
+    /// Stack-local execution/root records are borrowed by Runtime. They must be
+    /// gone before teardown in every optimization mode; silently continuing
+    /// would leave their deferred cleanup pointing into a destroyed Runtime.
+    fn assertIdleForTeardown(self: *const JSRuntime) void {
+        if (self.call_depth != 0 or
+            self.native_call_depth != 0 or
+            self.current_backtrace_frame != null or
+            self.active_native_call != null or
+            self.active_value_roots != null or
+            self.formatting_error_stack)
+        {
+            @panic("JSRuntime destroyed while execution or root frames are active");
         }
-        if (capacity != 0) self.memory.free(*WeakRootSlot, slots.ptr[0..capacity]);
     }
 
     pub fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot, notify: bool) void {
@@ -1818,10 +1928,6 @@ pub const JSRuntime = struct {
         _ = self.weak_object_ids.remove(address);
         _ = self.weak_id_objects.remove(weak_id);
         return weak_id << 1;
-    }
-
-    fn clearLocalRootSlots(self: *JSRuntime) void {
-        self.clearLocalRootSlotsFrom(0);
     }
 
     fn clearLocalRootSlotsFrom(self: *JSRuntime, start: usize) void {
@@ -2492,8 +2598,10 @@ pub const JSRuntime = struct {
         return self.atoms.internString(bytes);
     }
 
-    pub fn newClassId(self: *JSRuntime, requested: class.ClassId) class.ClassId {
-        return self.classes.newClassId(requested);
+    pub fn newClassId(self: *JSRuntime, requested: class.ClassId) error{ClassIdExhausted}!class.ClassId {
+        _ = self;
+        if (requested != class.invalid_class_id) return requested;
+        return class.allocateDynamicClassId();
     }
 
     pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
@@ -2522,7 +2630,7 @@ pub const JSRuntime = struct {
     pub fn installStandardGlobals(self: *JSRuntime, global: *Object) context_mod.DynamicImportError!void {
         const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
         var adopted_context: ?*context_mod.JSContext = null;
-        if (self.contextForGlobal(global) == null) {
+        if (self.contextForGlobalIncludingConstructing(global) == null) {
             var candidate = self.context_head;
             while (candidate) |ctx| : (candidate = ctx.runtime_next) {
                 if (ctx.global != null) continue;
@@ -2572,9 +2680,13 @@ pub const JSRuntime = struct {
     }
 
     pub fn enqueueFinalizationJob(self: *JSRuntime, callback: JSValue, held_value: JSValue) !void {
+        return self.enqueueFinalizationJobForRealm(null, callback, held_value);
+    }
+
+    pub fn enqueueFinalizationJobForRealm(self: *JSRuntime, realm: ?*context_mod.JSContext, callback: JSValue, held_value: JSValue) !void {
         const index = self.pending_finalization_jobs.len;
         try self.ensurePendingFinalizationJobCapacity(index + 1);
-        var job = try FinalizationJob.init(self, self.nextJobSequence(), callback, held_value);
+        var job = try FinalizationJob.init(self, realm, self.nextJobSequence(), callback, held_value);
         errdefer job.deinit(self);
         self.pending_finalization_jobs = self.pending_finalization_jobs.ptr[0 .. index + 1];
         self.pending_finalization_jobs[index] = job;

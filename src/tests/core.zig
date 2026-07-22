@@ -248,6 +248,146 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     try std.testing.expect(rt.firstContext() == null);
 }
 
+test "RealmContext construction stays unpublished and untraced until the live commit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.createConstructingWithOptions(rt, .{});
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(.constructing, ctx.publicationState());
+    try std.testing.expect(rt.firstContext() == null);
+    try std.testing.expectEqual(ctx, rt.constructing_context_head.?);
+    try std.testing.expectError(error.InvalidBuiltinRegistry, ctx.publishLive());
+
+    const marker = 0x5151;
+    ctx.eval_function = core.JSValue.int32(marker);
+    const Counter = struct {
+        count: usize = 0,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asInt32() == marker) self.count += 1;
+        }
+
+        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var counter = Counter{};
+    var visitor = core.runtime.RootVisitor{
+        .context = &counter,
+        .visit_value = Counter.visitValue,
+        .visit_object = Counter.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 0), counter.count);
+
+    try ctx.finishConstruction();
+    try std.testing.expectEqual(.live, ctx.publicationState());
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    try std.testing.expect(rt.constructing_context_head == null);
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 1), counter.count);
+}
+
+test "RealmContext owns the five QuickJS initial layouts as Shapes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+
+    const object_prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer object_prototype.value().free(rt);
+    const array_prototype = try core.Object.createArray(rt, object_prototype);
+    defer array_prototype.value().free(rt);
+    const regexp_prototype = try core.Object.create(rt, core.class.ids.object, object_prototype);
+    defer regexp_prototype.value().free(rt);
+
+    try ctx.initializeInitialShapes(object_prototype, array_prototype, regexp_prototype);
+    const initial_shapes = [_]*core.Shape{
+        ctx.array_shape.?,
+        ctx.arguments_shape.?,
+        ctx.mapped_arguments_shape.?,
+        ctx.regexp_shape.?,
+        ctx.regexp_result_shape.?,
+    };
+    for (initial_shapes) |initial_shape| {
+        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().kind);
+    }
+    try std.testing.expectEqual(array_prototype, ctx.array_shape.?.proto.?);
+    try std.testing.expectEqual(object_prototype, ctx.arguments_shape.?.proto.?);
+    try std.testing.expectEqual(object_prototype, ctx.mapped_arguments_shape.?.proto.?);
+    try std.testing.expectEqual(regexp_prototype, ctx.regexp_shape.?.proto.?);
+    try std.testing.expectEqual(array_prototype, ctx.regexp_result_shape.?.proto.?);
+    try std.testing.expectEqual(@as(u32, 0), ctx.array_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.arguments_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.mapped_arguments_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 1), ctx.regexp_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.regexp_result_shape.?.prop_count);
+
+    const array = try core.Object.createArray(rt, array_prototype);
+    defer array.value().free(rt);
+    try std.testing.expectEqual(ctx.array_shape.?, array.shape_ref);
+}
+
+test "Runtime queues retain their originating Realm until owned jobs are released" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+
+    try ctx.ensurePendingPromiseJobCapacity(1);
+    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0..1];
+    ctx.runtime.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.int32(11));
+
+    const TestJob = struct {
+        fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
+            return core.JSValue.undefinedValue();
+        }
+    };
+    try rt.job_queue.enqueueFunc(ctx, TestJob.run, &.{});
+    try rt.enqueueFinalizationJobForRealm(ctx, core.JSValue.int32(12), core.JSValue.int32(13));
+
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+
+    var promise_job = ctx.takePendingPromiseJob().?;
+    promise_job.deinit(rt);
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    rt.job_queue.runAll();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    var finalization_job = rt.takePendingFinalizationJob().?;
+    finalization_job.deinit(rt);
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "caller-owned ClassIdSlot is process-stable while definitions stay per Runtime" {
+    var slot: core.class.ClassIdSlot = .{};
+    const class_id = try slot.getOrAllocate();
+    try std.testing.expectEqual(class_id, try slot.getOrAllocate());
+
+    const first_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer first_rt.destroy();
+    const second_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer second_rt.destroy();
+
+    try first_rt.classes.register(class_id, .{ .class_name = "ProcessStableClassFirstRuntime" });
+    try second_rt.classes.register(class_id, .{ .class_name = "ProcessStableClassSecondRuntime" });
+    try std.testing.expect(first_rt.classes.isRegistered(class_id));
+    try std.testing.expect(second_rt.classes.isRegistered(class_id));
+    try std.testing.expectEqual(class_id, try first_rt.newClassId(class_id));
+    try std.testing.expectEqual(class_id, try second_rt.newClassId(class_id));
+
+    const first_name = first_rt.classes.className(class_id).?;
+    defer first_rt.atoms.free(first_name);
+    const second_name = second_rt.classes.className(class_id).?;
+    defer second_rt.atoms.free(second_name);
+    try std.testing.expectEqualStrings("ProcessStableClassFirstRuntime", first_rt.atoms.name(first_name).?);
+    try std.testing.expectEqualStrings("ProcessStableClassSecondRuntime", second_rt.atoms.name(second_name).?);
+
+    const final_class_id = std.math.maxInt(core.ClassId);
+    try first_rt.classes.register(final_class_id, .{ .class_name = "FinalLegalClassId" });
+    try std.testing.expect(first_rt.classes.isRegistered(final_class_id));
+    try std.testing.expectEqual(final_class_id, try first_rt.newClassId(final_class_id));
+}
+
 test "RealmContext participates in cycle collection through typed RealmRef edges" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -283,7 +423,7 @@ test "dynamic class registration reserves slots in live and future realms" {
     const second = try core.RealmContext.create(rt);
     defer second.destroy();
 
-    const class_id = rt.newClassId(core.class.invalid_class_id);
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.ensureContextClassPrototypeCapacity(class_id);
     try rt.classes.register(class_id, .{ .class_name = "RealmCapacityTest" });
     try std.testing.expect(first.classPrototypeObject(class_id) == null);
@@ -339,9 +479,9 @@ test "context takes pending promise jobs without allocation" {
     defer ctx.destroy();
 
     try ctx.ensurePendingPromiseJobCapacity(2);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..2];
-    ctx.pending_promise_jobs[0] = .{ .sequence = 3, .value = core.JSValue.int32(10) };
-    ctx.pending_promise_jobs[1] = .{ .sequence = 4, .value = core.JSValue.int32(11) };
+    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0..2];
+    ctx.runtime.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 3, core.JSValue.int32(10));
+    ctx.runtime.pending_promise_jobs[1] = try core.context.PendingPromiseJob.init(ctx, 4, core.JSValue.int32(11));
 
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
@@ -352,10 +492,10 @@ test "context takes pending promise jobs without allocation" {
 
     try std.testing.expectEqual(@as(u64, 3), first.sequence);
     try std.testing.expectEqual(@as(?i32, 10), first.value.asInt32());
-    try std.testing.expectEqual(@as(usize, 1), ctx.pending_promise_jobs.len);
-    try std.testing.expectEqual(@as(usize, 4), ctx.pending_promise_jobs_capacity);
+    try std.testing.expectEqual(@as(usize, 1), ctx.runtime.pending_promise_jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), ctx.runtime.pending_promise_jobs_capacity);
     try std.testing.expectEqual(@as(?u64, 4), ctx.peekPendingPromiseJobSequence());
-    try std.testing.expectEqual(@as(?i32, 11), ctx.pending_promise_jobs[0].value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), ctx.runtime.pending_promise_jobs[0].value.asInt32());
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
@@ -363,8 +503,8 @@ test "context takes pending promise jobs without allocation" {
     defer second.deinit(rt);
     try std.testing.expectEqual(@as(u64, 4), second.sequence);
     try std.testing.expectEqual(@as(?i32, 11), second.value.asInt32());
-    try std.testing.expectEqual(@as(usize, 0), ctx.pending_promise_jobs.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.pending_promise_jobs_capacity);
+    try std.testing.expectEqual(@as(usize, 0), ctx.runtime.pending_promise_jobs.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.runtime.pending_promise_jobs_capacity);
     try std.testing.expect(ctx.takePendingPromiseJob() == null);
 }
 
@@ -424,16 +564,16 @@ test "context backtrace can borrow VM frame pc lazily" {
 
     var pc: usize = 7;
     ctx.borrowBacktracePc(&pc);
-    try std.testing.expectEqual(@as(i32, 6), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 16), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 6), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 16), ctx.runtime.backtrace_frames[0].location().col_num);
 
     pc = 12;
-    try std.testing.expectEqual(@as(i32, 11), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 21), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 11), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 21), ctx.runtime.backtrace_frames[0].location().col_num);
 
     ctx.updateBacktracePc(3);
-    try std.testing.expectEqual(@as(i32, 3), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 13), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 3), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 13), ctx.runtime.backtrace_frames[0].location().col_num);
 }
 
 test "predefined atoms preserve QuickJS order and kinds" {
@@ -719,10 +859,10 @@ test "GC keeps context pending promise job unique symbol atoms until release" {
     defer ctx.destroy();
 
     try ctx.ensurePendingPromiseJobCapacity(1);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
+    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0..1];
     const pending_symbol = try rt.atoms.newValueSymbol("gc-context-pending-job-symbol");
     const pending_value = try rt.symbolValue(pending_symbol);
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, pending_value);
+    ctx.runtime.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, pending_value);
     pending_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
@@ -1243,8 +1383,8 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     defer rt.atoms.free(object_name);
     try std.testing.expectEqual(core.atom.ids.Object, object_name);
 
-    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
-    try std.testing.expectEqual(core.class.ids.init_count, dynamic_id);
+    const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
+    try std.testing.expect(dynamic_id >= core.class.ids.init_count);
     try rt.classes.register(dynamic_id, .{ .class_name = "HostThing", .has_exotic = true });
     try std.testing.expect(rt.classes.isRegistered(dynamic_id));
     const record = rt.classes.record(dynamic_id).?;
@@ -1484,7 +1624,7 @@ test "class finalizers and context prototype slots are wired" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
+    const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(dynamic_id, .{
         .class_name = "FinalizedThing",
         .payload_kind = .iterator,
@@ -1534,7 +1674,7 @@ test "object destruction defers class payload finalizers" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const payloadless_id = rt.newClassId(core.class.invalid_class_id);
+    const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(payloadless_id, .{
         .class_name = "PayloadlessFinalized",
         .payload_finalizer = countPayloadFinalizer,
@@ -1551,7 +1691,7 @@ test "object destruction defers class payload finalizers" {
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadFinalized",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -1575,7 +1715,7 @@ test "strong collection clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantCollectionClear",
         .payload_finalizer = reentrantCollectionClearFinalizer,
@@ -1614,7 +1754,7 @@ test "dense array delete defers element finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantArrayDelete",
         .payload_finalizer = reentrantArrayDeleteFinalizer,
@@ -1651,7 +1791,7 @@ test "ordinary property delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantPropertyDelete",
         .payload_finalizer = reentrantPropertyDeleteFinalizer,
@@ -1694,7 +1834,7 @@ test "regexp lastIndex set defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantRegExpLastIndexSet",
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
@@ -1731,7 +1871,7 @@ test "regexp lastIndex define defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantRegExpLastIndexDefine",
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
@@ -1772,7 +1912,7 @@ test "mapped arguments binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsSet",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1813,7 +1953,7 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsVarRefSet",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1854,7 +1994,7 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsDelete",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1903,7 +2043,7 @@ test "cached iterator next clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantCachedIteratorNextClear",
         .payload_finalizer = reentrantCachedIteratorNextFinalizer,
@@ -1939,7 +2079,7 @@ test "exception slot clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantExceptionSlotClear",
         .payload_finalizer = reentrantExceptionSlotFinalizer,
@@ -1973,7 +2113,7 @@ test "array iterator target clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantArrayIteratorTargetClear",
         .payload_finalizer = reentrantArrayIteratorFinalizer,
@@ -2015,12 +2155,12 @@ test "runtime cycle removal follows class payload mark hooks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const payloadless_id = rt.newClassId(core.class.invalid_class_id);
+    const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(payloadless_id, .{
         .class_name = "PayloadlessInCycle",
         .payload_finalizer = countPayloadFinalizer,
     });
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadInCycle",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -2054,7 +2194,7 @@ test "pending class payload finalizers trace payload value roots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "PendingExternalPayloadRoot",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -2113,7 +2253,7 @@ test "runtime cycle removal clears class payload object slots before finalizers"
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadObjectSlotCycle",
         .payload_finalizer = finalizeTestExternalObjectPayload,
@@ -2286,8 +2426,8 @@ test "runtime root tracer visits async roots" {
     defer ctx.destroy();
 
     try ctx.ensurePendingPromiseJobCapacity(1);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.int32(101));
+    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0..1];
+    ctx.runtime.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.int32(101));
 
     const TestJob = struct {
         fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
@@ -4163,7 +4303,7 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "TraceErrorExternalPayload",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -5065,7 +5205,7 @@ test "class payload function bytecode constant object cycle is released by runti
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadBytecodeCycle",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -7077,7 +7217,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const exotic_id = rt.newClassId(core.class.invalid_class_id);
+    const exotic_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(exotic_id, .{ .class_name = "ExoticDispatchHooksForTest" });
     const exotic = core.object.ExoticMethods{
         .get_own_property = exoticGet,

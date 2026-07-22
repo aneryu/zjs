@@ -393,7 +393,7 @@ pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, curr
 /// hot path free of property lookups and interning.
 /// Returns a borrowed atom valid while the frame entry is alive.
 pub fn resolvedBacktraceFunctionNameAt(ctx: *core.JSContext, index: usize) core.Atom {
-    const frame = &ctx.backtrace_frames[index];
+    const frame = &ctx.runtime.backtrace_frames[index];
     return resolveBacktraceFunctionName(ctx, frame);
 }
 
