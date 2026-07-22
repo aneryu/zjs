@@ -64,7 +64,6 @@ fn uriNamedEntry(comptime name: []const u8, comptime id: u32) core.host_function
         .length = 1,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&uriCall),
     };

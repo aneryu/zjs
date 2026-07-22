@@ -932,9 +932,8 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
 
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     const ctx = try zjs.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const global = try ctx.globalObject();
     defer {
-        global.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
@@ -946,6 +945,8 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.flags.func_kind = .generator;
+    core.gc.retain(&global.header);
+    fb.realm_global_header = &global.header;
     try rt.gc.add(&fb.header);
 
     {

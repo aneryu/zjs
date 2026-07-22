@@ -179,6 +179,13 @@ pub fn callValueWithThisGlobalsAndGlobal(
     if (try promiseResolvingFunctionCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCapabilityExecutorCall(ctx.runtime, object, args)) |value| return value;
     if (try promiseCombinatorElementCall(ctx, output, global, globals, object, args)) |value| return value;
+    if (object.class_id == core.class.ids.c_function_data) {
+        const tag = object.internalCallableTag();
+        if (tag != .none) {
+            const active_global = global orelse ctx.global orelse return error.TypeError;
+            if (try call_runtime.callInternalCallableByTag(ctx, output, active_global, object, tag, args, null, null)) |value| return value;
+        }
+    }
     if (object.hostFunctionKind() != 0) {
         const record = hostFunctionRecordFromId(object.hostFunctionKind()) orelse return error.TypeError;
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
@@ -325,11 +332,24 @@ fn callHostFunction(
     record: HostFunctionRecord,
     flags: HostCallFlags,
 ) !core.JSValue {
+    // QuickJS switches to `p->u.cfunc.realm` only in the final C-function
+    // arm, after the caller-side callability/argument/stack preflight. Data
+    // carriers retain the incoming context.
+    const call_ctx = if (func_obj.class_id == core.class.ids.c_function)
+        func_obj.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry
+    else
+        ctx;
+    const call_global = if (func_obj.class_id == core.class.ids.c_function)
+        call_ctx.global
+    else
+        global;
+    var empty_globals: [0]globals_mod.Slot = .{};
+    const call_globals = if (call_ctx == ctx) globals else empty_globals[0..];
     return record.call(.{
-        .ctx = ctx,
+        .ctx = call_ctx,
         .output = output,
-        .global = global,
-        .globals = globals,
+        .global = call_global,
+        .globals = call_globals,
         .func_obj = func_obj,
         .this_value = this_value,
         .args = args,
@@ -341,9 +361,8 @@ fn hostCallExternalHostFunction(call: HostCall) HostError!core.JSValue {
     const id = call.func_obj.externalHostFunctionId();
     const record = call.ctx.runtime.externalHostFunction(id) orelse return error.TypeError;
     return record.call(record.ptr, .{
-        .ctx = call.ctx,
+        .realm = call.ctx,
         .output = call.output,
-        .global = call.global,
         .func_obj = call.func_obj,
         .this_value = call.this_value,
         .args = call.args,
@@ -359,10 +378,7 @@ fn throwExternalHostError(call: HostCall, err: anyerror) HostError!core.JSValue 
     if (err == error.UnhandledPromiseRejection) return error.UnhandledPromiseRejection;
     if (call.ctx.hasException()) return error.JSException;
 
-    const global = call.global orelse
-        call.func_obj.functionRealmGlobalPtr() orelse
-        call.ctx.global orelse
-        return externalHostError(err);
+    const global = call.ctx.global orelse return externalHostError(err);
     const error_info = externalHostErrorInfo(err);
     const error_value = try hostResult(exception_ops.createNamedError(
         call.ctx,
@@ -614,6 +630,7 @@ pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.class_id != core.class.ids.c_function and
+        object.class_id != core.class.ids.c_function_data and
         object.class_id != core.class.ids.bytecode_function and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
@@ -767,11 +784,10 @@ pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?
 }
 
 fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try core.function.nativeFunction(rt, name, length);
+    const function = try core.function.nativeDataFunction(rt, name, length);
     errdefer function.free(rt);
     const function_object = thisObject(function) orelse return error.TypeError;
     if (global) |global_object| {
-        try function_object.setFunctionRealmGlobalPtr(rt, global_object);
         if (functionPrototypeFromGlobal(rt, global_object)) |function_proto| {
             function_object.setPrototype(rt, function_proto) catch {};
         }
@@ -869,10 +885,11 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
-    const constructor_value = try core.function.nativeFunction(rt, "Promise", 1);
+    const constructor_value = try core.function.nativeFunction(ctx, "Promise", 1);
     var constructor_alive = true;
     defer if (constructor_alive) constructor_value.free(rt);
     const constructor = thisObject(constructor_value) orelse return error.TypeError;
@@ -969,7 +986,7 @@ fn getPromiseIterator(
     iterable: core.JSValue,
 ) !PromiseIterator {
     if (iterable.isString()) {
-        const iterator = try core.object.stringIterator(ctx.runtime, iterable);
+        const iterator = try core.object.stringIterator(ctx, iterable);
         errdefer iterator.free(ctx.runtime);
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
@@ -980,7 +997,7 @@ fn getPromiseIterator(
     }
     if (thisObject(iterable)) |iterable_object| {
         if (iterable_object.class_id == core.class.ids.string) {
-            const iterator = try core.object.stringIterator(ctx.runtime, iterable);
+            const iterator = try core.object.stringIterator(ctx, iterable);
             errdefer iterator.free(ctx.runtime);
             const next_key = try ctx.runtime.internAtom("next");
             defer ctx.runtime.atoms.free(next_key);
@@ -1440,11 +1457,19 @@ pub fn callNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    const call_ctx = if (function_object.class_id == core.class.ids.c_function)
+        function_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry
+    else
+        ctx;
+    const call_global = if (function_object.class_id == core.class.ids.c_function)
+        call_ctx.global
+    else
+        global;
     if (function_object.nativeRecord()) |record| {
         return try builtin_dispatch.callInternalRecordDirect(
-            ctx,
+            call_ctx,
             output,
-            global,
+            call_global,
             globals,
             function_object,
             this_value,
@@ -1455,13 +1480,13 @@ pub fn callNativeFunctionRecord(
         );
     }
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
-    if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
+    if (try builtin_dispatch.callInternalRecord(call_ctx, output, call_global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {
         // Migrated to the internal record table (rt.internal_builtins);
         // reaching here means the id is not installed, which only happens
         // for corrupt ids.
         .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp, .performance, .atomics, .promise => error.TypeError,
-        .host => try callHostGlobalNativeFunctionRecord(ctx, global, this_value, function_object, native_ref.id, args),
+        .host => try callHostGlobalNativeFunctionRecord(call_ctx, call_global, this_value, function_object, native_ref.id, args),
     };
 }
 
@@ -1536,21 +1561,10 @@ pub fn createRealmObject(parent: *core.JSContext) HostError!core.JSValue {
     const realm = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 1);
     errdefer realm.value().free(rt);
     try realm.installOwnedRealmRef(rt, &child_owner);
-    try tagRealmEval(rt, realm_global);
     try tagRealmFunctionConstructor(rt, realm_global);
     try tagRealmRegExpAccessorErrors(rt, realm_global);
     try defineObjectProperty(rt, realm, "global", realm_global.value());
     return realm.value();
-}
-
-fn tagRealmEval(rt: *core.JSRuntime, realm_global: *core.Object) !void {
-    const eval_key = try rt.internAtom("eval");
-    defer rt.atoms.free(eval_key);
-    const eval_value = realm_global.getProperty(eval_key);
-    defer eval_value.free(rt);
-    const eval_object = expectObjectArg(eval_value) catch return;
-    const slot = try eval_object.functionRealmGlobalSlot(rt);
-    try eval_object.setOptionalValueSlot(rt, slot, realm_global.value().dup());
 }
 
 fn tagRealmFunctionConstructor(rt: *core.JSRuntime, realm_global: *core.Object) !void {
@@ -2100,6 +2114,7 @@ fn objectPrototypeLookupAccessor(ctx: *core.JSContext, global: ?*core.Object, re
 pub fn isCallableObjectValue(value: core.JSValue) bool {
     const object = thisObject(value) orelse return false;
     return object.class_id == core.class.ids.c_function or
+        object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         object.class_id == core.class.ids.bytecode_function;
@@ -2256,8 +2271,8 @@ fn createBoundFunction(
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.setOptionalValueSlot(rt, object.boundTargetSlot(), rooted_target.dup());
     try object.setOptionalValueSlot(rt, object.boundThisSlot(), rooted_bound_this.dup());
-    if (target_object.functionRealmGlobalPtr()) |realm_global| try object.setFunctionRealmGlobalPtr(rt, realm_global);
-    if (target_object.functionRealmGlobal()) |realm_value| try object.setOptionalValueSlot(rt, try object.functionRealmGlobalSlot(rt), realm_value.dup());
+    // Bound wrappers keep caller semantics. The recursive call selects a realm
+    // only after it reaches the final bytecode/C-function target.
     if (rooted_bound_args.len != 0) {
         const owned_bound_args = try rt.memory.alloc(core.JSValue, rooted_bound_args.len);
         var rooted_owned_bound_args: []core.JSValue = owned_bound_args[0..0];
@@ -2293,7 +2308,7 @@ test "createBoundFunction roots bound this and args while creating function" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const target = try core.function.nativeFunction(rt, "target", 0);
+    const target = try core.function.nativeFunction(ctx, "target", 0);
     defer target.free(rt);
 
     const this_atom = try rt.atoms.newValueSymbol("gc-bound-this-symbol");
@@ -2341,7 +2356,7 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const target = try core.function.nativeFunction(rt, "get [Symbol.species]", 0);
+    const target = try core.function.nativeFunction(ctx, "get [Symbol.species]", 0);
     defer target.free(rt);
     const target_object = thisObject(target) orelse return error.TypeError;
     target_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter)));
@@ -2751,8 +2766,7 @@ pub fn isOutputExternalHostFunctionId(rt: *core.JSRuntime, id: u32) bool {
 }
 
 fn externalHostOutput(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
-    const ctx: *core.JSContext = @ptrCast(@alignCast(call.ctx));
-    return hostOutputValues(ctx.runtime, call.output, call.args);
+    return hostOutputValues(call.realm.runtime, call.output, call.args);
 }
 
 fn hostCallOutput(call: HostCall) HostError!core.JSValue {

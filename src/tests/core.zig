@@ -2926,9 +2926,13 @@ test "native function state uses payload storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const home = try core.Object.create(rt, core.class.ids.object, null);
-    defer home.value().free(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const home = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try home.ensureGlobalPayload(rt);
+    ctx.global = home;
     const function = try core.Object.create(rt, core.class.ids.c_function, null);
+    function.setNativeFunctionRealm(ctx);
     defer function.value().free(rt);
     const source = try core.string.String.createAscii(rt, "function f(){}");
     defer source.value().free(rt);
@@ -2947,7 +2951,6 @@ test "native function state uses payload storage" {
     remap_to[0] = try rt.internAtom("newPrivate");
     (try function.privateRemapToSlotEnsured(rt)).* = remap_to;
     (try function.functionRealmGlobalSlot(rt)).* = home.value().dup();
-    try function.setFunctionRealmGlobalPtr(rt, home);
 
     try std.testing.expect(function.functionSource() != null);
     try std.testing.expectEqual(@as(i32, 11), function.hostFunctionKind());
@@ -2960,7 +2963,30 @@ test "native function state uses payload storage" {
     try std.testing.expectEqual(@as(usize, 1), function.privateRemapFrom().len);
     try std.testing.expectEqual(@as(usize, 1), function.privateRemapTo().len);
     try std.testing.expect(function.functionRealmGlobal() != null);
+    try std.testing.expectEqual(ctx, function.nativeFunctionRealm().?);
     try std.testing.expectEqual(home, function.functionRealmGlobalPtr().?);
+}
+
+test "true C functions own their construction realm while data functions do not" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    const data = try engine.core.function.nativeDataFunction(rt, "data", 0);
+    defer data.free(rt);
+
+    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
+    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, native_object.class_id);
+    try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
+    try std.testing.expectEqual(core.class.ids.c_function_data, data_object.class_id);
+    try std.testing.expect(data_object.nativeFunctionRealm() == null);
+
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    native.free(rt);
+    try std.testing.expect(rt.firstContext() == null);
 }
 
 test "bytecode function state uses the inline qjs function arm" {
@@ -3911,7 +3937,7 @@ test "runtime exposes stable gc stats snapshot" {
     });
     defer rt.deinit();
 
-    const owner = try core.Object.create(&rt, core.class.ids.c_function, null);
+    const owner = try core.Object.create(&rt, core.class.ids.c_function_data, null);
     defer owner.value().free(&rt);
     const child = try core.Object.create(&rt, core.class.ids.object, null);
     defer child.value().free(&rt);
@@ -4720,7 +4746,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const continuation = try core.Object.create(rt, core.class.ids.c_function, null);
+    const continuation = try core.Object.create(rt, core.class.ids.c_function_data, null);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     const key = try rt.internAtom("continuation");
     defer rt.atoms.free(key);
@@ -4754,7 +4780,10 @@ test "shared lazy native function cache cycle is released by runtime cycle remov
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const cached_key = try rt.internAtom("cached");
     defer rt.atoms.free(cached_key);
     const global_key = try rt.internAtom("global");
@@ -4776,16 +4805,12 @@ test "shared lazy native function cache cycle is released by runtime cycle remov
     try cached_function.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
     cached_value.free(rt);
-    global.value().free(rt);
+    ctx.destroy();
 
-    // L2: materializing the cached auto-init placeholder now flips the owning
-    // shape's `Flags.kind` (auto_init -> data) in lockstep with the slot, which
-    // clones the global's (transition-cacheable) shape to a uniquely-owned one.
-    // The old shape is released by refcount at clone time, so it is reclaimed
-    // there instead of by cycle removal -- one fewer object in the cycle sweep
-    // (4 not 5). `expectNoLiveGc` below still confirms a fully-collected graph
-    // (liveCount==0, shapes.len==0), i.e. no leak.
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    // Materialization promotes the placeholder to a function owned by the
+    // global while that true C function owns the context. The collector must
+    // reclaim the complete context -> global -> function -> context cycle.
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
 
 test "function bytecode constant object cycle is released by runtime cycle removal" {
@@ -5313,7 +5338,8 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
 
     const lazy = holder.getProperty(lazy_key);
     defer lazy.free(rt);
-    try std.testing.expect(lazy.isObject());
+    // A cleared realm token cannot manufacture an ownerless C_FUNCTION.
+    try std.testing.expect(lazy.isUndefined());
 
     holder.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
@@ -5353,41 +5379,29 @@ test "cleared realm pointer unregisters empty borrowed holder" {
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
 
-test "native function borrowed holder cache follows swap removal" {
+test "native call carriers do not enter borrowed realm bookkeeping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
-    const first = try core.Object.create(rt, core.class.ids.c_function, null);
-    const second = try core.Object.create(rt, core.class.ids.c_function, null);
-    const third = try core.Object.create(rt, core.class.ids.c_function, null);
+    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    defer native.free(rt);
+    const data = try engine.core.function.nativeDataFunction(rt, "data", 0);
+    defer data.free(rt);
+    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
+    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
 
-    try first.setFunctionRealmGlobalPtr(rt, global);
-    try second.setFunctionRealmGlobalPtr(rt, global);
-    try third.setFunctionRealmGlobalPtr(rt, global);
-    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
-
-    // Removing the first entry swaps the tail into its slot and must repair the
-    // moved function's cached index. Removing that moved entry repeats the same
-    // edge, exercising the FIFO teardown shape that used to be quadratic.
-    first.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-
-    try third.setFunctionRealmGlobalPtr(rt, null);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
-    third.value().free(rt);
-
-    try second.setFunctionRealmGlobalPtr(rt, null);
+    try data_object.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
+    try std.testing.expect(data_object.nativeFunctionRealm() == null);
+    try std.testing.expect(native_object.borrowedReferenceHolderIndex() == null);
+    try std.testing.expect(data_object.borrowedReferenceHolderIndex() == null);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
-    second.value().free(rt);
 }
 
 test "generator borrowed holder cache follows swap removal" {
@@ -5693,14 +5707,15 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     }
 }
 
-test "materialized auto-init function realm pointer registers borrowed holder" {
+test "materialized auto-init true C function owns its construction realm" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer holder.value().free(rt);
     const host_key = try rt.internAtom("gc");
     defer rt.atoms.free(host_key);
 
@@ -5716,15 +5731,19 @@ test "materialized auto-init function realm pointer registers borrowed holder" {
     );
 
     const function_value = holder.getProperty(host_key);
-    defer function_value.free(rt);
     const function_header = function_value.refHeader().?;
     const function_object: *core.Object = @fieldParentPtr("header", function_header);
 
+    try std.testing.expectEqual(ctx, function_object.nativeFunctionRealm().?);
     try std.testing.expectEqual(global, function_object.functionRealmGlobalPtr().?);
 
-    global.value().free(rt);
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    try std.testing.expectEqual(global, function_object.functionRealmGlobalPtr().?);
 
-    try std.testing.expectEqual(@as(?*core.Object, null), function_object.functionRealmGlobalPtr());
+    function_value.free(rt);
+    holder.value().free(rt);
+    try std.testing.expect(rt.firstContext() == null);
 }
 
 test "dead weak collection key entry is swept when target is destroyed" {

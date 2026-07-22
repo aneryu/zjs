@@ -136,15 +136,6 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// `staticMethodId` /
 /// `prototypeMethodId` helpers above; this table is consumed by both the slow
 /// record-dispatch path and the VM hot paths (`rt.internal_builtins`).
-///
-/// `prepared_call_ok` is uniformly false, but unlike the other domains that is
-/// not what gates `.array` prepared eligibility: the VM admits exactly `push`
-/// and `pop` to the prepared (no-function-object) path through
-/// `vm_call.arrayNativeSupportedWithoutFunctionObject`. Their dedicated record
-/// functions need only the receiver and tolerate `func_obj = null`; every
-/// shared `arrayCall` prototype method still requires a materialized function
-/// object. The residual flag therefore stays `false` without affecting the
-/// prepared path.
 pub const internal_entries = arrayEntries: {
     const Entry = core.host_function.InternalEntry;
     break :arrayEntries [_]Entry{
@@ -225,7 +216,6 @@ fn arrayEntryWithHandler(
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(handler),
     };
@@ -259,14 +249,13 @@ test "Array.pop has a dedicated native record handler" {
 
 /// The Array constructor record: construct-capable so `new Array(...)` (and
 /// `Array(...)` called as a function, routed with `is_constructor == false`)
-/// reach `arrayCall`'s construct branch. Never prepared-eligible.
+/// reach `arrayCall`'s construct branch.
 fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .constructor_or_func_magic,
         .native_function = builtin_dispatch.constructorOrFunctionMagic(&arrayCall),
     };

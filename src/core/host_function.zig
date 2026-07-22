@@ -1,7 +1,9 @@
 const std = @import("std");
 const Object = @import("object.zig").Object;
 const JSValue = @import("value.zig").JSValue;
-const JSContext = @import("context.zig").JSContext;
+const context = @import("context.zig");
+const JSContext = context.JSContext;
+const RealmContext = context.RealmContext;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const global_slots = @import("global_slots.zig");
 const class = @import("class.zig");
@@ -30,12 +32,39 @@ pub const InternalCallableTag = enum(u8) {
     // await-shaped internal reaction model as
     // `async_disposable_stack_continuation`).
     array_from_async_continuation = 13,
+
+    /// QuickJS C_FUNCTION_DATA-style closures consume the caller's realm.
+    /// The two promise job records deliberately remain true C functions for
+    /// now: their enqueue-realm ownership is part of the later job-carrier
+    /// normalization, not this caller-data split.
+    pub fn usesCallerRealm(self: InternalCallableTag) bool {
+        return switch (self) {
+            .promise_resolving,
+            .promise_capability_executor,
+            .promise_combinator_element,
+            .promise_finally_callback,
+            .async_function_resume,
+            .async_from_sync_iterator_unwrap,
+            .async_disposable_stack_continuation,
+            .async_generator_resolve,
+            .async_from_sync_iterator_close_wrap,
+            .array_from_async_continuation,
+            => true,
+            .none,
+            .promise_thenable_job,
+            .promise_reaction_job,
+            .throw_type_error_intrinsic,
+            => false,
+        };
+    }
 };
 
+/// Atomic call-duration realm view passed across the external-host boundary.
+/// `realm.global` and the realm's global slots must always be read from this
+/// same context; carrying independent aliases made mixed-realm calls possible.
 pub const ExternalCall = struct {
-    ctx: *anyopaque,
+    realm: *RealmContext,
     output: ?*std.Io.Writer,
-    global: ?*Object,
     func_obj: *Object,
     this_value: JSValue,
     args: []const JSValue,
@@ -246,9 +275,6 @@ pub const InternalRecord = struct {
     /// Selector forwarded to the typed handler so one implementation can serve several
     /// ids (JSCFunctionListEntry.magic analogue).
     magic: u16 = 0,
-    /// True when the record may be invoked without a materialized function
-    /// object (prepared-call eligibility: no func_obj/realm dependence).
-    prepared_call_ok: bool = false,
     /// Function.prototype.call-style transparent forwarding. The VM may reuse
     /// its current bytecode Machine for an eligible target while retaining this
     /// record as a synthetic native frame in observable error stacks.
@@ -278,7 +304,6 @@ pub const InternalEntry = struct {
     /// Domain-local method id (the low part of the encoded native builtin id).
     id: u32,
     magic: u16 = 0,
-    prepared_call_ok: bool = false,
     /// See `InternalRecord.forwards_call`.
     forwards_call: bool = false,
     cproto: NativeCProto = .generic,
@@ -805,8 +830,8 @@ pub const builtin_method_ids = struct {
 //
 // Pure name<->id / id->name(/kind) lookups over the `builtin_method_ids` enums
 // above. These are engine metadata (the QuickJS analogue lives next to the
-// JSCFunctionListEntry tables), consulted by the VM prepared-call gates and the
-// decoded-id comparison in exec, by the legacy method-call cascade, and by the
+// JSCFunctionListEntry tables), consulted by decoded-id comparison in exec,
+// by the legacy method-call cascade, and by the
 // standard-global property-install side. They depend only on `std`, the enum values
 // here, and `class.ClassId`; they touch no runtime state (no install/registry
 // table) and run no VM machinery, so they live in core and exec is the client.

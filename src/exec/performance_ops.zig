@@ -17,7 +17,6 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
         .length = 0,
         .id = now_id,
         .magic = now_id,
-        .prepared_call_ok = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&performanceNowCall),
     },

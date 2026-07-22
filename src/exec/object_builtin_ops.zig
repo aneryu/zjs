@@ -190,7 +190,6 @@ fn objectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&objectCall),
     };
@@ -201,7 +200,6 @@ fn constructorEntry() core.host_function.InternalEntry {
         .name = "Object",
         .length = 1,
         .id = @intFromEnum(ConstructorMethod.call),
-        .prepared_call_ok = false,
         .cproto = .constructor_or_func_magic,
         .native_function = builtin_dispatch.constructorOrFunctionMagic(&objectConstructorCall),
     };
@@ -211,10 +209,7 @@ fn constructorEntry() core.host_function.InternalEntry {
 /// entry per `Object.*` static and `Object.prototype.*` method. Static/prototype
 /// `id`/`magic` values are consumed by `qjsObjectCallForNativeRecord` and the
 /// bare-runtime fallback, kept in lockstep with the visible install order in
-/// `standard_globals`. Every record sets
-/// `prepared_call_ok = false`: the constructor fallback and Object methods need
-/// a materialized function object, realm global, and/or the shared property
-/// helper web.
+/// `standard_globals`.
 pub const internal_entries = [_]core.host_function.InternalEntry{
     constructorEntry(),
     staticEntry("assign", 2, .assign),

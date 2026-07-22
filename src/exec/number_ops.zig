@@ -51,26 +51,25 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
 /// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
 pub const internal_entries = [_]core.host_function.InternalEntry{
-    numberEntry("parseInt", 2, @intFromEnum(StaticMethod.parse_int), true),
-    numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float), true),
-    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan), false),
-    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite), false),
-    numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer), false),
-    numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer), false),
-    numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string), false),
-    numberEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string), false),
-    numberEntry("toFixed", 1, @intFromEnum(PrototypeMethod.to_fixed), false),
-    numberEntry("toExponential", 1, @intFromEnum(PrototypeMethod.to_exponential), false),
-    numberEntry("toPrecision", 1, @intFromEnum(PrototypeMethod.to_precision), false),
+    numberEntry("parseInt", 2, @intFromEnum(StaticMethod.parse_int)),
+    numberEntry("parseFloat", 1, @intFromEnum(StaticMethod.parse_float)),
+    numberEntry("isNaN", 1, @intFromEnum(StaticMethod.is_nan)),
+    numberEntry("isFinite", 1, @intFromEnum(StaticMethod.is_finite)),
+    numberEntry("isInteger", 1, @intFromEnum(StaticMethod.is_integer)),
+    numberEntry("isSafeInteger", 1, @intFromEnum(StaticMethod.is_safe_integer)),
+    numberEntry("toString", 1, @intFromEnum(PrototypeMethod.to_string)),
+    numberEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string)),
+    numberEntry("toFixed", 1, @intFromEnum(PrototypeMethod.to_fixed)),
+    numberEntry("toExponential", 1, @intFromEnum(PrototypeMethod.to_exponential)),
+    numberEntry("toPrecision", 1, @intFromEnum(PrototypeMethod.to_precision)),
 };
 
-fn numberEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+fn numberEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&numberCall),
     };

@@ -57,10 +57,7 @@ pub const encodePrototypeMethodId = string_id_lookup.encodePrototypeMethodId;
 /// and prototype method lists plus the
 /// `staticMethodId`/`prototypeMethodId` id helpers above (like Date/Number);
 /// this table is consumed by the record-dispatch path
-/// (`rt.internal_builtins`). `prepared_call_ok` mirrors the prepared-call gate
-/// in `vm_call.zig` (`nativeBuiltinSupportedWithoutFunctionObject`): only
-/// `String.fromCharCode` and `String.prototype.substring` are callable without a
-/// materialized function object today.
+/// (`rt.internal_builtins`).
 pub const internal_entries = stringEntries: {
     const Entry = core.host_function.InternalEntry;
     break :stringEntries [_]Entry{
@@ -68,51 +65,51 @@ pub const internal_entries = stringEntries: {
         // (call path) and `new String(...)` (construct path), so it is marked
         // construct-capable; `stringCall` branches on `is_constructor`.
         stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
-        stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), true),
-        stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point), false),
-        stringEntry("raw", 1, @intFromEnum(StaticMethod.raw), false),
+        stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code)),
+        stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point)),
+        stringEntry("raw", 1, @intFromEnum(StaticMethod.raw)),
         // Prototype methods that carry a `(.string, id)` native record id
         // (the subset `prototypeMethodId` maps and `decodePrototypeMethodId`
         // decodes). The remaining String.prototype methods (toString, valueOf,
         // the AnnexB html helpers, …) are installed as plain name-dispatched
         // native functions and never reach record dispatch.
-        stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), false),
-        stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring), true),
+        stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at)),
+        stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring)),
         stringDirectEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), &stringCaseCall),
         stringDirectEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), &stringCaseCall),
-        stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of), false),
-        stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes), false),
-        stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with), false),
-        stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with), false),
-        stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim), false),
-        stringEntry("concat", 1, @intFromEnum(PrototypeMethod.concat), false),
-        stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start), false),
-        stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end), false),
-        stringEntry("split", 2, @intFromEnum(PrototypeMethod.split), false),
-        stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of), false),
+        stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of)),
+        stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes)),
+        stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with)),
+        stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with)),
+        stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim)),
+        stringEntry("concat", 1, @intFromEnum(PrototypeMethod.concat)),
+        stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start)),
+        stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
+        stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
+        stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
         stringDirectEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall),
         stringDirectEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall),
         stringDirectEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall),
-        stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice), false),
-        stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat), false),
-        stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start), false),
-        stringEntry("padEnd", 1, @intFromEnum(PrototypeMethod.pad_end), false),
-        stringEntry("localeCompare", 1, @intFromEnum(PrototypeMethod.locale_compare), false),
-        stringEntry("normalize", 0, @intFromEnum(PrototypeMethod.normalize), false),
-        stringEntry("isWellFormed", 0, @intFromEnum(PrototypeMethod.is_well_formed), false),
-        stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed), false),
-        stringEntry("search", 1, @intFromEnum(PrototypeMethod.search), false),
-        stringEntry("match", 1, @intFromEnum(PrototypeMethod.match), false),
-        stringEntry("replace", 2, @intFromEnum(PrototypeMethod.replace), false),
-        stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all), false),
-        stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all), false),
+        stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
+        stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat)),
+        stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start)),
+        stringEntry("padEnd", 1, @intFromEnum(PrototypeMethod.pad_end)),
+        stringEntry("localeCompare", 1, @intFromEnum(PrototypeMethod.locale_compare)),
+        stringEntry("normalize", 0, @intFromEnum(PrototypeMethod.normalize)),
+        stringEntry("isWellFormed", 0, @intFromEnum(PrototypeMethod.is_well_formed)),
+        stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed)),
+        stringEntry("search", 1, @intFromEnum(PrototypeMethod.search)),
+        stringEntry("match", 1, @intFromEnum(PrototypeMethod.match)),
+        stringEntry("replace", 2, @intFromEnum(PrototypeMethod.replace)),
+        stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all)),
+        stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all)),
         // The String Iterator's `next` method.
-        stringEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next), false),
+        stringEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next)),
     };
 };
 
-fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
-    return stringEntryWithHandler(name, length, id, prepared, &stringCall);
+fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return stringEntryWithHandler(name, length, id, &stringCall);
 }
 
 fn stringDirectEntry(
@@ -121,14 +118,13 @@ fn stringDirectEntry(
     comptime id: u32,
     comptime handler: anytype,
 ) core.host_function.InternalEntry {
-    return stringEntryWithHandler(name, length, id, false, handler);
+    return stringEntryWithHandler(name, length, id, handler);
 }
 
 fn stringEntryWithHandler(
     comptime name: []const u8,
     comptime length: u8,
     comptime id: u32,
-    comptime prepared: bool,
     comptime handler: anytype,
 ) core.host_function.InternalEntry {
     return .{
@@ -136,7 +132,6 @@ fn stringEntryWithHandler(
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(handler),
     };
@@ -173,7 +168,6 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .constructor_or_func_magic,
         .native_function = builtin_dispatch.constructorOrFunctionMagic(&stringCall),
     };
@@ -342,9 +336,8 @@ fn stringCall(
     // string receiver/args and route the reused *pure body* through the table
     // here. It is gated on `func_obj == null and global == null`, the
     // contract those call sites use (the body needs no realm global). The
-    // prepared-call fast path (`vm_call.zig`, e.g. the prepared `substring`)
-    // also passes `func_obj == null` but threads the realm `global` and *raw*
-    // args, so it must fall through to the coercing dispatcher below instead.
+    // Other direct callers can pass `func_obj == null` with a realm `global`
+    // and raw args, so they must fall through to the coercing dispatcher below.
     // This deliberately bypasses the prototype dispatcher
     // (`string_ops.qjsStringPrototypeMethod`) — routing back through it would
     // re-enter this record (the dispatcher's own body call is one of the
@@ -1889,6 +1882,8 @@ test "string iteratorResult roots direct function bytecode value while creating 
 test "string wrapper iterator split and match helpers keep values under GC" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -1904,7 +1899,7 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     const wrapped_string = stringValueFromReceiver(wrapped_data) orelse return error.TypeError;
     try std.testing.expect(wrapped_string.eqlBytes("aba"));
 
-    const iterator_value = try iterator(rt, text);
+    const iterator_value = try iterator(ctx, text);
     defer iterator_value.free(rt);
     const iterator_object = try expectObject(iterator_value);
     const iterator_target = iterator_object.iteratorTarget() orelse return error.TypeError;

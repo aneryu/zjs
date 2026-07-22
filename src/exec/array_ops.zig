@@ -4123,7 +4123,7 @@ fn fromAsyncAwait(
 }
 
 fn fromAsyncContinuation(rt: *core.JSRuntime, global: *core.Object, state: *core.Object, rejected: bool) !core.JSValue {
-    const callback = try builtin_glue.qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .array_from_async_continuation);

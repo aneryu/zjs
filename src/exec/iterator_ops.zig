@@ -184,15 +184,15 @@ pub fn createAsyncFromSyncIterator(
     try wrapper.setOptionalValueSlot(rt, wrapper.iteratorTargetSlot(), rooted_sync_iterator.dup());
     try wrapper.setOptionalValueSlot(rt, wrapper.iteratorNextSlot(), rooted_next_method.dup());
 
-    const next_fn = try asyncFromSyncMethod(rt, "next", 1);
+    const next_fn = try asyncFromSyncMethod(ctx, "next", 1);
     defer next_fn.free(rt);
     try defineValueProperty(rt, wrapper, "next", next_fn);
 
-    const return_fn = try asyncFromSyncMethod(rt, "return", 2);
+    const return_fn = try asyncFromSyncMethod(ctx, "return", 2);
     defer return_fn.free(rt);
     try defineValueProperty(rt, wrapper, "return", return_fn);
 
-    const throw_fn = try asyncFromSyncMethod(rt, "throw", 3);
+    const throw_fn = try asyncFromSyncMethod(ctx, "throw", 3);
     defer throw_fn.free(rt);
     try defineValueProperty(rt, wrapper, "throw", throw_fn);
     return wrapper.value();
@@ -289,8 +289,9 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn asyncFromSyncMethod(rt: *core.JSRuntime, name: []const u8, method_id: i32) !core.JSValue {
-    const method = try core.function.nativeFunction(rt, name, 0);
+fn asyncFromSyncMethod(ctx: *core.JSContext, name: []const u8, method_id: i32) !core.JSValue {
+    const rt = ctx.runtime;
+    const method = try core.function.nativeFunction(ctx, name, 0);
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
     if (method_id < 1 or method_id > 3) return error.TypeError;
@@ -1135,6 +1136,7 @@ pub fn arrayIteratorPrototypeFromContext(
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
     try builtin_glue.defineNativeDataMethodWithNativeId(
         ctx.runtime,
+        global,
         object,
         "next",
         0,
@@ -1146,7 +1148,7 @@ pub fn arrayIteratorPrototypeFromContext(
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
     if (!next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
-    const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
+    const iterator_method = try core.function.nativeFunction(ctx, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
     if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
@@ -1468,13 +1470,14 @@ pub const IteratorFromResult = struct {
 
 pub fn qjsInstallIteratorHelperMethod(
     rt: *core.JSRuntime,
+    global: *core.Object,
     helper: *core.Object,
     name: []const u8,
     method_id: i32,
 ) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    const method = try core.function.nativeFunction(rt, name, 0);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, 0);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (method_id < 1 or method_id > 2) return error.TypeError;
@@ -1493,8 +1496,8 @@ fn qjsIteratorMethodsPrototype(
     const proto = try qjsIteratorPrototype(rt, global, tag_name);
     var proto_raw_owned = true;
     errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, &proto.header);
-    try qjsInstallIteratorHelperMethod(rt, proto, "next", 1);
-    try qjsInstallIteratorHelperMethod(rt, proto, "return", 2);
+    try qjsInstallIteratorHelperMethod(rt, global, proto, "next", 1);
+    try qjsInstallIteratorHelperMethod(rt, global, proto, "return", 2);
     const value = proto.value();
     proto_raw_owned = false;
     defer value.free(rt);
@@ -2125,8 +2128,8 @@ pub fn qjsIteratorZipCreateHelper(
     helper.iteratorZipModeSlot().* = @intFromEnum(mode);
     helper.iteratorZipStateSlot().* = 0;
     helper.iteratorZipAliveSlot().* = count;
-    try qjsInstallIteratorHelperMethod(rt, helper, "next", 1);
-    try qjsInstallIteratorHelperMethod(rt, helper, "return", 2);
+    try qjsInstallIteratorHelperMethod(rt, global, helper, "next", 1);
+    try qjsInstallIteratorHelperMethod(rt, global, helper, "return", 2);
     try helper.setOptionalValueSlot(rt, helper.iteratorTargetSlot(), iters_value);
     iters_value = core.JSValue.undefinedValue();
     try helper.setOptionalValueSlot(rt, helper.iteratorZipNextsSlot(), nexts_value);

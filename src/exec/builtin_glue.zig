@@ -488,10 +488,21 @@ pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JS
 }
 
 pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try core.function.nativeFunction(rt, name, length);
+    const function = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     errdefer function.free(rt);
     const object = objectFromValue(function) orelse return error.TypeError;
-    try object.setFunctionRealmGlobalPtr(rt, global);
+    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
+        try object.setPrototype(rt, function_proto);
+    }
+    return function;
+}
+
+/// C_FUNCTION_DATA analogue for internal callbacks whose semantics explicitly
+/// use the caller realm rather than the realm in which the carrier was made.
+pub fn qjsCreateDataFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
+    const function = try core.function.nativeDataFunction(rt, name, length);
+    errdefer function.free(rt);
+    const object = objectFromValue(function) orelse return error.TypeError;
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
         try object.setPrototype(rt, function_proto);
     }
@@ -610,10 +621,10 @@ pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.obj
     try global.setOptionalValueSlot(rt, cached, value.dup());
 }
 
-pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
+pub fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
@@ -621,10 +632,10 @@ pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: [
 /// Same as `defineNativeDataMethod`, but stamps the function object with a
 /// native-builtin record id so calls dispatch through the integer record
 /// mechanism instead of the legacy name chain.
-pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
+pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);

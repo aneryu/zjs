@@ -254,7 +254,7 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
     const object = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global) orelse objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
-    try installGeneratorPrototypeProperties(rt, object);
+    try installGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
     defer value.free(rt);
@@ -262,18 +262,18 @@ pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !
     return object;
 }
 
-pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Object) !void {
+pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Object, object: *core.Object) !void {
     const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
     const next_atom = try rt.internAtom("next");
     defer rt.atoms.free(next_atom);
-    const next = try core.function.nativeFunction(rt, "next", 1);
+    const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 1);
     defer next.free(rt);
     const next_object = property_ops.expectObject(next) catch return error.TypeError;
     next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
     try next_object.addGeneratorNextFunction(rt);
     try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
-    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
-    try builtin_glue.defineNativeDataMethodWithNativeId(rt, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, "return", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
+    try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, "throw", 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
@@ -287,7 +287,7 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     const object_value = object.value();
     var object_value_owned = true;
     errdefer if (object_value_owned) object_value.free(rt);
-    const constructor = try core.function.nativeFunction(rt, "GeneratorFunction", 1);
+    const constructor = try core.function.nativeFunctionForGlobal(rt, global, "GeneratorFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -955,7 +955,7 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
         .{ .name = "isNative", .id = .callsite_is_native },
     };
     for (methods) |method| {
-        try builtin_glue.defineNativeDataMethodWithNativeId(rt, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
+        try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
     try qjsDefineToStringTag(rt, prototype, "CallSite");
 
@@ -1717,10 +1717,7 @@ pub fn dynamicFunctionNewTargetPrototype(
     const prototype_value = try getValueProperty(ctx, output, global, new_target, core.atom.ids.prototype, caller_function, caller_frame);
     defer prototype_value.free(ctx.runtime);
     if (prototype_value.isObject()) return objectFromValue(prototype_value);
-    const fallback_global = if (objectFromValue(new_target)) |new_target_object| blk: {
-        if (isRevokedProxy(new_target_object)) return error.TypeError;
-        break :blk functionRealmGlobal(new_target_object) orelse global;
-    } else global;
+    const fallback_global = try functionRealmGlobal(ctx, new_target);
     return dynamicFunctionDefaultPrototype(ctx, fallback_global, kind);
 }
 
@@ -1738,6 +1735,14 @@ pub fn dynamicFunctionDefaultPrototype(
 }
 
 pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
+    // QuickJS JS_GetFunctionRealm recursively unwraps Proxy and bound
+    // functions for the explicit FunctionRealm query. This is distinct from
+    // call dispatch, where both wrappers keep the caller view until recursion
+    // reaches the final bytecode/C-function arm.
+    if (object.proxyTarget()) |target_value| {
+        const target_object = objectFromValue(target_value) orelse return null;
+        return objectRealmGlobal(target_object);
+    }
     if (object.class_id == core.class.ids.bound_function) {
         const target_value = object.boundTarget() orelse return null;
         const target_object = objectFromValue(target_value) orelse return null;
@@ -2300,9 +2305,9 @@ pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
     const proto = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global));
     var proto_raw_owned = true;
     errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, &proto.header);
-    try defineNativeDataMethod(rt, proto, "next", 0);
+    try defineNativeDataMethod(rt, global, proto, "next", 0);
     try tagIteratorWrapPrototypeMethod(rt, global, proto, "next", 1);
-    try defineNativeDataMethod(rt, proto, "return", 0);
+    try defineNativeDataMethod(rt, global, proto, "return", 0);
     try tagIteratorWrapPrototypeMethod(rt, global, proto, "return", 2);
     const value = proto.value();
     proto_raw_owned = false;
@@ -2490,6 +2495,7 @@ pub fn objectFromValue(value: core.JSValue) ?*core.Object {
 pub fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
     if (object.class_id != core.class.ids.c_function and
+        object.class_id != core.class.ids.c_function_data and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
     return object;
@@ -3407,10 +3413,7 @@ pub fn reflectConstructPrototypeVm(
     defer prototype_value.free(ctx.runtime);
     if (prototype_value.isObject()) return objectFromValue(prototype_value);
     if (try reflectConstructRealmPrototype(ctx, output, global, target_name, new_target, caller_function, caller_frame)) |prototype| return prototype;
-    const fallback_global = if (objectFromValue(new_target)) |new_target_object|
-        functionRealmGlobal(new_target_object) orelse global
-    else
-        global;
+    const fallback_global = try functionRealmGlobal(ctx, new_target);
     return constructorPrototypeFromGlobal(ctx.runtime, fallback_global, target_name);
 }
 

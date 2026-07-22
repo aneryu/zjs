@@ -121,7 +121,7 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const prototype_value = prototype.value();
     var prototype_value_owned = true;
     errdefer if (prototype_value_owned) prototype_value.free(rt);
-    const constructor = try core.function.nativeFunction(rt, "AsyncFunction", 1);
+    const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -143,12 +143,12 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
-    const method = try core.function.nativeFunction(rt, "[Symbol.asyncIterator]", 0);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncIterator]", 0);
     defer method.free(rt);
     const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(rt, async_iterator_atom, core.Descriptor.data(method, true, false, true));
     if (core.atom.predefinedId("Symbol.asyncDispose", .symbol)) |async_dispose_atom| {
-        const dispose = try core.function.nativeFunction(rt, "[Symbol.asyncDispose]", 0);
+        const dispose = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncDispose]", 0);
         defer dispose.free(rt);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
         if (!dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
@@ -167,7 +167,7 @@ pub fn asyncGeneratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Obje
     const object = try core.Object.create(rt, core.class.ids.object, async_iterator_prototype);
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
-    try installAsyncGeneratorPrototypeProperties(rt, object);
+    try installAsyncGeneratorPrototypeProperties(rt, global, object);
     const value = object.value();
     object_raw_owned = false;
     defer value.free(rt);
@@ -175,10 +175,10 @@ pub fn asyncGeneratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Obje
     return object;
 }
 
-pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Object) !void {
-    try defineAsyncGeneratorDataMethod(rt, object, "next", 1);
-    try defineAsyncGeneratorDataMethod(rt, object, "return", 1);
-    try defineAsyncGeneratorDataMethod(rt, object, "throw", 1);
+pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Object, object: *core.Object) !void {
+    try defineAsyncGeneratorDataMethod(rt, global, object, "next", 1);
+    try defineAsyncGeneratorDataMethod(rt, global, object, "return", 1);
+    try defineAsyncGeneratorDataMethod(rt, global, object, "throw", 1);
 
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "AsyncGenerator");
@@ -186,10 +186,10 @@ pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *co
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
 }
 
-pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
+pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (!method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
@@ -202,7 +202,7 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     const object_value = object.value();
     var object_value_owned = true;
     errdefer if (object_value_owned) object_value.free(rt);
-    const constructor = try core.function.nativeFunction(rt, "AsyncGeneratorFunction", 1);
+    const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncGeneratorFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -486,7 +486,7 @@ pub fn qjsAsyncDisposableStackContinuation(
     stack: *core.Object,
     rejected: bool,
 ) !core.JSValue {
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_disposable_stack_continuation);
@@ -788,10 +788,9 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    function_val = try core.function.nativeFunction(rt, "", 1);
+    function_val = try core.function.nativeDataFunction(rt, "", 1);
     errdefer function_val.free(rt);
     const object = objectFromValue(function_val) orelse return error.TypeError;
-    try object.setFunctionRealmGlobalPtr(rt, global);
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
         try object.setPrototype(rt, function_proto);
     }
@@ -807,7 +806,9 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const global = try zjs_vm.contextGlobal(ctx);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
     const state = try createPromiseResolvingState(rt);
     var state_alive = true;
@@ -1010,7 +1011,9 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const global = try zjs_vm.contextGlobal(ctx);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
     var reaction_alive = true;
@@ -1257,8 +1260,9 @@ test "qjsPromiseSettleValue handles result self-assignment" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer promise.value().free(rt);
     const result = try core.Object.create(rt, core.class.ids.object, null);
@@ -1277,11 +1281,12 @@ test "qjsPromiseSettleValue handles result self-assignment" {
 test "qjsPromiseSettleValue roots direct symbol result while preparing reaction jobs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
         promise.value().free(rt);
-        global.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
@@ -1338,10 +1343,8 @@ pub fn qjsPromiseResolvingFunctionCall(
     if (!reject and value.sameValue(target_value)) {
         // qjs js_promise_resolve_function_call (quickjs.c:53608):
         // JS_ThrowTypeError(ctx, "promise self resolution").
-        const error_value = if (objectRealmGlobal(function_object)) |error_global|
-            try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution")
-        else
-            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "promise self resolution");
+        const error_global = objectRealmGlobal(function_object) orelse global;
+        const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution");
         defer error_value.free(ctx.runtime);
         try qjsPromiseSettleValue(ctx, global, target, error_value, true);
         return core.JSValue.undefinedValue();
@@ -1408,9 +1411,12 @@ pub fn qjsPromiseThenableJob(rt: *core.JSRuntime, global: *core.Object, target_v
 test "qjsPromiseThenableJob roots direct function bytecode then callback while creating job" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const target = try core.Object.create(rt, core.class.ids.promise, null);
     defer target.value().free(rt);
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
@@ -1730,7 +1736,7 @@ pub fn qjsPromiseCapability(
     _ = try slot.promiseCapabilityResolveSlot(ctx.runtime);
     _ = try slot.promiseCapabilityRejectSlot(ctx.runtime);
 
-    executor_value = try qjsCreateBuiltinFunction(ctx.runtime, constructor_global, "", 2);
+    executor_value = try builtin_glue.qjsCreateDataFunction(ctx.runtime, constructor_global, "", 2);
     const executor_object = objectFromValue(executor_value) orelse return error.TypeError;
     try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
     try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, slot_value.dup());
@@ -1986,7 +1992,7 @@ pub fn qjsPromiseCombinatorCallback(
     state: *core.Object,
     index: u32,
 ) !core.JSValue {
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .promise_combinator_element);
@@ -2975,7 +2981,7 @@ pub fn qjsAsyncFunctionResumeCallback(
     continuation: *core.Object,
     rejected: bool,
 ) !core.JSValue {
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_function_resume);
@@ -3036,11 +3042,12 @@ pub fn qjsAsyncFunctionSettle(
 test "qjsAsyncFunctionSettle roots direct symbol result before promise stores it" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
     defer {
         continuation.value().free(rt);
-        global.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
@@ -3212,7 +3219,7 @@ pub fn qjsAsyncFromSyncIteratorCloseWrap(
     global: *core.Object,
     sync_iterator: core.JSValue,
 ) !core.JSValue {
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_close_wrap);
@@ -3382,7 +3389,7 @@ pub fn qjsAsyncFromSyncIteratorUnwrap(
     global: *core.Object,
     done: bool,
 ) !core.JSValue {
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_from_sync_iterator_unwrap);
@@ -3433,7 +3440,7 @@ pub fn qjsPromiseFinallyCallback(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const callback = try qjsCreateBuiltinFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", if (mode == .fulfill or mode == .reject) 1 else 0);
     errdefer callback.free(rt);
     const callback_object = objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .promise_finally_callback);
@@ -3788,11 +3795,12 @@ pub fn settlePendingPromiseReaction(
 test "settlePendingPromiseReaction roots callback and arg after clearing promise slots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
         promise.value().free(rt);
-        global.value().free(rt);
         ctx.destroy();
         rt.destroy();
     }
@@ -4062,20 +4070,17 @@ fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue 
 test "promise enqueues reactions and executes jobs via engine" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    rt.materialize_context_global_cb = struct {
-        fn cb(c: *core.JSContext) anyerror!*core.Object {
-            return try zjs_vm.contextGlobal(c);
-        }
-    }.cb;
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
     promise_jobs = 0;
     try core.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
 
     rt.job_queue.runAll();
-    const global_object = try ctx.globalObject();
-    try drainPendingPromiseJobs(ctx, null, global_object);
+    try drainPendingPromiseJobs(ctx, null, global);
 
     try std.testing.expectEqual(@as(usize, 3), promise_jobs);
 }

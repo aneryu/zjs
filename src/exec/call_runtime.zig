@@ -424,7 +424,7 @@ const VmNativeCallableDispatch = union(enum) {
 fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispatch {
     return switch (function_object.class_id) {
         core.class.ids.bound_function => .bound_function,
-        else => blk: {
+        core.class.ids.c_function => blk: {
             if (function_object.nativeCallTarget()) |target| {
                 break :blk .{ .resolved_record = target };
             }
@@ -436,10 +436,20 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
         },
+        core.class.ids.c_function_data => blk: {
+            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
+                break :blk .{ .native_ref = native_ref };
+            }
+            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
+            const tag = function_object.internalCallableTag();
+            if (tag != .none) break :blk .{ .internal = tag };
+            break :blk .name_dispatch;
+        },
+        else => .name_dispatch,
     };
 }
 
-fn callInternalCallableByTag(
+pub fn callInternalCallableByTag(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -479,11 +489,16 @@ noinline fn callRawFunctionBytecodeClassMode(
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
     const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
+    const function_global: *core.Object = if (fb.realm_global_header) |header|
+        @fieldParentPtr("header", header)
+    else
+        global;
+    const function_ctx = ctx.runtime.contextForGlobalIncludingConstructing(function_global) orelse return error.InvalidBuiltinRegistry;
     if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
         if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-        const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+        const result = try callFunctionBytecodeConstruct(function_ctx, func, func, this_value, args, &.{}, output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
         if (result.isObject()) return result;
-        result.free(ctx.runtime);
+        result.free(function_ctx.runtime);
         return this_value.dup();
     }
     if (fb.flags.is_class_constructor) {
@@ -491,11 +506,11 @@ noinline fn callRawFunctionBytecodeClassMode(
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
         const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
         if (!fb.flags.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(function_ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
         }
-        return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+        return callFunctionBytecodeModeState(function_ctx, func, func, initial_this, args, &.{}, output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
     }
-    return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global);
+    return callFunctionBytecode(function_ctx, func, func, this_value, args, &.{}, output, function_global);
 }
 
 noinline fn callFunctionObjectBytecodeClassMode(
@@ -512,26 +527,28 @@ noinline fn callFunctionObjectBytecodeClassMode(
 ) HostError!core.JSValue {
     const function_value = function_object.functionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    // Bound/Proxy dispatch has already recursed to this final bytecode arm.
+    // Select the FB's realm only here, matching JS_CallInternal's late
+    // `ctx = b->realm` switch after caller-side call preflight.
+    const function_global = function_object.bytecodeFunctionRealmGlobalPtr() orelse global;
+    const function_ctx = ctx.runtime.contextForGlobalIncludingConstructing(function_global) orelse return error.InvalidBuiltinRegistry;
     if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
         if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+        const result = try callFunctionBytecodeConstruct(function_ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
         if (result.isObject()) return result;
-        result.free(ctx.runtime);
+        result.free(function_ctx.runtime);
         return this_value.dup();
     }
     if (fb.flags.is_class_constructor) {
-        if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
+        if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(function_ctx, function_global, function_object, "class constructors must be invoked with 'new'");
         const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
         const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         if (!fb.flags.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(function_ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
         }
-        return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
+        return callFunctionBytecodeModeState(function_ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
     }
-    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    return callFunctionBytecodeModeState(function_ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
 noinline fn callNativeCallableObjectClassMode(
@@ -546,12 +563,20 @@ noinline fn callNativeCallableObjectClassMode(
     caller_frame: ?*frame_mod.Frame,
     allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
+    const function_ctx = if (function_object.class_id == core.class.ids.c_function)
+        function_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry
+    else
+        ctx;
+    const function_global = if (function_object.class_id == core.class.ids.c_function)
+        function_ctx.global orelse return error.InvalidBuiltinRegistry
+    else
+        global;
     switch (vmNativeCallableDispatch(function_object)) {
         .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
         .resolved_record => |target| {
-            const function_global = target.realm_global_ptr orelse object_ops.objectRealmGlobal(function_object) orelse global;
+            std.debug.assert(target.realm == function_ctx);
             const native_result = builtin_dispatch.callInternalRecordDirect(
-                ctx,
+                function_ctx,
                 output,
                 function_global,
                 &.{},
@@ -562,31 +587,30 @@ noinline fn callNativeCallableObjectClassMode(
                 caller_function,
                 caller_frame,
             ) catch |err| {
-                try throwRuntimeErrorForGlobal(ctx, function_global, err);
+                try throwRuntimeErrorForGlobal(function_ctx, function_global, err);
                 return err;
             };
             return native_result;
         },
         .native_ref => |native_ref| {
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
-                try throwRuntimeErrorForGlobal(ctx, function_global, err);
+            const native_result = callNativeBuiltinRecordForVm(function_ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
+                try throwRuntimeErrorForGlobal(function_ctx, function_global, err);
                 return err;
             };
             if (native_result) |value| return value;
         },
         .host_function => {
-            if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
+            if (try call_mod.callHostFunctionObjectForVm(function_ctx, output, function_global, function_object, this_value, args)) |value| return value;
         },
         .internal => |tag| {
-            if (try callInternalCallableByTag(ctx, output, global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
+            if (try callInternalCallableByTag(function_ctx, output, function_global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
         },
         .name_dispatch => {},
     }
     return callNativeCallableByName(
-        ctx,
+        function_ctx,
         output,
-        global,
+        function_global,
         this_value,
         func,
         function_object,
@@ -622,6 +646,7 @@ fn callValueOrBytecodeClassModeDispatch(
                 }
             },
             core.class.ids.c_function,
+            core.class.ids.c_function_data,
             core.class.ids.c_closure,
             core.class.ids.bound_function,
             => return callNativeCallableObjectClassMode(ctx, output, global, this_value, func, object, args, caller_function, caller_frame, allow_class_constructor_call),
@@ -1180,7 +1205,7 @@ pub fn ordinaryHasInstance(
     const proto_value = blk: {
         if (object_ops.objectFromValue(constructor_value)) |co| {
             if (!co.isProxy()) {
-                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
+                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v;
             }
         }
         break :blk try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
@@ -2241,7 +2266,7 @@ pub fn constructDynamicFunctionFromSource(
         defer body_value.free(ctx.runtime);
         try string_ops.appendSourceStringUtf8(ctx.runtime, &body, body_value);
     }
-    const function_global = dynamicFunctionRealmGlobal(constructor) orelse global;
+    const function_global = try functionRealmGlobal(ctx, constructor);
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
     const prefix = switch (kind) {
@@ -2309,17 +2334,43 @@ pub fn constructDynamicFunctionFromSource(
     return result;
 }
 
-pub fn dynamicFunctionRealmGlobal(constructor: core.JSValue) ?*core.Object {
-    const constructor_object = property_ops.expectObject(constructor) catch return null;
-    return object_ops.objectRealmGlobal(constructor_object);
+/// Cold `JS_GetFunctionRealm` analogue. This query must not be used to switch
+/// actual call dispatch early: Bound and Proxy calls perform their wrapper
+/// work in the caller realm and only their final target arm changes context.
+pub fn functionRealmContext(caller: *core.JSContext, function_value: core.JSValue) HostError!*core.JSContext {
+    const object = object_ops.objectFromValue(function_value) orelse return caller;
+    return switch (object.class_id) {
+        core.class.ids.c_function => object.nativeFunctionRealm() orelse error.InvalidBuiltinRegistry,
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+        => blk: {
+            const realm_global = object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
+            break :blk caller.runtime.contextForGlobalIncludingConstructing(realm_global) orelse error.InvalidBuiltinRegistry;
+        },
+        core.class.ids.proxy => blk: {
+            if (object_ops.isRevokedProxy(object)) {
+                const caller_global = caller.global orelse return error.InvalidBuiltinRegistry;
+                _ = try exception_ops.throwTypeErrorMessage(caller, caller_global, "revoked proxy");
+                unreachable;
+            }
+            const target = object.proxyTarget() orelse break :blk caller;
+            break :blk try functionRealmContext(caller, target);
+        },
+        core.class.ids.bound_function => blk: {
+            const target = object.boundTarget() orelse return error.InvalidBuiltinRegistry;
+            break :blk try functionRealmContext(caller, target);
+        },
+        // C_FUNCTION_DATA, C_CLOSURE, Promise/async special classes, and
+        // every other JSClassCall-style object all use the caller realm.
+        else => caller,
+    };
 }
 
-pub fn functionRealmGlobal(object: *core.Object) ?*core.Object {
-    if (object.proxyTarget()) |target_value| {
-        const target_object = object_ops.objectFromValue(target_value) orelse return null;
-        return functionRealmGlobal(target_object);
-    }
-    return object_ops.objectRealmGlobal(object);
+pub fn functionRealmGlobal(caller: *core.JSContext, function_value: core.JSValue) HostError!*core.Object {
+    const realm = try functionRealmContext(caller, function_value);
+    return realm.global orelse error.InvalidBuiltinRegistry;
 }
 
 pub fn qjsAssertThrows(
@@ -2447,9 +2498,9 @@ pub fn iteratorForValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (source_value.isString()) return core.object.stringIterator(ctx.runtime, source_value);
+    if (source_value.isString()) return core.object.stringIterator(ctx, source_value);
     const source_object = property_ops.expectObject(source_value) catch null;
-    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx.runtime, source_value);
+    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, source_value);
     if (source_object != null and
         (source_object.?.class_id == core.class.ids.array_iterator or
             source_object.?.class_id == core.class.ids.string_iterator or
@@ -5516,7 +5567,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
 pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
     if (global.cachedThrowTypeErrorIntrinsic(rt)) |stored| return stored.dup();
 
-    const thrower = try core.function.nativeFunction(rt, "", 0);
+    const thrower = try core.function.nativeFunctionForGlobal(rt, global, "", 0);
     errdefer thrower.free(rt);
     const thrower_object = try property_ops.expectObject(thrower);
     try thrower_object.setFunctionRealmGlobalPtr(rt, global);
@@ -5564,6 +5615,7 @@ pub fn functionBytecodeFromValue(value: core.JSValue) ?*const bytecode.FunctionB
 
 pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
     return class_id == core.class.ids.c_function or
+        class_id == core.class.ids.c_function_data or
         class_id == core.class.ids.c_closure or
         class_id == core.class.ids.bytecode_function or
         class_id == core.class.ids.bound_function;
@@ -5584,6 +5636,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
+        if (function_object.class_id == core.class.ids.c_function_data) return false;
         if (function_object.flags.is_html_dda) return false;
         if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);

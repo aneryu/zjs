@@ -30,7 +30,6 @@ fn functionEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionCall),
     };
@@ -43,7 +42,6 @@ fn functionCallEntry() core.host_function.InternalEntry {
         .length = 1,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .forwards_call = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&functionCallRecord),
@@ -122,8 +120,10 @@ fn functionCallRecord(
 
 /// Create a native function object carrying source text for
 /// `Function.prototype.toString`-style inspection.
-pub fn sourceFunction(rt: *core.JSRuntime, name: []const u8, source: []const u8) !core.JSValue {
+pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []const u8) !core.JSValue {
+    const rt = realm.runtimePtr();
     const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
+    function_object.setNativeFunctionRealm(realm);
     var function_value = function_object.value();
     var source_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
@@ -190,12 +190,14 @@ fn defineFunctionName(rt: *core.JSRuntime, function_object: *core.Object, name: 
 test "sourceFunction roots function and source while attaching source text" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const function_value = try sourceFunction(rt, "namedSource", "function namedSource() { return 1; }");
+    const function_value = try sourceFunction(ctx, "namedSource", "function namedSource() { return 1; }");
     defer function_value.free(rt);
     const function_object = objectFromFunctionValue(function_value) orelse return error.TypeError;
     const source_value = function_object.functionSource() orelse return error.TypeError;

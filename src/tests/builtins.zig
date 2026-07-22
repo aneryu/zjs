@@ -2954,6 +2954,34 @@ test "native builtin records use callee realm for errors and created objects" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "bound and proxy wrappers defer realm switching to the final target" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var other = $262.createRealm().global;
+        \\    other.eval("globalThis.realmFunction = function () { return Array; }");
+        \\    var bound = other.realmFunction.bind(null);
+        \\    var proxy = new Proxy(other.realmFunction, {});
+        \\    assert.sameValue(bound(), other.Array);
+        \\    assert.sameValue(proxy(), other.Array);
+        \\    var revoked = Proxy.revocable(other.realmFunction, {});
+        \\    revoked.revoke();
+        \\    try {
+        \\        revoked.proxy();
+        \\        throw new Error("expected revoked proxy call to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), TypeError.prototype);
+        \\        assert.sameValue(error instanceof other.TypeError, false);
+        \\    }
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "TypedArray iterator methods accept cross-realm typed array receivers" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3507,6 +3535,39 @@ test "Promise constructor resolve and reject functions inherit Function.prototyp
     try std.testing.expect(result.isUndefined());
 }
 
+test "C function data callbacks are callable but not constructors" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var resolveFunction;
+        \\var rejectFunction;
+        \\new Promise(function(resolve, reject) {
+        \\    resolveFunction = resolve;
+        \\    rejectFunction = reject;
+        \\});
+        \\var capabilityExecutor;
+        \\function CapabilityConstructor(executor) {
+        \\    capabilityExecutor = executor;
+        \\    executor(function() {}, function() {});
+        \\}
+        \\CapabilityConstructor.resolve = function(value) { return value; };
+        \\Promise.resolve.call(CapabilityConstructor, 1);
+        \\var revokeFunction = Proxy.revocable({}, {}).revoke;
+        \\var callbacks = [resolveFunction, rejectFunction, capabilityExecutor, revokeFunction];
+        \\for (var callback of callbacks) {
+        \\    assert.sameValue(typeof callback, "function");
+        \\    assert.throws(TypeError, function() { new callback(); });
+        \\    assert.throws(TypeError, function() { Reflect.construct(callback, []); });
+        \\    var wrapped = new Proxy(callback, {});
+        \\    assert.throws(TypeError, function() { new wrapped(); });
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise resolving functions keep internal state off user properties" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3545,6 +3606,28 @@ test "Promise resolving functions keep internal state off user properties" {
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
+}
+
+test "Promise self-resolution rejects with the caller realm TypeError" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var resolveFunction;
+        \\var promise = new Promise(function(resolve) {
+        \\    resolveFunction = resolve;
+        \\});
+        \\promise.then(undefined, function(reason) {
+        \\    print(reason.name, reason.constructor === TypeError, reason instanceof TypeError);
+        \\});
+        \\resolveFunction(promise);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("TypeError true true\n", stream.buffered());
 }
 
 test "Promise.resolve rejects self-resolution from custom capability" {
@@ -4118,7 +4201,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.exec.collection_ops.construct(rt, 3);
+    const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
@@ -4153,7 +4236,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.exec.collection_ops.construct(rt, 3);
+    const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
@@ -4256,7 +4339,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const base_set_value = try engine.exec.collection_ops.construct(rt, 2);
+    const base_set_value = try engine.exec.collection_ops.constructBare(rt, 2);
     defer base_set_value.free(rt);
     const base_set = objectFromValue(base_set_value);
 
@@ -4309,7 +4392,7 @@ test "host map closure releases appended value when entry allocation fails" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.exec.collection_ops.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
@@ -4346,7 +4429,7 @@ test "host map closure rolls back appended entry when size update fails" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try engine.exec.collection_ops.construct(rt, 1);
+    const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 

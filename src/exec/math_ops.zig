@@ -87,7 +87,6 @@ fn mathEntryWithHandler(
         .length = length,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(handler),
     };
@@ -99,7 +98,6 @@ fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_functio
         .length = 1,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .f_f,
         .native_function = .{ .f_f = mathUnaryNative(id) },
         .fallback_function = &mathOpCall,
@@ -112,7 +110,6 @@ fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_functi
         .length = 2,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .f_f_f,
         .native_function = .{ .f_f_f = mathBinaryNative(id) },
         .fallback_function = &mathOpCall,
@@ -207,10 +204,9 @@ fn mathOpCall(
 }
 
 /// Realm-path scalar `Math.*` computation (ids 1..36), shared by the record
-/// handler (`mathOpCall`) and the VM prepared-call fast path
-/// (`vm_call.callPreparedNativeTarget`). The prepared path calls this directly
-/// rather than through the record table's function pointer: the indirect call
-/// and table lookup measurably regress the hottest tight-loop scalar math
+/// handler (`mathOpCall`) and direct opcode helpers. The opcode helpers call
+/// this directly rather than through the record table's function pointer: the
+/// indirect call and table lookup measurably regress the hottest scalar math
 /// (Math.abs/sqrt/floor) by ~5%, so this is the documented hybrid: Math keeps
 /// a specialized prepared branch while every other migrated domain unifies on
 /// the table. Always invoked with a realm `global`; the bare-runtime fallback

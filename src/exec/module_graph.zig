@@ -450,7 +450,6 @@ pub fn evaluateImportCall(
     frame: *frame_mod.Frame,
 ) exec.exceptions.HostError!core.JSValue {
     const rt = ctx.runtime;
-
     // quickjs.c:31100 — `if (!JS_IsUndefined(options))`.
     var attributes = core.JSValue.undefinedValue();
     errdefer attributes.free(rt);
@@ -589,6 +588,7 @@ fn enqueueDynamicImportJobWithAttributes(
     attributes: core.JSValue,
 ) exec.exceptions.HostError!core.JSValue {
     const rt = ctx.runtime;
+    _ = global;
     // This function owns the incoming `attributes` reference; defineOwnProperty
     // below dups it into the job slot, so free the original on return.
     defer attributes.free(rt);
@@ -619,12 +619,11 @@ fn enqueueDynamicImportJobWithAttributes(
     const basename_value = try exec.value_ops.createStringValue(rt, referrer_path);
     defer basename_value.free(rt);
 
-    const job_value = try core.function.nativeFunction(rt, "", 0);
+    const job_value = try core.function.nativeDataFunction(rt, "", 0);
     defer job_value.free(rt);
     const job_object = try exec.property_ops.expectObject(job_value);
     job_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     job_object.externalHostFunctionIdSlot().* = try dynamicImportJobExternalId(rt);
-    try job_object.setFunctionRealmGlobalPtr(rt, global);
     // Bound job data lives as ordinary (GC-traced) properties on the job
     // callable, mirroring JS_NewCFunctionData's func_data slots.
     try job_object.defineOwnProperty(rt, resolve_atom, core.Descriptor.data(resolve_value, false, false, false));
@@ -646,10 +645,10 @@ fn enqueueDynamicImportJobWithAttributes(
 /// loader and settle the import() capability — any failure (including a
 /// pending JS exception) rejects the promise instead of aborting evaluation.
 fn dynamicImportJobCall(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
-    const ctx: *core.JSContext = @ptrCast(@alignCast(call.ctx));
+    const ctx = call.realm;
     const rt = ctx.runtime;
     const job_object = call.func_obj;
-    const global = call.global orelse job_object.functionRealmGlobalPtr() orelse return error.TypeError;
+    const global = ctx.global orelse return error.TypeError;
 
     const resolve_atom = try rt.internAtom("resolve");
     defer rt.atoms.free(resolve_atom);

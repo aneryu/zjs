@@ -288,6 +288,7 @@ fn reflectConstructPrototype(rt: *core.JSRuntime, target_name: []const u8, new_t
 
 pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     if (args.len < 2) return error.TypeError;
+    const realm_global = global orelse return error.TypeError;
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
     defer rooted_args_buffer.deinit(rt);
     const rooted_args = rooted_args_buffer.values;
@@ -316,15 +317,19 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     try defineObjectProperty(rt, object, "proxy", proxy.value());
     proxy_raw_owned = false;
     proxy.value().free(rt);
-    const revoke = try core.function.nativeFunction(rt, "revoke", 0);
+    // QuickJS `js_proxy_revocable` uses JS_NewCFunctionData: the revoker is a
+    // captured-data callable and therefore executes in its caller's realm.
+    const revoke = try core.function.nativeDataFunction(rt, "revoke", 0);
     defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
-    revoke_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke)));
+    // Data carriers deliberately do not populate the true-C-function record
+    // cache; dispatch decodes this stable id in the final caller-data arm.
+    revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
     const empty_name = try core.string.String.createAscii(rt, "");
     const empty_name_value = empty_name.value();
     defer empty_name_value.free(rt);
     try revoke_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name_value, false, false, true));
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
+    if (functionPrototypeFromGlobal(rt, realm_global)) |function_proto| {
         try revoke_object.setPrototype(rt, function_proto);
     }
     try revoke_object.setOptionalValueSlot(rt, try revoke_object.functionProxyRevokeTargetSlot(rt), proxy.value().dup());

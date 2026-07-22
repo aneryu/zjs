@@ -114,27 +114,23 @@ pub const legacyCaptureIndex = core.host_function.builtin_method_id_lookup.regex
 /// RegExp function list plus the `prototypeMethodId`/`accessorMethodId`/
 /// `LegacyAccessorMethod` id helpers above (like Date); this table is consumed
 /// by the record-dispatch path (`rt.internal_builtins`).
-/// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
-/// (`nativeBuiltinSupportedWithoutFunctionObject`): only `RegExp.prototype.test`
-/// and `RegExp.prototype.exec` are callable without a materialized function
-/// object today.
 pub const internal_entries = regexpEntries: {
     const Entry = core.host_function.InternalEntry;
     break :regexpEntries [_]Entry{
         // Constructor + static.
         regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct)),
-        regexpEntry("escape", 1, @intFromEnum(StaticMethod.escape), false),
+        regexpEntry("escape", 1, @intFromEnum(StaticMethod.escape)),
         // Prototype methods (the subset `prototypeMethodId` maps and
         // `decodePrototypeMethodId` decodes).
-        regexpEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), false),
-        regexpEntry("test", 1, @intFromEnum(PrototypeMethod.test_), true),
-        regexpGenericEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), true, &regexpExecCall),
-        regexpEntry("[Symbol.search]", 1, @intFromEnum(PrototypeMethod.symbol_search), false),
-        regexpGenericEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), false, &regexpSymbolMatchCall),
-        regexpEntry("[Symbol.matchAll]", 1, @intFromEnum(PrototypeMethod.symbol_match_all), false),
-        regexpEntry("[Symbol.replace]", 2, @intFromEnum(PrototypeMethod.symbol_replace), false),
-        regexpGenericEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), false, &regexpSymbolSplitCall),
-        regexpEntry("compile", 2, @intFromEnum(PrototypeMethod.compile), false),
+        regexpEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
+        regexpEntry("test", 1, @intFromEnum(PrototypeMethod.test_)),
+        regexpGenericEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), &regexpExecCall),
+        regexpEntry("[Symbol.search]", 1, @intFromEnum(PrototypeMethod.symbol_search)),
+        regexpGenericEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), &regexpSymbolMatchCall),
+        regexpEntry("[Symbol.matchAll]", 1, @intFromEnum(PrototypeMethod.symbol_match_all)),
+        regexpEntry("[Symbol.replace]", 2, @intFromEnum(PrototypeMethod.symbol_replace)),
+        regexpGenericEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), &regexpSymbolSplitCall),
+        regexpEntry("compile", 2, @intFromEnum(PrototypeMethod.compile)),
         // Flag/source accessor getters.
         regexpGetterEntry("get source", @intFromEnum(AccessorMethod.source), &regexpSourceAccessorCall),
         regexpGetterEntry("get flags", @intFromEnum(AccessorMethod.flags), &regexpFlagsAccessorCall),
@@ -147,31 +143,30 @@ pub const internal_entries = regexpEntries: {
         regexpFlagGetterEntry("get hasIndices", @intFromEnum(AccessorMethod.has_indices), regexp_adapter.flag_bits.indices),
         regexpFlagGetterEntry("get unicodeSets", @intFromEnum(AccessorMethod.unicode_sets), regexp_adapter.flag_bits.unicode_sets),
         // Legacy static RegExp accessors (input/$_, lastMatch, capture groups).
-        regexpEntry("get input", 0, @intFromEnum(LegacyAccessorMethod.get_input), false),
-        regexpEntry("set input", 1, @intFromEnum(LegacyAccessorMethod.set_input), false),
-        regexpEntry("get lastMatch", 0, @intFromEnum(LegacyAccessorMethod.get_last_match), false),
-        regexpEntry("get lastParen", 0, @intFromEnum(LegacyAccessorMethod.get_last_paren), false),
-        regexpEntry("get leftContext", 0, @intFromEnum(LegacyAccessorMethod.get_left_context), false),
-        regexpEntry("get rightContext", 0, @intFromEnum(LegacyAccessorMethod.get_right_context), false),
-        regexpEntry("get $1", 0, @intFromEnum(LegacyAccessorMethod.get_capture_1), false),
-        regexpEntry("get $2", 0, @intFromEnum(LegacyAccessorMethod.get_capture_2), false),
-        regexpEntry("get $3", 0, @intFromEnum(LegacyAccessorMethod.get_capture_3), false),
-        regexpEntry("get $4", 0, @intFromEnum(LegacyAccessorMethod.get_capture_4), false),
-        regexpEntry("get $5", 0, @intFromEnum(LegacyAccessorMethod.get_capture_5), false),
-        regexpEntry("get $6", 0, @intFromEnum(LegacyAccessorMethod.get_capture_6), false),
-        regexpEntry("get $7", 0, @intFromEnum(LegacyAccessorMethod.get_capture_7), false),
-        regexpEntry("get $8", 0, @intFromEnum(LegacyAccessorMethod.get_capture_8), false),
-        regexpEntry("get $9", 0, @intFromEnum(LegacyAccessorMethod.get_capture_9), false),
+        regexpEntry("get input", 0, @intFromEnum(LegacyAccessorMethod.get_input)),
+        regexpEntry("set input", 1, @intFromEnum(LegacyAccessorMethod.set_input)),
+        regexpEntry("get lastMatch", 0, @intFromEnum(LegacyAccessorMethod.get_last_match)),
+        regexpEntry("get lastParen", 0, @intFromEnum(LegacyAccessorMethod.get_last_paren)),
+        regexpEntry("get leftContext", 0, @intFromEnum(LegacyAccessorMethod.get_left_context)),
+        regexpEntry("get rightContext", 0, @intFromEnum(LegacyAccessorMethod.get_right_context)),
+        regexpEntry("get $1", 0, @intFromEnum(LegacyAccessorMethod.get_capture_1)),
+        regexpEntry("get $2", 0, @intFromEnum(LegacyAccessorMethod.get_capture_2)),
+        regexpEntry("get $3", 0, @intFromEnum(LegacyAccessorMethod.get_capture_3)),
+        regexpEntry("get $4", 0, @intFromEnum(LegacyAccessorMethod.get_capture_4)),
+        regexpEntry("get $5", 0, @intFromEnum(LegacyAccessorMethod.get_capture_5)),
+        regexpEntry("get $6", 0, @intFromEnum(LegacyAccessorMethod.get_capture_6)),
+        regexpEntry("get $7", 0, @intFromEnum(LegacyAccessorMethod.get_capture_7)),
+        regexpEntry("get $8", 0, @intFromEnum(LegacyAccessorMethod.get_capture_8)),
+        regexpEntry("get $9", 0, @intFromEnum(LegacyAccessorMethod.get_capture_9)),
     };
 };
 
-fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&regexpCall),
     };
@@ -181,7 +176,6 @@ fn regexpGenericEntry(
     comptime name: []const u8,
     comptime length: u8,
     comptime id: u32,
-    comptime prepared: bool,
     comptime implementation: core.host_function.NativeGenericFn,
 ) core.host_function.InternalEntry {
     return .{
@@ -189,7 +183,6 @@ fn regexpGenericEntry(
         .length = length,
         .id = id,
         .magic = 0,
-        .prepared_call_ok = prepared,
         .cproto = .generic,
         .native_function = .{ .generic = implementation },
     };
@@ -209,7 +202,6 @@ fn regexpGetterEntry(
         .length = 0,
         .id = id,
         .magic = 0,
-        .prepared_call_ok = false,
         .cproto = .getter,
         .native_function = .{ .getter = implementation },
     };
@@ -221,7 +213,6 @@ fn regexpFlagGetterEntry(comptime name: []const u8, comptime id: u32, comptime m
         .length = 0,
         .id = id,
         .magic = mask,
-        .prepared_call_ok = false,
         .cproto = .getter_magic,
         .native_function = .{ .getter_magic = &regexpFlagAccessorCall },
     };
@@ -236,7 +227,6 @@ fn regexpConstructorEntry(comptime name: []const u8, comptime length: u8, compti
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .constructor_or_func_magic,
         .native_function = builtin_dispatch.constructorOrFunctionMagic(&regexpCall),
     };

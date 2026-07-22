@@ -9,3 +9,4 @@ quickjs/
 # Claude Code session worktrees and local state
 .claude/
 .migration/
+.scratch/

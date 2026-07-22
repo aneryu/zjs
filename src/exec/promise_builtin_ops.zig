@@ -18,7 +18,6 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
         .length = 1,
         .id = @intFromEnum(StaticMethod.resolve),
         .magic = @intFromEnum(StaticMethod.resolve),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&promiseResolveCall),
     },
@@ -44,7 +43,6 @@ fn promiseStaticEntry(
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&promiseStaticCall),
     };

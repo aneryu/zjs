@@ -14,11 +14,9 @@ pub const BindingError = error{
 const MethodRuntime = struct {
     runtime: *core.JSRuntime,
     class_id: core.ClassId,
-    prototype: core.JSValueHandle,
 
     fn deinit(ptr: *anyopaque) void {
         const self: *MethodRuntime = @ptrCast(@alignCast(ptr));
-        self.prototype.deinit();
         self.runtime.memory.destroy(MethodRuntime, self);
     }
 };
@@ -381,7 +379,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 @compileError("zjs.binding.JSObject property entries must use zjs.binding.method(name, fn)");
             }
             const Stub = MethodStub(entry);
-            const function_value = try createMethodFunction(ctx, class_id, prototype, entry.name, callbackLength(entry.call), Stub.call);
+            const function_value = try createMethodFunction(ctx, class_id, entry.name, callbackLength(entry.call), Stub.call);
             defer function_value.free(ctx.runtimePtr());
 
             try key.defineDataProperty(ctx.runtimePtr(), prototype, core.Descriptor.data(function_value, true, false, true));
@@ -438,32 +436,23 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         fn createMethodFunction(
             ctx: *core.JSContext,
             class_id: core.ClassId,
-            prototype: *core.Object,
             name: []const u8,
             length: i32,
             call: core.host_function.ExternalCallFn,
         ) !core.JSValue {
             const rt = ctx.runtimePtr();
-            var prototype_handle = try rt.createPersistentValue(prototype.value());
-            errdefer prototype_handle.deinit();
-
             const runtime = try rt.memory.create(MethodRuntime);
             var runtime_owned = true;
-            errdefer if (runtime_owned) {
-                runtime.prototype.deinit();
-                rt.memory.destroy(MethodRuntime, runtime);
-            };
+            errdefer if (runtime_owned) rt.memory.destroy(MethodRuntime, runtime);
             runtime.* = .{
                 .runtime = rt,
                 .class_id = class_id,
-                .prototype = prototype_handle,
             };
-            prototype_handle = .{};
 
             const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
+            function_object.setNativeFunctionRealm(ctx);
             errdefer function_object.value().free(rt);
             try defineFunctionMetadata(rt, function_object, name, length);
-            try function_object.setFunctionRealmGlobalPtr(rt, try ctx.globalObject());
 
             const external_id = try rt.registerExternalHostFunction(.{
                 .ptr = @ptrCast(runtime),
@@ -492,7 +481,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             return struct {
                 fn call(ptr: *anyopaque, host_call: core.host_function.ExternalCall) anyerror!core.JSValue {
                     const runtime: *MethodRuntime = @ptrCast(@alignCast(ptr));
-                    const prototype = objectFromValue(runtime.prototype.get()) orelse return error.TypeError;
+                    const prototype = host_call.realm.classPrototypeObject(runtime.class_id) orelse return error.TypeError;
                     const self_payload = payloadFromClassAndPrototype(runtime.class_id, prototype, host_call.this_value) orelse return error.TypeError;
                     return invoke(entry.call, self_payload, host_call);
                 }
@@ -633,7 +622,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             switch (comptime callbackParamKind(Param)) {
                 .self_mut => return self_payload,
                 .self_const => return self_payload,
-                .context => return @ptrCast(@alignCast(host_call.ctx)),
+                .context => return host_call.realm,
                 .raw_call => return host_call,
                 .rest_values => {
                     const rest = host_call.args[js_index.*..];
@@ -753,7 +742,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         }
 
         fn callContext(host_call: core.host_function.ExternalCall) *core.JSContext {
-            return @ptrCast(@alignCast(host_call.ctx));
+            return host_call.realm;
         }
     };
 }
@@ -1145,7 +1134,7 @@ test "JSObject prototype methods enforce realm-local binding" {
     try std.testing.expectEqual(@as(i32, 11), binding_a.payload(value_a).?.value);
 }
 
-test "JSObject method prototype roots release with external host records" {
+test "JSObject method records do not retain a second prototype root" {
     const Payload = struct {
         marker: u8,
 
@@ -1168,7 +1157,7 @@ test "JSObject method prototype roots release with external host records" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try ObjectType.install(ctx);
-    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
 
     rt.clearExternalHostFunctions();
     rt.drainDeferredNativeCleanups();

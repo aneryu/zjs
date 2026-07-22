@@ -117,16 +117,12 @@ fn legacyBasePrototypeMethodId(id: u32) ?u32 {
 /// implementations (`mapSet`/`mapGet`/`setAdd`/...) for the bare-runtime path,
 /// and the realm-aware `qjs*` bodies (relocated here from exec) that drive user
 /// callbacks through the VM. The weak-collection key registry stays GC-coupled
-/// in core (`Object.weakIdentityFromValue`); the Map/Set opcode fast paths
-/// (`vm_call.zig` prepared path, `vm_property_*`) call the primitive impls
-/// directly. Constructors are not dispatched here (they run through the
+/// in core (`Object.weakIdentityFromValue`); direct Map/Set opcode paths call
+/// the primitive implementations. Constructors are not dispatched here (they run through the
 /// `new_collection` opcode); only the static `Map.groupBy` and the shared
 /// prototype methods route through the table. Standard-global bootstrap resolves
 /// names through its map/set/weak-collection prototype method lists; this table
 /// is consumed by the record-dispatch path (`rt.internal_builtins`).
-/// `prepared_call_ok` mirrors
-/// the prepared-call gate (`collectionNativeSupportedWithoutFunctionObject` in
-/// `vm_call.zig`).
 pub const internal_entries = collectionEntries: {
     const RecordEntry = core.host_function.InternalEntry;
     break :collectionEntries [_]RecordEntry{
@@ -138,38 +134,37 @@ pub const internal_entries = collectionEntries: {
         collectionConstructorEntry("Set", 0, @intFromEnum(ConstructorMethod.construct_set)),
         collectionConstructorEntry("WeakMap", 0, @intFromEnum(ConstructorMethod.construct_weak_map)),
         collectionConstructorEntry("WeakSet", 0, @intFromEnum(ConstructorMethod.construct_weak_set)),
-        collectionEntry("set", 2, @intFromEnum(PrototypeMethod.set), true),
-        collectionEntry("get", 1, @intFromEnum(PrototypeMethod.get), true),
-        collectionEntry("has", 1, @intFromEnum(PrototypeMethod.has), true),
-        collectionEntry("delete", 1, @intFromEnum(PrototypeMethod.delete), true),
-        collectionEntry("clear", 0, @intFromEnum(PrototypeMethod.clear), true),
-        collectionEntry("add", 1, @intFromEnum(PrototypeMethod.add), true),
-        collectionEntry("keys", 0, @intFromEnum(PrototypeMethod.keys), true),
-        collectionEntry("values", 0, @intFromEnum(PrototypeMethod.values), true),
-        collectionEntry("entries", 0, @intFromEnum(PrototypeMethod.entries), true),
-        collectionEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each), false),
-        collectionEntry("getOrInsert", 2, @intFromEnum(PrototypeMethod.get_or_insert), true),
-        collectionEntry("getOrInsertComputed", 2, @intFromEnum(PrototypeMethod.get_or_insert_computed), false),
-        collectionEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next), false),
-        collectionEntry("get size", 0, @intFromEnum(PrototypeMethod.size_getter), true),
-        collectionEntry("difference", 1, @intFromEnum(PrototypeMethod.difference), false),
-        collectionEntry("intersection", 1, @intFromEnum(PrototypeMethod.intersection), false),
-        collectionEntry("isDisjointFrom", 1, @intFromEnum(PrototypeMethod.is_disjoint_from), false),
-        collectionEntry("isSubsetOf", 1, @intFromEnum(PrototypeMethod.is_subset_of), false),
-        collectionEntry("isSupersetOf", 1, @intFromEnum(PrototypeMethod.is_superset_of), false),
-        collectionEntry("symmetricDifference", 1, @intFromEnum(PrototypeMethod.symmetric_difference), false),
-        collectionEntry("union", 1, @intFromEnum(PrototypeMethod.union_), false),
-        collectionEntry("groupBy", 2, @intFromEnum(StaticMethod.group_by), false),
+        collectionEntry("set", 2, @intFromEnum(PrototypeMethod.set)),
+        collectionEntry("get", 1, @intFromEnum(PrototypeMethod.get)),
+        collectionEntry("has", 1, @intFromEnum(PrototypeMethod.has)),
+        collectionEntry("delete", 1, @intFromEnum(PrototypeMethod.delete)),
+        collectionEntry("clear", 0, @intFromEnum(PrototypeMethod.clear)),
+        collectionEntry("add", 1, @intFromEnum(PrototypeMethod.add)),
+        collectionEntry("keys", 0, @intFromEnum(PrototypeMethod.keys)),
+        collectionEntry("values", 0, @intFromEnum(PrototypeMethod.values)),
+        collectionEntry("entries", 0, @intFromEnum(PrototypeMethod.entries)),
+        collectionEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each)),
+        collectionEntry("getOrInsert", 2, @intFromEnum(PrototypeMethod.get_or_insert)),
+        collectionEntry("getOrInsertComputed", 2, @intFromEnum(PrototypeMethod.get_or_insert_computed)),
+        collectionEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next)),
+        collectionEntry("get size", 0, @intFromEnum(PrototypeMethod.size_getter)),
+        collectionEntry("difference", 1, @intFromEnum(PrototypeMethod.difference)),
+        collectionEntry("intersection", 1, @intFromEnum(PrototypeMethod.intersection)),
+        collectionEntry("isDisjointFrom", 1, @intFromEnum(PrototypeMethod.is_disjoint_from)),
+        collectionEntry("isSubsetOf", 1, @intFromEnum(PrototypeMethod.is_subset_of)),
+        collectionEntry("isSupersetOf", 1, @intFromEnum(PrototypeMethod.is_superset_of)),
+        collectionEntry("symmetricDifference", 1, @intFromEnum(PrototypeMethod.symmetric_difference)),
+        collectionEntry("union", 1, @intFromEnum(PrototypeMethod.union_)),
+        collectionEntry("groupBy", 2, @intFromEnum(StaticMethod.group_by)),
     };
 };
 
-fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&collectionCall),
     };
@@ -177,14 +172,13 @@ fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: 
 
 /// A collection constructor record (one per `ConstructorKind`): construct-capable
 /// so `new Map/Set/WeakMap/WeakSet(...)` reach `collectionCall`'s construct
-/// branch. Never prepared-eligible.
+/// branch.
 fn collectionConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .constructor_magic,
         .native_function = builtin_dispatch.constructorMagic(&collectionCall),
     };
@@ -228,8 +222,8 @@ fn collectionCall(
         // and the typed-array static factories draining a Map/Set iterator
         // (`global == null`, the bare primitive iterator); the collection
         // construct adder fill (`global == null`, primitive set/add); and the
-        // prepared opcode fast path (`global != null`, the receiver's
-        // owner-class already validated by `vm_call`). With no function object
+        // direct opcode path (`global != null`, with the receiver's owner class
+        // already validated). With no function object
         // there is no installed-prototype owner class to re-derive here, so
         // dispatch the body directly, mirroring the historical direct callers:
         // `methodCallObjectWithGlobal` for the realm path (dropped-result
@@ -345,8 +339,19 @@ pub const Entry = struct {
 };
 
 /// QuickJS source map: narrow collection constructors used by the transitional
-/// `new_collection` bytecode.
-pub fn construct(rt: *core.JSRuntime, kind: u32) !core.JSValue {
+/// `new_collection` bytecode. The prototype-less compatibility object exposes
+/// own C-function methods, so their construction realm is explicit.
+pub fn construct(realm: *core.RealmContext, kind: u32) !core.JSValue {
+    const value = try constructWithPrototype(realm.runtime, kind, null);
+    errdefer value.free(realm.runtime);
+    const object = try expectObject(value);
+    try defineNativeMethods(realm, object, object.class_id);
+    return value;
+}
+
+/// Payload-only fixture/algorithm constructor. Callers use `methodCall`
+/// directly and therefore do not publish own callable properties.
+pub fn constructBare(rt: *core.JSRuntime, kind: u32) !core.JSValue {
     return constructWithPrototype(rt, kind, null);
 }
 
@@ -354,7 +359,6 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, kind: u32, prototype: ?*core.
     const class_id = collectionClassId(kind) orelse return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    if (prototype == null) try defineNativeMethods(rt, object, class_id);
     return object.value();
 }
 
@@ -732,6 +736,7 @@ fn createIteratorPrototype(
     iterator_class: core.ClassId,
     tag_name: []const u8,
 ) !*core.Object {
+    const realm_global = global orelse receiver.functionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
     var owned_base: ?*core.Object = null;
     errdefer if (owned_base) |base| base.value().free(rt);
     const base = iteratorPrototypeFromGlobal(rt, global) orelse blk: {
@@ -739,7 +744,7 @@ fn createIteratorPrototype(
         errdefer core.Object.destroyFromHeader(rt, &fallback.header);
         try defineToStringTag(rt, fallback, "Iterator");
 
-        const iterator_method = try function_builtin.nativeFunction(rt, "[Symbol.iterator]", 0);
+        const iterator_method = try function_builtin.nativeFunctionForGlobal(rt, realm_global, "[Symbol.iterator]", 0);
         defer iterator_method.free(rt);
         const iterator_function = try expectObject(iterator_method);
         if (!iterator_function.addIteratorIdentityFunction(rt)) return error.TypeError;
@@ -756,7 +761,7 @@ fn createIteratorPrototype(
         owned_base = null;
     }
     try defineToStringTag(rt, specific, tag_name);
-    const next = try function_builtin.nativeFunction(rt, "next", 0);
+    const next = try function_builtin.nativeFunctionForGlobal(rt, realm_global, "next", 0);
     defer next.free(rt);
     const next_object = try expectObject(next);
     next_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
@@ -924,7 +929,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const map_value = try construct(rt, 1);
+    const map_value = try constructBare(rt, 1);
     var map_alive = true;
     defer if (map_alive) map_value.free(rt);
     const map = try expectObject(map_value);
@@ -1604,8 +1609,9 @@ fn collectionClassId(kind: u32) ?core.ClassId {
 /// Own-method variant used by the prototype-less legacy `construct` path:
 /// create the named method and stamp it with its `.collection` native-record
 /// id so calls dispatch through the integer record mechanism.
-fn defineNativeMethodWithRecordId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
-    const method = try function_builtin.nativeFunction(rt, name, length);
+fn defineNativeMethodWithRecordId(realm: *core.RealmContext, object: *core.Object, name: []const u8, length: i32) !void {
+    const rt = realm.runtime;
+    const method = try function_builtin.nativeFunction(realm, name, length);
     defer method.free(rt);
     const method_object = try expectObject(method);
     const id = prototypeMethodId(name) orelse return error.TypeError;
@@ -1615,36 +1621,36 @@ fn defineNativeMethodWithRecordId(rt: *core.JSRuntime, object: *core.Object, nam
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 
-fn defineNativeMethods(rt: *core.JSRuntime, object: *core.Object, class_id: core.ClassId) !void {
+fn defineNativeMethods(realm: *core.RealmContext, object: *core.Object, class_id: core.ClassId) !void {
     switch (class_id) {
         core.class.ids.map, core.class.ids.weakmap => {
-            try defineNativeMethodWithRecordId(rt, object, "set", 2);
-            try defineNativeMethodWithRecordId(rt, object, "get", 1);
-            try defineNativeMethodWithRecordId(rt, object, "has", 1);
-            try defineNativeMethodWithRecordId(rt, object, "delete", 1);
+            try defineNativeMethodWithRecordId(realm, object, "set", 2);
+            try defineNativeMethodWithRecordId(realm, object, "get", 1);
+            try defineNativeMethodWithRecordId(realm, object, "has", 1);
+            try defineNativeMethodWithRecordId(realm, object, "delete", 1);
             if (class_id == core.class.ids.map) {
-                try defineNativeMethodWithRecordId(rt, object, "clear", 0);
-                try defineNativeMethodWithRecordId(rt, object, "keys", 0);
-                try defineNativeMethodWithRecordId(rt, object, "values", 0);
-                try defineNativeMethodWithRecordId(rt, object, "entries", 0);
-                try defineNativeMethodWithRecordId(rt, object, "forEach", 1);
-                try defineNativeMethodWithRecordId(rt, object, "getOrInsert", 2);
-                try defineNativeMethodWithRecordId(rt, object, "getOrInsertComputed", 2);
+                try defineNativeMethodWithRecordId(realm, object, "clear", 0);
+                try defineNativeMethodWithRecordId(realm, object, "keys", 0);
+                try defineNativeMethodWithRecordId(realm, object, "values", 0);
+                try defineNativeMethodWithRecordId(realm, object, "entries", 0);
+                try defineNativeMethodWithRecordId(realm, object, "forEach", 1);
+                try defineNativeMethodWithRecordId(realm, object, "getOrInsert", 2);
+                try defineNativeMethodWithRecordId(realm, object, "getOrInsertComputed", 2);
             } else {
-                try defineNativeMethodWithRecordId(rt, object, "getOrInsert", 2);
-                try defineNativeMethodWithRecordId(rt, object, "getOrInsertComputed", 2);
+                try defineNativeMethodWithRecordId(realm, object, "getOrInsert", 2);
+                try defineNativeMethodWithRecordId(realm, object, "getOrInsertComputed", 2);
             }
         },
         core.class.ids.set, core.class.ids.weakset => {
-            try defineNativeMethodWithRecordId(rt, object, "add", 1);
-            try defineNativeMethodWithRecordId(rt, object, "has", 1);
-            try defineNativeMethodWithRecordId(rt, object, "delete", 1);
+            try defineNativeMethodWithRecordId(realm, object, "add", 1);
+            try defineNativeMethodWithRecordId(realm, object, "has", 1);
+            try defineNativeMethodWithRecordId(realm, object, "delete", 1);
             if (class_id == core.class.ids.set) {
-                try defineNativeMethodWithRecordId(rt, object, "clear", 0);
-                try defineNativeMethodWithRecordId(rt, object, "keys", 0);
-                try defineNativeMethodWithRecordId(rt, object, "values", 0);
-                try defineNativeMethodWithRecordId(rt, object, "entries", 0);
-                try defineNativeMethodWithRecordId(rt, object, "forEach", 1);
+                try defineNativeMethodWithRecordId(realm, object, "clear", 0);
+                try defineNativeMethodWithRecordId(realm, object, "keys", 0);
+                try defineNativeMethodWithRecordId(realm, object, "values", 0);
+                try defineNativeMethodWithRecordId(realm, object, "entries", 0);
+                try defineNativeMethodWithRecordId(realm, object, "forEach", 1);
             }
         },
         else => {},

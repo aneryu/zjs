@@ -184,7 +184,7 @@ fn resolveFunction(
     action: ResolveAction,
     is_reject: bool,
 ) !core.JSValue {
-    const callback = try builtin_glue.qjsCreateBuiltinFunction(rt, global, "", 1);
+    const callback = try builtin_glue.qjsCreateDataFunction(rt, global, "", 1);
     errdefer callback.free(rt);
     const callback_object = object_ops.objectFromValue(callback) orelse return error.TypeError;
     try callback_object.setInternalCallableTag(rt, .async_generator_resolve);

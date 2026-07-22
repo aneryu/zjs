@@ -279,7 +279,8 @@ fn defineLazyNativeAccessorPairAtom(
 }
 
 pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Method) !void {
-    const value = try core.function.nativeFunction(rt, method.name, method.length);
+    const realm_global = target.functionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
+    const value = try core.function.nativeFunctionForGlobal(rt, realm_global, method.name, method.length);
     defer value.free(rt);
     try defineData(rt, target, method.name, value, method_flags);
 }
@@ -325,9 +326,8 @@ pub fn defineNativeMethodsAssumingNew(rt: *core.JSRuntime, target: *core.Object,
 }
 
 pub fn defineGlobalFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !void {
-    const value = try core.function.nativeFunction(rt, name, length);
+    const value = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer value.free(rt);
-    try expectObject(value).setFunctionRealmGlobalPtr(rt, global);
     try defineData(rt, global, name, value, global_flags);
 }
 
@@ -659,7 +659,8 @@ fn defineConstructor(
     static_methods: []const Method,
     prototype_methods: []const Method,
 ) !core.JSValue {
-    const constructor_value = try core.function.nativeFunctionWithLazyNameAndCapacity(rt, name, length, constructorOwnPropertyCapacity(kind, static_methods.len));
+    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const constructor_value = try core.function.nativeFunctionWithLazyNameAndCapacity(realm, name, length, constructorOwnPropertyCapacity(kind, static_methods.len));
     errdefer constructor_value.free(rt);
     const constructor = expectObject(constructor_value);
     try constructor.setFunctionRealmGlobalPtr(rt, global);
@@ -667,7 +668,7 @@ fn defineConstructor(
     if (kind != .proxy) {
         const prototype_capacity = prototypeOwnPropertyCapacity(kind, prototype_methods.len);
         const prototype_value = if (kind == .function)
-            try core.function.nativeFunctionWithLazyNameAndCapacity(rt, "", 0, prototype_capacity)
+            try core.function.nativeFunctionWithLazyNameAndCapacity(realm, "", 0, prototype_capacity)
         else if (kind == .array)
             (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, prototype_capacity)).value()
         else if (kind == .string)
@@ -3127,17 +3128,18 @@ pub const Intrinsics = struct {
         errdefer context.destroy();
         const global = try core.Object.createWithOwnPropertyCapacity(
             rt,
-            core.class.ids.object,
+            core.class.ids.global_object,
             null,
             standardGlobalOwnPropertyCapacity(),
         );
-        errdefer global.value().free(rt);
+        _ = try global.ensureGlobalPayload(rt);
+        context.global = global;
         try rt.installStandardGlobals(global);
         return .{ .context = context, .global = global };
     }
 
     pub fn deinit(self: *Intrinsics, rt: *core.JSRuntime) void {
-        self.global.value().free(rt);
+        _ = rt;
         self.context.destroy();
     }
 };

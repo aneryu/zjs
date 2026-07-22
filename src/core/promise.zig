@@ -229,7 +229,7 @@ fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: b
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    function_val = try core.function.nativeFunction(rt, "", 1);
+    function_val = try core.function.nativeDataFunction(rt, "", 1);
     errdefer function_val.free(rt);
     const header = function_val.refHeader() orelse return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);

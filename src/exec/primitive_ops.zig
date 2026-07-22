@@ -72,7 +72,6 @@ fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&primitiveCall),
     };

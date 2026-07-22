@@ -543,6 +543,7 @@ pub const object = struct {
     pub fn isCallableValue(v: value.Value) bool {
         const obj = coreFromValue(v) orelse return false;
         return obj.class_id == zjs_core.class.ids.c_function or
+            obj.class_id == zjs_core.class.ids.c_function_data or
             obj.class_id == zjs_core.class.ids.bytecode_function or
             obj.class_id == zjs_core.class.ids.c_closure or
             obj.class_id == zjs_core.class.ids.bound_function;

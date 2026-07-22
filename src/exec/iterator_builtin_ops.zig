@@ -55,9 +55,7 @@ pub fn next(index: *usize, length: usize) Result {
 /// the static helpers reach the for-of machinery. Standard-global bootstrap
 /// resolves names through its iterator static/prototype method lists plus the
 /// accessor/dispose enum ids; this table is consumed by the record-dispatch
-/// path (`rt.internal_builtins`). None of these
-/// records are prepared-call eligible (the prepared gate in
-/// `vm_call.zig` reports `.iterator => false`).
+/// path (`rt.internal_builtins`).
 pub const internal_entries = iteratorEntries: {
     const Entry = core.host_function.InternalEntry;
     break :iteratorEntries [_]Entry{
@@ -94,7 +92,6 @@ fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&iteratorCall),
     };

@@ -39,11 +39,7 @@ pub fn methodId(name: []const u8) ?u32 {
 /// Standard-global bootstrap resolves names/lengths through its Reflect method
 /// list and `methodId`; `proxy_revocable` and the dynamically materialized
 /// `proxy_revoke` closure bind through `reflect_ops.proxyRevocable` directly.
-/// This array is consumed by the record-dispatch path (`rt.internal_builtins`). All records set
-/// `prepared_call_ok = false`: every Reflect method needs a realm global and/or
-/// the materialized function object, matching the prepared-call gate
-/// (`vm_call.nativeBuiltinSupportedWithoutFunctionObject` returns false for
-/// `.reflect`).
+/// This array is consumed by the record-dispatch path (`rt.internal_builtins`).
 pub const internal_entries = reflectEntries: {
     const Entry = core.host_function.InternalEntry;
     break :reflectEntries [_]Entry{
@@ -71,7 +67,6 @@ fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&reflectCall),
     };

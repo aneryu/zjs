@@ -890,10 +890,16 @@ test "production embedding can create independent realms" {
     var realm_global_handle = retained[0];
     defer realm_global_handle.deinit();
     const realm_global_object = retained[1];
+    try std.testing.expect(rt.contextForGlobal(realm_global_object) != null);
+    {
+        const retained_global_this = try ctx.getProperty(realm_global_handle.get(), "globalThis");
+        defer retained_global_this.free(rt);
+        try std.testing.expect(retained_global_this.sameValue(realm_global_handle.get()));
+    }
+
+    realm_global_handle.deinit();
+    _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.contextForGlobal(realm_global_object) == null);
-    const retained_global_this = try ctx.getProperty(realm_global_handle.get(), "globalThis");
-    defer retained_global_this.free(rt);
-    try std.testing.expect(retained_global_this.sameValue(realm_global_handle.get()));
 }
 
 test "production embedding can eval script source in explicit function realms" {

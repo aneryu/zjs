@@ -1120,6 +1120,7 @@ pub const JSRuntime = struct {
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.modules.deinit(self);
+        self.releaseNativeFunctionRealmsForTeardown();
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
@@ -1476,6 +1477,43 @@ pub const JSRuntime = struct {
 
     pub fn firstContext(self: *const JSRuntime) ?*context_mod.JSContext {
         return self.context_head;
+    }
+
+    /// Runtime destruction invalidates every remaining JS object, so finalize
+    /// true C_FUNCTION realm owners before the last cycle passes. This mirrors
+    /// QuickJS's runtime-final GC driving `js_c_function_finalizer`, which calls
+    /// `JS_FreeContext` (quickjs.c:2405-2424, 6222-6227). Retaining one context
+    /// at a time keeps its object graph stable until that context's scan ends;
+    /// releasing the guard then runs the ordinary JSContext resource ordering.
+    fn releaseNativeFunctionRealmsForTeardown(self: *JSRuntime) void {
+        var live_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer live_owner.deinit();
+        while (live_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            self.releaseNativeFunctionRealmsForContext(ctx);
+            live_owner.deinit();
+            live_owner = next_owner;
+            next_owner = .{};
+        }
+
+        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer constructing_owner.deinit();
+        while (constructing_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            self.releaseNativeFunctionRealmsForContext(ctx);
+            constructing_owner.deinit();
+            constructing_owner = next_owner;
+            next_owner = .{};
+        }
+    }
+
+    fn releaseNativeFunctionRealmsForContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        var iter = self.gc.objectIterator();
+        while (iter.next()) |header| {
+            if (header.metaConst().kind != .object) continue;
+            const candidate: *Object = @alignCast(@fieldParentPtr("header", header));
+            candidate.releaseNativeFunctionRealmForRuntimeTeardown(ctx);
+        }
     }
 
     pub fn contextForGlobal(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {

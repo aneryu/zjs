@@ -387,80 +387,76 @@ pub const ExtendedPrototypeMethod = enum(u32) {
 /// selector. Property installation still resolves names through the registry's
 /// Date method tables (canonical name/length) and date.zig's id helpers; this
 /// table is consumed by the record-dispatch path (`rt.internal_builtins`).
-/// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
-/// (`nativeBuiltinSupportedWithoutFunctionObject`): only `Date.now` is callable
-/// without a materialized function object today.
 pub const internal_entries = dateEntries: {
     const Entry = core.host_function.InternalEntry;
     break :dateEntries [_]Entry{
-        dateEntry("UTC", 7, @intFromEnum(StaticMethod.utc), false),
-        dateEntry("parse", 1, @intFromEnum(StaticMethod.parse), false),
-        dateEntry("now", 0, @intFromEnum(StaticMethod.now), true),
+        dateEntry("UTC", 7, @intFromEnum(StaticMethod.utc)),
+        dateEntry("parse", 1, @intFromEnum(StaticMethod.parse)),
+        dateEntry("now", 0, @intFromEnum(StaticMethod.now)),
         dateConstructorEntry("Date", 7, @intFromEnum(ConstructorMethod.construct)),
-        dateEntry("getTime", 0, @intFromEnum(PrototypeMethod.get_time), false),
-        dateEntry("valueOf", 0, @intFromEnum(PrototypeMethod.value_of), false),
-        dateEntry("getFullYear", 0, @intFromEnum(PrototypeMethod.get_full_year), false),
-        dateEntry("getMonth", 0, @intFromEnum(PrototypeMethod.get_month), false),
-        dateEntry("getDate", 0, @intFromEnum(PrototypeMethod.get_date), false),
-        dateEntry("getHours", 0, @intFromEnum(PrototypeMethod.get_hours), false),
-        dateEntry("getMinutes", 0, @intFromEnum(PrototypeMethod.get_minutes), false),
-        dateEntry("getSeconds", 0, @intFromEnum(PrototypeMethod.get_seconds), false),
-        dateEntry("getMilliseconds", 0, @intFromEnum(PrototypeMethod.get_milliseconds), false),
-        dateEntry("toISOString", 0, @intFromEnum(PrototypeMethod.to_iso_string), false),
-        dateEntry("toJSON", 1, @intFromEnum(PrototypeMethod.to_json), false),
-        dateEntry("getUTCFullYear", 0, @intFromEnum(PrototypeMethod.get_utc_full_year), false),
-        dateEntry("getUTCMonth", 0, @intFromEnum(PrototypeMethod.get_utc_month), false),
-        dateEntry("getUTCDate", 0, @intFromEnum(PrototypeMethod.get_utc_date), false),
-        dateEntry("getUTCHours", 0, @intFromEnum(PrototypeMethod.get_utc_hours), false),
-        dateEntry("getUTCMinutes", 0, @intFromEnum(PrototypeMethod.get_utc_minutes), false),
-        dateEntry("getUTCSeconds", 0, @intFromEnum(PrototypeMethod.get_utc_seconds), false),
-        dateEntry("getUTCMilliseconds", 0, @intFromEnum(PrototypeMethod.get_utc_milliseconds), false),
-        dateEntry("getDay", 0, @intFromEnum(PrototypeMethod.get_day), false),
-        dateEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), false),
-        dateEntry("toUTCString", 0, @intFromEnum(PrototypeMethod.to_utc_string), false),
-        dateEntry("getYear", 0, @intFromEnum(PrototypeMethod.get_year), false),
-        dateEntry("setYear", 1, @intFromEnum(PrototypeMethod.set_year), false),
-        dateEntry("setTime", 1, @intFromEnum(PrototypeMethod.set_time), false),
-        dateEntry("setMilliseconds", 1, @intFromEnum(PrototypeMethod.set_milliseconds), false),
-        dateEntry("setSeconds", 2, @intFromEnum(PrototypeMethod.set_seconds), false),
-        dateEntry("setMinutes", 3, @intFromEnum(PrototypeMethod.set_minutes), false),
-        dateEntry("setHours", 4, @intFromEnum(PrototypeMethod.set_hours), false),
-        dateEntry("setDate", 1, @intFromEnum(PrototypeMethod.set_date), false),
-        dateEntry("setMonth", 2, @intFromEnum(PrototypeMethod.set_month), false),
-        dateEntry("setFullYear", 3, @intFromEnum(PrototypeMethod.set_full_year), false),
-        dateEntry("getTimezoneOffset", 0, @intFromEnum(PrototypeMethod.get_timezone_offset), false),
-        dateEntry("toDateString", 0, @intFromEnum(PrototypeMethod.to_date_string), false),
-        dateEntry("toTimeString", 0, @intFromEnum(PrototypeMethod.to_time_string), false),
-        dateEntry("[Symbol.toPrimitive]", 1, @intFromEnum(PrototypeMethod.to_primitive), false),
+        dateEntry("getTime", 0, @intFromEnum(PrototypeMethod.get_time)),
+        dateEntry("valueOf", 0, @intFromEnum(PrototypeMethod.value_of)),
+        dateEntry("getFullYear", 0, @intFromEnum(PrototypeMethod.get_full_year)),
+        dateEntry("getMonth", 0, @intFromEnum(PrototypeMethod.get_month)),
+        dateEntry("getDate", 0, @intFromEnum(PrototypeMethod.get_date)),
+        dateEntry("getHours", 0, @intFromEnum(PrototypeMethod.get_hours)),
+        dateEntry("getMinutes", 0, @intFromEnum(PrototypeMethod.get_minutes)),
+        dateEntry("getSeconds", 0, @intFromEnum(PrototypeMethod.get_seconds)),
+        dateEntry("getMilliseconds", 0, @intFromEnum(PrototypeMethod.get_milliseconds)),
+        dateEntry("toISOString", 0, @intFromEnum(PrototypeMethod.to_iso_string)),
+        dateEntry("toJSON", 1, @intFromEnum(PrototypeMethod.to_json)),
+        dateEntry("getUTCFullYear", 0, @intFromEnum(PrototypeMethod.get_utc_full_year)),
+        dateEntry("getUTCMonth", 0, @intFromEnum(PrototypeMethod.get_utc_month)),
+        dateEntry("getUTCDate", 0, @intFromEnum(PrototypeMethod.get_utc_date)),
+        dateEntry("getUTCHours", 0, @intFromEnum(PrototypeMethod.get_utc_hours)),
+        dateEntry("getUTCMinutes", 0, @intFromEnum(PrototypeMethod.get_utc_minutes)),
+        dateEntry("getUTCSeconds", 0, @intFromEnum(PrototypeMethod.get_utc_seconds)),
+        dateEntry("getUTCMilliseconds", 0, @intFromEnum(PrototypeMethod.get_utc_milliseconds)),
+        dateEntry("getDay", 0, @intFromEnum(PrototypeMethod.get_day)),
+        dateEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
+        dateEntry("toUTCString", 0, @intFromEnum(PrototypeMethod.to_utc_string)),
+        dateEntry("getYear", 0, @intFromEnum(PrototypeMethod.get_year)),
+        dateEntry("setYear", 1, @intFromEnum(PrototypeMethod.set_year)),
+        dateEntry("setTime", 1, @intFromEnum(PrototypeMethod.set_time)),
+        dateEntry("setMilliseconds", 1, @intFromEnum(PrototypeMethod.set_milliseconds)),
+        dateEntry("setSeconds", 2, @intFromEnum(PrototypeMethod.set_seconds)),
+        dateEntry("setMinutes", 3, @intFromEnum(PrototypeMethod.set_minutes)),
+        dateEntry("setHours", 4, @intFromEnum(PrototypeMethod.set_hours)),
+        dateEntry("setDate", 1, @intFromEnum(PrototypeMethod.set_date)),
+        dateEntry("setMonth", 2, @intFromEnum(PrototypeMethod.set_month)),
+        dateEntry("setFullYear", 3, @intFromEnum(PrototypeMethod.set_full_year)),
+        dateEntry("getTimezoneOffset", 0, @intFromEnum(PrototypeMethod.get_timezone_offset)),
+        dateEntry("toDateString", 0, @intFromEnum(PrototypeMethod.to_date_string)),
+        dateEntry("toTimeString", 0, @intFromEnum(PrototypeMethod.to_time_string)),
+        dateEntry("[Symbol.toPrimitive]", 1, @intFromEnum(PrototypeMethod.to_primitive)),
         // Engine-internal captured-setter records (no JS property; the registry
         // installs only the named methods above). Reached solely from the
         // `func_obj == null` arm so `exec/date_ops.zig` can route the
         // capture-then-apply setter bodies through the table.
-        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_year_with_captured_ms), false),
-        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms), false),
+        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_year_with_captured_ms)),
+        dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)),
         // Local/UTC method split + qjs fmt=3 locale shapes (see
         // `ExtendedPrototypeMethod`); handled entirely inside `dateCall`.
-        dateEntry("getUTCDay", 0, @intFromEnum(ExtendedPrototypeMethod.get_utc_day), false),
-        dateEntry("setUTCMilliseconds", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds), false),
-        dateEntry("setUTCSeconds", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds), false),
-        dateEntry("setUTCMinutes", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes), false),
-        dateEntry("setUTCHours", 4, @intFromEnum(ExtendedPrototypeMethod.set_utc_hours), false),
-        dateEntry("setUTCDate", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_date), false),
-        dateEntry("setUTCMonth", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_month), false),
-        dateEntry("setUTCFullYear", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year), false),
-        dateEntry("toLocaleString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_string), false),
-        dateEntry("toLocaleDateString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string), false),
-        dateEntry("toLocaleTimeString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string), false),
+        dateEntry("getUTCDay", 0, @intFromEnum(ExtendedPrototypeMethod.get_utc_day)),
+        dateEntry("setUTCMilliseconds", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds)),
+        dateEntry("setUTCSeconds", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds)),
+        dateEntry("setUTCMinutes", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes)),
+        dateEntry("setUTCHours", 4, @intFromEnum(ExtendedPrototypeMethod.set_utc_hours)),
+        dateEntry("setUTCDate", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_date)),
+        dateEntry("setUTCMonth", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_month)),
+        dateEntry("setUTCFullYear", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year)),
+        dateEntry("toLocaleString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_string)),
+        dateEntry("toLocaleDateString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string)),
+        dateEntry("toLocaleTimeString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string)),
     };
 };
 
-fn dateEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+fn dateEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = prepared,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&dateCall),
     };
@@ -474,7 +470,6 @@ fn dateConstructorEntry(comptime name: []const u8, comptime length: u8, comptime
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .constructor_or_func_magic,
         .native_function = builtin_dispatch.constructorOrFunctionMagic(&dateCall),
     };
@@ -484,7 +479,7 @@ fn dateConstructorEntry(comptime name: []const u8, comptime length: u8, comptime
 /// `call.zig` `callDateNativeFunctionRecord`: the constructor and statics run
 /// the pure builtin helpers below, while the `Symbol.toPrimitive` and
 /// prototype methods delegate to the exec VM ops (which stay in exec because
-/// the date opcode handlers and the prepared-call fast path also call them).
+/// the date opcode handlers also call them).
 fn dateCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -514,9 +509,9 @@ fn dateCall(
     // fall-throughs) has already coerced its arguments and routes the *pure body*
     // through the table here so VM coercion stays on the same record boundary. It is
     // gated on `func_obj == null and global == null`, the contract those call
-    // sites use; the prepared-call fast path (`vm_call.zig`) also passes
-    // `func_obj == null` but threads the realm `global` and *raw* args, so it
-    // must instead fall through to the coercing dispatcher below. This
+    // sites use; other direct callers pass `func_obj == null` while threading
+    // the realm `global` and raw args, so they must instead fall through to the
+    // coercing dispatcher below. This
     // deliberately bypasses the prototype dispatcher
     // (`object_ops.qjsDatePrototypeMethod`) — routing back through it would
     // re-enter this record (the dispatcher's own body call is one of the

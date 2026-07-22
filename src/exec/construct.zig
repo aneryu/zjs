@@ -59,8 +59,10 @@ pub fn ordinaryObject(rt: *core.JSRuntime) !*core.Object {
     return core.Object.create(rt, core.class.ids.object, null);
 }
 
-pub fn functionObject(rt: *core.JSRuntime, name: core.Atom) !core.JSValue {
+pub fn functionObject(ctx: *core.RealmContext, name: core.Atom) !core.JSValue {
+    const rt = ctx.runtimePtr();
     const function = try core.Object.create(rt, core.class.ids.c_function, null);
+    function.setNativeFunctionRealm(ctx);
     errdefer function.value().free(rt);
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -204,7 +206,7 @@ test "constructValue fallback roots callee while defining constructor property" 
 
     const name = try rt.internAtom("FallbackConstructor");
     defer rt.atoms.free(name);
-    const constructor = try functionObject(rt, name);
+    const constructor = try functionObject(ctx, name);
     var constructor_alive = true;
     defer if (constructor_alive) constructor.free(rt);
     const constructor_object = try expectObject(constructor);
@@ -1293,7 +1295,6 @@ fn expectConstructor(value: core.JSValue) !*core.Object {
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.bytecode_function and
         object.class_id != core.class.ids.bound_function and
-        object.class_id != core.class.ids.c_function_data and
         object.class_id != core.class.ids.c_closure)
     {
         return error.TypeError;

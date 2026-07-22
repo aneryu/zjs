@@ -2569,60 +2569,6 @@ pub var test262_agents = Test262AgentCoordinator{};
 pub threadlocal var current_test262_agent: ?*Test262Agent = null;
 var test262_external_host_context: u8 = 0;
 
-/// The test262 harness is a named host policy owner for realms created by
-/// `$262.createRealm()`.  Until W1b3b gives every escaped native function its
-/// own RealmRef carrier, the harness base owner keeps `$262.createRealm().global`
-/// alive without making the Runtime context list or an ordinary global object
-/// into an implicit owner.
-const Test262RealmOwners = struct {
-    runtime: *zjs.JSRuntime,
-    realms: []test262_root.core.RealmRef = &.{},
-    capacity: usize = 0,
-
-    fn create(runtime: *zjs.JSRuntime) !*Test262RealmOwners {
-        const owners = try runtime.createRuntime(Test262RealmOwners);
-        owners.* = .{ .runtime = runtime };
-        return owners;
-    }
-
-    fn retain(self: *Test262RealmOwners, realm: *test262_root.core.RealmContext) !void {
-        if (self.realms.len == self.capacity) {
-            const next_capacity = if (self.capacity == 0) @as(usize, 4) else self.capacity * 2;
-            const next = try self.runtime.allocRuntime(test262_root.core.RealmRef, next_capacity);
-            @memcpy(next[0..self.realms.len], self.realms);
-            if (self.capacity != 0) {
-                self.runtime.freeRuntime(
-                    test262_root.core.RealmRef,
-                    self.realms.ptr[0..self.capacity],
-                );
-            }
-            self.realms = next[0..self.realms.len];
-            self.capacity = next_capacity;
-        }
-
-        var owner = test262_root.core.RealmRef.retain(realm);
-        errdefer owner.deinit();
-        const len = self.realms.len;
-        self.realms = self.realms.ptr[0 .. len + 1];
-        self.realms[len] = owner;
-        owner = .{};
-    }
-
-    fn finalize(ptr: *anyopaque) void {
-        const self: *Test262RealmOwners = @ptrCast(@alignCast(ptr));
-        for (self.realms) |*owner| owner.deinit();
-        if (self.capacity != 0) {
-            self.runtime.freeRuntime(
-                test262_root.core.RealmRef,
-                self.realms.ptr[0..self.capacity],
-            );
-        }
-        const runtime = self.runtime;
-        self.* = undefined;
-        runtime.destroyRuntime(Test262RealmOwners, self);
-    }
-};
-
 pub var test262_gpa = std.heap.DebugAllocator(.{
     .safety = false,
     .stack_trace_frames = 0,
@@ -3146,7 +3092,7 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
 
     // Register createRealm on $262
     {
-        const func_val = try createTest262RealmFactory(rt, ctx);
+        const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(qjsTest262CreateRealm));
         defer func_val.free(rt);
         try ctx.defineDataProperty(ns_target, "createRealm", func_val, .{ .enumerable = false });
     }
@@ -3530,7 +3476,6 @@ fn qjsTest262CreateRealm(
     output: ?*std.Io.Writer,
     global: ?*zjs.Object,
     args: []const zjs.JSValue,
-    owners: *Test262RealmOwners,
 ) !zjs.JSValue {
     _ = output;
     _ = global;
@@ -3541,23 +3486,7 @@ fn qjsTest262CreateRealm(
     const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript), false, realm_global);
     defer eval_func.free(ctx.runtimePtr());
     try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
-    const realm_object = test262InternalObjectFromValue(realm_value) orelse return error.TypeError;
-    const realm_context = realm_object.realmContext() orelse return error.TypeError;
-    // Commit the harness base owner only after every other fallible publication
-    // step.  On append failure `realm_value` still owns the sole child ref and
-    // the errdefer above performs the ordinary RealmContext teardown.
-    try owners.retain(realm_context);
     return realm_value;
-}
-
-fn callTest262CreateRealm(ptr: *anyopaque, call: zjs.ExternalHostCall) anyerror!zjs.JSValue {
-    const owners: *Test262RealmOwners = @ptrCast(@alignCast(ptr));
-    const core_ctx: *test262_root.core.JSContext = @ptrCast(@alignCast(call.ctx));
-    var ctx = zjs.JSContext.borrowCore(core_ctx);
-    return qjsTest262CreateRealm(&ctx, call.output, call.global, call.args, owners) catch |err| {
-        try ensureTest262HarnessException(&ctx, call.global, err);
-        return err;
-    };
 }
 
 fn qjsTest262DetachArrayBuffer(
@@ -3589,10 +3518,10 @@ fn wrapExternal(comptime f: anytype) zjs.ExternalHostCallFn {
     return struct {
         fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
             _ = ptr;
-            const core_ctx: *test262_root.core.JSContext = @ptrCast(@alignCast(c.ctx));
-            var ctx = zjs.JSContext.borrowCore(core_ctx);
-            return f(&ctx, c.output, c.global, c.args) catch |err| {
-                try ensureTest262HarnessException(&ctx, c.global, err);
+            var ctx = zjs.JSContext.borrowCore(c.realm);
+            const global = c.realm.global;
+            return f(&ctx, c.output, global, c.args) catch |err| {
+                try ensureTest262HarnessException(&ctx, global, err);
                 return err;
             };
         }
@@ -3603,9 +3532,8 @@ fn wrapExternalWithFunc(comptime f: anytype) zjs.ExternalHostCallFn {
     return struct {
         fn call(ptr: *anyopaque, c: zjs.ExternalHostCall) anyerror!zjs.JSValue {
             _ = ptr;
-            const core_ctx: *test262_root.core.JSContext = @ptrCast(@alignCast(c.ctx));
-            var ctx = zjs.JSContext.borrowCore(core_ctx);
-            const global = c.global orelse c.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
+            var ctx = zjs.JSContext.borrowCore(c.realm);
+            const global = c.realm.global orelse return error.TypeError;
             return f(&ctx, c.output, global, c.func_obj, c.args) catch |err| {
                 try ensureTest262HarnessException(&ctx, global, err);
                 return err;
@@ -3638,32 +3566,6 @@ fn createExternalHostFunction(
     call: zjs.ExternalHostCallFn,
 ) !zjs.JSValue {
     return createExternalHostFunctionWithRealm(runtime, context, name, length, call, false, null);
-}
-
-fn createTest262RealmFactory(runtime: *zjs.JSRuntime, context: *zjs.JSContext) !zjs.JSValue {
-    // First materialize an unpublished function backed by a harmless static
-    // record.  Once that succeeds, replacement transfers the owner set to the
-    // Runtime external-record lifetime with no fallible gap.
-    const function_value = try context.createExternalFunction(
-        "createRealm",
-        0,
-        &test262_external_host_context,
-        callTest262CreateRealm,
-        null,
-        .{},
-    );
-    errdefer function_value.free(runtime);
-
-    const owners = try Test262RealmOwners.create(runtime);
-    const function_object = test262InternalObjectFromValue(function_value) orelse unreachable;
-    const old_record = runtime.replaceExternalHostFunction(function_object.externalHostFunctionId(), .{
-        .ptr = owners,
-        .call = callTest262CreateRealm,
-        .finalizer = Test262RealmOwners.finalize,
-    }) orelse unreachable;
-    std.debug.assert(old_record.ptr == @as(*anyopaque, @ptrCast(&test262_external_host_context)));
-    std.debug.assert(old_record.finalizer == null);
-    return function_value;
 }
 
 fn createExternalHostFunctionWithRealm(

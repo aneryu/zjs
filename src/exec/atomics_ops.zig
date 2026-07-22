@@ -62,7 +62,6 @@ fn atomicsEntry(
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&atomicsCall),
     };

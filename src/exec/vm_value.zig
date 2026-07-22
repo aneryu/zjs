@@ -571,6 +571,7 @@ fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.class_id != core.class.ids.c_function and
+        object.class_id != core.class.ids.c_function_data and
         object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
     return object;

@@ -1404,9 +1404,10 @@ pub const FunctionRarePayload = struct {
 
 pub const FunctionPayload = struct {
     pub const NativeFields = extern struct {
-        // qjs `u.cfunc.realm`: native functions own a per-object realm field;
-        // bytecode functions instead read the shared realm from their FB.
-        realm_global_ptr: ?*Object = null,
+        // qjs `u.cfunc.realm`: a true C_FUNCTION owns its construction realm.
+        // C_FUNCTION_DATA and other caller-semantics payloads leave this empty;
+        // bytecode functions instead own the shared realm through their FB.
+        realm: context_mod.RealmRef = .{},
         // Memoized resolved internal-record handle, mirroring qjs
         // `p->u.cfunc.c_function`. The record is comptime rodata and cannot
         // dangle.
@@ -1444,7 +1445,7 @@ pub const FunctionPayload = struct {
 
     pub fn destroyNative(self: *FunctionPayload, rt: *JSRuntime) void {
         const fields = &self.native;
-        fields.realm_global_ptr = null;
+        fields.realm.deinit();
         const native_dispatch_name = fields.native_dispatch_name;
         fields.native_dispatch_name = atom.null_atom;
         rt.atoms.free(native_dispatch_name);
@@ -3308,9 +3309,6 @@ pub const Object = extern struct {
         if (self.disposableStackPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.promisePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
         if (self.generatorPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.functionPayload()) |payload| {
-            if (!class.isBytecodeFunctionClass(self.class_id)) clearObjectPtr(&payload.native.realm_global_ptr, rt, matcher);
-        }
         if (self.moduleNamespacePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
     }
 
@@ -5386,16 +5384,17 @@ pub const Object = extern struct {
     /// after the call target has already proved this is a C-function object.
     pub const NativeCallTarget = struct {
         record: *const host_function.InternalRecord,
-        realm_global_ptr: ?*Object,
+        realm: *context_mod.RealmContext,
     };
 
     pub fn nativeCallTarget(self: *const Object) ?NativeCallTarget {
         if (self.class_id != class.ids.c_function) return null;
         const payload = self.functionPayloadConst() orelse return null;
         const record = payload.native.call_cache orelse return null;
+        const realm = payload.native.realm.borrow() orelse return null;
         return .{
             .record = record,
-            .realm_global_ptr = payload.native.realm_global_ptr,
+            .realm = realm,
         };
     }
 
@@ -5483,6 +5482,10 @@ pub const Object = extern struct {
     }
 
     pub fn setInternalCallableTag(self: *Object, rt: *JSRuntime, tag: host_function.InternalCallableTag) !void {
+        if (tag != .none) {
+            const expected_class = if (tag.usesCallerRealm()) class.ids.c_function_data else class.ids.c_function;
+            std.debug.assert(self.class_id == expected_class);
+        }
         (try self.internalCallableTagSlot(rt)).* = tag;
     }
 
@@ -6445,13 +6448,6 @@ pub const Object = extern struct {
         if (self.disposableStackPayload()) |payload| return &payload.realm_global_ptr;
         if (self.promisePayload()) |payload| return &payload.realm_global_ptr;
         if (self.moduleNamespacePayload()) |payload| return &payload.realm_global_ptr;
-        if (self.functionPayload()) |payload| {
-            // qjs stores the realm on JSFunctionBytecode for bytecode
-            // callables, not on every closure object. Only the native cfunc
-            // arm has a mutable borrowed pointer slot here.
-            std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));
-            return &payload.native.realm_global_ptr;
-        }
         if (self.generatorPayload()) |payload| return &payload.realm_global_ptr;
         std.debug.assert(self.flags.class_payload_kind != .none);
         unreachable;
@@ -6474,6 +6470,22 @@ pub const Object = extern struct {
             }
             return;
         }
+        if (self.class_id == class.ids.c_function) {
+            const global = realm_global orelse return error.InvalidBuiltinRegistry;
+            const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+            self.setNativeFunctionRealm(realm);
+            return;
+        }
+        // These call carriers intentionally have caller semantics. Bound and
+        // Proxy wrappers recurse with the caller view; C_FUNCTION_DATA and
+        // C_CLOSURE likewise never acquire a construction-realm owner.
+        if (self.class_id == class.ids.c_function_data or
+            self.class_id == class.ids.c_closure or
+            self.class_id == class.ids.bound_function or
+            self.class_id == class.ids.proxy)
+        {
+            return;
+        }
         const slot = try self.functionRealmGlobalPtrSlotEnsured(rt);
         if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
         slot.* = realm_global;
@@ -6485,6 +6497,17 @@ pub const Object = extern struct {
             if (self.bytecodeFunctionRealmGlobalPtr() == null) {
                 if (realm_global) |global| try self.bindBytecodeFunctionRealmGlobal(global);
             }
+            return;
+        }
+        if (self.class_id == class.ids.c_function) {
+            if (self.nativeFunctionRealm() == null) try self.setFunctionRealmGlobalPtr(rt, realm_global);
+            return;
+        }
+        if (self.class_id == class.ids.c_function_data or
+            self.class_id == class.ids.c_closure or
+            self.class_id == class.ids.bound_function or
+            self.class_id == class.ids.proxy)
+        {
             return;
         }
         const slot = try self.functionRealmGlobalPtrSlotEnsured(rt);
@@ -6548,21 +6571,46 @@ pub const Object = extern struct {
         return @fieldParentPtr("header", header);
     }
 
-    /// Direct realm read for the native-c_function call path — qjs `ctx =
-    /// p->u.cfunc.realm` (quickjs.c:17586). Same one-load `.function` payload body as
-    /// `bytecodeFunctionRealmGlobalPtr`; a distinct name documents the call-site
-    /// invariant (`fastNativeMethodCall` proves `class_payload_kind == .function` up
-    /// front before calling this, so the `unreachable` can never fire). Returns null
-    /// only when the payload's `realm_global_ptr` is unset (dead for materialized native
-    /// builtins), letting the caller fall back to the generic realm resolver.
+    /// Install the construction realm owned by a true C_FUNCTION. Retain the
+    /// replacement before dropping the old owner so assigning the same realm
+    /// remains safe even when this object is its last external owner.
+    pub fn setNativeFunctionRealm(self: *Object, realm: *context_mod.RealmContext) void {
+        std.debug.assert(self.class_id == class.ids.c_function);
+        const payload = self.functionPayload() orelse unreachable;
+        if (payload.native.realm.borrow() == realm) return;
+        const next = context_mod.RealmRef.retain(realm);
+        payload.native.realm.deinit();
+        payload.native.realm = next;
+    }
+
+    /// Finalize a true C_FUNCTION's owned realm edge during final Runtime
+    /// teardown. The caller must retain `realm` across its object-list scan so
+    /// dropping the last native edge cannot destroy the context mid-iteration.
+    /// Caller-semantics carriers never enter this path and keep owning no realm.
+    pub fn releaseNativeFunctionRealmForRuntimeTeardown(self: *Object, realm: *context_mod.RealmContext) void {
+        if (self.class_id != class.ids.c_function) return;
+        const payload = self.functionPayload() orelse unreachable;
+        if (payload.native.realm.borrow() != realm) return;
+        payload.native.realm.deinit();
+    }
+
+    /// Direct realm read for the native-C-function call path — qjs `ctx =
+    /// p->u.cfunc.realm` (quickjs.c:17586). C_FUNCTION_DATA deliberately
+    /// returns null because it consumes the caller's context.
+    pub fn nativeFunctionRealm(self: *const Object) ?*context_mod.RealmContext {
+        if (self.class_id != class.ids.c_function) return null;
+        const payload = self.functionPayloadConst() orelse return null;
+        return payload.native.realm.borrow();
+    }
+
     pub fn nativeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
-        if (self.functionPayloadConst()) |payload| return payload.native.realm_global_ptr;
-        std.debug.assert(self.flags.class_payload_kind == .function);
-        unreachable;
+        const realm = self.nativeFunctionRealm() orelse return null;
+        return realm.global;
     }
 
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         if (class.isBytecodeFunctionClass(self.class_id)) return self.bytecodeFunctionRealmGlobalPtr();
+        if (self.class_id == class.ids.c_function) return self.nativeFunctionRealmGlobalPtr();
         return self.borrowedRealmGlobalPtr();
     }
 
@@ -6570,7 +6618,6 @@ pub const Object = extern struct {
     /// cleanup registry. Bytecode-function realms are deliberately absent:
     /// their FunctionBytecode owns a JSValue edge and is traced by the cycle GC.
     fn borrowedRealmGlobalPtr(self: *const Object) ?*Object {
-        if (self.functionPayloadConst()) |payload| return payload.native.realm_global_ptr;
         if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
         if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
@@ -7885,6 +7932,10 @@ pub const Object = extern struct {
             var realm = payload.realm.borrow();
             try Helper.callVisitRealm(visitor, &realm);
         }
+        if (self.class_id == class.ids.c_function) {
+            const payload = self.functionPayload() orelse unreachable;
+            try Helper.callVisitRealm(visitor, &payload.native.realm.ptr);
+        }
         if (self.globalPayload()) |payload| {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
             try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
@@ -8991,7 +9042,7 @@ pub const Object = extern struct {
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
         if (info.kind == .console) {
-            const materialized = materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
+            const materialized = self.materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
         if (info.kind == .math_namespace or
@@ -9036,7 +9087,7 @@ pub const Object = extern struct {
             return self.finishMaterializedAccessorAutoInit(index, info, materialized);
         }
         if (info.host_function_kind != 0) {
-            const materialized = materializeHostFunctionAutoInit(info) orelse return JSValue.undefinedValue();
+            const materialized = self.materializeHostFunctionAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
         const cache_slot = sharedLazyNativeFunctionSlotForAutoInit(info);
@@ -9168,13 +9219,24 @@ pub const Object = extern struct {
         return if (realm_global) |global| global.cachedFunctionProto(info.rt) else null;
     }
 
+    fn realmForAutoInit(self: *Object, info: property.AutoInit) ?*context_mod.RealmContext {
+        const global: *Object = if (info.host_function_realm_global != 0)
+            @ptrFromInt(info.host_function_realm_global)
+        else if (info.rt.contextForGlobalIncludingConstructing(self) != null)
+            self
+        else
+            self.functionRealmGlobalPtr() orelse return null;
+        return info.rt.contextForGlobalIncludingConstructing(global);
+    }
+
     fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
         return self.materializeNativeFunctionAutoInitOnce(info) orelse
             self.materializeNativeFunctionAutoInitOnce(info);
     }
 
     fn materializeNativeFunctionAutoInitOnce(self: *Object, info: property.AutoInit) ?JSValue {
-        const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return null;
+        const realm = self.realmForAutoInit(info) orelse return null;
+        const materialized = function.nativeFunction(realm, info.name, info.length) catch return null;
         if (!self.prepareAutoInitNativeFunction(info, materialized, info.native_builtin_id, true)) {
             materialized.free(info.rt);
             return null;
@@ -9183,7 +9245,8 @@ pub const Object = extern struct {
     }
 
     fn materializeNativeAccessorAutoInit(self: *Object, info: property.AutoInit) ?property.Accessor {
-        const getter = function.nativeFunction(info.rt, info.name, info.length) catch return null;
+        const realm = self.realmForAutoInit(info) orelse return null;
+        const getter = function.nativeFunction(realm, info.name, info.length) catch return null;
         if (!self.prepareAutoInitNativeFunction(info, getter, info.native_builtin_id, true)) {
             getter.free(info.rt);
             return null;
@@ -9194,7 +9257,7 @@ pub const Object = extern struct {
                 getter.free(info.rt);
                 return null;
             };
-            const setter_value = function.nativeFunction(info.rt, setter_name, setter_length) catch {
+            const setter_value = function.nativeFunction(realm, setter_name, setter_length) catch {
                 getter.free(info.rt);
                 return null;
             };
@@ -9251,16 +9314,16 @@ pub const Object = extern struct {
         // still being built) the cache is null and we leave the
         // prototype as the default `null`, matching the behavior of
         // the eager path before constructor-graph wiring.
-        if (functionPrototypeForAutoInit(self, info)) |fp| {
-            if (function_value.refHeader()) |header| {
-                const obj: *Object = @fieldParentPtr("header", header);
-                const realm_global: ?*Object = if (info.host_function_realm_global != 0)
-                    @ptrFromInt(info.host_function_realm_global)
-                else
-                    self.functionRealmGlobalPtr();
-                if (obj.functionRealmGlobalPtrSlot().* == null) {
-                    obj.setFunctionRealmGlobalPtr(info.rt, realm_global) catch return false;
-                }
+        if (function_value.refHeader()) |header| {
+            const obj: *Object = @fieldParentPtr("header", header);
+            const realm_global: ?*Object = if (info.host_function_realm_global != 0)
+                @ptrFromInt(info.host_function_realm_global)
+            else
+                self.functionRealmGlobalPtr();
+            if (obj.nativeFunctionRealm() == null) {
+                obj.setFunctionRealmGlobalPtr(info.rt, realm_global) catch return false;
+            }
+            if (functionPrototypeForAutoInit(self, info)) |fp| {
                 if (obj != fp and !obj.hasOwnProperty(atom.ids.prototype) and obj.hostFunctionKind() == 0) {
                     obj.setPrototype(info.rt, fp) catch {};
                 }
@@ -9367,11 +9430,14 @@ pub const Object = extern struct {
         _ = function_object.addAsyncDisposableStackMethod(rt, method_id);
     }
 
-    fn materializeHostFunctionAutoInit(info: property.AutoInit) ?JSValue {
+    fn materializeHostFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
         const rt = info.rt;
+        const realm = self.realmForAutoInit(info) orelse return null;
+        if (realm.global == null) return null;
         const function_capacity: usize = 2 + if (info.host_function_prototype) @as(usize, 1) else 0;
         const function_object = Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, function_capacity) catch return null;
         const function_value = function_object.value();
+        function_object.setNativeFunctionRealm(realm);
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.external_host_function_id != 0) {
             if (info.host_function_kind != host_function.ids.external_host) {
@@ -9380,13 +9446,6 @@ pub const Object = extern struct {
             }
             function_object.externalHostFunctionIdSlot().* = info.external_host_function_id;
         }
-        if (info.host_function_realm_global != 0) {
-            function_object.setFunctionRealmGlobalPtr(rt, @ptrFromInt(info.host_function_realm_global)) catch {
-                function_value.free(rt);
-                return null;
-            };
-        }
-
         const name_string = string.String.createAscii(rt, info.name) catch {
             function_value.free(rt);
             return null;
@@ -9455,14 +9514,20 @@ pub const Object = extern struct {
         );
     }
 
-    fn materializeConsoleAutoInit(info: property.AutoInit) ?JSValue {
+    fn materializeConsoleAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
         const rt = info.rt;
         if (info.host_function_kind == 0) return null;
+        const realm_global: *Object = if (info.host_function_realm_global != 0)
+            @ptrFromInt(info.host_function_realm_global)
+        else if (rt.contextForGlobalIncludingConstructing(self) != null)
+            self
+        else
+            self.functionRealmGlobalPtr() orelse return null;
         const console = Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 3) catch return null;
         const console_value = console.value();
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
-            defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, null) catch {
+            defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, realm_global) catch {
                 console_value.free(rt);
                 return null;
             };
@@ -9490,7 +9555,8 @@ pub const Object = extern struct {
             descriptor.Descriptor.data(tag_value, false, false, true),
         ) catch return null;
 
-        const getter = function.nativeFunction(rt, "get userAgent", 0) catch return null;
+        const realm = rt.contextForGlobalIncludingConstructing(global) orelse return null;
+        const getter = function.nativeFunction(realm, "get userAgent", 0) catch return null;
         defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
             const getter_object: *Object = @fieldParentPtr("header", getter_header);
@@ -9528,7 +9594,7 @@ pub const Object = extern struct {
             "now",
             0,
             method_flags,
-            null,
+            global,
             function.nativeBuiltinId(.performance, 1),
         ) catch {
             performance_value.free(rt);
@@ -12315,7 +12381,8 @@ fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []
     try object.defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(tag_value.value(), false, false, true));
 }
 
-fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
+fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8) !*Object {
+    const rt = ctx.runtime;
     const base = try Object.create(rt, class.ids.object, null);
     var base_raw_owned = true;
     errdefer if (base_raw_owned) Object.destroyFromHeader(rt, &base.header);
@@ -12325,7 +12392,7 @@ fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
     base_raw_owned = false;
     base.value().free(rt);
     try defineStringIteratorToStringTag(rt, specific, tag_name);
-    const next = try function.nativeFunction(rt, "next", 0);
+    const next = try function.nativeFunction(ctx, "next", 0);
     defer next.free(rt);
     const next_object = (next.refHeader() orelse return error.TypeError);
     if (!next.isObject()) return error.TypeError;
@@ -12335,7 +12402,8 @@ fn stringIteratorPrototype(rt: *JSRuntime, tag_name: []const u8) !*Object {
     return specific;
 }
 
-pub fn stringIterator(rt: *JSRuntime, receiver: JSValue) !JSValue {
+pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValue {
+    const rt = ctx.runtime;
     var rooted_receiver = receiver;
     var target = JSValue.undefinedValue();
     var prototype_value = JSValue.undefinedValue();
@@ -12355,7 +12423,7 @@ pub fn stringIterator(rt: *JSRuntime, receiver: JSValue) !JSValue {
 
     target = try stringIteratorPrimitiveValue(rooted_receiver);
     defer target.free(rt);
-    const prototype = try stringIteratorPrototype(rt, "String Iterator");
+    const prototype = try stringIteratorPrototype(ctx, "String Iterator");
     prototype_value = prototype.value();
     defer prototype_value.free(rt);
     const object = try Object.create(rt, class.ids.string_iterator, prototype);

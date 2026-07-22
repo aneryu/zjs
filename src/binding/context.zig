@@ -494,9 +494,7 @@ pub const JSContext = struct {
     }
 
     pub fn functionRealmGlobal(self: *JSContext, function_value: JSValue) !?*Object {
-        _ = self;
-        const function_object = try Object.expect(function_value);
-        return exec.object_ops.objectRealmGlobal(function_object);
+        return try exec.call_runtime.functionRealmGlobal(self.core, function_value);
     }
 
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
@@ -565,15 +563,14 @@ pub const JSContext = struct {
             .finalizer = finalizer,
         });
 
-        const function_value = try core.function.nativeFunction(rt, name, length);
+        const realm_global = options.realm_global orelse try self.globalObject();
+        const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
+        const function_value = try core.function.nativeFunction(realm, name, length);
         errdefer function_value.free(rt);
 
         const function_object = try Object.expect(function_value);
         function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
         function_object.externalHostFunctionIdSlot().* = id;
-        const realm_global = options.realm_global orelse try self.globalObject();
-        try function_object.setFunctionRealmGlobalPtr(rt, realm_global);
-
         if (options.with_prototype) {
             const prototype = try Object.create(rt, class.ids.object, null);
             const prototype_value = prototype.value();

@@ -83,9 +83,6 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 /// Property installation resolves names/lengths through standard-global
 /// function lists and the `*MethodId` helpers above; this table is
 /// consumed by the record-dispatch path (`rt.internal_builtins`).
-/// `prepared_call_ok` is uniformly false: no buffer record was ever
-/// prepared-call eligible (`vm_call.nativeBuiltinSupportedWithoutFunctionObject`
-/// returns false for `.buffer`).
 pub const internal_entries = bufferEntries: {
     const Entry = core.host_function.InternalEntry;
     break :bufferEntries [_]Entry{
@@ -153,7 +150,6 @@ fn bufferEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&bufferCall),
     };

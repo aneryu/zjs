@@ -154,7 +154,7 @@ const InstalledBinding = struct {
         const self: *InstalledBinding = @ptrCast(@alignCast(ptr));
         const trampoline = self.descriptor.call orelse return error.TypeError;
         var frame = ffi.CallFrame{
-            .ctx = host_call.ctx,
+            .ctx = @ptrCast(host_call.realm),
             .services = &host_services,
             .host_context = self,
             .this_value = host_call.this_value,
@@ -163,7 +163,7 @@ const InstalledBinding = struct {
         const status = trampoline(&frame);
         const final_status = if (status == .ok) frame.error_status else status;
         if (final_status == .ok) return frame.result;
-        const ctx: *core.JSContext = @ptrCast(@alignCast(host_call.ctx));
+        const ctx = host_call.realm;
         if (final_status == .pending_exception) {
             if (ctx.hasException()) return error.JSException;
             return error.GenericError;
@@ -592,11 +592,11 @@ fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descrip
     errdefer if (!record_registered) installed_binding.deinit();
 
     const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
+    function_object.setNativeFunctionRealm(ctx);
     errdefer function_object.value().free(rt);
 
     const length = std.math.cast(i32, descriptor.length) orelse return error.BindingLengthOverflow;
     try defineFunctionMetadata(rt, function_object, descriptor.name.slice(), length);
-    try function_object.setFunctionRealmGlobalPtr(rt, try exec.zjs_vm.contextGlobal(ctx));
 
     const external_id = try rt.registerExternalHostFunction(.{
         .ptr = @ptrCast(installed_binding),
@@ -679,8 +679,8 @@ fn borrowedErrorMessage(message: ffi.BorrowedBytes) ?[]const u8 {
 }
 
 fn throwPluginErrorMessage(host_call: core.host_function.ExternalCall, status: ffi.Status, message: []const u8) !core.JSValue {
-    const ctx: *core.JSContext = @ptrCast(@alignCast(host_call.ctx));
-    const global = host_call.global orelse host_call.func_obj.functionRealmGlobalPtr() orelse ctx.global orelse try ctx.globalObject();
+    const ctx = host_call.realm;
+    const global = ctx.global orelse try ctx.globalObject();
     const error_name = errorNameFromStatus(status);
     const error_value = exec.exception_ops.createNamedError(ctx, global, error_name, message) catch |err| switch (err) {
         error.InvalidUtf8 => try exec.exception_ops.createNamedError(ctx, global, error_name, fallbackMessageFromStatus(status)),
@@ -1399,9 +1399,8 @@ test "runtime Plugin install tombstones external host records on binding prepara
     try std.testing.expect(record.ptr == @as(*anyopaque, @ptrCast(&tombstone_context)));
     try std.testing.expect(record.finalizer == null);
     try std.testing.expectError(error.TypeError, record.call(record.ptr, .{
-        .ctx = @ptrCast(ctx),
+        .realm = ctx.core,
         .output = null,
-        .global = null,
         .func_obj = target,
         .this_value = core.JSValue.undefinedValue(),
         .args = &.{},

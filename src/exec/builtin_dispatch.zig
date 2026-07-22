@@ -16,6 +16,8 @@ const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
 
+var empty_realm_globals: [0]core.global_slots.Slot = .{};
+
 pub const Bytecode = bytecode.Bytecode;
 pub const Frame = frame_mod.Frame;
 
@@ -29,6 +31,33 @@ const NativeCallEnvironment = struct {
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 };
+
+const CallRealmView = struct {
+    ctx: *core.RealmContext,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+};
+
+/// Resolve the final call carrier only after the caller has selected a record
+/// and completed its call-side preflight. True C_FUNCTION objects switch to
+/// their owned construction realm; C_FUNCTION_DATA and synthetic calls retain
+/// the incoming view. This mirrors js_call_c_function's late
+/// `ctx = p->u.cfunc.realm` assignment (quickjs.c:17586).
+fn finalCallRealmView(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    func_obj: ?*core.Object,
+) HostError!CallRealmView {
+    const object = func_obj orelse return .{ .ctx = ctx, .global = global, .globals = globals };
+    if (object.class_id != core.class.ids.c_function) return .{ .ctx = ctx, .global = global, .globals = globals };
+    const realm = object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+    return .{
+        .ctx = realm,
+        .global = realm.global,
+        .globals = empty_realm_globals[0..],
+    };
+}
 
 /// Exec-side convenience view for native implementations that need more than
 /// their typed cproto arguments. It is reconstructed from the current
@@ -193,31 +222,32 @@ pub inline fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
+    const view = try finalCallRealmView(ctx, global, globals, func_obj);
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
     // builtin captures the native callee before its bytecode caller. The data
     // is borrowed only for this synchronous invocation; snapshotting retains
     // the function value when an Error is materialized.
-    var native_scope = NativeBacktraceScope.init(ctx, func_obj);
+    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     native_scope.push();
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
         .output = output,
-        .global = global,
-        .globals = globals,
+        .global = view.global,
+        .globals = view.globals,
         .func_obj = func_obj,
         .is_constructor = false,
         .new_target = null,
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.runtime.active_native_call;
-    ctx.runtime.active_native_call = &native_env;
-    defer ctx.runtime.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.active_native_call;
+    view.ctx.runtime.active_native_call = &native_env;
+    defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(ctx, this_value, record, args) catch |err| {
-        try materializeRuntimeError(ctx, global, err);
+    return invokeResolvedInternalRecord(view.ctx, this_value, record, args) catch |err| {
+        try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
 }
@@ -397,27 +427,28 @@ fn callConstructRecordImpl(
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.isConstructor()) return null;
-    var native_scope = NativeBacktraceScope.init(ctx, func_obj);
+    const view = try finalCallRealmView(ctx, global, globals, func_obj);
+    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     if (push_native_frame) native_scope.push();
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
         .output = output,
-        .global = global,
-        .globals = globals,
+        .global = view.global,
+        .globals = view.globals,
         .func_obj = func_obj,
         .is_constructor = true,
         .new_target = prototype,
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.runtime.active_native_call;
-    ctx.runtime.active_native_call = &native_env;
-    defer ctx.runtime.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.active_native_call;
+    view.ctx.runtime.active_native_call = &native_env;
+    defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
+    return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
         const host_err = @as(HostError, @errorCast(err));
-        try materializeRuntimeError(ctx, global, host_err);
+        try materializeRuntimeError(view.ctx, view.global, host_err);
         return host_err;
     };
 }
