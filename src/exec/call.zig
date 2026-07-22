@@ -1521,26 +1521,25 @@ pub fn qjsFunctionBindCall(
     return createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args);
 }
 
-pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
+pub fn createRealmObject(parent: *core.JSContext) HostError!core.JSValue {
+    const rt = parent.runtime;
+    const child = try core.JSContext.createWithOptions(rt, .{
+        .stack_size = parent.stack_limit,
+        .track_unhandled_rejections = parent.track_unhandled_rejections,
+        .dynamic_import_callback = parent.dynamic_import_callback,
+        .dynamic_import_userdata = parent.dynamic_import_userdata,
+    });
+    var child_owner = core.context.RealmRef.takeOwned(child);
+    errdefer child_owner.deinit();
+
+    const realm_global = try hostResult(child.globalObject());
     const realm = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 1);
     errdefer realm.value().free(rt);
-    const realm_global = try core.Object.createWithOwnPropertyCapacity(
-        rt,
-        core.class.ids.object,
-        null,
-        rt.standardGlobalOwnPropertyCapacity() + 1,
-    );
-    var realm_global_owned = true;
-    errdefer if (realm_global_owned) realm_global.value().free(rt);
-    _ = try realm_global.ensureRealmPayload(rt);
-    try rt.installStandardGlobals(realm_global);
-    try defineGlobalThisProperty(rt, realm_global);
+    try realm.installOwnedRealmRef(rt, &child_owner);
     try tagRealmEval(rt, realm_global);
     try tagRealmFunctionConstructor(rt, realm_global);
     try tagRealmRegExpAccessorErrors(rt, realm_global);
     try defineObjectProperty(rt, realm, "global", realm_global.value());
-    realm_global.value().free(rt);
-    realm_global_owned = false;
     return realm.value();
 }
 
@@ -3157,7 +3156,7 @@ pub fn qjsEvalGlobalScriptSource(
     const use_global_lexicals = context_global == null or context_global.? != global;
     const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = global.globalLexicals();
+    if (use_global_lexicals) ctx.lexicals = global.globalLexicals(ctx.runtime);
 
     const EvalResult = @typeInfo(@TypeOf(qjsEvalGlobalScriptSource)).@"fn".return_type.?;
     const result: EvalResult = blk: {

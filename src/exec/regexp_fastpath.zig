@@ -691,7 +691,7 @@ pub fn qjsRegExpLegacyAccessor(
 }
 
 pub fn regExpConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (global.cachedRealmValue(.regexp_constructor)) |stored| {
+    if (global.cachedRealmValue(rt, .regexp_constructor)) |stored| {
         return objectFromValue(stored) orelse error.TypeError;
     }
     const key = try rt.internAtom("RegExp");
@@ -987,7 +987,7 @@ pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usiz
 }
 
 pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: *const RegExpMatch, input_len: usize) !void {
-    const legacy = global.installedRealmRegExpLegacyStatics() orelse
+    const legacy = global.installedRealmRegExpLegacyStatics(rt) orelse
         (try global.ensureInstalledRealmRegExpLegacyStatics(rt)) orelse return;
     const already_lazy_no_capture = legacy.lazy_no_capture_match;
 

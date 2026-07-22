@@ -276,8 +276,8 @@ fn arrayConstructorEntry(comptime name: []const u8, comptime length: u8, comptim
 /// fallback (the construct path passes `new_target` instead). Returns null when
 /// the realm cache is not yet populated, in which case the array is created
 /// with the engine default prototype.
-fn arrayPrototypeFromGlobal(global: *core.Object) ?*core.Object {
-    const stored = global.cachedRealmValue(.array_prototype) orelse return null;
+fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
     if (!stored.isObject()) return null;
     const header = stored.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
@@ -317,7 +317,7 @@ fn arrayCall(
         const prototype = if (host_call.is_constructor)
             host_call.new_target
         else if (host_call.global) |global|
-            arrayPrototypeFromGlobal(global)
+            arrayPrototypeFromGlobal(host_call.ctx.runtime, global)
         else
             null;
         return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype) catch |err| switch (err) {

@@ -98,7 +98,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         errdefer if (rt.modules.find(module_name)) |record| {
             if (record.status == .evaluating) {
                 record.status = .errored;
-                if (ctx.hasException()) record.setEvalException(rt, ctx.exception_slot.value.dup());
+                if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception.dup());
             }
         };
         const value = try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing);

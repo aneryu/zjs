@@ -605,7 +605,7 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, source: core.JSValue, flags: core.
 
 fn createRegExpObject(rt: *core.JSRuntime, realm_global: ?*core.Object, prototype: ?*core.Object) !*core.Object {
     if (realm_global) |global| {
-        if (global.cachedRealmValue(.regexp_instance_template)) |stored| {
+        if (global.cachedRealmValue(rt, .regexp_instance_template)) |stored| {
             const template = try core.Object.expect(stored);
             if (template.getPrototype() == prototype) {
                 return core.Object.createRegExpFromPropertyTemplate(rt, template);

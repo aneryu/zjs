@@ -172,8 +172,8 @@ pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (!promise.promiseIsRejected()) return;
     const reason = promise.promiseResult() orelse return;
     ctx.removeUnhandledPromiseRejection(promise.value());
-    if (!ctx.exception_slot.hasException()) return;
-    if (ctx.exception_slot.value.sameValue(reason)) {
+    if (!ctx.hasException()) return;
+    if (ctx.runtime.current_exception.sameValue(reason)) {
         ctx.clearException();
     }
 }

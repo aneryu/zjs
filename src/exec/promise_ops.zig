@@ -103,7 +103,7 @@ const toNumberForAtomics = call_runtime.toNumberForAtomics;
 const valueTruthy = coercion_ops.valueTruthy;
 
 pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    if (global.cachedPromiseProto()) |prototype| return prototype;
+    if (global.cachedPromiseProto(rt)) |prototype| return prototype;
     const promise_atom = rt.internAtom("Promise") catch return null;
     defer rt.atoms.free(promise_atom);
     const promise_value = global.getProperty(promise_atom);
@@ -115,7 +115,7 @@ pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*c
 }
 
 pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
-    if (cachedRealmObject(global, .async_function_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .async_function_prototype)) |stored| return stored;
 
     const prototype = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const prototype_value = prototype.value();
@@ -139,7 +139,7 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
 }
 
 pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (cachedRealmObject(global, .async_iterator_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .async_iterator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
@@ -162,7 +162,7 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
 }
 
 pub fn asyncGeneratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (cachedRealmObject(global, .async_generator_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .async_generator_prototype)) |stored| return stored;
     const async_iterator_prototype = try asyncIteratorPrototypeFromGlobal(rt, global);
     const object = try core.Object.create(rt, core.class.ids.object, async_iterator_prototype);
     var object_raw_owned = true;
@@ -197,7 +197,7 @@ pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, object: *core.Object,
 }
 
 pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
-    if (cachedRealmObject(global, .async_generator_function_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .async_generator_function_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
     var object_value_owned = true;
@@ -2068,7 +2068,7 @@ pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) 
     // the default species. The realm slot is populated at install time
     // (installPromiseExtras); the global read remains only as a fallback for
     // bare non-realm globals (unit-test contexts).
-    if (global.cachedRealmValue(.promise_constructor)) |stored| return stored.dup();
+    if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |stored| return stored.dup();
     const promise_key = try ctx.runtime.internAtom("Promise");
     defer ctx.runtime.atoms.free(promise_key);
     return global.getProperty(promise_key);
@@ -2593,7 +2593,7 @@ pub const PromiseRejectionReason = struct {
 pub fn promiseRejectionReason(ctx: *core.JSContext, global: *core.Object, err: anytype) PromiseRejectionReason {
     if (ctx.hasException()) {
         return .{
-            .value = ctx.exception_slot.value.dup(),
+            .value = ctx.runtime.current_exception.dup(),
             .from_exception = true,
         };
     }
@@ -2639,14 +2639,16 @@ pub fn constructAsyncGeneratorFunctionFromSource(
 }
 
 pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
-    const ctx = waiter.ctx.?;
-    if (waiter.promise) |promise| promise.free(ctx.runtime);
+    const ctx = waiter.realm.borrow().?;
+    const rt = ctx.runtime;
+    if (waiter.promise) |promise| promise.free(rt);
     atomicsReleaseWaiterKey(&waiter.key);
-    ctx.runtime.memory.destroy(AtomicsWaiter, waiter);
+    waiter.realm.deinit();
+    rt.memory.destroy(AtomicsWaiter, waiter);
 }
 
 pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, result: []const u8) !void {
-    const ctx = waiter.ctx orelse return;
+    const ctx = waiter.realm.borrow() orelse return;
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
     if (promise_object.promiseResultSlot().* != null) return;
@@ -2741,7 +2743,7 @@ pub fn qjsAtomicsWaitAsync(
     waiter.* = .{
         .key = key,
         .promise = promise.dup(),
-        .ctx = ctx,
+        .realm = core.RealmRef.retain(ctx),
         .deadline = deadline,
     };
     atomicsLinkAsyncWaiter(waiter);

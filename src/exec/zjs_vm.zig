@@ -181,16 +181,20 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     if (ctx.global) |existing| return existing;
     const global_object = try core.Object.createWithOwnPropertyCapacity(
         ctx.runtime,
-        core.class.ids.object,
+        core.class.ids.global_object,
         null,
         call_mod.contextGlobalOwnPropertyCapacity(ctx.runtime),
     );
     errdefer global_object.value().free(ctx.runtime);
-    _ = try global_object.ensureRealmPayload(ctx.runtime);
+    _ = try global_object.ensureGlobalPayload(ctx.runtime);
+    // Publish the context/global association before intrinsic bootstrap: realm
+    // cache accessors now resolve state through the runtime context list.
+    ctx.global = global_object;
+    errdefer ctx.global = null;
     try call_mod.installHostGlobals(ctx.runtime, global_object);
     const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);
-    if (ctx.runtime.preallocated_oom_error == null) {
+    if (ctx.preallocated_oom_error == null) {
         // Preallocate the out-of-memory catch value while the heap still has
         // room; when a memory limit is later exhausted, the catch machinery
         // can throw this object without allocating (QuickJS analogue).
@@ -198,7 +202,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         // `createNamedErrorWithoutStack`): a backtrace captured here would
         // describe startup, and the exhausted-heap delivery path
         // (`tryCatchInFrame`) must not allocate one.
-        ctx.runtime.preallocated_oom_error = exception_ops.createPreallocatedOutOfMemoryError(
+        ctx.preallocated_oom_error = exception_ops.createPreallocatedOutOfMemoryError(
             ctx.runtime,
             global_object,
         ) catch null;
@@ -206,7 +210,6 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     const next_eval = global_object.getProperty(core.atom.predefinedId("eval", .string).?);
     const old_eval = ctx.eval_function;
     ctx.eval_function = next_eval;
-    ctx.global = global_object;
     old_eval.free(ctx.runtime);
     return global_object;
 }

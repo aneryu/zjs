@@ -349,7 +349,7 @@ test "JSContext.toString performs ECMAScript ToString instead of tag assertion" 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const wrapper: *zjs.JSContext = @ptrCast(ctx);
+    var wrapper = zjs.JSContext.borrowCore(ctx);
     const object = try wrapper.eval("({ toString() { return 'semantic-string'; } })", .{});
     defer object.free(rt);
     try std.testing.expect(object.asString() == null);

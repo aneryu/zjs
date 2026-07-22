@@ -298,7 +298,7 @@ pub fn rejectedPromiseForRuntimeError(
     prototype: ?*core.Object,
 ) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
-        const thrown_value = ctx.exception_slot.value;
+        const thrown_value = ctx.runtime.current_exception;
         const promise = try core.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
         ctx.clearException();
         return promise;
@@ -465,7 +465,7 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (!ctx.hasException()) return false;
     if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
-    const object = objectFromValue(ctx.exception_slot.value) orelse return false;
+    const object = objectFromValue(ctx.runtime.current_exception) orelse return false;
     const name_value = object.getProperty(core.atom.ids.name);
     defer name_value.free(ctx.runtime);
     const string = name_value.asStringBody() orelse return false;

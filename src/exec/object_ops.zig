@@ -140,7 +140,7 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
     // already takes this fast path; `{}` literals went through the slow path and it
     // showed up as ~7.7% of empty-object allocation. `Object.prototype` is
     // non-writable/non-configurable so the cached value never goes stale.
-    if (global.cachedRealmValue(.object_prototype)) |stored| {
+    if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
         return property_ops.expectObject(stored) catch null;
     }
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
@@ -178,8 +178,8 @@ pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
     return property_ops.expectObject(prototype_value) catch null;
 }
 
-pub fn cachedRealmObject(global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
-    const stored = global.cachedRealmValue(slot) orelse return null;
+pub fn cachedRealmObject(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
+    const stored = global.cachedRealmValue(rt, slot) orelse return null;
     return property_ops.expectObject(stored) catch null;
 }
 
@@ -192,7 +192,7 @@ pub fn primitivePrototypeFromRealmOrGlobal(
     // Mirror QuickJS JS_GetPrototypePrimitive (quickjs.c:7995-8011): primitive
     // prototype lookup reads ctx->class_proto[...] directly. The realm slot is
     // the intrinsic pointer; fallback preserves bare-runtime/global-walk behavior.
-    if (cachedRealmObject(global, slot)) |stored| return stored;
+    if (cachedRealmObject(rt, global, slot)) |stored| return stored;
     return constructorPrototypeFromGlobalAtom(rt, global, constructor_atom);
 }
 
@@ -250,7 +250,7 @@ pub fn materializeFrameThisBinding(ctx: *core.JSContext, global: *core.Object, f
 }
 
 pub fn generatorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (cachedRealmObject(global, .generator_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .generator_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global) orelse objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
@@ -282,7 +282,7 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *core.Ob
 }
 
 pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
-    if (cachedRealmObject(global, .generator_function_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .generator_function_prototype)) |stored| return stored;
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
     var object_value_owned = true;
@@ -941,7 +941,7 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
 }
 
 pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (cachedRealmObject(global, .callsite_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .callsite_prototype)) |stored| return stored;
     const prototype = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var prototype_raw_owned = true;
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, &prototype.header);
@@ -2295,7 +2295,7 @@ pub fn iteratorIsOnIteratorPrototypeChain(rt: *core.JSRuntime, global: *core.Obj
 }
 
 pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (cachedRealmObject(global, .wrap_for_valid_iterator_prototype)) |stored| return stored;
+    if (cachedRealmObject(rt, global, .wrap_for_valid_iterator_prototype)) |stored| return stored;
 
     const proto = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global));
     var proto_raw_owned = true;

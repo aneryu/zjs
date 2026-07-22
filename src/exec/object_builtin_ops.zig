@@ -1125,8 +1125,9 @@ test "Object.groupBy new group define failure releases group once" {
         error.TypeError,
         appendObjectGroupByValue(ctx, null, global, out.value(), out, key, core.JSValue.int32(1), null, null),
     );
-    // Shapes are GC objects now: global and out share one live empty root shape.
-    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
+    // RealmContext and Shapes are GC objects: global and out share one live
+    // empty root shape, alongside their owning context.
+    try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
 }
 
 pub fn qjsObjectPreventExtensionsCall(

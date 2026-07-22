@@ -1,6 +1,7 @@
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
+const context_mod = @import("context.zig");
 const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
@@ -723,11 +724,10 @@ pub const RealmValueSlot = enum(u8) {
 
 const realm_value_slot_count: usize = @intFromEnum(RealmValueSlot.count);
 
-pub const RealmPayload = struct {
-    cached_function_proto: ?*Object = null,
-    cached_promise_proto: ?*Object = null,
-    cached_values: [realm_value_slot_count]?JSValue = @splat(null),
-    global_lexicals: ?*Object = null,
+/// State belonging to the global *object*, not to the realm.  Intrinsics,
+/// prototypes, eval, lexical state, random state and construction templates
+/// are owned by `RealmContext`.
+pub const GlobalPayload = struct {
     // qjs JSGlobalObject.uninitialized_vars (quickjs.c js_global_object_get_-
     // uninitialized_var, 17069-17096): side table of shared UNINITIALIZED
     // var-ref cells for globals captured before any declaration exists. A later
@@ -735,43 +735,24 @@ pub const RealmPayload = struct {
     // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
     // capture aliases the new binding.
     uninitialized_vars: ?*Object = null,
-    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
-    /// Annex-B RegExp constructor statics are realm state, not function-object
-    /// state. QuickJS does not expose these extensions, but keeping zjs's
-    /// compatibility snapshot beside the realm caches avoids routing every
-    /// successful match through the RegExp constructor's native+rare payloads.
-    regexp_legacy_statics: ?*RegExpLegacyStatics = null,
-
-    pub fn destroy(self: *RealmPayload, rt: *JSRuntime) void {
-        destroyOptionalObjectRef(rt, &self.cached_function_proto);
-        destroyOptionalObjectRef(rt, &self.cached_promise_proto);
-        destroyOptionalValueSlots(rt, &self.cached_values);
-        const global_lexicals = self.global_lexicals;
-        self.global_lexicals = null;
-        if (global_lexicals) |env| {
-            if (rt.gc.phase != .deinit) env.value().free(rt);
-        }
+    pub fn destroy(self: *GlobalPayload, rt: *JSRuntime) void {
         const uninitialized_vars = self.uninitialized_vars;
         self.uninitialized_vars = null;
         if (uninitialized_vars) |env| {
             if (rt.gc.phase != .deinit) env.value().free(rt);
         }
-        const shared_lazy_native_functions = self.shared_lazy_native_functions;
-        self.shared_lazy_native_functions = null;
-        if (shared_lazy_native_functions) |cache| {
-            for (cache) |*slot| {
-                const cached = slot.*;
-                slot.* = null;
-                if (cached) |stored| stored.free(rt);
-            }
-            rt.memory.destroy([runtime_mod.shared_lazy_native_function_slots]?JSValue, cache);
-        }
-        const legacy_statics = self.regexp_legacy_statics;
-        self.regexp_legacy_statics = null;
-        if (legacy_statics) |legacy| {
-            legacy.destroy(rt);
-            rt.memory.destroy(RegExpLegacyStatics, legacy);
-        }
+        self.* = .{};
+    }
+};
+
+/// Host-visible `$262.createRealm()` record.  Its one strong edge is explicit:
+/// the record may escape the creating call, so it owns a `RealmRef` rather
+/// than borrowing a context pointer.
+pub const RealmRecordPayload = struct {
+    realm: context_mod.RealmRef = .{},
+
+    pub fn destroy(self: *RealmRecordPayload) void {
+        self.realm.deinit();
         self.* = .{};
     }
 };
@@ -1573,10 +1554,15 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroy(rt);
             rt.memory.destroy(DisposableStackPayload, typed);
         },
-        .realm => {
-            const typed: *RealmPayload = @ptrCast(@alignCast(ptr));
+        .global => {
+            const typed: *GlobalPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(RealmPayload, typed);
+            rt.memory.destroy(GlobalPayload, typed);
+        },
+        .realm_record => {
+            const typed: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy();
+            rt.destroyRuntime(RealmRecordPayload, typed);
         },
         .buffer => {
             const typed: *BufferPayload = @ptrCast(@alignCast(ptr));
@@ -1660,7 +1646,7 @@ pub const ObjectFlags = packed struct(u16) {
     has_exotic_methods: bool = false,
     is_borrowed_reference_holder: bool = false,
     /// Actual active payload state. This is distinct from the class's declared
-    /// payload kind because ordinary/realm payloads are attached lazily.
+    /// payload kind because ordinary/global payloads are attached lazily.
     class_payload_kind: class.PayloadKind = .none,
 };
 
@@ -2236,7 +2222,7 @@ pub const Object = extern struct {
     /// `allocClassPayload` entirely.
     inline fn payloadKindAllocates(payload_kind: class.PayloadKind) bool {
         return switch (payload_kind) {
-            .none, .ordinary, .realm => false,
+            .none, .ordinary, .global => false,
             else => true,
         };
     }
@@ -2357,7 +2343,12 @@ pub const Object = extern struct {
                 payload.* = .{};
                 return @ptrCast(payload);
             },
-            .none, .ordinary, .realm => unreachable,
+            .realm_record => {
+                const payload = try rt.createRuntime(RealmRecordPayload);
+                payload.* = .{};
+                return @ptrCast(payload);
+            },
+            .none, .ordinary, .global => unreachable,
         }
     }
 
@@ -2390,7 +2381,8 @@ pub const Object = extern struct {
             .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
             .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
             .disposable_stack => rt.memory.destroy(DisposableStackPayload, @ptrCast(@alignCast(ptr))),
-            .none, .ordinary, .realm => {},
+            .realm_record => rt.destroyRuntime(RealmRecordPayload, @ptrCast(@alignCast(ptr))),
+            .none, .ordinary, .global => {},
         }
     }
 
@@ -2521,11 +2513,11 @@ pub const Object = extern struct {
     }
 
     pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
-        const payload = try self.ensureRealmPayload(rt);
-        if (payload.shared_lazy_native_functions != null) return;
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        if (ctx.shared_lazy_native_functions != null) return;
         const cache = try rt.createRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue);
         cache.* = @splat(null);
-        payload.shared_lazy_native_functions = cache;
+        ctx.shared_lazy_native_functions = cache;
     }
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
@@ -2538,30 +2530,58 @@ pub const Object = extern struct {
         return payload;
     }
 
-    pub fn globalLexicals(self: *const Object) ?*Object {
-        return if (self.realmPayloadConst()) |payload| payload.global_lexicals else null;
+    pub fn globalLexicals(self: *const Object, rt: *const JSRuntime) ?*Object {
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        return ctx.lexicals;
     }
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
-        (try self.ensureRealmPayload(rt)).global_lexicals = v;
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        ctx.lexicals = v;
     }
 
     // qjs u.global_object.uninitialized_vars accessors (quickjs.c:17069).
     pub fn globalUninitializedVars(self: *const Object) ?*Object {
-        return if (self.realmPayloadConst()) |payload| payload.uninitialized_vars else null;
+        return if (self.globalPayloadConst()) |payload| payload.uninitialized_vars else null;
     }
 
     pub fn setGlobalUninitializedVars(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
-        (try self.ensureRealmPayload(rt)).uninitialized_vars = v;
+        (try self.ensureGlobalPayload(rt)).uninitialized_vars = v;
     }
 
-    pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*RealmPayload {
-        if (self.realmPayload()) |payload| return payload;
-        const payload = try rt.createRuntime(RealmPayload);
+    pub fn ensureGlobalPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
+        if (self.globalPayload()) |payload| return payload;
+        std.debug.assert(self.class_id == class.ids.global_object);
+        const payload = try rt.createRuntime(GlobalPayload);
         payload.* = .{};
         self.u.payload = @ptrCast(payload);
-        self.flags.class_payload_kind = .realm;
+        self.flags.class_payload_kind = .global;
         return payload;
+    }
+
+    /// Transitional source-compatible spelling for internal fixtures.  It now
+    /// establishes explicit global-object class identity; no realm state is
+    /// attached to the object.
+    pub fn ensureRealmPayload(self: *Object, rt: *JSRuntime) !*GlobalPayload {
+        if (self.class_id == class.ids.object) self.class_id = class.ids.global_object;
+        return self.ensureGlobalPayload(rt);
+    }
+
+    pub fn installOwnedRealmRef(self: *Object, rt: *JSRuntime, owner: *context_mod.RealmRef) !void {
+        std.debug.assert(self.u.payload == null);
+        std.debug.assert(owner.borrow() != null);
+        const payload = try rt.createRuntime(RealmRecordPayload);
+        payload.* = .{ .realm = owner.* };
+        owner.* = .{};
+        self.u.payload = @ptrCast(payload);
+        self.flags.class_payload_kind = .realm_record;
+    }
+
+    pub fn realmContext(self: *const Object) ?*context_mod.RealmContext {
+        if (self.flags.class_payload_kind != .realm_record) return null;
+        const ptr = self.u.payload orelse return null;
+        const payload: *const RealmRecordPayload = @ptrCast(@alignCast(ptr));
+        return payload.realm.borrow();
     }
 
     const bytecode_function_aux_tag: usize = 1;
@@ -2641,65 +2661,65 @@ pub const Object = extern struct {
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const payload = try self.ensureRealmPayload(rt);
-        return &payload.cached_function_proto;
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        return &ctx.cached_function_proto;
     }
 
     pub fn setCachedFunctionProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const payload = try self.ensureRealmPayload(rt);
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        const old_prototype = payload.cached_function_proto;
-        payload.cached_function_proto = prototype;
+        const old_prototype = ctx.cached_function_proto;
+        ctx.cached_function_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
     }
 
-    pub fn cachedFunctionProto(self: *const Object) ?*Object {
-        if (self.realmPayloadConst()) |payload| return payload.cached_function_proto;
-        return null;
+    pub fn cachedFunctionProto(self: *const Object, rt: *const JSRuntime) ?*Object {
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        return ctx.cached_function_proto;
     }
 
     pub fn cachedPromiseProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
-        const payload = try self.ensureRealmPayload(rt);
-        return &payload.cached_promise_proto;
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        return &ctx.cached_promise_proto;
     }
 
     pub fn setCachedPromiseProto(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
-        const payload = try self.ensureRealmPayload(rt);
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        const old_prototype = payload.cached_promise_proto;
-        payload.cached_promise_proto = prototype;
+        const old_prototype = ctx.cached_promise_proto;
+        ctx.cached_promise_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
     }
 
-    pub fn cachedPromiseProto(self: *const Object) ?*Object {
-        if (self.realmPayloadConst()) |payload| return payload.cached_promise_proto;
-        return null;
+    pub fn cachedPromiseProto(self: *const Object, rt: *const JSRuntime) ?*Object {
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        return ctx.cached_promise_proto;
     }
 
     pub fn cachedRealmValueSlot(self: *Object, rt: *JSRuntime, slot: RealmValueSlot) !*?JSValue {
-        const payload = try self.ensureRealmPayload(rt);
-        return &payload.cached_values[@intFromEnum(slot)];
+        const ctx = rt.contextForGlobal(self) orelse return error.InvalidBuiltinRegistry;
+        return &ctx.cached_values[@intFromEnum(slot)];
     }
 
-    pub fn cachedRealmValue(self: *const Object, slot: RealmValueSlot) ?JSValue {
-        if (self.realmPayloadConst()) |payload| return payload.cached_values[@intFromEnum(slot)];
-        return null;
+    pub fn cachedRealmValue(self: *const Object, rt: *const JSRuntime, slot: RealmValueSlot) ?JSValue {
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        return ctx.cached_values[@intFromEnum(slot)];
     }
 
     pub fn cachedThrowTypeErrorIntrinsicSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
         return self.cachedRealmValueSlot(rt, .throw_type_error_intrinsic);
     }
 
-    pub fn cachedThrowTypeErrorIntrinsic(self: *const Object) ?JSValue {
-        return self.cachedRealmValue(.throw_type_error_intrinsic);
+    pub fn cachedThrowTypeErrorIntrinsic(self: *const Object, rt: *const JSRuntime) ?JSValue {
+        return self.cachedRealmValue(rt, .throw_type_error_intrinsic);
     }
 
-    fn sharedLazyNativeFunctionSlot(self: *Object, slot: u8) ?*?JSValue {
+    fn sharedLazyNativeFunctionSlot(self: *Object, rt: *JSRuntime, slot: u8) ?*?JSValue {
         if (slot == 0 or slot > runtime_mod.shared_lazy_native_function_slots) return null;
-        const payload = self.realmPayload() orelse return null;
-        const cache = payload.shared_lazy_native_functions orelse return null;
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        const cache = ctx.shared_lazy_native_functions orelse return null;
         return &cache[slot - 1];
     }
 
@@ -2821,7 +2841,8 @@ pub const Object = extern struct {
             .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
             .std_file => self.destroyStdFilePayload(rt),
             .disposable_stack => self.destroyDisposableStackPayload(rt),
-            .realm => self.destroyRealmPayload(rt),
+            .global => self.destroyGlobalPayload(rt),
+            .realm_record => self.destroyRealmRecordPayload(rt),
         }
         if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         const object_shape = self.shape_ref;
@@ -3335,11 +3356,10 @@ pub const Object = extern struct {
         return self.class_id == class.ids.proxy;
     }
 
-    /// Global objects are precisely the objects carrying the realm payload.
-    /// This removes a duplicate identity bit and mirrors qjs's context-owned
-    /// global-object state rather than allowing arbitrary objects to masquerade.
+    /// Global-object identity is a class, independent of the owning realm
+    /// context's state and lifetime.
     pub inline fn isGlobal(self: *const Object) bool {
-        return self.flags.class_payload_kind == .realm;
+        return self.class_id == class.ids.global_object;
     }
 
     pub inline fn hasNullPrototype(self: *const Object) bool {
@@ -5384,20 +5404,20 @@ pub const Object = extern struct {
 
     /// Return the realm's Annex-B RegExp snapshot only when the intrinsic
     /// constructor was installed. The cache-presence check and state lookup
-    /// share one RealmPayload load, mirroring a direct JSContext field read.
-    pub inline fn installedRealmRegExpLegacyStatics(self: *Object) ?*RegExpLegacyStatics {
-        const payload = self.realmPayload() orelse return null;
-        if (payload.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
-        return payload.regexp_legacy_statics;
+    /// share one RealmContext lookup, mirroring a direct JSContext field read.
+    pub inline fn installedRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) ?*RegExpLegacyStatics {
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
+        return ctx.regexp_legacy_statics;
     }
 
     pub fn ensureInstalledRealmRegExpLegacyStatics(self: *Object, rt: *JSRuntime) !?*RegExpLegacyStatics {
-        const payload = self.realmPayload() orelse return null;
-        if (payload.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
-        if (payload.regexp_legacy_statics) |legacy| return legacy;
+        const ctx = rt.contextForGlobal(self) orelse return null;
+        if (ctx.cached_values[@intFromEnum(RealmValueSlot.regexp_constructor)] == null) return null;
+        if (ctx.regexp_legacy_statics) |legacy| return legacy;
         const legacy = try rt.createRuntime(RegExpLegacyStatics);
         legacy.* = .{};
-        payload.regexp_legacy_statics = legacy;
+        ctx.regexp_legacy_statics = legacy;
         return legacy;
     }
 
@@ -6699,24 +6719,34 @@ pub const Object = extern struct {
         rt.memory.destroy(DisposableStackPayload, payload);
     }
 
-    fn realmPayload(self: *Object) ?*RealmPayload {
-        if (self.flags.class_payload_kind != .realm) return null;
+    fn globalPayload(self: *Object) ?*GlobalPayload {
+        if (self.flags.class_payload_kind != .global) return null;
         const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn realmPayloadConst(self: *const Object) ?*const RealmPayload {
-        if (self.flags.class_payload_kind != .realm) return null;
+    fn globalPayloadConst(self: *const Object) ?*const GlobalPayload {
+        if (self.flags.class_payload_kind != .global) return null;
         const ptr = self.u.payload orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn destroyRealmPayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.realmPayload() orelse return;
+    fn destroyGlobalPayload(self: *Object, rt: *JSRuntime) void {
+        const payload = self.globalPayload() orelse return;
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(RealmPayload, payload);
+        rt.destroyRuntime(GlobalPayload, payload);
+    }
+
+    fn destroyRealmRecordPayload(self: *Object, rt: *JSRuntime) void {
+        if (self.flags.class_payload_kind != .realm_record) return;
+        const ptr = self.u.payload orelse return;
+        const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
+        self.u.payload = null;
+        self.flags.class_payload_kind = .none;
+        payload.destroy();
+        rt.destroyRuntime(RealmRecordPayload, payload);
     }
 
     fn bufferPayload(self: *Object) ?*BufferPayload {
@@ -7065,12 +7095,16 @@ pub const Object = extern struct {
                 const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));
                 shape_ref.traceChildEdgesNoFail(rt, visitor);
             },
+            .realm_context => {
+                const ctx: *context_mod.JSContext = @alignCast(@fieldParentPtr("header", header));
+                ctx.traceChildEdgesNoFail(visitor);
+            },
             else => {},
         }
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape;
+        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape or header.metaConst().kind == .realm_context;
     }
 
     const DecrefVisitor = struct {
@@ -7091,6 +7125,10 @@ pub const Object = extern struct {
 
         pub fn visitShape(self: DecrefVisitor, shape_ref: *shape.Shape) void {
             self.visitHeader(&shape_ref.header);
+        }
+
+        pub fn visitRealm(self: DecrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
+            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
         }
 
         pub fn visitSymbol(self: DecrefVisitor, symbol: *u32) void {
@@ -7133,6 +7171,10 @@ pub const Object = extern struct {
 
         pub fn visitShape(self: ScanIncrefVisitor, shape_ref: *shape.Shape) void {
             self.visitHeader(&shape_ref.header);
+        }
+
+        pub fn visitRealm(self: ScanIncrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
+            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
         }
 
         pub fn visitSymbol(self: ScanIncrefVisitor, symbol: *u32) void {
@@ -7181,6 +7223,10 @@ pub const Object = extern struct {
 
         pub fn visitShape(self: ScanRestoreVisitor, shape_ref: *shape.Shape) void {
             self.visitHeader(&shape_ref.header);
+        }
+
+        pub fn visitRealm(self: ScanRestoreVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
+            if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
         }
 
         pub fn visitSymbol(self: ScanRestoreVisitor, symbol: *u32) void {
@@ -7403,7 +7449,7 @@ pub const Object = extern struct {
         {
             var cursor = garbage.head;
             while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape) garbage_count += 1;
+                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape or h.meta().kind == .realm_context) garbage_count += 1;
             }
         }
 
@@ -7414,6 +7460,7 @@ pub const Object = extern struct {
         var garbage_bytecodes: gc.HeaderList = .{};
         var garbage_var_refs: gc.HeaderList = .{};
         var garbage_shapes: gc.HeaderList = .{};
+        var garbage_contexts: gc.HeaderList = .{};
         garbage_committed = true;
         while (garbage.popFront()) |h| {
             switch (h.meta().kind) {
@@ -7421,6 +7468,7 @@ pub const Object = extern struct {
                 .function_bytecode => garbage_bytecodes.append(h),
                 .var_ref => garbage_var_refs.append(h),
                 .shape => garbage_shapes.append(h),
+                .realm_context => garbage_contexts.append(h),
                 else => unreachable,
             }
         }
@@ -7450,6 +7498,10 @@ pub const Object = extern struct {
         // until their object owners have released the capture edges.
         while (garbage_objects.popFront()) |h| {
             destroyFromHeader(rt, h);
+        }
+        while (garbage_contexts.popFront()) |h| {
+            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+            context_mod.JSContext.destroyFromHeader(rt, h);
         }
         while (garbage_bytecodes.popFront()) |h| {
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
@@ -7498,6 +7550,7 @@ pub const Object = extern struct {
                 },
                 .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
+                .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
         }
@@ -7726,6 +7779,19 @@ pub const Object = extern struct {
                 }
             }
 
+            inline fn callVisitRealm(vis: anytype, ctx_ptr: *?*context_mod.RealmContext) !void {
+                const VisType = @TypeOf(vis);
+                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
+                if (comptime @hasDecl(CleanType, "visitRealm")) {
+                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitRealm)).@"fn".return_type.?;
+                    if (comptime @typeInfo(ReturnType) == .error_union) {
+                        try vis.visitRealm(ctx_ptr);
+                    } else {
+                        vis.visitRealm(ctx_ptr);
+                    }
+                }
+            }
+
             inline fn traceOptValue(vis: anytype, opt_val: anytype) !void {
                 if (opt_val.*) |*stored| try callVisitValue(vis, stored);
             }
@@ -7771,15 +7837,15 @@ pub const Object = extern struct {
         };
 
         try Helper.callVisitShape(visitor, self.shape_ref);
-        if (self.realmPayload()) |payload| {
-            try Helper.callVisitObject(visitor, &payload.global_lexicals);
+        if (self.flags.class_payload_kind == .realm_record) {
+            const ptr = self.u.payload orelse unreachable;
+            const payload: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
+            var realm = payload.realm.borrow();
+            try Helper.callVisitRealm(visitor, &realm);
+        }
+        if (self.globalPayload()) |payload| {
             // qjs js_global_object_mark (quickjs.c:17062-17067).
             try Helper.callVisitObject(visitor, &payload.uninitialized_vars);
-            if (payload.shared_lazy_native_functions) |cache| {
-                for (cache) |*maybe_cached| {
-                    try Helper.traceOptValue(visitor, maybe_cached);
-                }
-            }
         }
         if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| {
             try Helper.traceOptValue(visitor, slot);
@@ -7846,21 +7912,6 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.typed_array_array_buffer_prototype);
             try Helper.traceOptValue(visitor, &payload.error_stack);
             try Helper.traceOptValue(visitor, &payload.error_stack_sites);
-        }
-        if (self.realmPayload()) |payload| {
-            try Helper.callVisitObject(visitor, &payload.cached_function_proto);
-            try Helper.callVisitObject(visitor, &payload.cached_promise_proto);
-            for (&payload.cached_values) |*slot| {
-                try Helper.traceOptValue(visitor, slot);
-            }
-            if (payload.regexp_legacy_statics) |legacy| {
-                try Helper.traceOptValue(visitor, &legacy.input);
-                try Helper.traceOptValue(visitor, &legacy.last_match);
-                try Helper.traceOptValue(visitor, &legacy.last_paren);
-                try Helper.traceOptValue(visitor, &legacy.left_context);
-                try Helper.traceOptValue(visitor, &legacy.right_context);
-                for (&legacy.captures) |*slot| try Helper.traceOptValue(visitor, slot);
-            }
         }
         for (self.arrayElements()) |*stored| {
             try Helper.callVisitValue(visitor, stored);
@@ -8303,6 +8354,7 @@ pub const Object = extern struct {
 
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
+                    countFunctionBytecodeRefsFromVisitedRealms(rt, function_bytecode, visited) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
                 if (internal_refs == 0) {
                     continue;
@@ -8326,6 +8378,7 @@ pub const Object = extern struct {
                 const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
+                    countFunctionBytecodeRefsFromVisitedRealms(rt, function_bytecode, visited) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
                 if (internal_refs == function_bytecode.header.meta().rc) continue;
 
@@ -8352,6 +8405,45 @@ pub const Object = extern struct {
         while (iterator.next()) |address| {
             const current: *Object = @ptrFromInt(address.*);
             count += try current.countDirectFunctionBytecodeRefs(rt, function_bytecode);
+        }
+        return count;
+    }
+
+    /// Realm-owned values used to live in the global object's payload and were
+    /// therefore counted by `countDirectFunctionBytecodeRefs`. Preserve that
+    /// ownership accounting after moving them onto RealmContext, but only for
+    /// realms whose global participates in the visited internal graph.
+    fn countFunctionBytecodeRefsFromVisitedRealms(
+        rt: *JSRuntime,
+        function_bytecode: *const FunctionBytecode,
+        visited: *const ObjectVisitSet,
+    ) usize {
+        var count: usize = 0;
+        var current = rt.firstContext();
+        while (current) |ctx| : (current = ctx.runtime_next) {
+            const global = ctx.global orelse continue;
+            if (!visited.contains(@intFromPtr(global))) continue;
+
+            count += countFunctionBytecodeValueRef(ctx.eval_function, function_bytecode);
+            count += countOptionalFunctionBytecodeRef(ctx.preallocated_oom_error, function_bytecode);
+            for (ctx.class_prototypes) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
+            for (ctx.cached_values) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
+            if (ctx.shared_lazy_native_functions) |cache| {
+                for (cache) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
+            }
+            if (ctx.regexp_legacy_statics) |legacy| {
+                count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);
+                count += countOptionalFunctionBytecodeRef(legacy.last_match, function_bytecode);
+                count += countOptionalFunctionBytecodeRef(legacy.last_paren, function_bytecode);
+                count += countOptionalFunctionBytecodeRef(legacy.left_context, function_bytecode);
+                count += countOptionalFunctionBytecodeRef(legacy.right_context, function_bytecode);
+                for (legacy.captures) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
+            }
+            for (ctx.unhandled_rejections) |entry| {
+                count += countFunctionBytecodeValueRef(entry.promise, function_bytecode);
+                count += countFunctionBytecodeValueRef(entry.reason, function_bytecode);
+            }
+            for (ctx.pending_promise_jobs) |job| count += countFunctionBytecodeValueRef(job.value, function_bytecode);
         }
         return count;
     }
@@ -8391,11 +8483,6 @@ pub const Object = extern struct {
         // it cannot reference this bytecode anyway.
         const counted = self.shape_ref.prop_count;
         for (self.prop_values[0..counted], 0..) |entry, index| count += countSlotFunctionBytecodeRefs(self.propFlagsAt(index), entry.slot, function_bytecode);
-        if (self.realmPayloadConst()) |payload| {
-            if (payload.shared_lazy_native_functions) |cache| {
-                for (cache) |maybe_cached| count += countOptionalFunctionBytecodeRef(maybe_cached, function_bytecode);
-            }
-        }
         if (self.ordinaryPayloadConst()) |payload| {
             count += countOptionalFunctionBytecodeRef(payload.callsite_file, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.callsite_function, function_bytecode);
@@ -8412,17 +8499,6 @@ pub const Object = extern struct {
             count += countOptionalFunctionBytecodeRef(payload.typed_array_array_buffer_prototype, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.error_stack, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.error_stack_sites, function_bytecode);
-        }
-        if (self.realmPayloadConst()) |payload| {
-            for (payload.cached_values) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            if (payload.regexp_legacy_statics) |legacy| {
-                count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.last_match, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.last_paren, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.left_context, function_bytecode);
-                count += countOptionalFunctionBytecodeRef(legacy.right_context, function_bytecode);
-                for (legacy.captures) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            }
         }
         for (self.arrayElements()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.typedArrayBuffer(), function_bytecode);
@@ -9040,7 +9116,7 @@ pub const Object = extern struct {
             @ptrFromInt(info.host_function_realm_global)
         else
             self.functionRealmGlobalPtr();
-        return if (realm_global) |global| global.cachedFunctionProto() else null;
+        return if (realm_global) |global| global.cachedFunctionProto(info.rt) else null;
     }
 
     fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
@@ -9149,7 +9225,7 @@ pub const Object = extern struct {
         if (info.host_function_realm_global == 0) return null;
         const global: *Object = @ptrFromInt(info.host_function_realm_global);
         global.ensureSharedLazyNativeFunctionCache(info.rt) catch return null;
-        return global.sharedLazyNativeFunctionSlot(info.shared_native_cache_slot);
+        return global.sharedLazyNativeFunctionSlot(info.rt, info.shared_native_cache_slot);
     }
 
     fn materializeArrayUnscopablesAutoInit(info: property.AutoInit) ?JSValue {
@@ -9430,7 +9506,7 @@ pub const Object = extern struct {
     }
 
     fn objectPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
-        if (global.cachedRealmValue(.object_prototype)) |stored| {
+        if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
             if (objectFromValue(stored)) |prototype| return prototype;
         }
         const object_ctor_value = global.getProperty(atom.predefinedId("Object", .string).?);
@@ -9471,7 +9547,7 @@ pub const Object = extern struct {
     }
 
     fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
-        if (global.cachedRealmValue(.array_prototype)) |stored| {
+        if (global.cachedRealmValue(rt, .array_prototype)) |stored| {
             if (objectFromValue(stored)) |prototype| return prototype;
         }
         const array_key = atom.predefinedId("Array", .string) orelse return null;

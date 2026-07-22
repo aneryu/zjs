@@ -183,10 +183,10 @@ fn xorshift64star(state: *u64) u64 {
     return x *% 0x2545F4914F6CDD1D;
 }
 
-/// qjs `js_math_random` (quickjs.c:47383): advance the per-runtime xorshift
+/// qjs `js_math_random` (quickjs.c:47383): advance the per-realm xorshift
 /// state and pack the top 52 bits into a [1.0, 2.0) double, returning d - 1.
-fn mathRandom(rt: *core.JSRuntime) f64 {
-    const v = xorshift64star(&rt.random_state);
+fn mathRandom(ctx: *core.JSContext) f64 {
+    const v = xorshift64star(&ctx.random_state);
     const bits: u64 = (@as(u64, 0x3ff) << 52) | (v >> 12);
     return @as(f64, @bitCast(bits)) - 1.0;
 }
@@ -199,7 +199,7 @@ fn mathOpCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     if (host_call.global == null) {
-        if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx.runtime));
+        if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx));
         const number = call(host_call.magic, host_call.args) catch return error.TypeError;
         return value_ops.numberToValue(number);
     }
@@ -225,7 +225,7 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         6 => qjsMathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
         7 => try qjsMathMinMax(ctx, output, global, args, false),
         8 => try qjsMathMinMax(ctx, output, global, args, true),
-        9 => mathRandom(ctx.runtime),
+        9 => mathRandom(ctx),
         10 => exp(try mathArg(ctx, output, global, args, 0)),
         11 => @sin(try mathArg(ctx, output, global, args, 0)),
         12 => @cos(try mathArg(ctx, output, global, args, 0)),

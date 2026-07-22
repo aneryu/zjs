@@ -231,6 +231,10 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
@@ -1484,7 +1488,7 @@ fn qjsIteratorMethodsPrototype(
     slot: core.object.RealmValueSlot,
     tag_name: []const u8,
 ) !*core.Object {
-    if (global.cachedRealmValue(slot)) |stored| return property_ops.expectObject(stored);
+    if (global.cachedRealmValue(rt, slot)) |stored| return property_ops.expectObject(stored);
 
     const proto = try qjsIteratorPrototype(rt, global, tag_name);
     var proto_raw_owned = true;
@@ -1599,6 +1603,10 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
@@ -2700,6 +2708,10 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 

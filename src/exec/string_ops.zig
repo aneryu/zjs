@@ -3324,7 +3324,7 @@ pub noinline fn initRegExpResultPropertyTemplate(rt: *core.JSRuntime, global: *c
 }
 
 fn regExpResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (global.cachedRealmValue(.regexp_match_result_template)) |stored| return core.Object.expect(stored);
+    if (global.cachedRealmValue(rt, .regexp_match_result_template)) |stored| return core.Object.expect(stored);
     return initRegExpResultPropertyTemplate(rt, global);
 }
 
@@ -3448,7 +3448,7 @@ pub fn updateRegExpLegacyStaticsForMatchValues(
     legacy_capture_values: *const [9]?core.JSValue,
     last_capture_value: ?core.JSValue,
 ) !void {
-    const legacy = global.installedRealmRegExpLegacyStatics() orelse
+    const legacy = global.installedRealmRegExpLegacyStatics(rt) orelse
         (try global.ensureInstalledRealmRegExpLegacyStatics(rt)) orelse return;
     const previous_capture_slot_count: usize = legacy.capture_slot_count;
     const next_capture_slot_count = @min(found.capture_count, legacy.captures.len);
@@ -3540,7 +3540,7 @@ pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.
         encoded_last_paren = encoded;
     }
 
-    const legacy = global.installedRealmRegExpLegacyStatics() orelse
+    const legacy = global.installedRealmRegExpLegacyStatics(rt) orelse
         (try global.ensureInstalledRealmRegExpLegacyStatics(rt)) orelse return true;
     const already_lazy = legacy.lazy_no_capture_match;
     const previous_capture_slot_count: usize = legacy.capture_slot_count;
@@ -3843,7 +3843,7 @@ pub fn toStringBytesForSymbol(
 }
 
 pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expected_name: []const u8) !bool {
-    const thrown_value = ctx.exception_slot.value;
+    const thrown_value = ctx.runtime.current_exception;
     const matches = try thrownValueMatchesConstructor(ctx.runtime, thrown_value, expected_name);
     ctx.clearException();
     return matches;

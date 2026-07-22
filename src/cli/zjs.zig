@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
     // loop turns) still resolve.
     var dynamic_import_state = engine.exec.module_graph.DynamicImportState{
         .runtime = runtime.context.runtimePtr(),
-        .context = &runtime.context.core,
+        .context = runtime.context.core,
         .output = &stdout_writer.interface,
         .io = io,
         .allocator = allocator,

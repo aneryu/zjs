@@ -163,7 +163,7 @@ pub const host = struct {
         source: []const u8,
         filename: []const u8,
     ) !value.Value {
-        return zjs_exec.call.qjsEvalGlobalScriptSource(&ctx.core, output, global, source, filename);
+        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx.core, output, global, source, filename);
     }
 
     fn evalGlobalScriptValueCore(
@@ -666,7 +666,7 @@ pub const object = struct {
 
         const rt = ctx.runtimePtr();
         const global = fromCore(try ctx.globalObject());
-        const array_prototype = cachedArrayPrototype(global) orelse try constructorPrototypeObject(rt, global, "Array");
+        const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObject(rt, global, "Array");
         const array = fromCore(try CoreObject.createArrayWithOwnPropertyCapacity(rt, optionalToCore(array_prototype), items.len));
         const array_value = toValue(array);
         errdefer array_value.free(rt);
@@ -684,8 +684,8 @@ pub const object = struct {
         array_value.free(rt);
     }
 
-    fn cachedArrayPrototype(global: *Object) ?*Object {
-        const stored = toCore(global).cachedRealmValue(.array_prototype) orelse return null;
+    fn cachedArrayPrototype(rt: *JSRuntime, global: *Object) ?*Object {
+        const stored = toCore(global).cachedRealmValue(rt, .array_prototype) orelse return null;
         return fromCore(coreFromValue(stored) orelse return null);
     }
 
@@ -1056,7 +1056,7 @@ pub const module = struct {
         host_hooks: Host,
         allocator: std.mem.Allocator,
     ) !value.Value {
-        return module_graph.evalFileModuleGraphWithHostHooks(ctx.runtimePtr(), &ctx.core, source_text, output, filename, host_hooks, allocator);
+        return module_graph.evalFileModuleGraphWithHostHooks(ctx.runtimePtr(), ctx.core, source_text, output, filename, host_hooks, allocator);
     }
 
     fn moduleResolutionError(err: anyerror) anyerror {

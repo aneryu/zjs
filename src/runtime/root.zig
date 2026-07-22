@@ -15,7 +15,7 @@ pub const Plugin = plugin.Plugin;
 pub const PluginInstallOptions = plugin.InstallOptions;
 
 pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
-    exec.zjs_vm.cleanupAtomicsWaitersForContext(&ctx.core);
+    exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx.core);
 }
 
 pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void {
@@ -26,7 +26,7 @@ pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *
 
     var cursor = call_runtime.atomics_waiters;
     while (cursor) |waiter| {
-        if (waiter.ctx) |ctx| {
+        if (waiter.realm.borrow()) |ctx| {
             if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {
                 waiter.notified = true;
                 waiter.cond.broadcast(io);
@@ -56,7 +56,7 @@ pub fn evalFileModuleGraphWithOutput(
     allocator: std.mem.Allocator,
     max_source_size: usize,
 ) !zjs.JSValue {
-    return exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), &ctx.core, source_text, output, filename, io, allocator, max_source_size);
+    return exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source_text, output, filename, io, allocator, max_source_size);
 }
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {

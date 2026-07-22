@@ -77,7 +77,10 @@ pub const ids = struct {
     pub const std_file: ClassId = 65;
     pub const disposable_stack: ClassId = 66;
     pub const async_disposable_stack: ClassId = 67;
-    pub const init_count: ClassId = 68;
+    /// Internal identity for the realm's global object.  Realm state itself
+    /// lives on `RealmContext`; this class only selects global-object storage.
+    pub const global_object: ClassId = 68;
+    pub const init_count: ClassId = 69;
 };
 
 /// Object-resident payload discriminator. Keep the tag within five bits so it
@@ -103,7 +106,8 @@ pub const PayloadKind = enum(u5) {
     finalization_registry,
     std_file,
     disposable_stack,
-    realm,
+    global,
+    realm_record,
     weak_ref,
 };
 
@@ -463,6 +467,7 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.call_site,
         ids.raw_json,
         => .ordinary,
+        ids.global_object => .global,
         ids.std_file => .std_file,
         ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
 

@@ -1131,7 +1131,7 @@ fn evalPreloadedFileModuleStep(
                     // quickjs.c:31279/31563).
                     record.status = .errored;
                     if (context.hasException()) {
-                        record.setEvalException(runtime, context.exception_slot.value.dup());
+                        record.setEvalException(runtime, context.runtime.current_exception.dup());
                     }
                 }
             }

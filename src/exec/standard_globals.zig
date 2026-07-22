@@ -3053,7 +3053,7 @@ fn collectionClassId(name: []const u8) ?core.ClassId {
 }
 
 fn functionPrototypeForWiring(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    if (global.cachedFunctionProto()) |function_proto| return function_proto;
+    if (global.cachedFunctionProto(rt)) |function_proto| return function_proto;
     const function_ctor = global.getOwnDataObjectBorrowed(core.atom.ids.Function) orelse return error.InvalidBuiltinRegistry;
     return constructorPrototypeObject(rt, function_ctor) orelse return error.InvalidBuiltinRegistry;
 }
@@ -3123,9 +3123,13 @@ fn wireNativeFunctionPrototype(rt: *core.JSRuntime, value: core.JSValue, functio
 }
 
 pub const Intrinsics = struct {
+    context: *core.JSContext,
     global: *core.Object,
 
     pub fn init(rt: *core.JSRuntime) !Intrinsics {
+        configureRuntime(rt);
+        const context = try core.JSContext.create(rt);
+        errdefer context.destroy();
         const global = try core.Object.createWithOwnPropertyCapacity(
             rt,
             core.class.ids.object,
@@ -3133,12 +3137,13 @@ pub const Intrinsics = struct {
             standardGlobalOwnPropertyCapacity(),
         );
         errdefer global.value().free(rt);
-        try installStandardGlobals(rt, global);
-        return .{ .global = global };
+        try rt.installStandardGlobals(global);
+        return .{ .context = context, .global = global };
     }
 
     pub fn deinit(self: *Intrinsics, rt: *core.JSRuntime) void {
         self.global.value().free(rt);
+        self.context.destroy();
     }
 };
 

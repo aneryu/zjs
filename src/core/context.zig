@@ -5,7 +5,7 @@ const class = @import("class.zig");
 const object_mod = @import("object.zig");
 const Object = object_mod.Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
-const exception = @import("exception.zig");
+const gc = @import("gc.zig");
 const runtime_mod = @import("runtime.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
@@ -425,12 +425,24 @@ pub const UnhandledRejectionEntry = struct {
 };
 
 pub const JSContext = struct {
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.realm_context);
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
     pub const EvalTiming = ContextEvalTiming;
 
+    comptime {
+        std.debug.assert(@offsetOf(@This(), "header") == 0);
+    }
+
+    /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
+    /// collector node.  Keep this first; `MemoryAccount` places the common RC
+    /// metadata immediately before it.
+    header: gc.GCObjectHeader align(16) = .{},
     runtime: *JSRuntime,
-    exception_slot: exception.ExceptionSlot = .{},
+    /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
+    /// header links above are reserved exclusively for the collector.
+    runtime_prev: ?*JSContext = null,
+    runtime_next: ?*JSContext = null,
     /// Not-yet-handled rejected promises, in rejection order. Mirrors the qjs
     /// CLI host tracker list (js_std_promise_rejection_tracker's
     /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
@@ -462,6 +474,13 @@ pub const JSContext = struct {
     active_native_call: ?*const anyopaque = null,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
+    cached_function_proto: ?*Object = null,
+    cached_promise_proto: ?*Object = null,
+    cached_values: [@intFromEnum(object_mod.RealmValueSlot.count)]?JSValue = @splat(null),
+    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
+    regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
+    random_state: u64 = 0x1234_5678_9abc_def0,
+    preallocated_oom_error: ?JSValue = null,
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
     /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
@@ -488,19 +507,21 @@ pub const JSContext = struct {
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
-        const ctx = try rt.memory.create(JSContext);
-        errdefer rt.memory.destroy(JSContext, ctx);
+        const ctx = try rt.createRuntime(JSContext);
+        errdefer rt.destroyRuntime(JSContext, ctx);
         try ctx.init(rt, options);
         return ctx;
     }
 
-    pub fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+    fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
         self.* = .{
+            .header = .{},
             .runtime = rt,
             .stack_limit = options.stack_size orelse rt.stackSize(),
             .track_unhandled_rejections = options.track_unhandled_rejections,
             .dynamic_import_callback = options.dynamic_import_callback,
             .dynamic_import_userdata = options.dynamic_import_userdata,
+            .random_state = runtime_mod.newRealmRandomSeed(),
         };
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {
@@ -512,12 +533,17 @@ pub const JSContext = struct {
             self.class_prototypes = prototypes;
         }
         var provider_registered = false;
+        var context_linked = false;
         errdefer {
+            if (context_linked) rt.unlinkContext(self);
             if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
             self.deinitClassPrototypeSlots();
         }
         try rt.registerRootProvider(self.rootProvider());
         provider_registered = true;
+        rt.linkContext(self);
+        context_linked = true;
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
     }
 
     pub fn runtimePtr(self: *JSContext) *JSRuntime {
@@ -629,11 +655,11 @@ pub const JSContext = struct {
         return @fieldParentPtr("header", header);
     }
 
-    pub fn deinit(self: *JSContext) void {
+    fn deinitResources(self: *JSContext) void {
         const rt = self.runtime;
+        rt.unlinkContext(self);
         rt.unregisterRootProvider(self.rootProvider());
         self.host_event_loop = null;
-        self.exception_slot.clear(rt);
         self.clearUnhandledRejection();
         const old_eval = self.eval_function;
         self.eval_function = JSValue.nullValue();
@@ -660,13 +686,49 @@ pub const JSContext = struct {
             frame.function_value.free(rt);
         }
         if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
+        if (self.cached_function_proto) |prototype| prototype.value().free(rt);
+        self.cached_function_proto = null;
+        if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
+        self.cached_promise_proto = null;
+        for (&self.cached_values) |*slot| {
+            if (slot.*) |value| value.free(rt);
+            slot.* = null;
+        }
+        if (self.shared_lazy_native_functions) |cache| {
+            for (cache) |*slot| {
+                if (slot.*) |value| value.free(rt);
+                slot.* = null;
+            }
+            rt.destroyRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue, cache);
+            self.shared_lazy_native_functions = null;
+        }
+        if (self.regexp_legacy_statics) |legacy| {
+            legacy.destroy(rt);
+            rt.destroyRuntime(object_mod.RegExpLegacyStatics, legacy);
+            self.regexp_legacy_statics = null;
+        }
+        if (self.preallocated_oom_error) |value| value.free(rt);
+        self.preallocated_oom_error = null;
         self.deinitClassPrototypeSlots();
     }
 
     pub fn destroy(self: *JSContext) void {
-        const rt = self.runtime;
-        self.deinit();
-        rt.memory.destroy(JSContext, self);
+        gc.release(self.runtime, &self.header);
+    }
+
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        self.deinitResources();
+        if (rt.gc.phase == .remove_cycles) {
+            rt.gc.deferCycleStructFree(header);
+            return;
+        }
+        rt.destroyRuntime(JSContext, self);
+    }
+
+    pub fn freeCycleDeferredStruct(rt: *JSRuntime, header: *gc.Header) void {
+        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        rt.destroyRuntime(JSContext, self);
     }
 
     pub fn dupValue(self: *JSContext, value: JSValue) JSValue {
@@ -686,13 +748,35 @@ pub const JSContext = struct {
     }
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.exception_slot.value);
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
         }
         try visitor.value(&self.eval_function);
+        if (self.preallocated_oom_error) |*value| try visitor.value(value);
         try visitor.values(self.class_prototypes);
+        if (self.cached_function_proto) |prototype| {
+            var rooted: ?*Object = prototype;
+            try visitor.optionalObject(&rooted);
+            self.cached_function_proto = rooted;
+        }
+        if (self.cached_promise_proto) |prototype| {
+            var rooted: ?*Object = prototype;
+            try visitor.optionalObject(&rooted);
+            self.cached_promise_proto = rooted;
+        }
+        for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
+        if (self.shared_lazy_native_functions) |cache| {
+            for (cache) |*slot| if (slot.*) |*value| try visitor.value(value);
+        }
+        if (self.regexp_legacy_statics) |legacy| {
+            if (legacy.input) |*value| try visitor.value(value);
+            if (legacy.last_match) |*value| try visitor.value(value);
+            if (legacy.last_paren) |*value| try visitor.value(value);
+            if (legacy.left_context) |*value| try visitor.value(value);
+            if (legacy.right_context) |*value| try visitor.value(value);
+            for (&legacy.captures) |*slot| if (slot.*) |*value| try visitor.value(value);
+        }
         try visitor.optionalObject(&self.global);
         try visitor.optionalObject(&self.lexicals);
         for (self.pending_promise_jobs) |*job| {
@@ -700,6 +784,38 @@ pub const JSContext = struct {
         }
         if (self.host_event_loop) |host_event_loop| {
             try host_event_loop.traceRoots(visitor);
+        }
+    }
+
+    /// Infallible owned-edge enumeration used by the RC cycle collector.  The
+    /// runtime context-list link is deliberately absent: it is membership, not
+    /// ownership.
+    pub fn traceChildEdgesNoFail(self: *JSContext, visitor: anytype) void {
+        for (self.unhandled_rejections) |*entry| {
+            visitor.visitValue(&entry.promise);
+            visitor.visitValue(&entry.reason);
+        }
+        visitor.visitValue(&self.eval_function);
+        if (self.preallocated_oom_error) |*value| visitor.visitValue(value);
+        for (self.class_prototypes) |*prototype| visitor.visitValue(prototype);
+        visitor.visitObject(&self.cached_function_proto);
+        visitor.visitObject(&self.cached_promise_proto);
+        for (&self.cached_values) |*slot| if (slot.*) |*value| visitor.visitValue(value);
+        if (self.shared_lazy_native_functions) |cache| {
+            for (cache) |*slot| if (slot.*) |*value| visitor.visitValue(value);
+        }
+        if (self.regexp_legacy_statics) |legacy| {
+            if (legacy.input) |*value| visitor.visitValue(value);
+            if (legacy.last_match) |*value| visitor.visitValue(value);
+            if (legacy.last_paren) |*value| visitor.visitValue(value);
+            if (legacy.left_context) |*value| visitor.visitValue(value);
+            if (legacy.right_context) |*value| visitor.visitValue(value);
+            for (&legacy.captures) |*slot| if (slot.*) |*value| visitor.visitValue(value);
+        }
+        visitor.visitObject(&self.global);
+        visitor.visitObject(&self.lexicals);
+        for (self.pending_promise_jobs) |*job| {
+            visitor.visitValue(&job.value);
         }
     }
 
@@ -757,20 +873,28 @@ pub const JSContext = struct {
     }
 
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
-        self.exception_slot.set(self.runtime, value);
+        const old = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        old.free(self.runtime);
+        self.runtime.current_exception = value;
         return JSValue.exception();
     }
 
     pub fn hasException(self: JSContext) bool {
-        return self.exception_slot.hasException();
+        return !self.runtime.current_exception.isUninitialized();
     }
 
     pub fn takeException(self: *JSContext) JSValue {
-        return self.exception_slot.take();
+        if (!self.hasException()) return JSValue.undefinedValue();
+        const result = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        return result;
     }
 
     pub fn clearException(self: *JSContext) void {
-        self.exception_slot.clear(self.runtime);
+        const old = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        old.free(self.runtime);
     }
 
     pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
@@ -790,8 +914,8 @@ pub const JSContext = struct {
             }
         }
         self.appendUnhandledRejection(promise, value) catch return;
-        if (!self.exception_slot.hasException()) {
-            self.exception_slot.set(self.runtime, value.dup());
+        if (!self.hasException()) {
+            _ = self.throwValue(value.dup());
         }
     }
 
@@ -1064,5 +1188,44 @@ pub const JSContext = struct {
             return cb(self);
         }
         return error.InvalidBuiltinRegistry;
+    }
+};
+
+/// Realm identity.  zjs keeps the public `JSContext` spelling for API
+/// compatibility; the two names intentionally denote the same QuickJS-style
+/// GC object, not a wrapper and a separate realm record.
+pub const RealmContext = JSContext;
+
+/// One owning context reference, matching `JS_DupContext` / `JS_FreeContext`.
+/// Runtime context-list membership is deliberately not represented here.
+pub const RealmRef = extern struct {
+    ptr: ?*RealmContext = null,
+
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == @sizeOf(?*RealmContext));
+    }
+
+    pub fn takeOwned(ctx: *RealmContext) RealmRef {
+        return .{ .ptr = ctx };
+    }
+
+    pub fn retain(ctx: *RealmContext) RealmRef {
+        gc.retain(&ctx.header);
+        return .{ .ptr = ctx };
+    }
+
+    pub fn clone(self: RealmRef) RealmRef {
+        if (self.ptr) |ctx| gc.retain(&ctx.header);
+        return self;
+    }
+
+    pub fn borrow(self: RealmRef) ?*RealmContext {
+        return self.ptr;
+    }
+
+    pub fn deinit(self: *RealmRef) void {
+        const ctx = self.ptr orelse return;
+        self.ptr = null;
+        gc.release(ctx.runtime, &ctx.header);
     }
 };

@@ -1323,18 +1323,18 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
 }
 
 fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
-    if (cachedRealmObject(global, .object_prototype)) |prototype| return prototype;
+    if (cachedRealmObject(rt, global, .object_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Object");
 }
 
 fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
-    if (cachedRealmObject(global, .array_prototype)) |prototype| return prototype;
+    if (cachedRealmObject(rt, global, .array_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Array");
 }
 
-fn cachedRealmObject(global: ?*core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
+fn cachedRealmObject(rt: *core.JSRuntime, global: ?*core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
     const global_object = global orelse return null;
-    const stored = global_object.cachedRealmValue(slot) orelse return null;
+    const stored = global_object.cachedRealmValue(rt, slot) orelse return null;
     return objectFromValue(stored);
 }
 

@@ -641,7 +641,7 @@ pub const helpers = struct {
             errdefer ctx.destroy();
             const event_loop = try options.allocator.create(engine.runtime.EventLoop);
             errdefer options.allocator.destroy(event_loop);
-            event_loop.* = engine.runtime.EventLoop.init(@ptrCast(ctx), .{});
+            event_loop.* = engine.runtime.EventLoop.initCore(ctx, .{});
             event_loop.install();
             return .{
                 .allocator = options.allocator,
@@ -652,7 +652,7 @@ pub const helpers = struct {
         }
 
         pub fn deinit(self: *TestEngine) void {
-            const wrapper: *zjs.JSContext = @ptrCast(self.context);
+            var wrapper = zjs.JSContext.borrowCore(self.context);
             wrapper.runJobs(null) catch {};
             self.event_loop.deinit();
             self.allocator.destroy(self.event_loop);
@@ -687,7 +687,8 @@ pub const helpers = struct {
             if (self.context.global == null) {
                 const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
                 const run_test262 = @import("../cli/run_test262.zig");
-                try run_test262.installTest262Globals(self.runtime, @ptrCast(self.context), global_obj);
+                var wrapper = zjs.JSContext.borrowCore(self.context);
+                try run_test262.installTest262Globals(self.runtime, &wrapper, global_obj);
             }
         }
 
@@ -695,7 +696,8 @@ pub const helpers = struct {
             const filename = options.filename;
             const mode = options.mode;
             self.ensureTest262GlobalsInstalled() catch |err| return @errorCast(err);
-            return (@as(*zjs.JSContext, @ptrCast(self.context))).eval(source_text, .{
+            var wrapper = zjs.JSContext.borrowCore(self.context);
+            return wrapper.eval(source_text, .{
                 .mode = mode,
                 .filename = filename,
                 .source_kind = options.source_kind,
@@ -763,7 +765,8 @@ pub const helpers = struct {
         }
 
         pub fn runJobs(self: *TestEngine) !void {
-            try (@as(*zjs.JSContext, @ptrCast(self.context))).runJobs(null);
+            var wrapper = zjs.JSContext.borrowCore(self.context);
+            try wrapper.runJobs(null);
         }
 
         pub fn createExternalHostFunctionValue(
@@ -1875,7 +1878,8 @@ test "call subsystem installs and invokes host globals" {
     defer global.value().free(rt);
     try helpers.installHostGlobalsBare(rt, global);
     const run_test262 = @import("../cli/run_test262.zig");
-    try run_test262.installTest262Globals(rt, @ptrCast(ctx), global);
+    var wrapper = zjs.JSContext.borrowCore(ctx);
+    try run_test262.installTest262Globals(rt, &wrapper, global);
 
     const print_key = try rt.internAtom("print");
     defer rt.atoms.free(print_key);
@@ -12095,6 +12099,8 @@ fn loadFixtureModule(
 test "host global bootstrap installs and tears down builtin plus host domains" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     _ = try global.ensureRealmPayload(rt);

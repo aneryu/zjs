@@ -137,7 +137,7 @@ pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
 }
 
 pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    if (global.cachedRealmValue(.array_prototype)) |stored| {
+    if (global.cachedRealmValue(rt, .array_prototype)) |stored| {
         return property_ops.expectObject(stored) catch null;
     }
     if (global.getOwnDataObjectBorrowed(core.atom.ids.Array)) |constructor| {
@@ -6174,7 +6174,7 @@ pub fn qjsArrayIteratorValue(ctx: *core.JSContext, output: ?*std.Io.Writer, glob
 }
 
 pub fn arrayPrototypeValuesFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
-    if (global.cachedRealmValue(.array_prototype_values)) |stored| return stored.dup();
+    if (global.cachedRealmValue(rt, .array_prototype_values)) |stored| return stored.dup();
     const prototype = arrayPrototypeFromGlobal(rt, global) orelse return null;
     const values_key = (comptime core.atom.predefinedId("values", .string)) orelse return null;
     return prototype.getProperty(values_key);

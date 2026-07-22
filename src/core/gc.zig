@@ -7,6 +7,7 @@ const builtin = @import("builtin");
 const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
+const context_mod = @import("context.zig");
 const var_ref = @import("var_ref.zig");
 const string = @import("string.zig");
 const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
@@ -114,6 +115,7 @@ pub const RefKind = enum(u8) {
     function_bytecode = 3,
     var_ref = 4,
     shape = 5,
+    realm_context = 6,
 };
 
 pub const GcKind = RefKind;
@@ -779,8 +781,11 @@ pub const Registry = struct {
                 held_function_bytecodes = h;
                 continue;
             }
-            std.debug.assert(h.meta().kind == .object);
-            object.Object.destroyFromHeader(rt, h);
+            switch (h.meta().kind) {
+                .object => object.Object.destroyFromHeader(rt, h),
+                .realm_context => context_mod.JSContext.destroyFromHeader(rt, h),
+                else => unreachable,
+            }
             rt.drainDeferredClassPayloadFinalizers();
         }
 
@@ -1222,6 +1227,7 @@ pub const Registry = struct {
             .object => @sizeOf(object.Object),
             .function_bytecode => @sizeOf(FunctionBytecode),
             .var_ref => @sizeOf(var_ref.VarRef),
+            .realm_context => @sizeOf(context_mod.JSContext),
             // A shape's heap footprint includes its inline FAM (hash table +
             // prop[]); recompute from the live capacity fields (qjs get_shape_size).
             .shape => blk: {
@@ -1255,6 +1261,7 @@ pub const Registry = struct {
                 break :blk fb.heapByteSize();
             },
             .var_ref => @sizeOf(var_ref.VarRef),
+            .realm_context => @sizeOf(context_mod.JSContext),
             .shape => blk: {
                 const sh: *const shape.Shape = @alignCast(@fieldParentPtr("header", h));
                 break :blk sh.allocationSize();
@@ -1268,7 +1275,7 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape;
+        return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape or h.metaConst().kind == .realm_context;
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
@@ -1752,8 +1759,8 @@ pub inline fn release(rt: anytype, header: anytype) void {
 /// GC owners also arrive here through `release` above.
 pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     std.debug.assert(header.meta().rc == 0);
-    if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
-    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .shape)) return;
+    if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context)) return;
+    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .shape or header.meta().kind == .realm_context)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
     // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
     // marked-garbage object exactly once. Freeing it here (a cascade) would
@@ -1773,14 +1780,14 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate. (zjs has no `.module` GC-kind in flight, so the
     // MODULE arm of the qjs gate has no zjs analogue.)
-    if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode)) return;
+    if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context)) return;
 
     // QJS queues the GC kinds reachable through JSValue and lets the outermost
     // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
     // own direct release path and can only add object work while a queued node
     // is being destroyed. This removes unbounded Object/FB/VarRef destructor
     // recursion without adding a fallible allocation to the zero-ref path.
-    if (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode) {
+    if (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context) {
         rt.gc.enqueueZeroRef(rt, header);
         return;
     }
@@ -1820,5 +1827,6 @@ fn destroyZeroRefNow(rt: anytype, header: *Header) void {
         .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
         .var_ref => var_ref.VarRef.destroyFromHeader(rt, header),
         .shape => rt.shapes.destroyFromHeader(header),
+        .realm_context => context_mod.JSContext.destroyFromHeader(rt, header),
     }
 }

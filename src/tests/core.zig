@@ -225,6 +225,76 @@ test "runtime and context init-deinit are leak free" {
     }
 }
 
+test "RealmContext is header-first and RealmRef owns independently of runtime list membership" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.RealmContext, "header"));
+    try std.testing.expectEqual(@sizeOf(?*core.RealmContext), @sizeOf(core.RealmRef));
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.RealmContext.create(rt);
+    const second = try core.RealmContext.create(rt);
+
+    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().kind);
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    var owner = core.RealmRef.retain(first);
+    first.destroy();
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    second.destroy();
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    owner.deinit();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "RealmContext participates in cycle collection through typed RealmRef edges" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const realm_record = try core.Object.create(rt, core.class.ids.object, null);
+    var realm_owner = core.RealmRef.retain(ctx);
+    try realm_record.installOwnedRealmRef(rt, &realm_owner);
+    const record_key = try rt.internAtom("realmCycleRecord");
+    defer rt.atoms.free(record_key);
+    try global.defineOwnProperty(
+        rt,
+        record_key,
+        core.Descriptor.data(realm_record.value(), true, true, true),
+    );
+    realm_record.value().free(rt);
+
+    ctx.destroy();
+    try std.testing.expect(rt.firstContext() != null);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "dynamic class registration reserves slots in live and future realms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.RealmContext.create(rt);
+    defer first.destroy();
+    const second = try core.RealmContext.create(rt);
+    defer second.destroy();
+
+    const class_id = rt.newClassId(core.class.invalid_class_id);
+    try rt.ensureContextClassPrototypeCapacity(class_id);
+    try rt.classes.register(class_id, .{ .class_name = "RealmCapacityTest" });
+    try std.testing.expect(first.classPrototypeObject(class_id) == null);
+    try std.testing.expect(second.classPrototypeObject(class_id) == null);
+
+    const future = try core.RealmContext.create(rt);
+    defer future.destroy();
+    try std.testing.expect(future.classPrototypeObject(class_id) == null);
+    _ = try future.ensureClassPrototypeSlot(class_id);
+}
+
 test "runtime-resident indexes outlive a temporary allocator" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.heap.page_allocator, .{});
@@ -569,7 +639,7 @@ test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "GC keeps runtime and context value slot unique symbol atoms" {
+test "GC keeps runtime exception and realm value slot unique symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -578,6 +648,11 @@ test "GC keeps runtime and context value slot unique symbol atoms" {
 
     const runtime_symbol = try rt.atoms.newValueSymbol("gc-runtime-slot-symbol");
     rt.current_exception = try rt.symbolValue(runtime_symbol);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(runtime_symbol) != null);
+    ctx.clearException();
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(runtime_symbol) == null);
 
     const exception_symbol = try rt.atoms.newValueSymbol("gc-context-exception-symbol");
     _ = ctx.throwValue(try rt.symbolValue(exception_symbol));
@@ -591,21 +666,16 @@ test "GC keeps runtime and context value slot unique symbol atoms" {
     ctx.class_prototypes[0] = try rt.symbolValue(prototype_symbol);
 
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(runtime_symbol) != null);
     try std.testing.expect(rt.atoms.name(exception_symbol) != null);
     try std.testing.expect(rt.atoms.name(rejection_symbol) != null);
     try std.testing.expect(rt.atoms.name(prototype_symbol) != null);
 
-    const old_runtime_exception = rt.current_exception;
-    rt.current_exception = core.JSValue.uninitialized();
-    old_runtime_exception.free(rt);
     ctx.clearException();
     const old_prototype = ctx.class_prototypes[0];
     ctx.class_prototypes[0] = core.JSValue.nullValue();
     old_prototype.free(rt);
 
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(runtime_symbol) == null);
     try std.testing.expect(rt.atoms.name(exception_symbol) == null);
     try std.testing.expect(rt.atoms.name(rejection_symbol) != null);
     try std.testing.expect(rt.atoms.name(prototype_symbol) == null);
@@ -1163,7 +1233,8 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(@as(core.ClassId, 65), core.class.ids.std_file);
     try std.testing.expectEqual(@as(core.ClassId, 66), core.class.ids.disposable_stack);
     try std.testing.expectEqual(@as(core.ClassId, 67), core.class.ids.async_disposable_stack);
-    try std.testing.expectEqual(@as(core.ClassId, 68), core.class.ids.init_count);
+    try std.testing.expectEqual(@as(core.ClassId, 68), core.class.ids.global_object);
+    try std.testing.expectEqual(@as(core.ClassId, 69), core.class.ids.init_count);
     try std.testing.expect(rt.classes.isRegistered(core.class.ids.object));
     try std.testing.expect(rt.classes.isRegistered(core.class.ids.generator));
     try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
@@ -2211,20 +2282,19 @@ test "runtime root tracer visits async roots" {
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var ctx: core.JSContext = undefined;
-    try ctx.init(&rt, .{});
-    defer ctx.deinit();
+    const ctx = try core.JSContext.create(&rt);
+    defer ctx.destroy();
 
     try ctx.ensurePendingPromiseJobCapacity(1);
     ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(&ctx, 1, core.JSValue.int32(101));
+    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.int32(101));
 
     const TestJob = struct {
         fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
             return core.JSValue.undefinedValue();
         }
     };
-    try rt.job_queue.enqueueFunc(&ctx, TestJob.run, &.{core.JSValue.int32(106)});
+    try rt.job_queue.enqueueFunc(ctx, TestJob.run, &.{core.JSValue.int32(106)});
     try rt.enqueueFinalizationJob(core.JSValue.int32(107), core.JSValue.int32(108));
 
     const Counter = struct {
@@ -3230,9 +3300,11 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
@@ -5038,11 +5110,14 @@ test "class payload function bytecode constant object cycle is released by runti
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-test "realm cached prototypes are strong cycle-collected references" {
+test "realm context owns cached prototype references" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const ctx = try core.JSContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     const promise_proto = try core.Object.create(rt, core.class.ids.object, null);
     const global_key = try rt.internAtom("global");
@@ -5057,11 +5132,12 @@ test "realm cached prototypes are strong cycle-collected references" {
     try std.testing.expectEqual(@as(i32, 2), function_proto.header.meta().rc);
     try std.testing.expectEqual(@as(i32, 2), promise_proto.header.meta().rc);
 
-    global.value().free(rt);
+    ctx.destroy();
     function_proto.value().free(rt);
     promise_proto.value().free(rt);
 
-    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
 test "destroyed realm global clears borrowed realm pointers and auto init metadata" {
@@ -6733,8 +6809,9 @@ test "module resolution normalizes namespace re-export bindings" {
     try std.testing.expectEqual(star_atom, mixed_resolution.resolved.local_name);
 }
 
-fn interruptOnce(rt: *core.JSRuntime, _: ?*anyopaque) bool {
-    rt.random_state +%= 1;
+fn interruptOnce(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
+    const count: *usize = @ptrCast(@alignCast(userdata.?));
+    count.* += 1;
     return true;
 }
 
@@ -6752,11 +6829,11 @@ test "runtime stack and interrupt state are stored" {
     try std.testing.expectEqual(std.math.maxInt(u62), rt.vm_stack_arena_policy.limit);
     rt.setStackSize(4096);
     try std.testing.expect(!rt.hasInterruptHandler());
-    rt.setInterruptHandler(interruptOnce, null);
+    var interrupt_count: usize = 0;
+    rt.setInterruptHandler(interruptOnce, &interrupt_count);
     try std.testing.expect(rt.hasInterruptHandler());
-    const before = rt.random_state;
     try std.testing.expect(rt.runInterruptHandler());
-    try std.testing.expectEqual(before +% 1, rt.random_state);
+    try std.testing.expectEqual(@as(usize, 1), interrupt_count);
 }
 
 test "ordinary objects define own data properties and descriptors" {

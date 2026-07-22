@@ -410,7 +410,7 @@ pub inline fn primitivePrototypeDataPropertyValueForFastPath(
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (rt.atoms.mightBePrivate(atom_id)) return null;
-    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
+    var object = primitivePrototypeObjectForFastPath(rt, global, receiver, atom_id) orelse return null;
     while (true) {
         if (object.needsSlowPropertyAccess() or object.hasExoticMethods() or object.proxyTarget() != null) return null;
         var slow_property = false;
@@ -421,6 +421,7 @@ pub inline fn primitivePrototypeDataPropertyValueForFastPath(
 }
 
 inline fn primitivePrototypeObjectForFastPath(
+    rt: *core.JSRuntime,
     global: *core.Object,
     receiver: core.JSValue,
     atom_id: core.Atom,
@@ -439,7 +440,7 @@ inline fn primitivePrototypeObjectForFastPath(
     else
         return null;
 
-    const prototype_value = global.cachedRealmValue(slot) orelse return null;
+    const prototype_value = global.cachedRealmValue(rt, slot) orelse return null;
     return objectFromValue(prototype_value);
 }
 
@@ -611,7 +612,7 @@ inline fn primitivePrototypePropertyForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     if (rt.atoms.mightBePrivate(atom_id)) return null;
-    var object = primitivePrototypeObjectForFastPath(global, receiver, atom_id) orelse return null;
+    var object = primitivePrototypeObjectForFastPath(rt, global, receiver, atom_id) orelse return null;
     while (true) {
         if (object.proxyTarget() != null) return .{ .proxy = object };
         if (object.needsSlowPropertyAccess() or object.hasExoticMethods()) return null;

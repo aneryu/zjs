@@ -238,7 +238,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     const ctx = try core.JSContext.create(rt);
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
-    const wrapper: *BindingContext = @ptrCast(ctx);
+    var wrapper = BindingContext.borrowCore(ctx);
 
     const value = try wrapper.eval(snippet.source, .{
         .mode = snippet.mode,
@@ -376,7 +376,7 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     const ctx = try core.JSContext.create(rt);
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
-    const wrapper: *BindingContext = @ptrCast(ctx);
+    var wrapper = BindingContext.borrowCore(ctx);
 
     var sink: u8 = 0;
     var output = std.Io.Writer.fixed(@as(*[1]u8, &sink));
@@ -558,7 +558,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
             break :attempt;
         };
         defer ctx.destroy();
-        const wrapper: *BindingContext = @ptrCast(ctx);
+        var wrapper = BindingContext.borrowCore(ctx);
 
         if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |value| {
             value.free(rt);

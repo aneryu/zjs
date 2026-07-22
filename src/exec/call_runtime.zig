@@ -219,7 +219,7 @@ pub fn tryCatchInFrame(
             // preallocated error is dup()ed, never rebuilt, so no stack can
             // be captured here.
             if (create_err == error.OutOfMemory) {
-                if (ctx.runtime.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
+                if (ctx.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
             }
             return create_err;
         };
@@ -2755,7 +2755,9 @@ pub const AtomicsWaiter = struct {
     linked: bool = false,
     cond: std.Io.Condition = .init,
     promise: ?core.JSValue = null,
-    ctx: ?*core.JSContext = null,
+    /// Present only for heap-backed waitAsync nodes. The synchronous waiter is
+    /// stack-local and leaves this empty.
+    realm: core.RealmRef = .{},
     deadline: ?std.Io.Timestamp = null,
     next: ?*AtomicsWaiter = null,
 };
@@ -3054,7 +3056,7 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
     var cursor = atomics_waiters;
     while (cursor) |waiter| {
         const next = waiter.next;
-        const expired = waiter.ctx == ctx and waiter.promise != null and waiter.deadline != null and now.nanoseconds >= waiter.deadline.?.nanoseconds;
+        const expired = waiter.realm.borrow() == ctx and waiter.promise != null and waiter.deadline != null and now.nanoseconds >= waiter.deadline.?.nanoseconds;
         if (!expired) {
             previous = waiter;
             cursor = next;
@@ -3082,7 +3084,7 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
     var cursor = atomics_waiters;
     while (cursor) |waiter| {
         const next = waiter.next;
-        if (waiter.ctx != ctx) {
+        if (waiter.realm.borrow() != ctx) {
             previous = waiter;
             cursor = next;
             continue;
@@ -3476,7 +3478,7 @@ pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Ob
 pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
     if (ctx.lexicals) |env| return env;
     if (ctx.global) |global| {
-        if (global.globalLexicals()) |env| {
+        if (global.globalLexicals(ctx.runtime)) |env| {
             ctx.lexicals = env;
             return env;
         }
@@ -3488,15 +3490,15 @@ pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
 
 pub fn existingGlobalLexicalEnv(ctx: *core.JSContext) ?*core.Object {
     if (ctx.lexicals) |env| return env;
-    if (ctx.global) |global| return global.globalLexicals();
+    if (ctx.global) |global| return global.globalLexicals(ctx.runtime);
     return null;
 }
 
 pub fn existingGlobalLexicalEnvForGlobal(ctx: *core.JSContext, global: *core.Object) ?*core.Object {
     if (ctx.lexicals) |env| return env;
-    if (global.globalLexicals()) |env| return env;
+    if (global.globalLexicals(ctx.runtime)) |env| return env;
     if (ctx.global) |context_global| {
-        if (context_global != global) return context_global.globalLexicals();
+        if (context_global != global) return context_global.globalLexicals(ctx.runtime);
     }
     return null;
 }
@@ -3969,7 +3971,7 @@ pub fn indirectEval(
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
     const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals();
+    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals(ctx.runtime);
 
     const EvalResult = @typeInfo(@TypeOf(indirectEval)).@"fn".return_type.?;
     const result: EvalResult = blk: {
@@ -5237,6 +5239,10 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
@@ -5456,7 +5462,7 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, 
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const template = if (global.cachedRealmValue(.iterator_result_template)) |stored|
+    const template = if (global.cachedRealmValue(rt, .iterator_result_template)) |stored|
         try core.Object.expect(stored)
     else
         try initIteratorResultPropertyTemplate(rt, global);
@@ -5470,9 +5476,15 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, 
 test "createIteratorResult roots direct function bytecode value while creating result" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
@@ -5519,7 +5531,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
 }
 
 pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
-    if (global.cachedThrowTypeErrorIntrinsic()) |stored| return stored.dup();
+    if (global.cachedThrowTypeErrorIntrinsic(rt)) |stored| return stored.dup();
 
     const thrower = try core.function.nativeFunction(rt, "", 0);
     errdefer thrower.free(rt);

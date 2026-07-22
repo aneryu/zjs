@@ -13,7 +13,7 @@ fn constructCompiledLiteralInRealm(
     if (!compiled_value.isString()) return error.TypeError;
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TypeError;
     if (compiled_string.isWide() or compiled_string.len() == 0) return error.TypeError;
-    const template_value = global.cachedRealmValue(.regexp_instance_template) orelse return error.TypeError;
+    const template_value = global.cachedRealmValue(rt, .regexp_instance_template) orelse return error.TypeError;
     const template = try core.Object.expect(template_value);
 
     var source_val = source;

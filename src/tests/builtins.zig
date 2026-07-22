@@ -2897,6 +2897,23 @@ test "Engine top-level var probes preserve cross-realm global identity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Engine createRealm owns independent intrinsics with realm-local instanceof" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var realm = $262.createRealm();
+        \\var other = realm.global;
+        \\assert.sameValue(other.Array === Array, false);
+        \\assert.sameValue([] instanceof Array, true);
+        \\assert.sameValue(other.eval("[] instanceof Array"), true);
+        \\assert.sameValue(new other.Array() instanceof other.Array, true);
+        \\assert.sameValue(new other.Array() instanceof Array, false);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine cross-realm eval keeps global lexical declarations per realm" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

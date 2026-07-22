@@ -752,6 +752,11 @@ pub const JSRuntime = struct {
     /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
     standard_global_own_property_capacity: usize = 0,
 
+    /// QuickJS `context_list`: intrusive membership only.  Realm ownership is
+    /// carried by `RealmRef` and the GC header, never by these links.
+    context_head: ?*context_mod.JSContext = null,
+    context_tail: ?*context_mod.JSContext = null,
+
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
     weak_reference_holder_head: ?*Object = null,
@@ -824,7 +829,6 @@ pub const JSRuntime = struct {
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
-    random_state: u64 = 0x1234_5678_9abc_def0,
     /// Lazy cache of single-byte (latin1) strings for ASCII code units.
     /// Populated on first request via `singleByteString`. Each cached
     /// String holds a permanent ref-count + 1 contributed by the cache;
@@ -860,7 +864,6 @@ pub const JSRuntime = struct {
     /// machinery can still materialize a catch value when the heap is fully
     /// exhausted (QuickJS's preallocated out-of-memory exception analogue).
     /// Populated by the exec layer at context-global bootstrap.
-    preallocated_oom_error: ?JSValue = null,
     performance_time_origin_ms: f64 = 0,
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
@@ -933,6 +936,8 @@ pub const JSRuntime = struct {
         rt.materialize_context_global_cb = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
         rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
+        rt.context_head = null;
+        rt.context_tail = null;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
         rt.weak_reference_holder_head = null;
@@ -996,18 +1001,12 @@ pub const JSRuntime = struct {
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
-        // Seed the Math.random xorshift state from wall-clock microseconds,
-        // mirroring qjs js_random_init (quickjs.c:47373); the state must be
-        // non-zero or xorshift64star degenerates to all-zeros.
-        rt.random_state = randomSeedMicros();
-        if (rt.random_state == 0) rt.random_state = 1;
         rt.single_byte_strings = @splat(null);
         rt.empty_string = null;
         rt.recent_two_unit_string = null;
         rt.recent_atom_strings = @splat(null);
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
-        rt.preallocated_oom_error = null;
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
@@ -1062,10 +1061,6 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| JSValue.string(stored.header()).free(self);
         }
-        if (self.preallocated_oom_error) |stored| {
-            self.preallocated_oom_error = null;
-            stored.free(self);
-        }
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
         self.clearLocalRootSlots();
@@ -1091,6 +1086,11 @@ pub const JSRuntime = struct {
         // property-key atoms held by shapes, which intentionally outlive objects
         // until phase 3 of gc.deinit.
         self.atoms.releaseCachedStrings(self);
+        // The context list is borrowed enumeration, never a teardown owner.
+        // Named host/harness owners are released above; public RealmRefs must
+        // be released by their callers before destroying the Runtime.
+        std.debug.assert(self.context_head == null);
+        std.debug.assert(self.context_tail == null);
         self.gc.deinit(self);
         std.debug.assert(self.weak_reference_holder_head == null);
         std.debug.assert(self.weak_reference_holder_tail == null);
@@ -1361,6 +1361,78 @@ pub const JSRuntime = struct {
         removed.flags.is_borrowed_reference_holder = false;
     }
 
+    pub fn linkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        std.debug.assert(ctx.runtime == self);
+        std.debug.assert(ctx.runtime_prev == null and ctx.runtime_next == null);
+        ctx.runtime_prev = self.context_tail;
+        if (self.context_tail) |tail| {
+            tail.runtime_next = ctx;
+        } else {
+            self.context_head = ctx;
+        }
+        self.context_tail = ctx;
+    }
+
+    pub fn unlinkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        if (ctx.runtime_prev == null and ctx.runtime_next == null and self.context_head != ctx) return;
+        if (ctx.runtime_prev) |prev| {
+            prev.runtime_next = ctx.runtime_next;
+        } else {
+            std.debug.assert(self.context_head == ctx);
+            self.context_head = ctx.runtime_next;
+        }
+        if (ctx.runtime_next) |next| {
+            next.runtime_prev = ctx.runtime_prev;
+        } else {
+            std.debug.assert(self.context_tail == ctx);
+            self.context_tail = ctx.runtime_prev;
+        }
+        ctx.runtime_prev = null;
+        ctx.runtime_next = null;
+    }
+
+    pub fn firstContext(self: *const JSRuntime) ?*context_mod.JSContext {
+        return self.context_head;
+    }
+
+    pub fn contextForGlobal(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {
+        var current = self.context_head;
+        while (current) |ctx| : (current = ctx.runtime_next) {
+            if (ctx.global == global) return ctx;
+        }
+        return null;
+    }
+
+    /// Reserve a prototype slot in every live realm before a class id is
+    /// published to callers.  This closes the old "registered after context
+    /// creation" hole without making the runtime list an ownership edge.
+    pub fn ensureContextClassPrototypeCapacity(self: *JSRuntime, class_id: class.ClassId) !void {
+        var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer current_owner.deinit();
+        while (current_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            errdefer next_owner.deinit();
+            _ = try ctx.ensureClassPrototypeSlot(class_id);
+            current_owner.deinit();
+            current_owner = next_owner;
+            next_owner = .{};
+        }
+    }
+
+    /// Drop a dynamically unregistered class prototype from every live realm
+    /// before its runtime definition (and possibly its plugin DSO) disappears.
+    pub fn clearContextClassPrototype(self: *JSRuntime, class_id: class.ClassId) void {
+        var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer current_owner.deinit();
+        while (current_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            ctx.clearClassPrototype(class_id);
+            current_owner.deinit();
+            current_owner = next_owner;
+            next_owner = .{};
+        }
+    }
+
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
         for (self.root_providers) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
@@ -1419,7 +1491,6 @@ pub const JSRuntime = struct {
     pub fn traceRoots(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
         try self.traceValueRootFrames(roots, visitor);
         try visitor.value(&self.current_exception);
-        try visitor.optionalValue(&self.preallocated_oom_error);
         for (self.local_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
@@ -2450,7 +2521,31 @@ pub const JSRuntime = struct {
     /// `DynamicImportCallback` host hook) keep a concrete error set.
     pub fn installStandardGlobals(self: *JSRuntime, global: *Object) context_mod.DynamicImportError!void {
         const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
-        installer(self, global) catch |err| return @errorCast(err);
+        var adopted_context: ?*context_mod.JSContext = null;
+        if (self.contextForGlobal(global) == null) {
+            var candidate = self.context_head;
+            while (candidate) |ctx| : (candidate = ctx.runtime_next) {
+                if (ctx.global != null) continue;
+                global.class_id = class.ids.global_object;
+                gc.retain(&global.header);
+                ctx.global = global;
+                _ = global.ensureGlobalPayload(self) catch |err| {
+                    ctx.global = null;
+                    global.value().free(self);
+                    return @errorCast(err);
+                };
+                adopted_context = ctx;
+                break;
+            }
+            if (adopted_context == null) return error.InvalidBuiltinRegistry;
+        }
+        installer(self, global) catch |err| {
+            if (adopted_context) |ctx| {
+                ctx.global = null;
+                global.value().free(self);
+            }
+            return @errorCast(err);
+        };
     }
 
     pub fn hasInterruptHandler(self: JSRuntime) bool {
@@ -3163,9 +3258,10 @@ test "external hard memory pressure requests urgent major gc" {
 
 /// Wall-clock microseconds for the Math.random seed (qjs js_random_init,
 /// quickjs.c:47373, gettimeofday-based). Falls back to 1 on clock failure.
-fn randomSeedMicros() u64 {
+pub fn newRealmRandomSeed() u64 {
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.REALTIME, &ts) != 0) return 1;
     const micros = @as(i128, ts.sec) * std.time.us_per_s + @divTrunc(@as(i128, ts.nsec), std.time.ns_per_us);
-    return @truncate(@as(u128, @bitCast(micros)));
+    const seed: u64 = @truncate(@as(u128, @bitCast(micros)));
+    return if (seed == 0) 1 else seed;
 }

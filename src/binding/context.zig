@@ -28,7 +28,15 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
 }
 
 pub const JSContext = struct {
-    core: core.JSContext,
+    /// Stable heap identity; this pointer owns the initial RealmRef returned by
+    /// `core.JSContext.createWithOptions` until `deinit`/`destroy`.
+    core: *core.JSContext,
+
+    /// Non-owning facade for callbacks whose ABI already carries the stable
+    /// core realm pointer.  The facade must not be destroyed.
+    pub fn borrowCore(core_ctx: *core.JSContext) JSContext {
+        return .{ .core = core_ctx };
+    }
 
     pub fn create(rt: *JSRuntime) !*JSContext {
         return createWithOptions(rt, .{});
@@ -38,22 +46,24 @@ pub const JSContext = struct {
         const ctx = try rt.memory.create(JSContext);
         errdefer rt.memory.destroy(JSContext, ctx);
         ensureStandardGlobalsRegistered(rt);
-        try ctx.core.init(rt, options);
+        ctx.core = try core.JSContext.createWithOptions(rt, options);
         return ctx;
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
         ensureStandardGlobalsRegistered(rt);
-        try self.core.init(rt, options);
+        self.* = .{ .core = try core.JSContext.createWithOptions(rt, options) };
     }
 
     pub fn deinit(self: *JSContext) void {
-        self.core.deinit();
+        exec.zjs_vm.cleanupAtomicsWaitersForContext(self.core);
+        self.core.destroy();
     }
 
     pub fn destroy(self: *JSContext) void {
         const rt = self.core.runtime;
-        self.core.deinit();
+        exec.zjs_vm.cleanupAtomicsWaitersForContext(self.core);
+        self.core.destroy();
         rt.memory.destroy(JSContext, self);
     }
 
@@ -228,7 +238,7 @@ pub const JSContext = struct {
     // --- Execution / VM / Builtins Helpers (Moved from core/context.zig) ---
     pub fn globalObject(self: *JSContext) !*Object {
         ensureStandardGlobalsRegistered(self.core.runtime);
-        return exec.zjs_vm.contextGlobal(&self.core);
+        return exec.zjs_vm.contextGlobal(self.core);
     }
 
     pub fn createObject(self: *JSContext) !JSValue {
@@ -250,7 +260,7 @@ pub const JSContext = struct {
 
     pub fn getPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom) !JSValue {
         const global = try self.globalObject();
-        return exec.zjs_vm.getValueProperty(&self.core, null, global, val, property_name, null, null);
+        return exec.zjs_vm.getValueProperty(self.core, null, global, val, property_name, null, null);
     }
 
     pub fn getProperty(self: *JSContext, val: JSValue, property_name: []const u8) !JSValue {
@@ -261,9 +271,9 @@ pub const JSContext = struct {
 
     pub fn getPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
-        return exec.object_ops.getValueProperty(&self.core, options.output, global, val, key, null, null);
+        return exec.object_ops.getValueProperty(self.core, options.output, global, val, key, null, null);
     }
 
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
@@ -274,7 +284,7 @@ pub const JSContext = struct {
 
     pub fn deletePropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.deletePropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
@@ -287,21 +297,21 @@ pub const JSContext = struct {
 
     pub fn hasOwnPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.hasOwnPropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn ownPropertyDescriptor(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.ownPropertyDescriptorAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn toString(self: *JSContext, val: JSValue) !JSValue {
         const global = try self.globalObject();
-        return exec.string_ops.toStringForAnnexB(&self.core, null, global, val, null, null);
+        return exec.string_ops.toStringForAnnexB(self.core, null, global, val, null, null);
     }
 
     pub fn toOwnedUtf8(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
@@ -313,7 +323,7 @@ pub const JSContext = struct {
 
     pub fn toNumber(self: *JSContext, val: JSValue) !f64 {
         const global = try self.globalObject();
-        const primitive = try exec.coercion_ops.toPrimitiveForNumber(&self.core, null, global, val);
+        const primitive = try exec.coercion_ops.toPrimitiveForNumber(self.core, null, global, val);
         defer primitive.free(self.core.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try exec.value_ops.toNumberValue(self.core.runtime, primitive);
@@ -337,7 +347,7 @@ pub const JSContext = struct {
         // Public predicate spelling stays infallible; under allocation
         // failure it degrades to a conservative `false`. Engine-internal
         // paths use the fallible form and propagate OOM.
-        return exec.call_runtime.isConstructorLike(&self.core, val) catch false;
+        return exec.call_runtime.isConstructorLike(self.core, val) catch false;
     }
 
     pub fn functionName(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
@@ -350,12 +360,12 @@ pub const JSContext = struct {
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
         const this_value = options.this_value orelse JSValue.undefinedValue();
-        return exec.call_runtime.callValueOrBytecode(&self.core, options.output, global, this_value, callee, args, null, null);
+        return exec.call_runtime.callValueOrBytecode(self.core, options.output, global, this_value, callee, args, null, null);
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        if (options.capture_stack) return exec.exception_ops.createNamedError(&self.core, global, name, message);
+        if (options.capture_stack) return exec.exception_ops.createNamedError(self.core, global, name, message);
         return exec.exception_ops.createNamedErrorWithoutStack(self.core.runtime, global, name, message);
     }
 
@@ -370,7 +380,7 @@ pub const JSContext = struct {
 
     pub fn pendingExceptionMatchesErrorName(self: *JSContext, expected_name: []const u8) !bool {
         if (!self.hasException()) return false;
-        return exec.string_ops.thrownValueMatchesConstructor(self.core.runtime, self.core.exception_slot.value, expected_name);
+        return exec.string_ops.thrownValueMatchesConstructor(self.core.runtime, self.core.runtime.current_exception, expected_name);
     }
 
     pub fn consumePendingExceptionIfErrorName(self: *JSContext, expected_name: []const u8) !bool {
@@ -390,7 +400,7 @@ pub const JSContext = struct {
     }
 
     pub fn createRealm(self: *JSContext) !JSValue {
-        return exec.call.createRealmObject(self.core.runtime);
+        return exec.call.createRealmObject(self.core);
     }
 
     pub fn realmGlobal(self: *JSContext, realm: JSValue) !JSValue {
@@ -428,13 +438,13 @@ pub const JSContext = struct {
     fn deletePropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
-        return exec.object_ops.deleteValueProperty(&self.core, options.output, global, val, object, property_name, null, null);
+        return exec.object_ops.deleteValueProperty(self.core, options.output, global, val, object, property_name, null, null);
     }
 
     fn ownPropertyDescriptorAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
-        var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(&self.core, options.output, global, object, property_name, null, null) orelse {
+        var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(self.core, options.output, global, object, property_name, null, null) orelse {
             if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
                 return Descriptor.data(object.value().dup(), true, false, true);
             }
@@ -479,23 +489,31 @@ pub const JSContext = struct {
 
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
         ensureStandardGlobalsRegistered(self.core.runtime);
-        return exec.eval_entry.evalScriptSource(&self.core, source_text, options);
+        const target = if (options.realm_global) |global|
+            self.core.runtime.contextForGlobal(global) orelse return error.TypeError
+        else
+            self.core;
+        return exec.eval_entry.evalScriptSource(target, source_text, options);
     }
 
     pub fn evalScriptValue(self: *JSContext, source_value: JSValue, options: core.ScriptEvalOptions) !JSValue {
         ensureStandardGlobalsRegistered(self.core.runtime);
-        return exec.eval_entry.evalScriptValue(&self.core, source_value, options);
+        const target = if (options.realm_global) |global|
+            self.core.runtime.contextForGlobal(global) orelse return error.TypeError
+        else
+            self.core;
+        return exec.eval_entry.evalScriptValue(target, source_value, options);
     }
 
     pub fn eval(self: *JSContext, source_text: []const u8, options: core.EvalOptions) !JSValue {
         ensureStandardGlobalsRegistered(self.core.runtime);
-        return exec.eval_entry.eval(&self.core, source_text, options);
+        return exec.eval_entry.eval(self.core, source_text, options);
     }
 
     pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {
         self.core.runtime.job_queue.runAll();
         const global_object = try self.globalObject();
-        exec.zjs_vm.drainPendingPromiseJobs(&self.core, output, global_object) catch |err| {
+        exec.zjs_vm.drainPendingPromiseJobs(self.core, output, global_object) catch |err| {
             if (self.hasException() or self.hasUnhandledRejection()) return;
             return err;
         };
