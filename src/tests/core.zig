@@ -7173,13 +7173,9 @@ test "weak map deep value chain releases without recursive destruction" {
     }
 
     head.value().free(rt);
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        _ = rt.runObjectCycleRemoval();
-        try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
-        try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
-    } else {
-        // TODO(S3): weak-collection liveness under forced GC.
-    }
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), map.weakCollectionEntries().len);
+    try std.testing.expectEqual(@as(usize, live_empty_object_gc_count), rt.gc.liveCount());
 }
 
 test "weak map cycle sweep clears index after removing dead keys" {
