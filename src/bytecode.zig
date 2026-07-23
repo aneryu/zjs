@@ -8961,6 +8961,12 @@ pub const pipeline_resolve_labels = struct {
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
                 }
+                if (matchUndefinedReturnPeephole(code, pc) != null) {
+                    // QJS attributes the consumed return's source marker to
+                    // return_undef. The matcher already rejects an external
+                    // jump target at this boundary.
+                    positions[pc + 1] = out_pc;
+                }
                 if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| {
                     // QJS attributes source markers on the consumed compare
                     // and branch to the replacement nullish test. The matcher

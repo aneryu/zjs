@@ -5096,14 +5096,35 @@ test "resolve_labels folds undefined return" {
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer bc.deinit(rt);
     const op = bytecode.opcode.op;
-    try bc.setCode(&.{ op.undefined, op.@"return" });
+    {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&.{ op.undefined, op.@"return" });
+        try bc.appendSourceLoc(0, 10, 2);
+        try bc.appendSourceLoc(1, 11, 3);
 
-    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
-    try pipeline.resolve_labels.run(&ctx);
-    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+        try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[1].pc);
+    }
+
+    {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        const input = [_]u8{ op.get_arg0, op.if_false, 7, 0, 0, 0, op.undefined, op.@"return" };
+        try bc.setCode(&input);
+        try bc.appendSourceLoc(6, 20, 2);
+        try bc.appendSourceLoc(7, 21, 3);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+        try std.testing.expectEqualSlices(u8, &.{ op.get_arg0, op.if_false8, 2, op.undefined, op.@"return" }, bc.code);
+        try std.testing.expectEqual(@as(u32, 3), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 4), bc.source_loc_slots[1].pc);
+    }
 }
 
 test "resolve_labels null comparison strict_neq branches invert both directions with QuickJS source mapping" {
