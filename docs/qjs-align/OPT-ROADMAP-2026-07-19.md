@@ -2836,6 +2836,11 @@ final bytecode 与 zjs snapshot 证明：
 | `put_x(n); get_x(n) → set_x(n)` | ✅ `02c486e5`确认并锁定pinned QJS的四个wide phase-2同idx族：loc、loc-check、arg与var-ref均由`resolve_labels`折为对应`set_x`并在final选择short form；被删除`get_x`前的source marker映回replacement `set_x`起点。idx不同时保留原put/get；外部jump进入get边界时禁止fold，进入put边界时允许fold并正确重定位。该族不改变atom/cpool owner | 本行封账；`zig build test-bytecode --seed 0 --summary all -- 'put/get'`定向3/3全绿。OOM复用`ac6aa9a3`对同一`resolve_labels.run` positions/sizes/final-code安装边界的逐点失败、旧owner不变与同Bytecode重试证据；不得外推为整个`runPhases` transactional。本项是correctness/coverage收口，不进入PMU，也不代表M-EMIT完成 |
 | signed bigint-i32 literal neg | ✅ `b39eb39c`按pinned qjs producer/finalizer边界完成：parser仍先发正的`push_bigint_i32`与`neg`，`resolve_labels`只对相邻两条做无ownership peephole；`0/1/INT32_MAX`折为带符号immediate，输入`INT32_MIN`为避免溢出不折，`2147483648n`及更大值继续保持owned cpool BigInt + `neg`，不窥看或回写cpool；折叠后的source位置挂回unary minus，括号、正BigInt、Number neg与Number `-0`均有反例锁定 | 本子项封账；`zig build test-parser test-bytecode test-exec --seed 0 --summary all -- bigint`证据为parser 4/4、bytecode 1/1、exec 1/1，且`git diff --check`通过。这里只完成signed BigInt一行，不代表M-EMIT完成，discarded pure expression及表中其他差异仍待逐项裁决 |
 
+`return_async` terminal dead-tail 子项由 `69e3e389` 封账：修复前 focused fixture 复现 atom-bearing
+死尾及末尾 `return_undef` 残留；修复后 bytecode focused 1/1，只保留
+`get_loc0; return_async`，死 atom ledger/refcount 与死尾 source-to-output-end 映射均已验证。
+这里只关闭 `return_async` 后的线性 dead tail，不外推为死区 CFG 整体闭环。
+
 执行纪律：
 
 - binding resolution/hoist construction 与 peephole 分账：前者决定 cell 和函数值的创建阶段、
