@@ -2895,13 +2895,24 @@ final bytecode 与 zjs snapshot 证明：
 - `4286c344` 为独立`undefined; drop` matcher补上QuickJS `code_match`不跨label的entry guard：
   外部控制流进入drop时不再整体删除pair，同时允许后续通用`drop; return_undef`从该入口折为
   terminator；positive discard、targeted drop与input-end/source回映由focused bytecode 1/1锁定。
+- `7c74c8b2` 补齐`add_loc`对empty-string RHS的内层short-form consumer：整体matcher先识别
+  owned `push_atom_value(empty)`，layout/emission再按pinned QuickJS发
+  `push_empty_string; add_loc`，最终atom ledger只释放empty owner。nonempty/tagged/cpool与
+  targeted RHS边界保持；focused bytecode 6/6、parser 2/2及五个`resolve_labels`分配点逐点
+  OOM/retry全绿。
+- `0050384e` 把empty-finalizer `gosub`删除从phase 3迁回pinned QuickJS的
+  `resolve_variables`：phase-2 CFG不再沿仅含`ret`的finalizer边，size/write同相位删除
+  gosub，orphan `ret`随之成为dead；final pass再把相邻`undefined; drop`及前序pure discard
+  级联删除。direct `nop; ret`、`goto→ret`、source/atom owner和逐分配点OOM/retry均锁定；
+  focused bytecode四项、parser两项全绿。
+- `b5e8d185` 让五族`with_*` atom-label probe与普通goto共用pinned QuickJS的bounded
+  `find_jump_target`：taken edge的reachability和final relocation同时穿过最多十跳，
+  probe自身不做adjacency删除或terminal替换。五族、adjacent terminal、independent catch
+  entry、cycle、invalid target、dead atom/source与真实parser/exec consumer均锁定；
+  focused bytecode 5/5、parser 1/1、exec 1/1全绿。
 
-M-EMIT仍有三个已确认的源码/phase/consumer残项：empty-finalizer `gosub`仍在
-`resolve_labels`才删除，因而其`undefined; drop`级联与dead `ret`仍未对齐；constant-test
-产生的goto/删除branch已由上述共享action参与变换后的CFG dead-code裁决；剩余五族`with_*`
-atom-label target尚未按`find_jump_target`穿过goto链，`add_loc`消费empty-string RHS时仍输出owned
-`push_atom_value(empty)`而不是`push_empty_string`。以上三个残项和阶段末test262/OOM/checkpoint门禁完成前，
-不得关闭M-EMIT。
+M-EMIT已确认的源码/phase/consumer残项至此归零；阶段末test262/OOM/checkpoint与总体门禁
+完成前仍只称“机制完成、门禁待验”，不得提前关闭W5或整份路线图。
 
 `return_async` terminal dead-tail 子项由 `69e3e389` 封账：修复前 focused fixture 复现 atom-bearing
 死尾及末尾 `return_undef` 残留；修复后 bytecode focused 1/1，只保留
@@ -3055,7 +3066,10 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W5-branch-normalization（**已完成，三条窄correctness规则**） | ✅ `124f475e`完成goto-to-next删除、conditional-to-next改drop、conditional+goto翻转三条pinned QJS规则，并把source/target边界接入既有layout | 完整bytecode 173/173、完整parser 458/458、production branch专项1/1。只关闭三条相邻instruction-boundary规则；constant-test产生的新CFG edge不在本项结论内 |
 | W5-constant-CFG（**已完成，窄correctness/phase-consumer机制**） | ✅ `a3a610a6`以共享constant-test action驱动reachability/layout/emission，严格保持raw-next→terminal→ordinary jump优先级；`b1f5c17b`补齐真实parser producer | bytecode focused 3/3、parser focused 2/2；锁定terminal/else dead arm、raw-next及不做第二轮goto adjacency四形状。只关闭constant-fold后dead CFG |
 | W5-undefined-discard（**已完成，窄correctness边界**） | ✅ `4286c344`让`undefined; drop`不跨独立drop入口，并保留后续通用terminator fold | bytecode focused 1/1；source与input-end映射均锁定。无新增allocation，OOM继续只复用既有`resolve_labels.run`事务证据 |
-| W5-emit-audit-remaining（**进行中**） | empty-finalizer `gosub` phase/级联、五族`with_*` target threading、`add_loc` empty-string short form仍是已确认残项 | 本行与上面完成行取代W5主行中旧的dead/logical/discard状态描述；这些源码残项以及阶段末test262/OOM/checkpoint完成前，M-EMIT保持开放 |
+| W5-empty-gosub（**已完成，phase-owner机制**） | ✅ `0050384e`在`resolve_variables`删除empty-finalizer gosub并让orphan ret进入dead CFG，phase 3 owner退场 | focused bytecode四项、parser两项；source/atom owner与逐分配点OOM/retry锁定 |
+| W5-add-loc-empty（**已完成，short-form consumer**） | ✅ `7c74c8b2`在canonical add_loc matcher内部发empty-string short form并重建atom ledger | bytecode 6/6、parser 2/2；五分配点OOM/retry及nonempty/tagged/target反例全绿 |
+| W5-with-threading（**已完成，五族target规则**） | ✅ `b5e8d185`让五族atom-label probe的taken edge按bounded `find_jump_target`同步参与reachability/relocation | bytecode 5/5、parser 1/1、exec 1/1；cycle、independent entry、invalid target与owner/source均锁定 |
+| W5-emit-audit-remaining（**机制完成，阶段门禁待验**） | 已确认源码/phase/consumer残项归零 | 本行与上面完成行取代W5主行的旧状态；阶段末test262/OOM/checkpoint及总体门禁完成前，M-EMIT/W5仍保持开放 |
 | W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
