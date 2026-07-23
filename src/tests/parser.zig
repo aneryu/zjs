@@ -8764,6 +8764,77 @@ test "quick parser emits compound assignment and update statements" {
     try std.testing.expect(globalDeclarationClosureNamed(&parsed, rt, "x").?.isLexical());
 }
 
+test "add_loc finalization accepts only QuickJS RHS producers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt,
+        \\function atomRhs() {
+        \\  var value = "";
+        \\  side();
+        \\  value += "x";
+        \\  side();
+        \\  return value;
+        \\}
+        \\function intRhs() {
+        \\  var value = 0;
+        \\  side();
+        \\  value += 1;
+        \\  side();
+        \\  return value;
+        \\}
+        \\function cpoolRhs() {
+        \\  var value = 0;
+        \\  side();
+        \\  value += 1.5;
+        \\  side();
+        \\  return value;
+        \\}
+        \\function taggedRhs() {
+        \\  var value = "";
+        \\  side();
+        \\  value += "123";
+        \\  side();
+        \\  return value;
+        \\}
+    , .{ .mode = .script, .filename = "add-loc-rhs.js" });
+    defer parsed.deinit();
+
+    const atom_rhs = findFunctionConstantNamed(&parsed, rt, "atomRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(atom_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(atom_rhs.byteCode(), op.add));
+
+    const int_rhs = findFunctionConstantNamed(&parsed, rt, "intRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(int_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(int_rhs.byteCode(), op.add));
+
+    const cpool_rhs = findFunctionConstantNamed(&parsed, rt, "cpoolRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(cpool_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.add));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.push_const8));
+
+    const tagged_rhs = findFunctionConstantNamed(&parsed, rt, "taggedRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(tagged_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.add));
+    var saw_tagged_rhs = false;
+    var pc: usize = 0;
+    while (pc < tagged_rhs.byteCode().len) {
+        const op_id = tagged_rhs.byteCode()[pc];
+        const size = engine.bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > tagged_rhs.byteCode().len) return error.TestExpectedEqual;
+        if (op_id == op.push_atom_value) {
+            const atom_id = readU32(tagged_rhs.byteCode(), pc + 1);
+            if (core.atom.isTaggedInt(atom_id)) {
+                saw_tagged_rhs = true;
+                try std.testing.expect(pc + size < tagged_rhs.byteCode().len);
+                try std.testing.expectEqual(op.add, tagged_rhs.byteCode()[pc + size]);
+            }
+        }
+        pc += size;
+    }
+    try std.testing.expect(saw_tagged_rhs);
+}
+
 test "quick parser emits arithmetic compound assignment operators" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

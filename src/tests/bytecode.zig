@@ -4299,6 +4299,167 @@ test "resolve_labels preserves targeted slot store while folding its trailing di
     }, bc.code);
 }
 
+test "resolve_labels folds the QuickJS add_loc RHS family" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("add-loc-positive");
+    const rhs_atom = try rt.internAtom("rhs");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(rhs_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 40;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.push_atom_value;
+    std.mem.writeInt(u32, input[4..8], rhs_atom, .little);
+    input[8] = op.add;
+    input[9] = op.dup;
+    input[10] = op.put_loc;
+    std.mem.writeInt(u16, input[11..13], 4, .little);
+    input[13] = op.drop;
+
+    input[14] = op.get_loc;
+    std.mem.writeInt(u16, input[15..17], 5, .little);
+    input[17] = op.push_i32;
+    std.mem.writeInt(i32, input[18..22], 42, .little);
+    input[22] = op.add;
+    input[23] = op.dup;
+    input[24] = op.put_loc;
+    std.mem.writeInt(u16, input[25..27], 5, .little);
+    input[27] = op.drop;
+
+    input[28] = op.get_loc;
+    std.mem.writeInt(u16, input[29..31], 6, .little);
+    input[31] = op.get_arg;
+    std.mem.writeInt(u16, input[32..34], 1, .little);
+    input[34] = op.add;
+    input[35] = op.dup;
+    input[36] = op.put_loc;
+    std.mem.writeInt(u16, input[37..39], 6, .little);
+    input[39] = op.drop;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(rhs_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 14;
+    expected[0] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[1..5], rhs_atom, .little);
+    expected[5] = op.add_loc;
+    expected[6] = 4;
+    expected[7] = op.push_i8;
+    expected[8] = 42;
+    expected[9] = op.add_loc;
+    expected[10] = 5;
+    expected[11] = op.get_arg1;
+    expected[12] = op.add_loc;
+    expected[13] = 6;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{rhs_atom}, bc.atom_operands);
+}
+
+test "resolve_labels rejects non-QuickJS add_loc RHS and slot boundaries" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("add-loc-negative");
+    defer rt.atoms.free(name);
+    const tagged_atom = core.atom.atomFromUInt32(123);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    _ = try bc.addConstant(core.JSValue.float64(1.5));
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 56;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.push_const;
+    std.mem.writeInt(u32, input[4..8], 0, .little);
+    input[8] = op.add;
+    input[9] = op.dup;
+    input[10] = op.put_loc;
+    std.mem.writeInt(u16, input[11..13], 4, .little);
+    input[13] = op.drop;
+
+    input[14] = op.get_loc;
+    std.mem.writeInt(u16, input[15..17], 5, .little);
+    input[17] = op.push_atom_value;
+    std.mem.writeInt(u32, input[18..22], tagged_atom, .little);
+    input[22] = op.add;
+    input[23] = op.dup;
+    input[24] = op.put_loc;
+    std.mem.writeInt(u16, input[25..27], 5, .little);
+    input[27] = op.drop;
+
+    input[28] = op.get_loc;
+    std.mem.writeInt(u16, input[29..31], 256, .little);
+    input[31] = op.push_i32;
+    std.mem.writeInt(i32, input[32..36], 1, .little);
+    input[36] = op.add;
+    input[37] = op.dup;
+    input[38] = op.put_loc;
+    std.mem.writeInt(u16, input[39..41], 256, .little);
+    input[41] = op.drop;
+
+    input[42] = op.get_loc;
+    std.mem.writeInt(u16, input[43..45], 6, .little);
+    input[45] = op.push_i32;
+    std.mem.writeInt(i32, input[46..50], 1, .little);
+    input[50] = op.add;
+    input[51] = op.dup;
+    input[52] = op.put_loc;
+    std.mem.writeInt(u16, input[53..55], 7, .little);
+    input[55] = op.drop;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(tagged_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 31;
+    expected[0] = op.get_loc8;
+    expected[1] = 4;
+    expected[2] = op.push_const8;
+    expected[3] = 0;
+    expected[4] = op.add;
+    expected[5] = op.put_loc8;
+    expected[6] = 4;
+    expected[7] = op.get_loc8;
+    expected[8] = 5;
+    expected[9] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[10..14], tagged_atom, .little);
+    expected[14] = op.add;
+    expected[15] = op.put_loc8;
+    expected[16] = 5;
+    expected[17] = op.get_loc;
+    std.mem.writeInt(u16, expected[18..20], 256, .little);
+    expected[20] = op.push_1;
+    expected[21] = op.add;
+    expected[22] = op.put_loc;
+    std.mem.writeInt(u16, expected[23..25], 256, .little);
+    expected[25] = op.get_loc8;
+    expected[26] = 6;
+    expected[27] = op.push_1;
+    expected[28] = op.add;
+    expected[29] = op.put_loc8;
+    expected[30] = 7;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{tagged_atom}, bc.atom_operands);
+}
+
 test "resolve_labels folds local update families to inc_loc" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -8465,6 +8465,41 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
+    /// Exact RHS producer family accepted by QuickJS's add_loc fold
+    /// (quickjs.c:35417-35458). Compact forms are accepted only by the
+    /// pre-resolve_labels compatibility entry, where an equivalent wide
+    /// producer may already have been shortened. Constant-pool values and
+    /// tagged integer atoms are deliberately excluded: QuickJS emits neither
+    /// through the matched push_atom_value/push_i32 producer paths.
+    pub fn qjsAddLocRhsSize(code: []const u8, pc: usize, allow_compact_forms: bool) ?usize {
+        if (pc >= code.len) return null;
+        const op_id = code[pc];
+
+        if (op_id == opcode.op.push_atom_value) {
+            if (pc + 5 > code.len) return null;
+            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (atom.isTaggedInt(atom_id)) return null;
+            return 5;
+        }
+
+        const size: usize = switch (op_id) {
+            opcode.op.push_i32 => 5,
+            opcode.op.get_loc, opcode.op.get_arg, opcode.op.get_var_ref => 3,
+            else => if (allow_compact_forms) switch (op_id) {
+                opcode.op.push_minus1...opcode.op.push_7 => 1,
+                opcode.op.push_i8, opcode.op.get_loc8 => 2,
+                opcode.op.push_i16 => 3,
+                opcode.op.get_loc0...opcode.op.get_loc3,
+                opcode.op.get_arg0...opcode.op.get_arg3,
+                opcode.op.get_var_ref0...opcode.op.get_var_ref3,
+                => 1,
+                else => return null,
+            } else return null,
+        };
+        if (pc + size > code.len) return null;
+        return size;
+    }
+
     fn matchAddLocPeephole(code: []const u8, pc: usize) ?AddLocPeephole {
         if (pc + 3 > code.len) return null;
         const first_op = code[pc];
@@ -8475,12 +8510,7 @@ pub const pipeline_resolve_labels = struct {
         const rhs_pc = pc + 3;
         if (rhs_pc >= code.len) return null;
         const rhs_op = code[rhs_pc];
-
-        const rhs_size = switch (rhs_op) {
-            opcode.op.push_i32, opcode.op.push_const, opcode.op.push_atom_value => @as(usize, 5),
-            opcode.op.get_loc, opcode.op.get_arg, opcode.op.get_var_ref => @as(usize, 3),
-            else => return null,
-        };
+        const rhs_size = qjsAddLocRhsSize(code, rhs_pc, false) orelse return null;
 
         const suffix_pc = rhs_pc + rhs_size;
         if (suffix_pc + 6 > code.len) return null;
@@ -10731,51 +10761,6 @@ pub const pipeline_finalize = struct {
         };
     }
 
-    /// A single-value, side-effect-free, no-pop operand op that may legally sit
-    /// between `get_loc(n)` and `add` in the add_loc fuse pattern. Mirrors the
-    /// operand set in QuickJS's add_loc peephole (quickjs.c:35417-35458:
-    /// push_atom_value / push_i32 / get_loc / get_arg / get_var_ref), extended with
-    /// zjs's compact push encodings. All are nPop=0/nPush=1 with no control flow,
-    /// so replacing `get_loc(n) W add put_loc(n)` with `W add_loc(n)` is value- and
-    /// stack-neutral. (scope ops sharing push_minus1..push_7 ids are already gone:
-    /// resolve_variables runs before this pass.)
-    fn isFusableAddLocOperand(op_id: u8) bool {
-        const op = opcode.op;
-        return switch (op_id) {
-            op.push_i32,
-            op.push_const,
-            op.push_const8,
-            op.push_atom_value,
-            op.push_minus1,
-            op.push_0,
-            op.push_1,
-            op.push_2,
-            op.push_3,
-            op.push_4,
-            op.push_5,
-            op.push_6,
-            op.push_7,
-            op.get_loc,
-            op.get_loc8,
-            op.get_loc0,
-            op.get_loc1,
-            op.get_loc2,
-            op.get_loc3,
-            op.get_arg,
-            op.get_arg0,
-            op.get_arg1,
-            op.get_arg2,
-            op.get_arg3,
-            op.get_var_ref,
-            op.get_var_ref0,
-            op.get_var_ref1,
-            op.get_var_ref2,
-            op.get_var_ref3,
-            => true,
-            else => false,
-        };
-    }
-
     /// Peephole pass: fuse a contiguous `get_locN; inc/dec; put_locN` triple
     /// (same local index, idx < 256) into a single 2-byte `inc_loc`/`dec_loc`
     /// (`loc8` format), matching QuickJS's `OP_inc_loc` / `OP_dec_loc`.
@@ -10847,8 +10832,7 @@ pub const pipeline_finalize = struct {
                 // the same argument as the inc/dec fuse above.
                 if (get.idx < 256) {
                     const w_pc = i + get.size;
-                    if (w_pc < code.len and isFusableAddLocOperand(code[w_pc])) {
-                        const w_size = fuseInstrSize(code[w_pc]);
+                    if (resolve_labels.qjsAddLocRhsSize(code, w_pc, true)) |w_size| {
                         const add_pc = w_pc + w_size;
                         if (add_pc < code.len and code[add_pc] == op.add) {
                             const put2_pc = add_pc + 1; // add is size 1
