@@ -863,7 +863,7 @@ const value = Reflect.construct(Object, [], newTarget);
 | wrapper布局与EventLoop owner | EventLoop/test262 production以及TestEngine/string-view fixture仍把`*core.JSContext`反向cast成outer binding wrapper；wrapper拆分或先销毁即悬空。quickjs-libc loop不存ctx，但zjs现有`runUntilIdle(self)`会存 | W1b3a删除全树layout cast；loop因existing API own单一host RealmRef并只保存稳定core context，明确登记为API-lifetime adaptation。vtable直用core ctx，deinit按detach→callback roots→RealmRef释放；未完成前阻塞公开context拆分、callback ABI及Runtime teardown exact |
 | Atomics.waitAsync裸context与跨线程JS | pinned QJS无waitAsync；其同步waiter只在栈上等待cond。zjs heap waiter挂全局链表并持Promise+裸ctx，notify可从foreign thread直接修改JS heap，settle失败又被`catch {}`吞掉后销毁node | W1b3a先建立node RealmRef owner以阻断UAF；W1b3d2再实现no-alloc host completion→owner-runtime FIFO settlement及OOM retry/cancel。未完成前阻塞RealmContext last-ref、Runtime teardown和“deferred work统一由job承载”的封口 |
 | AUTOINIT允许域/opaque/error/publication | zjs把CGETSET、number/int常量和alias cache也做lazy，以`AutoInitRef{rt,id}`查runtime table；generic `getProperty`又把builder OOM变undefined、native builder同read双试，成功global slot仍是data。QJS仅三类ID、direct opaque，accessor/常量/alias eager，builder一次调用并上传异常，global当场发布VARREF，MODULE_NS可发布原export VarRef | W1b3d1 M-AUTOINIT-QJS-DOMAIN-PUBLISH；先按producer恢复QJS允许域/direct descriptor并删除shared alias cache，再修owner/error/global publication；MODULE_NS真实producer随W1e接入。它先于ordinary GLOBAL selector；correctness/OOM变化收益记零，完成后construction/cell/Zoo基线全部重冻 |
-| generator 函数表达式作默认参数 | 已在 `0c7a46f8` 重验：`function f(x=function*(){yield 1}){...}` 在 zjs 为 `UnexpectedToken`，qjs 返回 `1` | M-EMIT 的 parser/发码面 |
+| generator 函数表达式作默认参数 | ✅ `fde49b15` 已把nested function grammar恢复为fresh function boundary：进入child后不再沿用outer FormalParameters的`in_parameter_initializer`。正例`function f(x=function*(){yield 1}){return x().next().value} f()`在qjs/zjs均返回`1`；真正位于外层参数初始化器的direct-yield负例`function* g(x=yield 1){}`在两边仍均为`SyntaxError` | parser correctness blocker已解除，不再列为M-EMIT红灯；该修复改变compiler基线，后续diagnostic/PMU必须从包含`fde49b15`的状态重冻 |
 | named function-expression self-binding construction | 原冻结点的 lazy materialization 沿用旧 scope-linked/unconditional-const metadata，且参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs 修复并由 `c034597c` 合入；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | 已解除 correctness 阻塞并废弃旧 M-CELL A/B；这一项本身不授权删 runtime publication，后者仍受 M-HOIST-CONSTRUCTION 阻塞 |
 | `fclosure` cpool 宽度 | 260 个 expression 的 parser panic 已修；producer 保留宽 index，最终只对 ≤255 缩短 | `936111c5` 已合入并通过相关 parser/exec/checkpoint/full gates；DONE，不计性能收益 |
 | module link-time wide-function hoist | 260 个 exported function 的 cycle TDZ 已修；link consumer 同时解码 `fclosure8/fclosure` | `936111c5` 已合入；P0 DONE。它只证明 operand transport，不证明 module guarded prefix 已与 qjs 同构 |
@@ -886,7 +886,8 @@ const value = Reflect.construct(Object, [], newTarget);
   正确性前置，不替代 W4 阶段末统一 force-GC/OOM gate；
 - 再动 M-RETURN-CONT/M-FRAME-CONT 前，先为复用 frame 的 tail chain 实现并验证与 qjs stack guard
   等价的可观察终止；现有 call/jump interrupt polling 单独保留并回归，不把两种机制揉成一个计数器；
-- parser 正确性修复可独立进行，但若合入，M-EMIT 的 bytecode 基线必须重冻；
+- parser 默认参数correctness已由`fde49b15`合入；generator初始停点又由`b8f7e0d2`改变最终bytecode，
+  因此M-EMIT的diagnostic/PMU基线必须从同时包含二者的状态重冻，不能继续引用旧blocker或旧四-op marker快照；
 - M-FCLOSURE-WIDTH 已由 `936111c5` 完成；后续不得把它的 correctness 变化并入 construction 或
   plain-put 收益。当前候选已删除 module declaration scanner/body skip，宽度测试只继续证明同一 guarded
   bytecode 的 `fclosure8/fclosure` 两种编码；
@@ -2771,13 +2772,16 @@ final bytecode 与 zjs snapshot 证明：
 |---|---|---|
 | binding resolution 与 hoist construction：single parse、scope/arg/function-name/eval-object/with/closure/global优先级，以及final vardef、root function、capture index、cell/value创建阶段 | candidate已恢复bytecode function-value producer并对齐row schema/closure identity/pseudo staging、args→locals lookup、eval链头、8B/12B row和guarded module prefix；仍缺单遍declaration/lvalue、destructuring source-order/internal stack、single-body finally、完整scope event/exit cell close、derived-this真实capture、唯一finalizer/body anchor与Annex-B producer，以及RealmRef/carriers/terminator/root/direct-FB/closure2/pc2line/move/pack/module | 当前compiler缺口严格归W1b2.5，product-only using transport归W1b2.6；随后才进入M-REALM-STATE-REF至M-FB-PACK-CORE，最后由W1d exact-close/W1e补齐class/module producer。不是peephole，不进行“只缩短序列”的PMU归因 |
 | pipeline order、short loc/arg/var-ref、const8/fclosure8 | 普通 pipeline/encoding 已有，`fclosure` 255/256 producer/consumer 已由 `936111c5` 修复 | P0 封账；其他 short family 只补矩阵证据，不重做 |
+| generator parameter/body初始停点 | ✅ `fde49b15`先修复nested generator function expression的fresh grammar boundary；`b8f7e0d2`再按pinned qjs producer/consumer发canonical `OP_initial_yield`，替换`push_false; drop; push_true; drop` marker并删除runtime `generatorBodyPc`扫描。sync generator与async-generator保持suspended-start，首次`next`不注入resume value，pre-start `throw/return`不进入body；ordinary async function、legacy adapter与空packed fixture仍按既有pc 0入口准备resident frame | correctness/lowering子项封账并冻结script/module bytecode snapshot及sync/async-generator exec回归；它只关闭initial-yield这一刀，不代表M-EMIT完成 |
 | tail call、`get_field(length)`、empty string short form | zjs多在parser提前输出，但三者不能因“最终更短”合并裁决：pinned QJS parser没有tail-call pushdown；`get_length`又会改变last-op/delete/call consumer，empty-string才可能只是纯表示 | tail-call producer在M-PARSER-CONTROL-CLEANUP删除；未来product tail-call只能是baseline默认关闭的后置CFG pass。`get_length`先做producer/consumer/source/OOM审计，不能只比final bytes；empty-string确认不改变任何phase事件后才允许保留等价pass位置 |
-| logical chain、null/undefined/typeof、constant branch、push-neg、dup-put/set、return-undef、dead code、inc/add-loc | 已有 matcher 或独立 fuse | 逐条钉 snapshot 后封账；不能再用旧的粗粒度族数代替 coverage |
+| logical chain、null/undefined/typeof、constant branch、push-neg、dup-put/set、return-undef、dead code、inc/add-loc | 已有 matcher 或独立 fuse | 逐条钉 snapshot 后封账；这里的CFG/dead-code matcher不等于已消除所有discarded pure expression，不能再用旧的粗粒度族数代替coverage |
+| discarded pure expression（如`(1);`、`("x");`） | diagnostic final-bytecode diff已确认：zjs仍保留literal push + `drop`，pinned qjs已消除 | 仍待按numeric/string及source/OOM事件逐项裁决；未完成，不并入initial-yield刀 |
 | `insert3 + put_array_el/put_ref_value + drop` | 待 final-bytecode diff | 若 zjs 最终仍保留该序列，一条规则一刀 |
 | redundant `to_propkey` before simple producer + `put_array_el` | 待 final-bytecode diff | 先覆盖 symbol/object coercion 反例，再裁决 |
 | `insert2 + put_field + drop` | 待 final-bytecode diff | 先证明 stack effect/atom ownership，再裁决 |
 | post-inc/dec store rewrites（loc/arg/var-ref/field/array） | loc 已有部分 fuse，其余待 diff | 按 destination family 分刀，不合批 |
-| `put_x(n); get_x(n) → set_x(n)` 与 bigint-i32 neg | 待 coverage/diff | 只有最终差异且有可达脚本才进入 PMU |
+| `put_x(n); get_x(n) → set_x(n)` | 待 coverage/diff | 只有最终差异且有可达脚本才进入PMU |
+| signed bigint-i32 literal neg | diagnostic final-bytecode diff已确认：`return -(1n)`在zjs为`push_bigint_i32 1; neg`，pinned qjs直接发`push_bigint_i32 -1` | 仍待独立snapshot、语义反例与producer/ownership审计后逐项裁决；未完成，不并入initial-yield刀 |
 
 执行纪律：
 
@@ -2897,7 +2901,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
 | W3-native（**已完成，correctness + 候选回退**） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零。重复`callable_realm`transport候选在ordinary/cross-realm/C_FUNCTION_DATA/constructor/synthetic/nested语义矩阵通过，并在两个builtin domain的plain/method与exact/missing形状稳定减少每次2～6条指令 | ❌ 独立布局重建虽保留direct指令削减，却使property-read/allocation controls回退+1.477%/+1.660%，越过+1%门槛且暴露code-layout方向翻转；生产候选完整回退，九个direct/control probe与失败结论保留，W3冻结 |
 | W4 | ✅ force-GC liveness 前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 前置门禁已恢复；剩余 core stats 条件是 instrumentation 语义而非 liveness skip。先空对象 lifecycle，后 transition/capacity 差分；阶段末仍跑统一 force-GC/OOM gate，不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
-| W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
+| W5（**进行中；correctness/initial-yield已收口**） | ✅ `fde49b15`以fresh function grammar boundary修复默认参数内generator function expression，正例返回`1`且外层direct-yield负例仍与qjs同为`SyntaxError`；✅ `b8f7e0d2`以canonical `OP_initial_yield`替换四-op marker并删除`generatorBodyPc`扫描，保持sync/async-generator suspended-start及ordinary async/fixture pc 0入口 → 重冻diagnostic/PMU → 继续M-EMIT | hoist construction不算peephole；initial-yield只完成这一条producer/consumer。discarded dead expression、signed bigint-i32及表中其他final-bytecode差异仍待逐项裁决，禁止宣称M-EMIT完成 |
 | W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
