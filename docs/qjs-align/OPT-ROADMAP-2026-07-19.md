@@ -2866,6 +2866,36 @@ final bytecode 与 zjs snapshot 证明：
 | `put_x(n); get_x(n) → set_x(n)` | ✅ `02c486e5`确认并锁定pinned QJS的四个wide phase-2同idx族：loc、loc-check、arg与var-ref均由`resolve_labels`折为对应`set_x`并在final选择short form；被删除`get_x`前的source marker映回replacement `set_x`起点。idx不同时保留原put/get；外部jump进入get边界时禁止fold，进入put边界时允许fold并正确重定位。该族不改变atom/cpool owner | 本行封账；`zig build test-bytecode --seed 0 --summary all -- 'put/get'`定向3/3全绿。OOM复用`ac6aa9a3`对同一`resolve_labels.run` positions/sizes/final-code安装边界的逐点失败、旧owner不变与同Bytecode重试证据；不得外推为整个`runPhases` transactional。本项是correctness/coverage收口，不进入PMU，也不代表M-EMIT完成 |
 | signed bigint-i32 literal neg | ✅ `b39eb39c`按pinned qjs producer/finalizer边界完成：parser仍先发正的`push_bigint_i32`与`neg`，`resolve_labels`只对相邻两条做无ownership peephole；`0/1/INT32_MAX`折为带符号immediate，输入`INT32_MIN`为避免溢出不折，`2147483648n`及更大值继续保持owned cpool BigInt + `neg`，不窥看或回写cpool；折叠后的source位置挂回unary minus，括号、正BigInt、Number neg与Number `-0`均有反例锁定 | 本子项封账；`zig build test-parser test-bytecode test-exec --seed 0 --summary all -- bigint`证据为parser 4/4、bytecode 1/1、exec 1/1，且`git diff --check`通过。这里只完成signed BigInt一行，不代表M-EMIT完成，discarded pure expression及表中其他差异仍待逐项裁决 |
 
+2026-07-24 completion audit 对上表的增量状态如下；这些结论取代相应旧状态，但不追溯改写
+每个已封账窄机制的历史证据：
+
+- `24018694` 已把pinned QuickJS的phase-2 dead-code边界带回`resolve_variables`：
+  先按phase-1 instruction/label图求entry reachability，再只让live binding event参与capture/cell、
+  atom与source重建。referenced live merge、dead-only jump cycle、八种精确phase-2 terminal、
+  `return_async`仍留给phase 3、live indexed-store target及真实nested capture反例均已锁定；
+  完整`test-bytecode`为171/171。这里只关闭dead binding event及其phase owner，不关闭
+  empty-finalizer `gosub`或resolve-labels中由新fold产生的dead CFG。
+- `cf7f6e88` 已补齐signed inline BigInt的discard consumer：
+  `push_bigint_i32; neg; drop`在无interior target时整体删除，`0/1/INT32_MAX`、source回映与
+  targeted-neg边界均有bytecode证据；production `(-1n);`只剩`return_undef`，
+  cpool `(-2147483648n);`继续保留。提交前bigint bytecode 2/2、parser 4/4及
+  numeric-discard producer 1/1全绿，随后完整bytecode 173/173继续覆盖。本项关闭
+  signed-inline BigInt discard，不把positive/cpool BigInt或整个discard family一并关闭。
+- `124f475e` 已按pinned QuickJS instruction boundary实现三条通用branch normalization：
+  `goto L; L:`删除goto，`if_false/if_true L; L:`改为`drop`，以及
+  `if_* L1; goto L2; L1:`在无外部入口时翻转branch并直指L2。两种branch方向、source回映、
+  independent-entry反例、logical/typeof/put-get下游consumer及真实parser producer均已锁定；
+  完整`test-bytecode` 173/173、完整`test-parser` 458/458、production branch专项1/1全绿。
+  本项只关闭这三条相邻边界规则，不外推为constant-fold后的CFG fixed point。
+
+M-EMIT仍有五个已确认的源码/phase/consumer残项：empty-finalizer `gosub`仍在
+`resolve_labels`才删除，因而其`undefined; drop`级联与dead `ret`仍未对齐；constant-test
+产生的goto/删除branch尚未参与变换后的CFG dead-code裁决；五族`with_*` atom-label target
+尚未按`find_jump_target`穿过goto链；`add_loc`消费empty-string RHS时仍输出owned
+`push_atom_value(empty)`而不是`push_empty_string`；独立`undefined; drop` matcher的
+interior-target/source边界尚未封账。以上残项和阶段末test262/OOM/checkpoint门禁完成前，
+不得关闭M-EMIT。
+
 `return_async` terminal dead-tail 子项由 `69e3e389` 封账：修复前 focused fixture 复现 atom-bearing
 死尾及末尾 `return_undef` 残留；修复后 bytecode focused 1/1，只保留
 `get_loc0; return_async`，死 atom ledger/refcount 与死尾 source-to-output-end 映射均已验证。
@@ -3013,6 +3043,10 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W5-dead-pc2line（**已完成，窄correctness机制**） | ✅ `ea959805`在`resolve_labels`最终layout后以allocation-free in-place compaction只保留`pc < final code len`的source slot；不可达suffix中的line marker仍可更新scanner状态，但不再制造指向bytecode end的dead pc2line record | 既有goto-terminal、async-return与dead-CFG fixture锁定无末端source record；本批完整bytecode在新增最后一条tagged-label OOM fixture前为166/166。只关闭dead-end pc2line record，不关闭整个dead-code family或M-EMIT |
 | W5-logical-producer（**已完成，窄correctness机制**） | ✅ `180faaf2`把`parseLogicalAndOr`的每条`&&`/`||`链改为单一shared tagged `ParserLabelRef`，所有prefix共同引用该target，synthetic `dup/branch/drop`及链尾label均no-source；最终OR prefix共同落到最终consumer，opcode种类与语义保持 | raw phase-1锁定同label/同target/零synthetic source slot，multiline final pc2line锁定source progression；parser logical 9/9。该producer子项已闭，但不单独关闭logical全项或M-EMIT |
 | W5-logical-phase-owner（**已完成，窄correctness机制**） | ✅ `a4be78cd`把logical fold迁到pinned QuickJS同相位的`resolve_variables`，在wide label与line marker仍存在时处理shared label、line marker和bounded goto target，并删除`resolve_labels` matcher/fallback；interior target继续阻止消费branch/drop suffix | bytecode logical 8/8；本批完整bytecode在新增最后一条tagged-label OOM fixture前166/166，`quick-check` 8/8。absolute-target OOM只对该路径声明byte/source/atom全事务并支持同Bytecode retry；tagged-label OOM只声明无泄漏与同Bytecode retry，不声明原始byte逐字节回滚。logical实现/phase-owner证据已闭，且本行取代上方W5主行的旧logical状态；M-EMIT仍开放，阶段末test262 logical slice、`test-oom`与checkpoint仍待本批统一门禁 |
+| W5-phase2-dead-binding（**已完成，窄correctness/phase-owner机制**） | ✅ `24018694`在`resolve_variables`按phase-1 CFG reachability先裁掉dead binding event，再进行capture/cell、atom与source重建；terminal集合精确排除`return_async`，dead-only cycle不自保活，live merge与indexed-store入口仍保留 | focused fixture覆盖owner refcount、closure row、`var_ref_count`、source remap与真实parser nested capture；完整bytecode 171/171。只关闭phase-2 dead binding，不关闭empty `gosub`级联、constant-fold后dead CFG或M-EMIT |
+| W5-bigint-discard（**已完成，窄correctness机制**） | ✅ `cf7f6e88`让signed inline `push_bigint_i32; neg; drop`按QJS整体消失，并保留interior-target与cpool BigInt边界 | bigint bytecode 2/2、parser 4/4、numeric-discard producer 1/1；随后完整bytecode 173/173。只关闭signed-inline BigInt discard，不关闭整个discard family |
+| W5-branch-normalization（**已完成，三条窄correctness规则**） | ✅ `124f475e`完成goto-to-next删除、conditional-to-next改drop、conditional+goto翻转三条pinned QJS规则，并把source/target边界接入既有layout | 完整bytecode 173/173、完整parser 458/458、production branch专项1/1。只关闭三条相邻instruction-boundary规则；constant-test产生的新CFG edge不在本项结论内 |
+| W5-emit-audit-remaining（**进行中**） | empty-finalizer `gosub` phase/级联、constant-fold后CFG dead、五族`with_*` target threading、`add_loc` empty-string short form、`undefined; drop` interior-target/source边界仍是已确认残项 | 本行与上面三个新完成行取代W5主行中旧的dead/logical/discard状态描述；这些源码残项以及阶段末test262/OOM/checkpoint完成前，M-EMIT保持开放 |
 | W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
