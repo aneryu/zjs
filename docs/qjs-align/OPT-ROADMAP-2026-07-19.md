@@ -2747,6 +2747,18 @@ fallible ownership transaction；D）只在out-of-line `beginConstruction`特判
 整个`M-ALLOC-LIFECYCLE`，accounting、destroy或allocator geometry只有出现新的profile事实才可
 另立独立候选。
 
+`M-ALLOC-OBJECT-FREE-ORDER` correctness 子项已由`48f6d61d`收口：对象进入zero-ref FIFO后，
+先释放own properties与原shape/prototype，再以原object identity同步调用class payload
+finalizer，callback返回后才释放其余class-owned edge、从GC/accounting注销并raw free。zjs公开
+读helper要求非空shape，因此callback窗口使用process-lifetime空FAM tombstone表达qjs的
+`shape=NULL/prop=NULL`，`getPrototype`、`hasOwnProperty`、`getProperty`均只能看到已剥离空对象；
+当前drain项与排队项仍属于Runtime，使callback内`ownsObject`与qjs zero-ref list lifetime一致。
+per-object deferred-finalizer reservation及生产enqueue已删除，inline/external payload均同步、
+无分配且恰好一次；旧deferred queue API的独立清理不在本刀扩张删除。最终回滚shape候选后的
+`test-core`为286/286，runtime wrapper相关8/8，`zig fmt --check`与`git diff --check`通过；
+full `test-runtime`唯一失败是未改动的既有plugin OOM pending-exception旧断言，不归入本机制。
+这一步只关闭finalizer/free顺序，不把accounting或allocator geometry宣称为性能收益。
+
 Recon 顺序：
 
 1. 用当前同一 `allocation-empty-object-2m.js` 跨 07-08 候选提交复现 0.96x；无法复现就删除
@@ -2929,7 +2941,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
 | W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
 | W3-native（**已完成，correctness + 候选回退**） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零。重复`callable_realm`transport候选在ordinary/cross-realm/C_FUNCTION_DATA/constructor/synthetic/nested语义矩阵通过，并在两个builtin domain的plain/method与exact/missing形状稳定减少每次2～6条指令 | ❌ 独立布局重建虽保留direct指令削减，却使property-read/allocation controls回退+1.477%/+1.660%，越过+1%门槛且暴露code-layout方向翻转；生产候选完整回退，九个direct/control probe与失败结论保留，W3冻结 |
-| W4（进行中；M-ALLOC-STANDARD-OBJECT子方向已关闭） | ✅ force-GC liveness 前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 首候选虽改善两个Object direct消费者，却使pure `[]` control回退cycles +11.787% / instructions +1.680%，按§8完整回退；第二候选隔离审计的A/B/C/D四案均无法同时保持non-object codegen且避免复制大段ownership transaction，故该子方向收益记零、代码不保留。整个M-ALLOC-LIFECYCLE未关闭；accounting/destroy等仅凭新的profile事实另立。阶段末仍跑统一force-GC/OOM gate；M-SHAPE-PUBLISH保持独立待执行 |
+| W4（进行中；standard-object候选已关闭，object free-order correctness已收口） | ✅ force-GC liveness 前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ ✅ `48f6d61d`对齐properties/shape→同步class finalizer→accounting/raw-free顺序 → 继续M-ALLOC-LIFECYCLE/M-SHAPE-PUBLISH | standard-object首候选虽改善两个Object direct消费者，却使pure `[]` control回退cycles +11.787% / instructions +1.680%，按§8完整回退；第二候选隔离审计的A/B/C/D四案也无法保持non-object隔离，故该子方向收益记零。free-order是correctness且不申报性能；整个M-ALLOC-LIFECYCLE仍未关闭，accounting/allocator geometry仅凭新profile另立。阶段末仍跑统一force-GC/OOM gate；M-SHAPE-PUBLISH保持独立待执行 |
 | W5（**进行中；correctness/initial-yield、signed BigInt、numeric discard及三组store规则已收口**） | ✅ `fde49b15`以fresh function grammar boundary修复默认参数内generator function expression，正例返回`1`且外层direct-yield负例仍与qjs同为`SyntaxError`；✅ `b8f7e0d2`以canonical `OP_initial_yield`替换四-op marker并删除`generatorBodyPc`扫描，保持sync/async-generator suspended-start及ordinary async/fixture pc 0入口；✅ `b39eb39c`以`resolve_labels`相邻peephole折叠signed `push_bigint_i32 + neg`并保持MIN/cpool/source边界；✅ `08e4bbdb`按QJS producer/finalizer边界完成numeric discard和通用tail `drop + return_undef`；✅ 复核`8a09960f`已按QJS phase覆盖discarded indexed/ref、field及post-update store，2026-07-24 `discarded`窄门禁5/5全绿 → 继续M-EMIT | hoist construction不算peephole；每项只按各自producer/finalizer封账。discarded string、redundant `to_propkey`、put→get coverage及表中其他final-bytecode差异仍待逐项裁决，禁止宣称M-EMIT完成 |
 | W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
