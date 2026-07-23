@@ -8175,6 +8175,7 @@ pub const pipeline_resolve_labels = struct {
             opcode.op.tail_call_method,
             opcode.op.@"return",
             opcode.op.return_undef,
+            opcode.op.return_async,
             opcode.op.throw,
             opcode.op.throw_error,
             opcode.op.ret,

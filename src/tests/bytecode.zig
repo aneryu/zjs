@@ -5386,6 +5386,47 @@ test "resolve_labels removes atom-bearing dead code after a terminal opcode" {
     try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
 }
 
+test "resolve_labels removes atom-bearing dead code after return_async" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("async-dead-tail");
+    defer rt.atoms.free(name);
+    const dead_atom = try rt.internAtom("async-dead-operand");
+    defer rt.atoms.free(dead_atom);
+    const base_ref_count = rt.atoms.refCount(dead_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 9;
+    input[0] = op.get_loc0;
+    input[1] = op.return_async;
+    input[2] = op.push_atom_value;
+    std.mem.writeInt(u32, input[3..7], dead_atom, .little);
+    input[7] = op.drop;
+    input[8] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(dead_atom);
+    try bc.appendSourceLoc(1, 10, 2);
+    try bc.appendSourceLoc(2, 11, 3);
+    try bc.appendSourceLoc(8, 12, 4);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{ op.get_loc0, op.return_async }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
+    try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[1].pc);
+    try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[2].pc);
+}
+
 test "resolve_labels folds typeof inequality branches with branch source and target" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
