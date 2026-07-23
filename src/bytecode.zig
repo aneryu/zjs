@@ -6748,6 +6748,118 @@ pub const pipeline_resolve_variables = struct {
         return put_op;
     }
 
+    const Phase1LogicalPrefix = struct {
+        branch_op: u8,
+        target: usize,
+        end_pc: usize,
+    };
+
+    const Phase1LogicalChain = struct {
+        branch_op: u8,
+        target: usize,
+        end_pc: usize,
+    };
+
+    fn skipPhase1LineMarkers(code: []const u8, start_pc: usize) ?usize {
+        var pc = start_pc;
+        while (pc < code.len and code[pc] == opcode.op.line_num) {
+            if (pc + opcode.sizeOfPhase1(opcode.op.line_num) > code.len) return null;
+            pc += opcode.sizeOfPhase1(opcode.op.line_num);
+        }
+        return pc;
+    }
+
+    fn phase1LogicalPrefix(
+        code: []const u8,
+        jump_targets: []const bool,
+        pc: usize,
+        guard_consumed_suffix: bool,
+    ) ?Phase1LogicalPrefix {
+        if (pc >= code.len or code[pc] != opcode.op.dup or jump_targets.len != code.len + 1) return null;
+
+        const branch_pc = skipPhase1LineMarkers(code, pc + 1) orelse return null;
+        if (branch_pc + 5 > code.len) return null;
+        const branch_op = code[branch_pc];
+        if (branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) return null;
+
+        const drop_pc = skipPhase1LineMarkers(code, branch_pc + 5) orelse return null;
+        if (drop_pc >= code.len or code[drop_pc] != opcode.op.drop) return null;
+        const end_pc = drop_pc + 1;
+        if (guard_consumed_suffix) {
+            for (jump_targets[pc + 1 .. end_pc]) |is_target| {
+                if (is_target) return null;
+            }
+        }
+
+        const target = std.mem.readInt(u32, code[branch_pc + 1 ..][0..4], .little);
+        if (target > code.len) return null;
+        return .{
+            .branch_op = branch_op,
+            .target = target,
+            .end_pc = end_pc,
+        };
+    }
+
+    /// QuickJS `get_label_pos`: labels and line markers do not interrupt a
+    /// logical-chain target, and a bounded chain of gotos is followed before
+    /// inspecting the target opcode.
+    fn phase1LogicalTargetPc(code: []const u8, initial_target: usize) ?usize {
+        var target = initial_target;
+        var goto_hops: usize = 0;
+        while (goto_hops < 20) : (goto_hops += 1) {
+            var pc = target;
+            while (pc < code.len) {
+                switch (code[pc]) {
+                    opcode.op.line_num, opcode.op.label => {
+                        if (pc + 5 > code.len) return null;
+                        pc += 5;
+                    },
+                    opcode.op.goto => {
+                        if (pc + 5 > code.len) return null;
+                        target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                        if (target > code.len) return null;
+                        break;
+                    },
+                    else => return pc,
+                }
+            } else return pc;
+        }
+        return null;
+    }
+
+    /// QuickJS performs this fold in `resolve_variables`, while labels are
+    /// still wide and OP_line_num markers still delimit source provenance:
+    ///
+    ///   dup if_false(l1) drop ... l1: if_false(l2) -> if_false(l2)
+    ///
+    /// The consumed branch/drop suffix must not be an independent entry point.
+    fn matchPhase1LogicalChain(
+        code: []const u8,
+        jump_targets: []const bool,
+        pc: usize,
+    ) ?Phase1LogicalChain {
+        const first = phase1LogicalPrefix(code, jump_targets, pc, true) orelse return null;
+        var target = first.target;
+        var hops: usize = 0;
+        while (hops < code.len) : (hops += 1) {
+            const target_pc = phase1LogicalTargetPc(code, target) orelse return null;
+            if (target_pc + 5 <= code.len and code[target_pc] == first.branch_op) {
+                const final_target = std.mem.readInt(u32, code[target_pc + 1 ..][0..4], .little);
+                if (final_target > code.len) return null;
+                return .{
+                    .branch_op = first.branch_op,
+                    .target = final_target,
+                    .end_pc = first.end_pc,
+                };
+            }
+
+            const next = phase1LogicalPrefix(code, jump_targets, target_pc, false) orelse return null;
+            if (next.branch_op != first.branch_op) return null;
+            target = next.target;
+        }
+        return null;
+    }
+
     /// Bind the parser's tagged label identities to absolute phase-1 PCs.
     /// Optional chains can therefore share one label without retaining an
     /// exit vector or patching by byte-pattern scan. Validation and the only
@@ -7056,6 +7168,12 @@ pub const pipeline_resolve_variables = struct {
                 i += 3;
                 continue;
             }
+            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+                output_size += 5;
+                jump_count += 1;
+                i = logical.end_pc;
+                continue;
+            }
             // Validate the parser-time OP_eval / OP_apply_eval scope index. The
             // write pass below replaces it with the finalized vardef-chain head;
             // parser scope metadata never crosses the finalization boundary.
@@ -7361,6 +7479,16 @@ pub const pipeline_resolve_variables = struct {
                 out_idx += 1;
                 pc_map[i + 2] = out_idx;
                 i += 3;
+                continue;
+            }
+            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+                output[out_idx] = logical.branch_op;
+                std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], @intCast(logical.target), .little);
+                jump_sites[out_jump_idx] = .{ .operand_pos = out_idx + 1 };
+                out_jump_idx += 1;
+                out_idx += 5;
+                for (i + 1..logical.end_pc) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                i = logical.end_pc;
                 continue;
             }
             // Convert OP_eval / OP_apply_eval's parser scope index to QuickJS's
@@ -8231,12 +8359,6 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    const LogicalChainPeephole = struct {
-        branch_op: u8,
-        target: usize,
-        total_size: usize,
-    };
-
     const NullishTestPeephole = struct {
         test_op: u8,
         branch_op: ?u8,
@@ -8332,51 +8454,6 @@ pub const pipeline_resolve_labels = struct {
             .target = target,
             .total_size = 12,
         };
-    }
-
-    /// Collapse the prefix of a chained logical expression:
-    ///
-    ///   dup if_false(l1) drop ... l1: if_false(l2)
-    ///     -> if_false(l2) ... l1: if_false(l2)
-    ///
-    /// and likewise for `if_true`.  This mirrors QuickJS's resolve-labels
-    /// peephole.  The branch and drop must not be independent control-flow
-    /// entry points because both are removed from this occurrence.
-    fn matchLogicalChainPeephole(code: []const u8, pc: usize) ?LogicalChainPeephole {
-        if (pc + 7 > code.len or code[pc] != opcode.op.dup) return null;
-        const branch_op = code[pc + 1];
-        if (branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) return null;
-        if (code[pc + 6] != opcode.op.drop) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
-
-        var target = jumpTarget(code, pc + 1) catch return null;
-        var hops: usize = 0;
-        // Every valid hop lands on another instruction in this bytecode.  A
-        // byte-length bound therefore admits every finite chain while making
-        // malformed cyclic jump graphs terminate without a semantic depth cap.
-        while (hops < code.len) : (hops += 1) {
-            const target_pc = skipLabels(code, target) catch return null;
-            if (target_pc >= code.len) return null;
-
-            if (code[target_pc] == branch_op) {
-                const final_target = resolvedJumpTarget(code, target_pc) catch return null;
-                return .{
-                    .branch_op = branch_op,
-                    .target = final_target,
-                    .total_size = 7,
-                };
-            }
-
-            if (target_pc + 7 > code.len or
-                code[target_pc] != opcode.op.dup or
-                code[target_pc + 1] != branch_op or
-                code[target_pc + 6] != opcode.op.drop)
-            {
-                return null;
-            }
-            target = jumpTarget(code, target_pc + 1) catch return null;
-        }
-        return null;
     }
 
     /// QuickJS `resolve_labels` begins this family at quickjs.c:35264. Atom
@@ -8908,7 +8985,6 @@ pub const pipeline_resolve_labels = struct {
         if (redundantReturnUndefSize(code, pc)) |size| return size;
         if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
         if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
-        if (matchLogicalChainPeephole(code, pc)) |p| return p.total_size;
         if (matchDupPutPeephole(code, pc)) |p| return p.total_size;
         if (matchPutGetPeephole(code, pc)) |p| return p.total_size;
         if (matchIncLocPeephole(code, pc)) |p| return p.total_size;
@@ -8999,10 +9075,6 @@ pub const pipeline_resolve_labels = struct {
                     const target_pc = positions[p.target];
                     const diff = relOffset(out_pc + 1, target_pc);
                     break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
-                } else if (matchLogicalChainPeephole(code, pc)) |p| blk: {
-                    const target_pc = positions[p.target];
-                    const diff = relOffset(out_pc, target_pc);
-                    break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
                 } else if (matchDupPutPeephole(code, pc)) |p|
                     loweredSlotInstructionSize(p.result_op, p.idx, use_short_opcodes)
                 else if (matchPutGetPeephole(code, pc)) |p|
@@ -9377,10 +9449,6 @@ pub const pipeline_resolve_labels = struct {
                     const branch_size = sizes[i] - 1;
                     try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
                 }
-                i += p.total_size;
-            } else if (matchLogicalChainPeephole(func.code, i)) |p| {
-                const size = sizes[i];
-                try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, size);
                 i += p.total_size;
             } else if (matchDupPutPeephole(func.code, i)) |p| {
                 try emitSlotInstruction(p.result_op, p.idx, output, &out_idx, use_short_opcodes);
