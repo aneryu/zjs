@@ -8260,12 +8260,8 @@ test "job queue symbol roots preserve weak map values" {
     value.value().free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
-        try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
-    } else {
-        // TODO(S3): weak-collection liveness under forced GC.
-    }
+    try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
+    try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
 
     queue.deinit();
     _ = rt.runObjectCycleRemoval();
