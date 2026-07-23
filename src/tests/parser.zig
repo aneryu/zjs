@@ -3074,6 +3074,28 @@ test "F5: if statement without else" {
     try std.testing.expectEqual(fn_bc.code.len, if_false_target);
 }
 
+test "F5: constant test conditions reach the final QuickJS fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{ .source = "if (true) x;", .expected = &.{ op.get_var, op.drop } },
+        .{ .source = "if (false) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+        .{ .source = "if (null) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+        .{ .source = "if (0) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+        .{ .source = "if (1) x;", .expected = &.{ op.get_var, op.drop } },
+        .{ .source = "if (void 0) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+    };
+    for (cases) |case| {
+        var fn_bc = try parseStatement(&env, case.source);
+        defer fn_bc.deinit(env.rt);
+        try expectOpcodeSequence(fn_bc.code, case.expected);
+    }
+}
+
 test "F5: if statement with else" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

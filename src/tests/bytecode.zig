@@ -2411,58 +2411,105 @@ test "resolve_labels: threads jumps through unconditional goto targets" {
     try std.testing.expectEqual(@as(i32, 9), std.mem.readInt(i32, bc.code[1..5], .little));
 }
 
-test "resolve_labels: folds constant push_i32 conditional tests" {
+test "resolve_labels constant tests fold every QuickJS producer and preserve source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
 
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
     const op = bytecode.opcode.op;
+    const producers = [_]struct {
+        op_id: u8,
+        size: usize,
+        value: i32 = 0,
+        truthy: bool,
+    }{
+        .{ .op_id = op.push_false, .size = 1, .truthy = false },
+        .{ .op_id = op.push_true, .size = 1, .truthy = true },
+        .{ .op_id = op.null, .size = 1, .truthy = false },
+        .{ .op_id = op.undefined, .size = 1, .truthy = false },
+        .{ .op_id = op.push_i32, .size = 5, .value = -1, .truthy = true },
+    };
+    const branches = [_]u8{ op.if_false, op.if_true };
 
-    {
-        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer bc.deinit(rt);
+    for (producers) |producer| {
+        for (branches) |branch_op| {
+            var input = [_]u8{0} ** 11;
+            input[0] = producer.op_id;
+            if (producer.op_id == op.push_i32) {
+                std.mem.writeInt(i32, input[1..5], producer.value, .little);
+            }
+            const jump_pc = producer.size;
+            const target_pc = jump_pc + 5;
+            input[jump_pc] = branch_op;
+            std.mem.writeInt(u32, input[jump_pc + 1 ..][0..4], @intCast(target_pc), .little);
+            input[target_pc] = op.return_undef;
 
-        // push_i32 1 ; if_false pc=10 ; return_undef
-        var input = [_]u8{0} ** 11;
-        input[0] = op.push_i32;
-        std.mem.writeInt(i32, input[1..5], 1, .little);
-        input[5] = op.if_false;
-        std.mem.writeInt(u32, input[6..10], 10, .little);
-        input[10] = op.return_undef;
-        try bc.setCode(&input);
+            var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+            defer bc.deinit(rt);
+            try bc.setCode(input[0 .. target_pc + 1]);
+            try bc.appendSourceLoc(0, 10, 2);
+            try bc.appendSourceLoc(@intCast(jump_pc), 11, 3);
+            try bc.appendSourceLoc(@intCast(target_pc), 12, 4);
 
-        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
-        try pipeline.resolve_labels.run(&ctx);
+            var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+            try pipeline.resolve_labels.run(&ctx);
 
-        try std.testing.expectEqual(@as(usize, 1), bc.code.len);
-        try std.testing.expectEqual(op.return_undef, bc.code[0]);
+            const taken = if (branch_op == op.if_true) producer.truthy else !producer.truthy;
+            if (taken) {
+                try std.testing.expectEqualSlices(u8, &.{ op.goto8, 1, op.return_undef }, bc.code);
+                try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+                try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[1].pc);
+                try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[2].pc);
+            } else {
+                try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+                for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
+            }
+        }
     }
+}
 
-    {
-        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer bc.deinit(rt);
+test "resolve_labels constant test keeps a branch with an interior jump target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("constant-test-interior");
+    defer rt.atoms.free(name);
 
-        // push_i32 0 ; if_false pc=11 ; drop ; return_undef
-        var input = [_]u8{0} ** 12;
-        input[0] = op.push_i32;
-        std.mem.writeInt(i32, input[1..5], 0, .little);
-        input[5] = op.if_false;
-        std.mem.writeInt(u32, input[6..10], 11, .little);
-        input[10] = op.drop;
-        input[11] = op.return_undef;
-        try bc.setCode(&input);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
 
-        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
-        try pipeline.resolve_labels.run(&ctx);
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.get_arg;
+    std.mem.writeInt(u16, input[1..3], 0, .little);
+    input[3] = op.if_false;
+    std.mem.writeInt(u32, input[4..8], 9, .little);
+    input[8] = op.push_true;
+    input[9] = op.if_true;
+    std.mem.writeInt(u32, input[10..14], 14, .little);
+    input[14] = op.return_undef;
+    try bc.setCode(&input);
 
-        try std.testing.expectEqual(@as(usize, 7), bc.code.len);
-        try std.testing.expectEqual(op.goto, bc.code[0]);
-        try std.testing.expectEqual(@as(i32, 5), std.mem.readInt(i32, bc.code[1..5], .little));
-        try std.testing.expectEqual(op.drop, bc.code[5]);
-        try std.testing.expectEqual(op.return_undef, bc.code[6]);
-    }
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.get_arg0,
+        op.if_false8,
+        2,
+        op.push_true,
+        op.if_true8,
+        1,
+        op.return_undef,
+    }, bc.code);
 }
 
 test "resolve_labels: folds push_i32 neg" {

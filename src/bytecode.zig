@@ -8046,17 +8046,33 @@ pub const pipeline_resolve_labels = struct {
     };
 
     fn matchConstantTestPeephole(code: []const u8, pc: usize) ?ConstantTestPeephole {
-        if (pc + 10 > code.len or code[pc] != opcode.op.push_i32) return null;
-        const jump_pc = pc + 5;
+        if (pc >= code.len) return null;
+        const Producer = struct {
+            size: usize,
+            truthy: bool,
+        };
+        const producer: Producer = switch (code[pc]) {
+            opcode.op.push_false, opcode.op.null, opcode.op.undefined => .{ .size = @as(usize, 1), .truthy = false },
+            opcode.op.push_true => .{ .size = @as(usize, 1), .truthy = true },
+            opcode.op.push_i32 => blk: {
+                if (pc + 5 > code.len) return null;
+                break :blk .{
+                    .size = @as(usize, 5),
+                    .truthy = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little) != 0,
+                };
+            },
+            else => return null,
+        };
+        const jump_pc = pc + producer.size;
+        if (jump_pc + 5 > code.len) return null;
         const jump_op = code[jump_pc];
         if (jump_op != opcode.op.if_false and jump_op != opcode.op.if_true) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 10)) return null;
-        const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
-        const truthy = value != 0;
+        const total_size = producer.size + 5;
+        if (hasJumpTargetInRange(code, pc + 1, pc + total_size)) return null;
         return .{
-            .taken = if (jump_op == opcode.op.if_true) truthy else !truthy,
+            .taken = if (jump_op == opcode.op.if_true) producer.truthy else !producer.truthy,
             .jump_pc = jump_pc,
-            .total_size = 10,
+            .total_size = total_size,
         };
     }
 
@@ -8973,6 +8989,12 @@ pub const pipeline_resolve_labels = struct {
                     // control-flow entry into the consumed range.
                     positions[pc + 6] = out_pc;
                     if (p.branch_op != null) positions[pc + 7] = out_pc;
+                }
+                if (matchConstantTestPeephole(code, pc)) |p| {
+                    // QJS applies a source marker before the consumed branch
+                    // to the replacement goto. The interior-target guard
+                    // makes this boundary remap source-only.
+                    positions[p.jump_pc] = out_pc;
                 }
                 if (matchPutGetPeephole(code, pc) != null) {
                     // QJS applies the source marker before the consumed get to
