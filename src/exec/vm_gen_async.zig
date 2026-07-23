@@ -88,11 +88,25 @@ fn parkGeneratorExecutionState(
     rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
+    generator: *core.Object,
     execution: *core.object.GeneratorExecutionState,
     pc: usize,
     catch_target_pc: u32,
     has_frame: bool,
 ) void {
+    // An open cell borrows pvalue from this frame. Once a published generator
+    // is parked, retain that storage owner exactly once in the cell, matching
+    // QuickJS's attached JSVarRef -> JSAsyncFunctionState edge. Initial
+    // parameter setup uses a detached shell; finishGeneratorShell installs
+    // these edges immediately after publishing its fresh rc==1 header.
+    if (generator.header.metaConst().flags.heap_accounted) {
+        const generator_value = generator.value();
+        for (frame.open_var_refs) |maybe_cell| {
+            const cell = maybe_cell orelse continue;
+            cell.attachOpenOwner(generator_value);
+        }
+    }
+
     const state = &execution.suspended;
     const was_resident_owner = state.running_aliases and state.resident_storage_owner;
     const frame_views_match = was_resident_owner and residentFrameViewsMatch(state, frame);
@@ -187,7 +201,7 @@ pub noinline fn saveGeneratorExecutionState(
         std.math.cast(u32, target) orelse return error.InvalidBytecode
     else
         std.math.maxInt(u32);
-    parkGeneratorExecutionState(ctx.runtime, stack, frame, execution, pc, catch_target_pc, true);
+    parkGeneratorExecutionState(ctx.runtime, stack, frame, generator, execution, pc, catch_target_pc, true);
 }
 
 pub fn resumeExecutionState(
@@ -238,7 +252,7 @@ pub fn finishExecutionStateRun(rt: *core.JSRuntime, stack: *stack_mod.Stack, fra
     const state = &execution.suspended;
     if (!state.running_aliases) return;
     if (state.resident_storage_owner) {
-        parkGeneratorExecutionState(rt, stack, frame, execution, frame.pc, std.math.maxInt(u32), false);
+        parkGeneratorExecutionState(rt, stack, frame, object, execution, frame.pc, std.math.maxInt(u32), false);
         return;
     }
     state.finishRunningAliases();

@@ -1775,6 +1775,11 @@ pub const Object = extern struct {
             rt.shapes.release(final_shape);
             return err;
         };
+        // Parameter initialization parks the frame while this shell is still
+        // detached. Publish first (the shell's raw owner keeps it alive), then
+        // install the open-cell -> generator edges so registry publication
+        // retains its fresh-header rc==1 contract.
+        self.attachGeneratorOpenVarRefOwners();
     }
 
     /// Error-path counterpart for a shell that has not been registered yet.
@@ -4854,6 +4859,17 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(self.u.payload.?));
     }
 
+    /// Attach every open cell in this generator's parked frame to the object
+    /// that owns its backing storage. Idempotent across repeated suspensions.
+    pub fn attachGeneratorOpenVarRefOwners(self: *Object) void {
+        const execution = self.generatorPayloadPtr().execution orelse return;
+        const owner = self.value();
+        for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
+            const cell = maybe_cell orelse continue;
+            cell.attachOpenOwner(owner);
+        }
+    }
+
     pub fn generatorThisSlot(self: *Object) *JSValue {
         return &self.generatorLiveExecution().this_value;
     }
@@ -6713,19 +6729,12 @@ pub const Object = extern struct {
             },
             .var_ref => {
                 const ref: *var_ref_mod.VarRef = @alignCast(@fieldParentPtr("header", header));
-                // Closed cell: the owned edge is `value` (qjs gc marks a
-                // detached var_ref's *pvalue, which IS &value there —
-                // gc_decref/mark var-ref arm). Not `pvalue.*` here: the
-                // direct-eval const VIEW (eval_ops.directEvalOuterVarRefView)
-                // aliases pvalue into its TARGET cell's storage while owning
-                // the target cell through `value` — tracing pvalue.* would
-                // count an edge the view holds no ref on (the target's plain
-                // value) and miss the owned target-cell ref.
-                if (ref.is_open) {
-                    visitor.visitValue(ref.varRefValueSlot());
-                } else {
-                    visitor.visitValue(&ref.value);
-                }
+                // Closed: value is the owned binding value. Open: pvalue is a
+                // borrowed frame slot, while value owns the parked generator
+                // that keeps that slot alive. This is QuickJS's detached-value
+                // vs attached-async_func union; tracing pvalue for an open cell
+                // double-counts the frame-owned slot and corrupts trial RC.
+                visitor.visitValue(&ref.value);
             },
             .shape => {
                 const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", header));

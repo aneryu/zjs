@@ -10160,7 +10160,7 @@ test "async mapped arguments and closures retain one alias across await" {
     );
 }
 
-test "cycle collection closes escaped generator arg aliases before releasing resident backing" {
+test "escaped generator arg aliases retain resident backing across cycle collection" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -10194,7 +10194,12 @@ test "cycle collection closes escaped generator arg aliases before releasing res
     const release = try js.eval("__argCycleHolder = null;");
     release.free(js.runtime);
     _ = js.runtime.runObjectCycleRemoval();
-    try std.testing.expect(!cell.is_open);
+    // QuickJS's attached JSVarRef owns the parked async-function state. The
+    // escaped arguments object and closures therefore keep this generator
+    // frame resident even after its direct global reference is gone.
+    try std.testing.expect(cell.is_open);
+    try std.testing.expect(cell.value.isObject());
+    try std.testing.expectEqual(core.class.ids.generator, (try property_ops.expectObject(cell.value)).class_id);
     try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
 
     const escaped = try js.eval(
