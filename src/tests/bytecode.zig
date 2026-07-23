@@ -4691,53 +4691,109 @@ test "resolve_labels rejects non-QuickJS add_loc RHS and slot boundaries" {
     try std.testing.expectEqualSlices(core.Atom, &.{tagged_atom}, bc.atom_operands);
 }
 
-test "resolve_labels folds local update families to inc_loc" {
+test "resolve_labels inc_loc folds all canonical local updates and preserves source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const name = try rt.internAtom("test");
+    const name = try rt.internAtom("inc-loc-canonical");
     defer rt.atoms.free(name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
     fd.use_short_opcodes = true;
 
-    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        input: []const u8,
+        expected_op: u8,
+        idx: u8,
+        source_pcs: []const u8,
+    }{
+        .{
+            .input = &.{ op.get_loc, 4, 0, op.post_inc, op.put_loc, 4, 0, op.drop, op.return_undef },
+            .expected_op = op.inc_loc,
+            .idx = 4,
+            .source_pcs = &.{ 0, 3, 4, 7, 8 },
+        },
+        .{
+            .input = &.{ op.get_loc, 5, 0, op.post_dec, op.put_loc, 5, 0, op.drop, op.return_undef },
+            .expected_op = op.dec_loc,
+            .idx = 5,
+            .source_pcs = &.{ 0, 3, 4, 7, 8 },
+        },
+        .{
+            .input = &.{ op.get_loc, 6, 0, op.inc, op.dup, op.put_loc, 6, 0, op.drop, op.return_undef },
+            .expected_op = op.inc_loc,
+            .idx = 6,
+            .source_pcs = &.{ 0, 3, 4, 5, 8, 9 },
+        },
+        .{
+            .input = &.{ op.get_loc, 7, 0, op.dec, op.dup, op.put_loc, 7, 0, op.drop, op.return_undef },
+            .expected_op = op.dec_loc,
+            .idx = 7,
+            .source_pcs = &.{ 0, 3, 4, 5, 8, 9 },
+        },
+    };
+
+    for (cases) |case| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(case.input);
+        for (case.source_pcs, 0..) |pc, source_idx| {
+            try bc.appendSourceLoc(pc, @intCast(10 + source_idx), 2);
+        }
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{ case.expected_op, case.idx, op.return_undef }, bc.code);
+        for (bc.source_loc_slots[0 .. bc.source_loc_slots.len - 1]) |slot| {
+            try std.testing.expectEqual(@as(u32, 0), slot.pc);
+        }
+        try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[bc.source_loc_slots.len - 1].pc);
+    }
+}
+
+test "resolve_labels inc_loc keeps non-canonical and guarded boundaries" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("inc-loc-boundaries");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
 
     const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 25;
-    input[0] = op.get_loc;
-    std.mem.writeInt(u16, input[1..3], 4, .little);
-    input[3] = op.post_inc;
-    input[4] = op.put_loc;
-    std.mem.writeInt(u16, input[5..7], 4, .little);
-    input[7] = op.drop;
-    input[8] = op.get_loc;
-    std.mem.writeInt(u16, input[9..11], 5, .little);
-    input[11] = op.dec;
-    input[12] = op.dup;
-    input[13] = op.put_loc;
-    std.mem.writeInt(u16, input[14..16], 5, .little);
-    input[16] = op.drop;
-    input[17] = op.get_loc;
-    std.mem.writeInt(u16, input[18..20], 300, .little);
-    input[20] = op.post_inc;
-    input[21] = op.put_loc;
-    std.mem.writeInt(u16, input[22..24], 300, .little);
-    input[24] = op.drop;
-    try bc.setCode(&input);
+    const cases = [_]struct {
+        input: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            // The removed pre-resolve_labels pass used to fold this simplified
+            // non-QJS shape.
+            .input = &.{ op.get_loc, 4, 0, op.inc, op.put_loc, 4, 0, op.return_undef },
+            .expected = &.{ op.get_loc8, 4, op.inc, op.put_loc8, 4, op.return_undef },
+        },
+        .{
+            .input = &.{ op.get_loc, 0, 1, op.post_inc, op.put_loc, 0, 1, op.drop, op.return_undef },
+            .expected = &.{ op.get_loc, 0, 1, op.inc, op.put_loc, 0, 1, op.return_undef },
+        },
+        .{
+            .input = &.{ op.get_arg0, op.if_false, 10, 0, 0, 0, op.get_loc, 4, 0, op.post_inc, op.put_loc, 4, 0, op.drop, op.return_undef },
+            .expected = &.{ op.get_arg0, op.if_false8, 4, op.get_loc8, 4, op.post_inc, op.put_loc8, 4, op.return_undef },
+        },
+    };
 
-    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
-    try pipeline.resolve_labels.run(&ctx);
+    for (cases) |case| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(case.input);
 
-    try std.testing.expectEqualSlices(u8, &.{
-        op.inc_loc, 4,
-        op.dec_loc, 5,
-        op.get_loc, 44,
-        1,          op.inc,
-        op.put_loc, 44,
-        1,
-    }, bc.code);
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, case.expected, bc.code);
+    }
 }
 
 test "resolve_labels folds discarded post update stores" {

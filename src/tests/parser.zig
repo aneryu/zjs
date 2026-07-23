@@ -2455,6 +2455,24 @@ test "F4: final bytecode applies QuickJS discarded lvalue and loop update peepho
     try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.drop));
 }
 
+test "F5: local x++ and --x reach the canonical final inc_loc snapshots" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const cases = [_]struct {
+        source: []const u8,
+        expected_op: u8,
+    }{
+        .{ .source = "function f() { var x; x++; }", .expected_op = op.inc_loc },
+        .{ .source = "function f() { var x; --x; }", .expected_op = op.dec_loc },
+    };
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, "f") orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualSlices(u8, &.{ case.expected_op, 0, op.return_undef }, child.byteCode());
+    }
+}
+
 test "F4: dotted assign value remains on stack via insert2 (chained)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
