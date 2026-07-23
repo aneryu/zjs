@@ -10767,45 +10767,6 @@ pub const Object = extern struct {
         rt.shapes.release(old_shape);
     }
 
-    fn reconcilePropertyStorageForShapeTransition(
-        self: *Object,
-        rt: *JSRuntime,
-        retained_target: *shape.Shape,
-        current_capacity: usize,
-    ) !void {
-        // The cache result owns one target ref but has not changed the parent.
-        // Keep that exact rollback state across the only fallible step.
-        errdefer rt.shapes.release(retained_target);
-
-        const parent = self.shape_ref;
-        const used_with_pending = @as(usize, parent.prop_count) + 1;
-        const target_capacity: usize = retained_target.prop_size;
-        std.debug.assert(current_capacity != 0);
-        std.debug.assert(target_capacity != current_capacity);
-        std.debug.assert(used_with_pending <= current_capacity);
-        std.debug.assert(used_with_pending == retained_target.prop_count);
-        std.debug.assert(used_with_pending <= target_capacity);
-
-        // Allocate before publishing either half of the Object layout. On OOM,
-        // the retained target is released above and append's existing rollback
-        // still sees the original parent/current buffer/pending overhang.
-        const replacement = try rt.allocRuntime(property.Entry, target_capacity);
-
-        // Slots are moved as raw owner records, not duplicated: until the
-        // contiguous no-fail publication below, the current buffer remains the
-        // sole logical owner. Include the pending overhang at parent.prop_count.
-        @memcpy(replacement[0..used_with_pending], self.prop_values[0..used_with_pending]);
-        const current_properties = self.prop_values[0..current_capacity];
-
-        // No allocation, callback, or error is allowed between these stores and
-        // releasing the old owners. The retained target ref and replacement
-        // allocation become the Object's owners together.
-        self.prop_values = replacement.ptr;
-        self.shape_ref = retained_target;
-        rt.shapes.release(parent);
-        rt.memory.free(property.Entry, current_properties);
-    }
-
     fn adoptShapeForNewProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, flags: u6, property_capacity: usize, is_array_index: bool) !void {
         // No local atom guard: the sole caller `appendPreparedPropertyEntry`
         // already holds an `atoms.dup(atom_id)` guard live across this entire
@@ -10823,12 +10784,7 @@ pub const Object = extern struct {
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        switch (try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity)) {
-            .adopted => {},
-            .reconcile_property_storage => |retained_target| {
-                try self.reconcilePropertyStorageForShapeTransition(rt, retained_target, property_capacity);
-            },
-        }
+        try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
