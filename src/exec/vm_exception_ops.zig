@@ -290,6 +290,13 @@ pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, erro
 }
 
 pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) exceptions.HostError!core.JSValue {
+    // QuickJS's async boundary takes the already-thrown interrupt value and
+    // rejects with it. Keep this transfer local to Promise conversion:
+    // admitting Interrupted to the generic pending-error matcher would let
+    // generator catches and assertion helpers consume an uncatchable error.
+    if (@as(anyerror, err) == error.Interrupted and ctx.exceptionIsUncatchable()) {
+        return ctx.takeException();
+    }
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const error_info = promiseErrorInfo(err);
     return createNamedError(ctx, global, error_info.name, error_info.message) catch |create_err| {
@@ -354,7 +361,22 @@ pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, mes
 /// QuickJS `JS_ThrowInterrupted`: retain a real InternalError in the polled
 /// Realm while making it uncatchable by JavaScript catch markers.
 pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
-    const error_value = try createNamedError(ctx, global, "InternalError", "interrupted");
+    const error_value = createNamedError(ctx, global, "InternalError", "interrupted") catch |err| {
+        if (err != error.OutOfMemory) return err;
+        // QuickJS marks the current exception uncatchable even when building
+        // InternalError("interrupted") recursively falls into its OOM path.
+        // Use the Realm's preallocated OOM object so zjs can preserve that
+        // contract without allocating on the exhausted heap.
+        if (!ctx.hasException()) {
+            const fallback = if (ctx.preallocated_oom_error) |preallocated|
+                preallocated.dup()
+            else
+                core.JSValue.nullValue();
+            _ = ctx.throwValue(fallback);
+        }
+        ctx.setExceptionUncatchable(true);
+        return error.Interrupted;
+    };
     _ = ctx.throwValue(error_value);
     ctx.setExceptionUncatchable(true);
     return error.Interrupted;
@@ -588,6 +610,7 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
         error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
+        error.Interrupted => .{ .name = "InternalError", .message = "interrupted" },
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
         error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
         error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },

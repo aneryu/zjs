@@ -85,6 +85,20 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
+        .name = "tail-moved-args",
+        .source =
+        \\function target(a,b,c,d,e,f,g,h,i,j) {
+        \\  "use strict";
+        \\  return arguments.length;
+        \\}
+        \\function forward(eval,a,b,c,d,e,f,g,h,i,j) {
+        \\  return eval(a,b,c,d,e,f,g,h,i,j);
+        \\}
+        \\forward(target,0,1,2,3,4,5,6,7,8,9) === 10 ? "tail-moved-ok" : "tail-moved-bad"
+        ,
+        .expect = .{ .string = "tail-moved-ok" },
+    },
+    .{
         .name = "private-class-fresh-identity",
         .source =
         \\function makeBox(initial) {

@@ -818,6 +818,11 @@ pub const JSRuntime = struct {
     /// to this runtime.
     call_depth: usize = 0,
     native_call_depth: usize = 0,
+    /// Planned QuickJS bytecode-frame bytes for every active bytecode call,
+    /// including tail-call callers whose physical zjs Entry storage has been
+    /// reused. This Runtime owner survives nested Machines and Realm switches.
+    /// It remains separate from Realm interrupt cadence and native call depth.
+    active_bytecode_stack_bytes: usize = 0,
     formatting_error_stack: bool = false,
     backtrace_frames: []context_mod.BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
@@ -998,6 +1003,7 @@ pub const JSRuntime = struct {
         rt.current_exception_uncatchable = false;
         rt.call_depth = 0;
         rt.native_call_depth = 0;
+        rt.active_bytecode_stack_bytes = 0;
         rt.formatting_error_stack = false;
         rt.backtrace_frames = &.{};
         rt.backtrace_capacity = 0;
@@ -1884,6 +1890,7 @@ pub const JSRuntime = struct {
     fn assertIdleForTeardown(self: *const JSRuntime) void {
         if (self.call_depth != 0 or
             self.native_call_depth != 0 or
+            self.active_bytecode_stack_bytes != 0 or
             self.current_backtrace_frame != null or
             self.active_native_call != null or
             self.active_value_roots != null or

@@ -6,6 +6,7 @@ const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
+const call_vm = @import("vm_call.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -29,7 +30,7 @@ const HostError = exceptions.HostError;
 const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
 const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;
 const qjsPromiseErrorValue = exception_ops.qjsPromiseErrorValue;
-const runWithCallEnv = zjs_vm.runWithCallEnv;
+const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 
@@ -3436,16 +3437,39 @@ pub fn qjsAsyncFunctionStart(
     var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    call_depth_precharged: bool,
+    call_entry_ctx: *core.JSContext,
+    call_entry_global: *core.Object,
 ) HostError!core.JSValue {
     const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
 
-    const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, false);
+    const continuation_value = try createGeneratorObject(
+        ctx,
+        func,
+        current_function_value,
+        this_value,
+        args,
+        var_refs,
+        output,
+        global,
+        false,
+        call_depth_precharged,
+        call_entry_ctx,
+        call_entry_global,
+    );
     defer continuation_value.free(ctx.runtime);
     const continuation = objectFromValue(continuation_value) orelse return error.TypeError;
     try continuation.setOptionalValueSlot(ctx.runtime, continuation.generatorAsyncPromiseSlot(), promise.dup());
 
-    try qjsAsyncFunctionRunAndSettle(ctx, output, global, continuation, null, false);
+    try qjsAsyncFunctionRunAndSettle(
+        call_entry_ctx,
+        output,
+        call_entry_global,
+        continuation,
+        null,
+        false,
+    );
     return promise;
 }
 
@@ -3468,10 +3492,13 @@ pub fn qjsAsyncFunctionRunState(
     continuation.generatorExecutingSlot().* = true;
     defer continuation.generatorExecutingSlot().* = false;
 
-    const async_global = objectRealmGlobal(continuation) orelse global;
+    const caller_global = ctx.global orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
     const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
-    return runWithCallEnv(.{
+    const call_depth_guard = try call_vm.enterCallDepth(ctx, caller_global, 0);
+    defer call_depth_guard.deinit();
+    try exception_ops.pollInterrupt(ctx, caller_global);
+    return runWithCallEnvAfterInterruptPoll(.{
         .ctx = ctx,
         .stack = &nested_stack,
         .function = fb,
@@ -3479,12 +3506,13 @@ pub fn qjsAsyncFunctionRunState(
         .args = continuation.generatorArgs(),
         .var_refs = continuation.generatorCaptures(),
         .output = output,
-        .global = async_global,
+        .global = caller_global,
         .strict_unresolved_get_var = fb_runtime_strict,
         .generator_state = continuation,
         .resume_value = resume_value,
         .current_function_value = current_function_value,
         .suspend_on_module_await = true,
+        .call_depth_precharged = true,
     });
 }
 

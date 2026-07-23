@@ -2256,6 +2256,9 @@ pub fn createGeneratorObject(
     output: ?*std.Io.Writer,
     global: *core.Object,
     is_async: bool,
+    call_depth_precharged: bool,
+    call_entry_ctx: *core.JSContext,
+    call_entry_global: *core.Object,
 ) !core.JSValue {
     var rooted_func = func;
     var rooted_current = current_function_value;
@@ -2357,7 +2360,21 @@ pub fn createGeneratorObject(
     // Every generator gets one resident frame at creation, including internal
     // hand-built bytecode with no body marker (which parks at pc 0). qjs's
     // async_func_init likewise has no separate deferred args/captures owner.
-    const init_result = try runGeneratorParameterInit(ctx, fb, nested, prepared_frame_ptr, object, rooted_current, effective_this, input_args, input_var_refs, output, global);
+    const init_result = try runGeneratorParameterInit(
+        ctx,
+        fb,
+        nested,
+        prepared_frame_ptr,
+        object,
+        rooted_current,
+        effective_this,
+        input_args,
+        input_var_refs,
+        output,
+        call_depth_precharged,
+        call_entry_ctx,
+        call_entry_global,
+    );
     init_result.free(ctx.runtime);
 
     var resolved_prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch OwnedPrototype.fromObject(null);

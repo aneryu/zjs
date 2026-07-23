@@ -404,9 +404,31 @@ pub const CallEnv = struct {
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
     prepared_entry_frame: ?*const PreparedEntryFrame = null,
+    /// The surrounding bytecode call machinery already performed and owns
+    /// the caller-Realm stack preflight/accounting guard.
+    call_depth_precharged: bool = false,
+    /// Mirrors JS_CALL_FLAG_COPY_ARGV for standalone/C-API-style entries.
+    /// Inline opcode calls always use the default flags=0 contract.
+    copy_argv: bool = false,
 };
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
+    if (env.generator_state != null and !env.call_depth_precharged) {
+        // async_func_resume performs js_check_stack_overflow(rt, 0) before
+        // its inner JS_CallInternal poll. Cover generator/async/module
+        // resident entries that do not already carry an outer guard.
+        var precharged = env;
+        precharged.global = env.ctx.global orelse env.global;
+        const call_depth_guard = try call_vm.enterCallDepth(
+            precharged.ctx,
+            precharged.global,
+            0,
+        );
+        defer call_depth_guard.deinit();
+        try exception_ops.pollInterrupt(precharged.ctx, precharged.global);
+        precharged.call_depth_precharged = true;
+        return runWithCallEnvAfterInterruptPoll(precharged);
+    }
     try exception_ops.pollInterrupt(env.ctx, env.global);
     return runWithCallEnvAfterInterruptPoll(env);
 }
@@ -415,11 +437,35 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
 /// already completed. This named boundary prevents cross-Realm calls from
 /// charging both caller and callee before the body starts.
 pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
+    // QuickJS performs the bytecode-frame stack guard in the caller Realm
+    // immediately after the caller-side interrupt poll, and only then switches
+    // to b->realm. Keep both the error prototype and precedence identical.
+    // Generator/async execution uses the heap-resident JSAsyncFunctionState
+    // frame from its first parameter-init run onward. QuickJS checks native
+    // SP with alloca_size=0 for both that initial resume and later resumes.
+    const planned_stack_bytes = if (env.generator_state != null)
+        0
+    else
+        call_vm.qjsBytecodeFrameAllocaSize(
+            env.function,
+            env.args.len,
+            env.copy_argv,
+        );
+    var call_depth_guard: ?call_vm.CallDepthGuard = null;
+    if (!env.call_depth_precharged) {
+        call_depth_guard = try call_vm.enterCallDepth(
+            env.ctx,
+            env.global,
+            planned_stack_bytes,
+        );
+    }
+    defer if (call_depth_guard) |guard| guard.deinit();
+
     var effective = env;
     if (env.function.realmContext()) |realm| {
         // Canonical FunctionBytecode carries its publication RealmRef. Switch
-        // only at the final bytecode entry, after caller-side
-        // Bound/Proxy work, matching qjs `ctx = b->realm`.
+        // only after caller-side Bound/Proxy work, interrupt poll, and planned
+        // stack guard, matching qjs `ctx = b->realm`.
         effective.ctx = realm;
         effective.global = realm.global orelse return error.InvalidBuiltinRegistry;
     }
@@ -475,8 +521,6 @@ fn runWithArgsState(
     entry_initial_pc: usize,
     entry_prepared_frame: ?*const PreparedEntryFrame,
 ) HostError!core.JSValue {
-    const call_depth_guard = try call_vm.enterCallDepth(ctx, global);
-    defer call_depth_guard.deinit();
     const call_profile_guard = call_vm.enterCallProfile(ctx.runtime);
     defer call_profile_guard.deinit();
 
