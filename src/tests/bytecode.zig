@@ -3164,11 +3164,11 @@ test "resolve_labels folds gotos to terminal opcodes" {
         try pipeline.resolve_labels.run(&ctx);
 
         try std.testing.expectEqualSlices(u8, case.expected, bc.code);
+        try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
         try std.testing.expectEqual(
             @as(u32, @intCast(case.expected.len - 1)),
             bc.source_loc_slots[0].pc,
         );
-        try std.testing.expectEqual(@as(u32, @intCast(case.expected.len)), bc.source_loc_slots[1].pc);
     }
 }
 
@@ -5496,9 +5496,8 @@ test "resolve_labels removes atom-bearing dead code after return_async" {
     try std.testing.expectEqualSlices(u8, &.{ op.get_loc0, op.return_async }, bc.code);
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
+    try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
     try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
-    try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[1].pc);
-    try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[2].pc);
 }
 
 test "resolve_labels folds typeof inequality branches with branch source and target" {
@@ -5719,10 +5718,8 @@ test "resolve_labels removes targets referenced only by unreachable jumps" {
         try std.testing.expectEqualSlices(u8, &.{ op.get_loc0, op.@"return" }, bc.code);
         try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
         try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
+        try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
         try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
-        for (bc.source_loc_slots[1..]) |slot| {
-            try std.testing.expectEqual(@as(u32, 2), slot.pc);
-        }
     }
 
     {
@@ -5743,9 +5740,7 @@ test "resolve_labels removes targets referenced only by unreachable jumps" {
         try pipeline.resolve_labels.run(&ctx);
 
         try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
-        for (bc.source_loc_slots) |slot| {
-            try std.testing.expectEqual(@as(u32, 1), slot.pc);
-        }
+        try std.testing.expectEqual(@as(usize, 0), bc.source_loc_slots.len);
     }
 }
 

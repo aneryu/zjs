@@ -9488,7 +9488,7 @@ pub const pipeline_resolve_labels = struct {
             if (owned.len != 0) ctx.memory.free(atom.Atom, owned);
         };
 
-        func.remapSourceLocs(positions);
+        func.remapSourceLocsBeforeEnd(positions, code_to_install.len);
         if (code_was_trimmed and output.len != 0) ctx.memory.free(u8, output);
         func.installCode(code_to_install);
         trimmed_code_owned = false;
@@ -11516,6 +11516,31 @@ const function_mod = struct {
                 if (slot.pc >= old_to_new_pc.len) continue;
                 slot.pc = @intCast(old_to_new_pc[slot.pc]);
             }
+        }
+
+        /// Remap source slots after final layout and discard entries that no
+        /// longer precede an emitted opcode. QuickJS only calls
+        /// `add_pc2line_info` before live output instructions; line markers in
+        /// an unreachable suffix update its scanner state but do not create a
+        /// pc2line record at bytecode end. Compact in place so this remains
+        /// allocation-free at the resolve_labels commit boundary.
+        pub fn remapSourceLocsBeforeEnd(
+            self: *BytecodeImpl,
+            old_to_new_pc: []const usize,
+            new_code_len: usize,
+        ) void {
+            if (self.source_loc_slots.len == 0) return;
+            var write_index: usize = 0;
+            for (self.source_loc_slots) |slot| {
+                var remapped = slot;
+                if (slot.pc < old_to_new_pc.len) {
+                    remapped.pc = @intCast(old_to_new_pc[slot.pc]);
+                }
+                if (@as(usize, remapped.pc) >= new_code_len) continue;
+                self.source_loc_slots[write_index] = remapped;
+                write_index += 1;
+            }
+            self.source_loc_slots = self.source_loc_slots.ptr[0..write_index];
         }
 
         /// Root-bytecode counterpart of FunctionDef.truncateSourceLocs.
