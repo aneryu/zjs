@@ -4432,8 +4432,9 @@ test "resolve_labels get_length fold is transactional across every allocation fa
     while (try runGetLengthFoldAllocationFailure(cleanup_rt, fail_offset)) {
         fail_offset += 1;
     }
-    // positions, sizes, final code, and the rebuilt atom-owner ledger.
-    try std.testing.expectEqual(@as(usize, 4), fail_offset);
+    // positions, sizes, CFG state/worklist, final code, and the rebuilt
+    // atom-owner ledger.
+    try std.testing.expectEqual(@as(usize, 6), fail_offset);
 }
 
 test "resolve_labels folds discarded slot and field stores" {
@@ -5604,6 +5605,75 @@ test "resolve_labels preserves dead code reached by an external jump" {
     try std.testing.expectEqual(op.push_atom_value, bc.code[5]);
     try std.testing.expectEqual(op.return_undef, bc.code[10]);
     try std.testing.expectEqualSlices(core.Atom, &.{live_atom}, bc.atom_operands);
+}
+
+test "resolve_labels removes targets referenced only by unreachable jumps" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("unreachable-jump-graph");
+    defer rt.atoms.free(name);
+    const dead_atom = try rt.internAtom("unreachable-target-operand");
+    defer rt.atoms.free(dead_atom);
+    const base_ref_count = rt.atoms.refCount(dead_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    {
+        var input = [_]u8{0} ** 13;
+        input[0] = op.get_loc0;
+        input[1] = op.@"return";
+        input[2] = op.goto;
+        std.mem.writeInt(u32, input[3..7], 7, .little);
+        input[7] = op.push_atom_value;
+        std.mem.writeInt(u32, input[8..12], dead_atom, .little);
+        input[12] = op.@"return";
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(dead_atom);
+        try bc.appendSourceLoc(1, 10, 2);
+        try bc.appendSourceLoc(2, 11, 3);
+        try bc.appendSourceLoc(7, 12, 4);
+        try bc.appendSourceLoc(12, 13, 5);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{ op.get_loc0, op.@"return" }, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+        for (bc.source_loc_slots[1..]) |slot| {
+            try std.testing.expectEqual(@as(u32, 2), slot.pc);
+        }
+    }
+
+    {
+        var input = [_]u8{0} ** 11;
+        input[0] = op.return_undef;
+        input[1] = op.goto;
+        std.mem.writeInt(u32, input[2..6], 6, .little);
+        input[6] = op.goto;
+        std.mem.writeInt(u32, input[7..11], 1, .little);
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.appendSourceLoc(1, 20, 2);
+        try bc.appendSourceLoc(6, 21, 3);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+        for (bc.source_loc_slots) |slot| {
+            try std.testing.expectEqual(@as(u32, 1), slot.pc);
+        }
+    }
 }
 
 test "resolve_labels retains return after jump-entered trailing cleanup" {

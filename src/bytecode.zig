@@ -8165,39 +8165,7 @@ pub const pipeline_resolve_labels = struct {
         {
             return null;
         }
-        return 2 + (deadCodePastTerminalSize(code, pc + 1) orelse 0);
-    }
-
-    fn canSkipDeadCodeAfter(op_id: u8) bool {
-        return switch (op_id) {
-            opcode.op.goto,
-            opcode.op.tail_call,
-            opcode.op.tail_call_method,
-            opcode.op.@"return",
-            opcode.op.return_undef,
-            opcode.op.return_async,
-            opcode.op.throw,
-            opcode.op.throw_error,
-            opcode.op.ret,
-            => true,
-            else => false,
-        };
-    }
-
-    fn deadCodePastTerminalSize(code: []const u8, pc: usize) ?usize {
-        if (pc >= code.len or !canSkipDeadCodeAfter(code[pc])) return null;
-        const terminal_size = instrSize(code[pc]);
-        var scan_pc = pc + terminal_size;
-        var skipped: usize = 0;
-        while (scan_pc < code.len) {
-            if (hasJumpTargetTo(code, scan_pc)) break;
-            const op_id = code[scan_pc];
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or scan_pc + size > code.len) return null;
-            scan_pc += size;
-            skipped += size;
-        }
-        return if (skipped == 0) null else skipped;
+        return 2;
     }
 
     fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
@@ -8272,7 +8240,7 @@ pub const pipeline_resolve_labels = struct {
         {
             return null;
         }
-        return 2 + (deadCodePastTerminalSize(code, pc + 1) orelse 0);
+        return 2;
     }
 
     /// QuickJS short-opcode folds for `value === null/undefined` and for the
@@ -8696,6 +8664,81 @@ pub const pipeline_resolve_labels = struct {
         return false;
     }
 
+    const reachability_boundary: u8 = 1 << 0;
+    const reachability_live: u8 = 1 << 1;
+
+    fn enqueueReachable(
+        states: []u8,
+        worklist: []usize,
+        worklist_len: *usize,
+        target: usize,
+    ) !void {
+        if (target >= states.len or states[target] & reachability_boundary == 0) {
+            return error.InvalidBytecode;
+        }
+        if (states[target] & reachability_live != 0) return;
+        if (worklist_len.* >= worklist.len) return error.InvalidBytecode;
+        states[target] |= reachability_live;
+        worklist[worklist_len.*] = target;
+        worklist_len.* += 1;
+    }
+
+    /// Compute instruction-boundary CFG reachability before layout. QuickJS
+    /// removes a dead jump's label reference while skipping unreachable code;
+    /// using the original jump set as a liveness oracle therefore preserves
+    /// targets referenced only by dead code and cannot eliminate dead cycles.
+    /// An explicit graph gives the same fixed point without mutating the input
+    /// or coupling reachability to the iterative short-jump layout.
+    fn computeReachability(ctx: *const JSContext) ![]u8 {
+        const code = ctx.function.code;
+        const states = try ctx.memory.alloc(u8, code.len + 1);
+        errdefer ctx.memory.free(u8, states);
+        @memset(states, 0);
+
+        var pc: usize = 0;
+        while (pc < code.len) {
+            states[pc] |= reachability_boundary;
+            const size = if (code[pc] == opcode.op.label) 5 else instrSize(code[pc]);
+            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            pc += size;
+        }
+        if (pc != code.len) return error.InvalidBytecode;
+        states[code.len] |= reachability_boundary;
+
+        const worklist = try ctx.memory.alloc(usize, code.len + 1);
+        defer ctx.memory.free(usize, worklist);
+        var worklist_len: usize = 0;
+        try enqueueReachable(states, worklist, &worklist_len, 0);
+
+        var worklist_index: usize = 0;
+        while (worklist_index < worklist_len) : (worklist_index += 1) {
+            const current = worklist[worklist_index];
+            if (current == code.len) continue;
+
+            const op_id = code[current];
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+            if (size == 0 or current + size > code.len) return error.InvalidBytecode;
+            const next = current + size;
+
+            if (op_id == opcode.op.goto) {
+                try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
+            } else if (isJumpOp(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            } else if (isAtomLabelU8Op(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, try atomLabelTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            } else if (!isTerminalOp(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            }
+        }
+        return states;
+    }
+
+    fn isReachable(states: []const u8, pc: usize) bool {
+        return pc < states.len and states[pc] & reachability_live != 0;
+    }
+
     fn redundantReturnUndefSize(code: []const u8, pc: usize) ?usize {
         if (pc >= code.len or code[pc] != opcode.op.return_undef) return null;
         if (hasJumpTargetTo(code, pc)) return null;
@@ -8853,7 +8896,7 @@ pub const pipeline_resolve_labels = struct {
         if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
         if (discardedPushI32DropPairSize(code, pc)) |size| return size;
         if (dropReturnUndefPairSize(code, pc)) |size| return size;
-        return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
+        return in_size;
     }
 
     /// QuickJS removes a call whose finalizer contains only `ret`.  The parser
@@ -8866,7 +8909,14 @@ pub const pipeline_resolve_labels = struct {
         return target_pc < code.len and code[target_pc] == opcode.op.ret;
     }
 
-    fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
+    fn computeLayout(
+        ctx: *const JSContext,
+        positions: []usize,
+        sizes: []usize,
+        reachability: []const u8,
+        use_short_opcodes: bool,
+        initial_pc: usize,
+    ) !usize {
         const code = ctx.function.code;
         @memset(positions, 0);
         @memset(sizes, 0);
@@ -8888,6 +8938,18 @@ pub const pipeline_resolve_labels = struct {
                 const old_size = sizes[pc];
                 const in_size = if (op == opcode.op.label) 5 else instrSize(op);
                 if (pc + in_size > code.len) return error.InvalidBytecode;
+
+                if (!isReachable(reachability, pc)) {
+                    sizes[pc] = 0;
+                    if (old_size != 0) changed = true;
+                    const next_pc = pc + in_size;
+                    var boundary_pc = pc + 1;
+                    while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
+                        positions[boundary_pc] = out_pc;
+                    }
+                    pc = next_pc;
+                    continue;
+                }
 
                 const new_size: usize = if (op == opcode.op.label)
                     0
@@ -9219,11 +9281,20 @@ pub const pipeline_resolve_labels = struct {
         defer ctx.memory.free(usize, positions);
         const sizes = try ctx.memory.alloc(usize, func.code.len + 1);
         defer ctx.memory.free(usize, sizes);
+        const reachability = try computeReachability(ctx);
+        defer ctx.memory.free(u8, reachability);
 
         // First pass: compute the old-pc -> new-pc layout. OP_label is
         // dropped; jumps are rewritten from parser absolute targets to the
         // pc-relative form expected after resolve_labels.
-        const output_size = try computeLayout(ctx, positions, sizes, use_short_opcodes, prologue_size);
+        const output_size = try computeLayout(
+            ctx,
+            positions,
+            sizes,
+            reachability,
+            use_short_opcodes,
+            prologue_size,
+        );
 
         // Keep empty output as an inert slice so bytecode ownership stays explicit
         // without touching allocator accounting.
@@ -9240,7 +9311,11 @@ pub const pipeline_resolve_labels = struct {
         var i: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
-            if (op == opcode.op.label) {
+            const raw_size = if (op == opcode.op.label) 5 else instrSize(op);
+            if (i + raw_size > func.code.len) return error.InvalidBytecode;
+            if (!isReachable(reachability, i)) {
+                i += raw_size;
+            } else if (op == opcode.op.label) {
                 i += 5;
             } else if (isEmptyGosub(func.code, i)) {
                 i += instrSize(op);
@@ -9344,7 +9419,7 @@ pub const pipeline_resolve_labels = struct {
             } else if (isJumpOp(op)) {
                 const size = sizes[i];
                 try emitJump(func.code, i, output, &out_idx, positions, size);
-                i += instrSize(op) + (deadCodePastTerminalSize(func.code, i) orelse 0);
+                i += instrSize(op);
             } else if (isAtomLabelU8Op(op)) {
                 try emitAtomLabelU8(func.code, i, output, &out_idx, positions);
                 i += instrSize(op);
@@ -9352,7 +9427,7 @@ pub const pipeline_resolve_labels = struct {
                 const size = instrSize(op);
                 if (i + size > func.code.len) return error.InvalidBytecode;
                 try emitLoweredInstruction(func.code, i, output, &out_idx, use_short_opcodes);
-                i += size + (deadCodePastTerminalSize(func.code, i) orelse 0);
+                i += size;
             }
         }
 
