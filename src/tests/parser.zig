@@ -2943,6 +2943,26 @@ test "F5: return call remains plain call plus return" {
     try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
 }
 
+test "F5: return method call remains call_method plus return" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseFunctionBodyStatement(&env, "return obj.method(\"\");");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.get_field2,
+        op.push_empty_string,
+        op.call_method,
+        op.@"return",
+    });
+    const call_pc = engine.bytecode.opcode.sizeOf(op.get_var) +
+        engine.bytecode.opcode.sizeOf(op.get_field2) +
+        engine.bytecode.opcode.sizeOf(op.push_empty_string);
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, call_pc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
+}
+
 test "F5: throw statement" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
