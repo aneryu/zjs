@@ -2064,7 +2064,7 @@ test "runtime Plugin treats ok return with non-ok frame error_status as failure"
     try std.testing.expectEqualStrings("RangeError:explicit error status", bytes.items);
 }
 
-test "runtime Plugin out_of_memory status ignores borrowed error messages" {
+test "runtime Plugin out_of_memory status materializes the runtime OOM exception and ignores borrowed messages" {
     const Impl = struct {
         fn fail(frame: *ffi.CallFrame) ffi.Status {
             frame.error_message = ffi.BorrowedBytes.from("must not allocate an Error for OOM");
@@ -2090,8 +2090,14 @@ test "runtime Plugin out_of_memory status ignores borrowed error messages" {
     const fail_value = try target.getProperty(fail_atom);
     defer fail_value.free(rt);
 
-    try std.testing.expectError(error.OutOfMemory, exec.call.callValue(ctx.core, null, fail_value, &.{}));
     try std.testing.expect(!ctx.hasException());
+    try std.testing.expectError(error.OutOfMemory, exec.call.callValue(ctx.core, null, fail_value, &.{}));
+    try std.testing.expect(ctx.hasException());
+    var exception = ctx.takePendingException();
+    defer exception.free(rt);
+    try std.testing.expect(!ctx.hasException());
+    try expectErrorObjectProperty(rt, exception, "name", "InternalError");
+    try expectErrorObjectProperty(rt, exception, "message", "out of memory");
 }
 
 test "runtime Plugin pending_exception preserves an existing pending exception" {
