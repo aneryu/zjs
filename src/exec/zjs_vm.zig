@@ -636,7 +636,7 @@ fn runWithArgsState(
     // QuickJS likewise resumes its preallocated stack directly.
     if (!skip_resume_slab) try reserveEntryFrameCapacity(entry_stack, entry_function);
     catch_target_storage = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
-    // Marker-less internal generator bytecode has no parameter/body boundary to
+    // Markerless internal generator bytecode has no OP_initial_yield boundary to
     // execute toward. Park its fully initialized frame before dispatch at pc 0.
     if (entry_stop_before_pc) |stop_pc| {
         if (frame_storage.pc == stop_pc) {

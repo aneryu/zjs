@@ -1932,28 +1932,6 @@ pub const function_bytecode = struct {
             }
             unreachable;
         }
-        /// PC of the generator body marker, or 0 if none. Mirrors qjs, which
-        /// locates the body marker by scanning the bytecode rather than caching
-        /// a field (the former `generator_body_pc: usize`). The marker is the
-        /// `push_false; drop; push_true; drop` sequence emitted at the boundary
-        /// between the parameter-init prologue and the generator body; the pc
-        /// returned points just past it. Only generator/async-generator FBs
-        /// contain the marker, so this returns 0 for ordinary functions.
-        pub fn generatorBodyPc(self: *const FunctionBytecodeImpl) usize {
-            const code = self.byteCode();
-            const op = opcode.op;
-            var i: usize = 0;
-            while (i + 4 <= code.len) : (i += 1) {
-                if (code[i] == op.push_false and
-                    code[i + 1] == op.drop and
-                    code[i + 2] == op.push_true and
-                    code[i + 3] == op.drop)
-                {
-                    return i + 4;
-                }
-            }
-            return 0;
-        }
         pub inline fn allVarDefs(self: *const FunctionBytecodeImpl) []BytecodeVarDef {
             if (self.legacyBytecodeAdapter()) |legacy| {
                 std.debug.assert(legacy.argdefs.len == 0);

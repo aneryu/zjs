@@ -3794,6 +3794,43 @@ test "F9: yield expression" {
     try expectOpcode(child.byteCode(), op.return_async);
 }
 
+test "W5: generator parameter boundary emits initial_yield in scripts and modules" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var script = try parseStatementWithTopLevelChildren(
+        &env,
+        "function f(x = function* () { yield 1; }) { return x; }",
+    );
+    defer script.deinit(env.rt);
+
+    const outer = try expectFunctionConstant(&script, 0);
+    const nested_generator = try expectFunctionConstant(outer, 0);
+    const nested_code = nested_generator.byteCode();
+    try std.testing.expect(nested_code.len >= 3);
+    try std.testing.expectEqualSlices(u8, &.{
+        op.initial_yield,
+        op.push_1,
+        op.yield,
+    }, nested_code[0..3]);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(nested_code, op.initial_yield));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(nested_code, op.push_false));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(nested_code, op.push_true));
+
+    var module = try parseModuleStatement(&env, "export function* g(x = 1) { yield x; }");
+    defer module.deinit(env.rt);
+
+    const module_generator = try expectFunctionConstant(&module, 0);
+    const module_code = module_generator.byteCode();
+    const initial_yield_offset = firstOpcodeOffset(module_code, op.initial_yield).?;
+    const body_yield_offset = firstOpcodeOffset(module_code, op.yield).?;
+    try std.testing.expect(initial_yield_offset > 0);
+    try std.testing.expect(initial_yield_offset < body_yield_offset);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(module_code, op.initial_yield));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module_code, op.push_false));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module_code, op.push_true));
+}
+
 test "F9: yield* expression" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

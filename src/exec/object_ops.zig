@@ -2357,9 +2357,10 @@ pub fn createGeneratorObject(
         break :blk rooted_this;
     } else rooted_this;
     object.setGeneratorThis(ctx.runtime, effective_this.dup());
-    // Every generator gets one resident frame at creation, including internal
-    // hand-built bytecode with no body marker (which parks at pc 0). qjs's
-    // async_func_init likewise has no separate deferred args/captures owner.
+    // Every generator gets one resident frame at creation. Canonical bytecode
+    // parks at OP_initial_yield; markerless internal fixtures park at pc 0.
+    // qjs's async_func_init likewise has no separate deferred args/captures
+    // owner.
     const init_result = try runGeneratorParameterInit(
         ctx,
         fb,

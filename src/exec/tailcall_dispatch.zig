@@ -141,11 +141,11 @@ pub const Vm = struct {
     /// Static-field atom paired with `property_holder` for the immediately
     /// following Proxy action. Duplicated by that action before re-entry.
     property_atom: core.Atom = core.atom.null_atom,
-    /// Frame-constant `(depth==0 and l0.stop_before_pc != null)` — the generator
-    /// stop-boundary guard that blocks the local/var fast paths. Hoisted here (set
-    /// once per frame in the driver/reloadTop) so each loc op checks ONE bool load
-    /// instead of re-deriving machine.depth + l0.stop_before_pc per op (mirrors
-    /// dispatchLoop's `local_fast_blocked_by_generator`).
+    /// Frame-constant `(depth==0 and l0.stop_before_pc != null)` — the legacy
+    /// entry-boundary guard that blocks the local/var fast paths. Hoisted here
+    /// (set once per frame in the driver/reloadTop) so each loc op checks ONE
+    /// bool load instead of re-deriving machine.depth + l0.stop_before_pc per
+    /// op (mirrors dispatchLoop's `local_fast_blocked_by_generator`).
     local_fast_blocked: bool = false,
 
     /// Pointer to the CURRENT frame's catch-target slot. `reloadTop` re-points
@@ -252,9 +252,9 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(
 /// After a cold helper ran (frame.pc advanced, Stack mutated), re-dispatch at
 /// the next opcode. The bound check is a fixture/corruption guard; production
 /// bytecode has already proved that no reachable edge falls off the end.
-/// Generator/eval stop-boundary (`stop_before_pc`): when frame.pc reaches the
-/// generator body start, suspend (save state) and return — the param-init phase
-/// runs `[0, generator_body_pc)` then stops. Mirrors zjs_vm.zig:921's stopBeforePc.
+/// Legacy entry stop-boundary (`stop_before_pc`): suspend and save state when
+/// frame.pc reaches the requested fixture boundary. Canonical generators use
+/// OP_initial_yield instead.
 inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
     if (vm.machine.depth == 0) {
         const stop_before_pc = vm.machine.l0.stop_before_pc orelse return false;
@@ -433,12 +433,9 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     // false on every steady-state entry: run() derives it at L0 entry,
     // reloadTop/reloadAfterPop re-derive it on every driver-loop frame switch,
     // and depth>0 callees keep it false by this very invariant. The only true
-    // readers here are the blocked-L0 seams — generator parameter-init
-    // (runGeneratorParameterInit arms stop_before_pc = generatorBodyPc, and a
-    // param default like `function* g(a = leaf())` calls from that armed L0)
-    // and a `.return()`-driven finally resume whose finally body calls — so
-    // only that arm stores, and the matching re-arm on return is
-    // reloadAfterPop's L0 stop-seam publication.
+    // readers here are blocked-L0 legacy/synthetic stop seams whose body calls
+    // into another function, so only that arm stores, and the matching re-arm
+    // on return is reloadAfterPop's L0 stop-seam publication.
     if (vm.local_fast_blocked) {
         @branchHint(.unlikely);
         // Cache-coherence pin: a true cache at call entry means the CALLER was

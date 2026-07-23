@@ -401,15 +401,27 @@ pub fn stopBeforePc(
     const stop_pc = stop_before_pc orelse return null;
     if (frame.pc != stop_pc) return null;
     if (generator) |generator_object| {
-        // The only non-null stop is the generator parameter/body boundary.
-        // QuickJS closes parameter-environment refs there while keeping
-        // arg_buf resident. zjs shares one open-ref table for args and locals,
-        // so close only the parameter-environment entries before parking.
-        if (!generator_object.generatorStarted()) try frame.closeParameterEnvironmentVarRefs(ctx.runtime);
-        try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc, catch_target);
-        generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
+        try parkGeneratorStartBoundary(ctx, stack, frame, generator_object, stop_pc, catch_target);
     }
     return core.JSValue.undefinedValue();
+}
+
+fn parkGeneratorStartBoundary(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    generator: *core.Object,
+    pc: usize,
+    catch_target: ?usize,
+) !void {
+    // QuickJS closes parameter-environment refs at OP_initial_yield while
+    // keeping arg_buf resident. zjs shares one open-ref table for args and
+    // locals, so close only the parameter-environment entries before parking.
+    // The started/just-yielded bits intentionally remain false: this is the
+    // suspended-start control boundary, not a user-visible yield.
+    if (!generator.generatorStarted()) try frame.closeParameterEnvironmentVarRefs(ctx.runtime);
+    try saveGeneratorExecutionState(ctx, stack, frame, generator, pc, catch_target);
+    generator.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
 }
 
 pub fn initialYield(
@@ -422,10 +434,7 @@ pub fn initialYield(
 ) !Result {
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
-            generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
-            generator_object.generatorStartedSlot().* = true;
-            generator_object.generatorJustYieldedSlot().* = true;
+            try parkGeneratorStartBoundary(ctx, stack, frame, generator_object, frame.pc, catch_target);
         }
         return .{ .return_value = core.JSValue.undefinedValue() };
     }

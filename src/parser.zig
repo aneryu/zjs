@@ -13681,10 +13681,7 @@ pub const parser_core = struct {
         var parameters = try parseFunctionParameters(s, func_kind, capture_child);
         defer parameters.deinit(s);
         if (capture_child and (func_kind == .generator or func_kind == .async_generator)) {
-            try s.emitOp(opcode.op.push_false);
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.push_true);
-            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.initial_yield);
         }
         // Break/continue label resolution does not cross function boundaries.
         const saved_control_frames = s.enterControlBoundary();

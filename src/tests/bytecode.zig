@@ -2326,6 +2326,31 @@ test "resolve_labels: drops label opcodes" {
     try std.testing.expectEqual(op.return_undef, bc.code[5]);
 }
 
+test "resolve_labels: preserves the generator initial_yield boundary" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("initial-yield");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.initial_yield;
+    input[1] = op.push_i32;
+    std.mem.writeInt(i32, input[2..6], 1, .little);
+    input[6] = op.yield;
+    input[7] = op.return_async;
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
+}
+
 test "resolve_labels: rewrites absolute goto target to relative offset" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -4471,6 +4471,106 @@ test "generator object uses the prototype selected after parameter initializatio
     try std.testing.expect(result.isUndefined());
 }
 
+test "initial_yield keeps sync generators in suspended-start after parameter initialization" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const initialYieldEvents = [];
+        \\function* initialYieldGenerator(
+        \\  factory = (initialYieldEvents.push("param"), function* () { yield 1; })
+        \\) {
+        \\  initialYieldEvents.push("body");
+        \\  yield factory().next().value;
+        \\}
+        \\const first = initialYieldGenerator();
+        \\assert.sameValue(initialYieldEvents.join(","), "param");
+        \\let step = first.next(99);
+        \\assert.sameValue(step.value, 1);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(initialYieldEvents.join(","), "param,body");
+        \\assert.sameValue(first.next().done, true);
+        \\const returned = initialYieldGenerator();
+        \\step = returned.return(9);
+        \\assert.sameValue(step.value, 9);
+        \\assert.sameValue(step.done, true);
+        \\const thrown = initialYieldGenerator();
+        \\let caught;
+        \\try { thrown.throw(11); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 11);
+        \\assert.sameValue(initialYieldEvents.join(","), "param,body,param,param");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "initial_yield keeps async generators in suspended-start" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const asyncInitialYieldEvents = [];
+        \\async function* asyncInitialYieldGenerator(
+        \\  value = (asyncInitialYieldEvents.push("param"), 3)
+        \\) {
+        \\  asyncInitialYieldEvents.push("body");
+        \\  yield value;
+        \\}
+        \\const first = asyncInitialYieldGenerator();
+        \\print("create", asyncInitialYieldEvents.join(","));
+        \\first.next(99).then(function(step) {
+        \\  print("next", step.value, step.done, asyncInitialYieldEvents.join(","));
+        \\  const returned = asyncInitialYieldGenerator();
+        \\  return returned.return(9);
+        \\}).then(function(step) {
+        \\  print("return", step.value, step.done, asyncInitialYieldEvents.join(","));
+        \\  const thrown = asyncInitialYieldGenerator();
+        \\  return thrown.throw(11).then(function() {
+        \\    print("throw resolved");
+        \\  }, function(reason) {
+        \\    print("throw", reason, asyncInitialYieldEvents.join(","));
+        \\  });
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "create param\n" ++
+            "next 3 false param,body\n" ++
+            "return 9 true param,body,param\n" ++
+            "throw 11 param,body,param,param\n",
+        stream.buffered(),
+    );
+}
+
+test "initial_yield executes exported generator bytecode in module mode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\const moduleInitialYieldEvents = [];
+        \\export function* moduleInitialYieldGenerator(
+        \\  value = (moduleInitialYieldEvents.push("param"), 4)
+        \\) {
+        \\  moduleInitialYieldEvents.push("body");
+        \\  yield value;
+        \\}
+        \\const iterator = moduleInitialYieldGenerator();
+        \\assert.sameValue(moduleInitialYieldEvents.join(","), "param");
+        \\const step = iterator.next();
+        \\assert.sameValue(step.value, 4);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(moduleInitialYieldEvents.join(","), "param,body");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "generator completion resumes keep the original function home object" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

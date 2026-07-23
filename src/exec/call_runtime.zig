@@ -4869,6 +4869,18 @@ pub fn runGeneratorParameterInit(
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer object.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
+    // Canonical generators suspend on their explicit OP_initial_yield after
+    // parameter initialization. Ordinary async functions have no such opcode:
+    // keep their resident frame parked at pc 0 until the promise driver starts
+    // the body. Legacy mutable-bytecode and empty packed fixtures likewise
+    // retain their pc-0 entry contract without reintroducing a production
+    // bytecode scan.
+    const stop_before_pc: ?usize = if (fb.functionKind() == .async or
+        fb.legacyBytecodeAdapter() != null or
+        fb.byteCode().len == 0)
+        0
+    else
+        null;
     const env: zjs_vm.CallEnv = .{
         .ctx = call_entry_ctx,
         .stack = &nested_stack,
@@ -4880,7 +4892,9 @@ pub fn runGeneratorParameterInit(
         .global = call_entry_global,
         .strict_unresolved_get_var = true,
         .generator_state = object,
-        .stop_before_pc = fb.generatorBodyPc(),
+        .stop_on_yield = stop_before_pc == null and
+            (fb.functionKind() == .generator or fb.functionKind() == .async_generator),
+        .stop_before_pc = stop_before_pc,
         .current_function_value = current_function_value,
         .prepared_entry_frame = prepared_entry_frame,
         .call_depth_precharged = true,
