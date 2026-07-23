@@ -8065,15 +8065,22 @@ pub const pipeline_resolve_labels = struct {
 
     const PushI32NegPeephole = struct {
         value: i32,
+        discarded: bool,
         total_size: usize,
     };
 
     fn matchPushI32NegPeephole(code: []const u8, pc: usize) ?PushI32NegPeephole {
         if (pc + 6 > code.len or code[pc] != opcode.op.push_i32 or code[pc + 5] != opcode.op.neg) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
         if (value == std.math.minInt(i32) or value == 0) return null;
-        return .{ .value = -value, .total_size = 6 };
+        if (pc + 7 <= code.len and
+            code[pc + 6] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+        {
+            return .{ .value = -value, .discarded = true, .total_size = 7 };
+        }
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
     const PushBigIntI32NegPeephole = struct {
@@ -8092,6 +8099,28 @@ pub const pipeline_resolve_labels = struct {
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
         if (value == std.math.minInt(i32)) return null;
         return .{ .value = -value, .total_size = 6 };
+    }
+
+    fn discardedPushI32DropPairSize(code: []const u8, pc: usize) ?usize {
+        if (pc + 6 > code.len or
+            code[pc] != opcode.op.push_i32 or
+            code[pc + 5] != opcode.op.drop)
+        {
+            return null;
+        }
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        return 6;
+    }
+
+    fn dropReturnUndefPairSize(code: []const u8, pc: usize) ?usize {
+        if (pc + 2 > code.len or
+            code[pc] != opcode.op.drop or
+            code[pc + 1] != opcode.op.return_undef or
+            hasJumpTargetTo(code, pc + 1))
+        {
+            return null;
+        }
+        return 2 + (deadCodePastTerminalSize(code, pc + 1) orelse 0);
     }
 
     fn canSkipDeadCodeAfter(op_id: u8) bool {
@@ -8753,6 +8782,8 @@ pub const pipeline_resolve_labels = struct {
         if (matchConstantTestPeephole(code, pc)) |p| return p.total_size;
         if (matchPushI32NegPeephole(code, pc)) |p| return p.total_size;
         if (matchPushBigIntI32NegPeephole(code, pc)) |p| return p.total_size;
+        if (discardedPushI32DropPairSize(code, pc)) |size| return size;
+        if (dropReturnUndefPairSize(code, pc)) |size| return size;
         return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
     }
 
@@ -8834,9 +8865,13 @@ pub const pipeline_resolve_labels = struct {
                     const diff = relOffset(out_pc, target_pc);
                     break :blk jumpSizeForOffset(opcode.op.goto, diff, use_short_opcodes);
                 } else if (matchPushI32NegPeephole(code, pc)) |p|
-                    loweredPushI32Size(p.value, use_short_opcodes)
+                    if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
                 else if (matchPushBigIntI32NegPeephole(code, pc) != null)
                     instrSize(opcode.op.push_bigint_i32)
+                else if (discardedPushI32DropPairSize(code, pc) != null)
+                    0
+                else if (dropReturnUndefPairSize(code, pc) != null)
+                    instrSize(opcode.op.return_undef)
                 else if (isAtomLabelU8Op(op))
                     instrSize(op)
                 else if (isJumpOp(op)) blk: {
@@ -8853,12 +8888,22 @@ pub const pipeline_resolve_labels = struct {
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
                 }
+                if (matchPushI32NegPeephole(code, pc) != null) {
+                    // QuickJS attributes the folded push to the unary minus.
+                    // A discarded push/neg/drop has size zero, so the same
+                    // mapping points all consumed source positions at the
+                    // surviving next instruction.
+                    positions[pc + 5] = out_pc;
+                }
                 if (matchPushBigIntI32NegPeephole(code, pc) != null) {
                     // QuickJS attributes the folded push to the unary minus.
                     // The matcher rejects jumps into this consumed range, so
                     // remapping the neg boundary to the replacement start is
                     // source-only and cannot alter control flow.
                     positions[pc + 5] = out_pc;
+                }
+                if (dropReturnUndefPairSize(code, pc) != null) {
+                    positions[pc + 1] = out_pc;
                 }
                 out_pc += new_size;
                 pc = next_pc;
@@ -9127,13 +9172,19 @@ pub const pipeline_resolve_labels = struct {
                 }
                 i += p.total_size;
             } else if (matchPushI32NegPeephole(func.code, i)) |p| {
-                emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
+                if (!p.discarded) emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
                 i += p.total_size;
             } else if (matchPushBigIntI32NegPeephole(func.code, i)) |p| {
                 output[out_idx] = opcode.op.push_bigint_i32;
                 std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
                 out_idx += instrSize(opcode.op.push_bigint_i32);
                 i += p.total_size;
+            } else if (discardedPushI32DropPairSize(func.code, i)) |pair_size| {
+                i += pair_size;
+            } else if (dropReturnUndefPairSize(func.code, i)) |return_size| {
+                output[out_idx] = opcode.op.return_undef;
+                out_idx += instrSize(opcode.op.return_undef);
+                i += return_size;
             } else if (isJumpOp(op)) {
                 const size = sizes[i];
                 try emitJump(func.code, i, output, &out_idx, positions, size);

@@ -2411,6 +2411,43 @@ test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "numeric discarded immediates preserve comma control and completion semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function numericDiscardTail() { (1); }
+        \\function numericDiscardComma(value) { return (1, value); }
+        \\function numericDiscardControl(flag) { if (flag) (1); return flag ? 2 : 3; }
+        \\function numericDiscardUpdate() {
+        \\  let count = 0;
+        \\  for (; count < 2; (1), count++) {}
+        \\  return count;
+        \\}
+        \\assert.sameValue(numericDiscardTail(), undefined);
+        \\assert.sameValue(numericDiscardComma(42), 42);
+        \\assert.sameValue(numericDiscardControl(true), 2);
+        \\assert.sameValue(numericDiscardControl(false), 3);
+        \\assert.sameValue(numericDiscardUpdate(), 2);
+        \\assert.sameValue(void 0, undefined);
+        \\assert.sameValue(eval("1"), 1);
+        \\assert.sameValue(eval("-1"), -1);
+        \\assert.sameValue(Object.is(eval("-0"), -0), true);
+        \\assert.sameValue(eval("+1"), 1);
+        \\assert.sameValue(eval("-2147483648"), -2147483648);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const repl = try js.evalWithOptions("1", .{ .filename = "<repl>" });
+    defer repl.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), repl.asInt32());
+
+    const module = try js.evalModule("1; export const numericDiscardModule = 1;");
+    defer module.free(js.runtime);
+    try std.testing.expect(module.isUndefined());
+}
+
 test "vm executes stack constants source locations and return_undef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

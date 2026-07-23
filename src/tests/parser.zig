@@ -1550,13 +1550,13 @@ test "F4: typeof optional chain parses full chain" {
     try std.testing.expectEqual(op.typeof, fn_bc.code[fn_bc.code.len - 1]);
 }
 
-test "F4: void evaluates and discards then pushes undefined" {
+test "F4: numeric discard in void keeps only undefined" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "void 0");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.push_0, op.drop, op.undefined });
+    try expectOpcodeSequence(fn_bc.code, &.{op.undefined});
 }
 
 test "M3.1 F4: strict eval and arguments update targets are rejected" {
@@ -1695,13 +1695,13 @@ test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_1, op.add, op.dup, op.put_var });
 }
 
-test "F4: comma operator drops left, keeps right" {
+test "F4: numeric discard in comma removes pure left and keeps right" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1, 2");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.drop, op.push_2 });
+    try expectOpcodeSequence(fn_bc.code, &.{op.push_2});
 }
 
 test "F4: member access a.b emits get_var + get_field" {
@@ -1825,9 +1825,15 @@ test "M3.1 F4: computed object property emits define_array_el" {
     var fn_bc = try parseExpr(&env, "{ [\"x\"]: 1 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_array_el, fn_bc.code[fn_bc.code.len - 2]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    // The final property-value cleanup is also the discarded expression
+    // result, so the final-bytecode drop; return_undef fold removes it.
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.object,
+        op.push_atom_value,
+        op.to_propkey,
+        op.push_1,
+        op.define_array_el,
+    });
 }
 
 test "M3.1 F4: object spread emits copy_data_properties" {
@@ -2798,13 +2804,13 @@ test "F5: empty statement" {
     try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
 }
 
-test "F5: block statement" {
+test "F5: block statement folds only the final expression discard" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ x; y; }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var });
 }
 
 test "F5: return statement without value" {
@@ -2936,13 +2942,98 @@ test "F5: for update moves optional chain code with atom operands" {
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.is_undefined_or_null));
 }
 
-test "F5: expression statement" {
+test "F5: final expression statement discard folds into the terminator" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "x;");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{op.get_var});
+}
+
+test "W5: numeric discarded immediates respect statement and completion boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const immediate_statements = [_][]const u8{
+        "0;",
+        "1;",
+        "7;",
+        "8;",
+        "127;",
+        "128;",
+        "32767;",
+        "32768;",
+        "2147483647;",
+    };
+    for (immediate_statements) |source| {
+        var fn_bc = try parseStatement(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
+    }
+
+    var large_number = try parseStatement(&env, "2147483648;");
+    defer large_number.deinit(env.rt);
+    // The generic drop; return_undef rule removes only the tail drop.
+    try expectOpcodeSequence(large_number.code, &.{op.push_const8});
+
+    var bigint = try parseStatement(&env, "1n;");
+    defer bigint.deinit(env.rt);
+    // BigInt is not in the numeric-immediate discard family and remains live.
+    try expectOpcodeSequence(bigint.code, &.{op.push_bigint_i32});
+
+    var tail_root = try parseStatementWithTopLevelChildren(&env, "function numericTail(){ (1); }");
+    defer tail_root.deinit(env.rt);
+    const tail = findFunctionConstantNamed(&tail_root, env.rt, "numericTail") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, tail.byteCode());
+
+    var negative_root = try parseStatementWithTopLevelChildren(&env, "function numericNegative(){ (-1); }");
+    defer negative_root.deinit(env.rt);
+    const negative = findFunctionConstantNamed(&negative_root, env.rt, "numericNegative") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, negative.byteCode());
+
+    var negative_zero_root = try parseStatementWithTopLevelChildren(&env, "function numericNegativeZero(){ (-0); }");
+    defer negative_zero_root.deinit(env.rt);
+    const negative_zero = findFunctionConstantNamed(&negative_zero_root, env.rt, "numericNegativeZero") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_0, op.neg, op.return_undef }, negative_zero.byteCode());
+
+    var min_root = try parseStatementWithTopLevelChildren(&env, "function numericMin(){ (-2147483648); }");
+    defer min_root.deinit(env.rt);
+    const min = findFunctionConstantNamed(&min_root, env.rt, "numericMin") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_const8, 0, op.neg, op.return_undef }, min.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), min.cpoolSlice().len);
+
+    var plus_root = try parseStatementWithTopLevelChildren(&env, "function numericPlus(){ (+1); }");
+    defer plus_root.deinit(env.rt);
+    const plus = findFunctionConstantNamed(&plus_root, env.rt, "numericPlus") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_1, op.plus, op.return_undef }, plus.byteCode());
+
+    var control_root = try parseStatementWithTopLevelChildren(&env, "function numericControl(x){ if (x) (1); return x; }");
+    defer control_root.deinit(env.rt);
+    const control = findFunctionConstantNamed(&control_root, env.rt, "numericControl") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.drop));
+
+    var update_root = try parseStatementWithTopLevelChildren(&env, "function numericUpdate(x){ for (; x; (1)) { x = 0; } return x; }");
+    defer update_root.deinit(env.rt);
+    const update = findFunctionConstantNamed(&update_root, env.rt, "numericUpdate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(update.byteCode(), op.push_1));
+
+    var completion = try compileForTest(env.rt, "1", .{
+        .mode = .script,
+        .filename = "<repl>",
+        .return_completion = true,
+    });
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
+    try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
+
+    var module = try compileForTest(env.rt, "1;", .{ .mode = .module, .filename = "numeric-discard.mjs" });
+    defer module.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
+    try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
 
 test "F5: labelled break crossing switch drops discriminant" {
@@ -7674,7 +7765,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(!parsed.isStrict());
     try expectOpcode(parsed.byteCode(), qop.add);
-    try expectOpcode(parsed.byteCode(), qop.drop);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.byteCode(), qop.drop));
     try std.testing.expect(countOpcode(parsed.byteCode(), qop.return_undef) + countOpcode(parsed.byteCode(), qop.return_async) > 0);
     try std.testing.expectEqual(@as(usize, 0), parsed.constants().len);
 }

@@ -13752,13 +13752,10 @@ pub const parser_core = struct {
                 } else if (func_kind == .derived_class_constructor) {
                     try s.emitScopeGetVarCheckThis(atom_this);
                     try s.emitOp(opcode.op.@"return");
-                } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
-                    // In-place drop → return_undef keeps code.len unchanged, so
-                    // it is only sound when nothing jumps to the current end
-                    // (the jump would still land past the rewritten byte).
-                    var mutable_code = s.currentCode();
-                    mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                 } else {
+                    // Keep QuickJS's parser shape: the expression-statement
+                    // drop remains before the appended terminator. Final
+                    // bytecode rules decide whether that drop can disappear.
                     try s.emitOp(opcode.op.return_undef);
                 }
             }
@@ -14229,11 +14226,6 @@ pub const parser_core = struct {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
                         try s.emitOp(opcode.op.return_async);
-                    } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
-                        // In-place rewrite keeps code.len unchanged — only
-                        // sound when nothing jumps to the current end.
-                        var mutable_code = s.currentCode();
-                        mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                     } else {
                         try s.emitOp(opcode.op.return_undef);
                     }
