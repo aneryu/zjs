@@ -3349,6 +3349,75 @@ test "W5: numeric discarded immediates respect statement and completion boundari
     try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
 
+test "W5: tagged-int numeric strings use cpool without changing other string producers" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(
+        env.rt,
+        \\function numericString() {
+        \\  return "123" +
+        \\    1.5;
+        \\}
+        \\function numericTemplate() { return `456`; }
+        \\function ordinaryString() { return "01"; }
+        \\function ordinaryTemplate() { return `plain-template`; }
+        \\function taggedTemplate(tag) { return tag`789`; }
+    ,
+        .{ .mode = .script, .filename = "tagged-int-string-cpool.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const numeric_string = findFunctionConstantNamed(&parsed, env.rt, "numericString") orelse return error.TestExpectedEqual;
+    const numeric_code = numeric_string.byteCode();
+    const numeric_constants = numeric_string.cpoolSlice();
+    try std.testing.expectEqual(@as(usize, 2), numeric_constants.len);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_code, op.push_atom_value));
+
+    const string_pc = firstOpcodeOffset(numeric_code, op.push_const8) orelse return error.TestExpectedEqual;
+    const number_pc = string_pc + engine.bytecode.opcode.sizeOf(op.push_const8);
+    try std.testing.expectEqual(op.push_const8, numeric_code[number_pc]);
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(numeric_code, string_pc));
+    try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(numeric_code, number_pc));
+
+    const numeric_string_value = numeric_constants[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(numeric_string_value.eqlBytes("123"));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), numeric_constants[1].asFloat64().?, 0.0);
+
+    const string_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(string_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), string_source.line_num);
+    try std.testing.expectEqual(@as(i32, 3), string_source.col_num);
+    const number_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(number_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 3), number_source.line_num);
+    try std.testing.expectEqual(@as(i32, 5), number_source.col_num);
+
+    const numeric_template = findFunctionConstantNamed(&parsed, env.rt, "numericTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), numeric_template.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(numeric_template.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_template.byteCode(), op.push_atom_value));
+    const numeric_template_value = numeric_template.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(numeric_template_value.eqlBytes("456"));
+
+    const ordinary_string = findFunctionConstantNamed(&parsed, env.rt, "ordinaryString") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), ordinary_string.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ordinary_string.byteCode(), op.push_atom_value));
+
+    const ordinary_template = findFunctionConstantNamed(&parsed, env.rt, "ordinaryTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), ordinary_template.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ordinary_template.byteCode(), op.push_atom_value));
+
+    const tagged_template = findFunctionConstantNamed(&parsed, env.rt, "taggedTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), tagged_template.cpoolSlice().len);
+    try std.testing.expect(tagged_template.cpoolSlice()[0].isObject());
+}
+
 test "W5: string discard follows QuickJS atom and completion boundaries" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3359,10 +3428,23 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty.code, raw_empty_pc + 1));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty.atom_operands);
 
-    var raw_tagged = try parseRawStatement(&env, "\"123\";");
+    var raw_tagged = try parseRawExprWithRuntime(&env, "\"123\"");
     defer raw_tagged.deinit(env.rt);
-    const raw_tagged_pc = (try findPhase1Opcode(raw_tagged.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
-    try std.testing.expect(core.atom.isTaggedInt(readU32(raw_tagged.code, raw_tagged_pc + 1)));
+    const raw_tagged_pc = (try findPhase1Opcode(raw_tagged.code, op.push_const, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(raw_tagged.code, raw_tagged_pc));
+    try std.testing.expectEqual(@as(usize, 0), raw_tagged.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 1), raw_tagged.constants.values.len);
+    const raw_tagged_string = raw_tagged.constants.values[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(raw_tagged_string.eqlBytes("123"));
+
+    var raw_tagged_template = try parseRawExprWithRuntime(&env, "`456`");
+    defer raw_tagged_template.deinit(env.rt);
+    const raw_tagged_template_pc = (try findPhase1Opcode(raw_tagged_template.code, op.push_const, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(raw_tagged_template.code, raw_tagged_template_pc));
+    try std.testing.expectEqual(@as(usize, 0), raw_tagged_template.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 1), raw_tagged_template.constants.values.len);
+    const raw_tagged_template_string = raw_tagged_template.constants.values[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(raw_tagged_template_string.eqlBytes("456"));
 
     var raw_empty_template = try parseRawStatement(&env, "``;");
     defer raw_empty_template.deinit(env.rt);
@@ -3395,10 +3477,16 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
     try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.regexp));
     try std.testing.expectEqual(@as(usize, 2), empty_matching_regexp.constants().len);
 
-    var tagged = try parseStatement(&env, "\"123\";");
-    defer tagged.deinit(env.rt);
-    try expectOpcodeSequence(tagged.code, &.{op.push_atom_value});
-    try std.testing.expect(core.atom.isTaggedInt(readU32(tagged.code, 1)));
+    var tagged_root = try compileForTest(
+        env.rt,
+        "function numericStringDiscard(){ 0; \"123\"; return 0; }",
+        .{ .mode = .script, .filename = "numeric-string-discard.js" },
+    );
+    defer tagged_root.deinit();
+    const tagged = findFunctionConstantNamed(&tagged_root, env.rt, "numericStringDiscard") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), tagged.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.drop));
 
     var discarded_root = try parseStatementWithTopLevelChildren(
         &env,
@@ -5323,6 +5411,18 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    return function;
+}
+
+fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("runtime-expression");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+    defer state.deinit(env.rt);
+    try parser_core.parseExpr(&state);
     return function;
 }
 
@@ -9041,23 +9141,10 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
     const tagged_rhs = findFunctionConstantNamed(&parsed, rt, "taggedRhs") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 0), countOpcode(tagged_rhs.byteCode(), op.add_loc));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.add));
-    var saw_tagged_rhs = false;
-    var pc: usize = 0;
-    while (pc < tagged_rhs.byteCode().len) {
-        const op_id = tagged_rhs.byteCode()[pc];
-        const size = engine.bytecode.opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > tagged_rhs.byteCode().len) return error.TestExpectedEqual;
-        if (op_id == op.push_atom_value) {
-            const atom_id = readU32(tagged_rhs.byteCode(), pc + 1);
-            if (core.atom.isTaggedInt(atom_id)) {
-                saw_tagged_rhs = true;
-                try std.testing.expect(pc + size < tagged_rhs.byteCode().len);
-                try std.testing.expectEqual(op.add, tagged_rhs.byteCode()[pc + size]);
-            }
-        }
-        pc += size;
-    }
-    try std.testing.expect(saw_tagged_rhs);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), tagged_rhs.cpoolSlice().len);
+    const tagged_string = tagged_rhs.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(tagged_string.eqlBytes("123"));
 }
 
 test "add_loc finalization attributes a multiline local RHS to the operator" {

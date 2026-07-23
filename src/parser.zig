@@ -10575,6 +10575,22 @@ pub const parser_core = struct {
     fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
         const atom_id = try s.function.atoms.internString(bytes);
         defer s.function.atoms.free(atom_id);
+
+        // QuickJS's emit_push_const(..., as_atom = true) keeps ordinary
+        // string atoms as push_atom_value, but a canonical numeric name is a
+        // tagged-int atom and therefore falls back to an owned cpool string.
+        // Runtime-less parser fragments cannot own JSValues and retain their
+        // existing atom-only fallback, like the tagged-template test path.
+        if (atom_module.isTaggedInt(atom_id)) {
+            if (s.runtime) |rt| {
+                const string = core.string.String.createUtf8(rt, bytes) catch |err| switch (err) {
+                    error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
+                    error.InvalidUtf8 => return Error.InvalidUtf8,
+                };
+                try s.emitPushConstOwned(string.value());
+                return;
+            }
+        }
         try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
     }
 
