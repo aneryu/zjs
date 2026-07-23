@@ -3413,6 +3413,59 @@ test "W5: final branches normalize at QuickJS instruction boundaries" {
     }
 }
 
+test "W5: production with atom-label target threads past destructuring fallback goto" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const y_atom = try env.rt.internAtom("y");
+    defer env.rt.atoms.free(y_atom);
+
+    var root = try parseStatementWithTopLevelChildren(
+        &env,
+        "function withThread(obj, y) { with (obj) { [x] = y; } }",
+    );
+    defer root.deinit(env.rt);
+    const child = findFunctionConstantNamed(&root, env.rt, "withThread") orelse return error.TestExpectedEqual;
+    const code = child.byteCode();
+
+    var with_pc: ?usize = null;
+    var loop_entry: ?usize = null;
+    var fallback_goto_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        if (opcode_id == op.with_get_var and
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == y_atom)
+        {
+            with_pc = pc;
+        } else if (opcode_id == op.dup and pc + 1 < code.len and code[pc + 1] == op.for_of_start) {
+            loop_entry = pc;
+        } else if (opcode_id == op.goto8 or opcode_id == op.goto16 or opcode_id == op.goto) {
+            if (with_pc != null) fallback_goto_pc = pc;
+        }
+        pc += size;
+    }
+
+    const probe_pc = with_pc orelse return error.TestExpectedEqual;
+    const expected_target = loop_entry orelse return error.TestExpectedEqual;
+    const target_i64 =
+        @as(i64, @intCast(probe_pc + 5)) +
+        @as(i64, std.mem.readInt(i32, code[probe_pc + 5 ..][0..4], .little));
+    try std.testing.expect(target_i64 >= 0);
+    const probe_target: usize = @intCast(target_i64);
+
+    // Pinned QuickJS phase 2 emits `with_get_var y, L; get_arg y; L: goto
+    // destructure`. resolve_labels retargets the taken edge straight to the
+    // destructuring entry while retaining the fallback path's own goto.
+    try std.testing.expect(expected_target < probe_pc);
+    try std.testing.expectEqual(expected_target, probe_target);
+    try std.testing.expectEqual(op.dup, code[probe_target]);
+    const fallback_pc = fallback_goto_pc orelse return error.TestExpectedEqual;
+    try std.testing.expect(fallback_pc > probe_pc);
+    try std.testing.expectEqual(expected_target, readRelTarget32(code, fallback_pc));
+}
+
 test "F5: while statement" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

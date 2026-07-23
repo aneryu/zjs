@@ -2873,6 +2873,241 @@ test "resolve_labels: threads jumps through unconditional goto targets" {
     try std.testing.expectEqual(op.@"return", bc.code[6]);
 }
 
+test "resolve_labels threads all five with atom-label targets through goto chains" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("with-target-threading");
+    const probe_atom = try rt.internAtom("dynamicName");
+    const dead_atom = try rt.internAtom("dead-chain-operand");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(probe_atom);
+    defer rt.atoms.free(dead_atom);
+    const probe_base_refs = rt.atoms.refCount(probe_atom).?;
+    const dead_base_refs = rt.atoms.refCount(dead_atom).?;
+
+    const op = bytecode.opcode.op;
+    const probe_ops = [_]u8{
+        op.with_get_var,
+        op.with_put_var,
+        op.with_delete_var,
+        op.with_make_ref,
+        op.with_get_ref,
+    };
+    for (probe_ops) |probe_op| {
+        // probe -> A: goto B; dead atom/drop/return; B: return_undef.
+        // The dynamic taken edge must target B directly. Its ordinary
+        // fallthrough return and B's terminal both remain distinct.
+        var input = [_]u8{0} ** 34;
+        input[0] = probe_op;
+        std.mem.writeInt(u32, input[1..5], probe_atom, .little);
+        std.mem.writeInt(u32, input[5..9], 11, .little);
+        input[9] = 1;
+        input[10] = op.return_undef;
+        input[11] = op.label;
+        std.mem.writeInt(u32, input[12..16], 1, .little);
+        input[16] = op.goto;
+        std.mem.writeInt(u32, input[17..21], 28, .little);
+        input[21] = op.push_atom_value;
+        std.mem.writeInt(u32, input[22..26], dead_atom, .little);
+        input[26] = op.drop;
+        input[27] = op.return_undef;
+        input[28] = op.label;
+        std.mem.writeInt(u32, input[29..33], 2, .little);
+        input[33] = op.return_undef;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(probe_atom);
+        try bc.retainAtomOperand(dead_atom);
+        try bc.appendSourceLoc(0, 10, 2);
+        try bc.appendSourceLoc(16, 11, 3);
+        try bc.appendSourceLoc(21, 12, 4);
+        try bc.appendSourceLoc(33, 13, 5);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 12), bc.code.len);
+        try std.testing.expectEqual(probe_op, bc.code[0]);
+        try std.testing.expectEqual(probe_atom, std.mem.readInt(u32, bc.code[1..5], .little));
+        try std.testing.expectEqual(@as(i32, 6), std.mem.readInt(i32, bc.code[5..9], .little));
+        try std.testing.expectEqual(@as(u8, 1), bc.code[9]);
+        try std.testing.expectEqual(op.return_undef, bc.code[10]);
+        try std.testing.expectEqual(op.return_undef, bc.code[11]);
+
+        try std.testing.expectEqualSlices(core.Atom, &.{probe_atom}, bc.atom_operands);
+        try std.testing.expectEqual(probe_base_refs + 1, rt.atoms.refCount(probe_atom).?);
+        try std.testing.expectEqual(dead_base_refs, rt.atoms.refCount(dead_atom).?);
+        try std.testing.expectEqual(@as(usize, 4), bc.source_loc_slots.len);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 11), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 11), bc.source_loc_slots[2].pc);
+        try std.testing.expectEqual(@as(u32, 11), bc.source_loc_slots[3].pc);
+    }
+    try std.testing.expectEqual(probe_base_refs, rt.atoms.refCount(probe_atom).?);
+    try std.testing.expectEqual(dead_base_refs, rt.atoms.refCount(dead_atom).?);
+}
+
+test "resolve_labels keeps with atom-label probes at adjacent terminal targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("with-adjacent-target");
+    const probe_atom = try rt.internAtom("dynamicName");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(probe_atom);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 11;
+    input[0] = op.with_get_var;
+    std.mem.writeInt(u32, input[1..5], probe_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 10, .little);
+    input[9] = 1;
+    input[10] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(probe_atom);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 11), bc.code.len);
+    try std.testing.expectEqual(op.with_get_var, bc.code[0]);
+    try std.testing.expectEqual(@as(i32, 5), std.mem.readInt(i32, bc.code[5..9], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[10]);
+    try std.testing.expectEqualSlices(core.Atom, &.{probe_atom}, bc.atom_operands);
+}
+
+test "resolve_labels with atom-label threading preserves independent entries and bounded cycles" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("with-target-boundaries");
+    const probe_atom = try rt.internAtom("dynamicName");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(probe_atom);
+
+    const op = bytecode.opcode.op;
+    {
+        // catch enters A independently, so A's goto must survive even though
+        // the with probe is retargeted directly to B.
+        var input = [_]u8{0} ** 35;
+        input[0] = op.@"catch";
+        std.mem.writeInt(u32, input[1..5], 16, .little);
+        input[5] = op.with_get_ref;
+        std.mem.writeInt(u32, input[6..10], probe_atom, .little);
+        std.mem.writeInt(u32, input[10..14], 16, .little);
+        input[14] = 1;
+        input[15] = op.return_undef;
+        input[16] = op.label;
+        std.mem.writeInt(u32, input[17..21], 1, .little);
+        input[21] = op.goto;
+        std.mem.writeInt(u32, input[22..26], 28, .little);
+        input[26] = op.nop;
+        input[27] = op.return_undef;
+        input[28] = op.label;
+        std.mem.writeInt(u32, input[29..33], 2, .little);
+        input[33] = op.nop;
+        input[34] = op.@"return";
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(probe_atom);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 23), bc.code.len);
+        try std.testing.expectEqual(op.@"catch", bc.code[0]);
+        try std.testing.expectEqual(@as(i32, 15), std.mem.readInt(i32, bc.code[1..5], .little));
+        try std.testing.expectEqual(op.with_get_ref, bc.code[5]);
+        try std.testing.expectEqual(@as(i32, 11), std.mem.readInt(i32, bc.code[10..14], .little));
+        try std.testing.expectEqual(op.return_undef, bc.code[15]);
+        try std.testing.expectEqual(op.goto, bc.code[16]);
+        try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[17..21], .little));
+        try std.testing.expectEqual(op.nop, bc.code[21]);
+        try std.testing.expectEqual(op.@"return", bc.code[22]);
+    }
+
+    {
+        // A -> B -> A exceeds the ten-hop bound. Pinned QuickJS falls back
+        // to the probe's original A target instead of choosing a cycle phase.
+        var input = [_]u8{0} ** 33;
+        input[0] = op.with_delete_var;
+        std.mem.writeInt(u32, input[1..5], probe_atom, .little);
+        std.mem.writeInt(u32, input[5..9], 11, .little);
+        input[9] = 1;
+        input[10] = op.return_undef;
+        input[11] = op.label;
+        std.mem.writeInt(u32, input[12..16], 1, .little);
+        input[16] = op.goto;
+        std.mem.writeInt(u32, input[17..21], 23, .little);
+        input[21] = op.nop;
+        input[22] = op.return_undef;
+        input[23] = op.label;
+        std.mem.writeInt(u32, input[24..28], 2, .little);
+        input[28] = op.goto;
+        std.mem.writeInt(u32, input[29..33], 11, .little);
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(probe_atom);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 21), bc.code.len);
+        try std.testing.expectEqual(op.with_delete_var, bc.code[0]);
+        try std.testing.expectEqual(@as(i32, 6), std.mem.readInt(i32, bc.code[5..9], .little));
+        try std.testing.expectEqual(op.return_undef, bc.code[10]);
+        try std.testing.expectEqual(op.goto, bc.code[11]);
+        try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[12..16], .little));
+        try std.testing.expectEqual(op.goto, bc.code[16]);
+        try std.testing.expectEqual(@as(i32, -6), std.mem.readInt(i32, bc.code[17..21], .little));
+    }
+}
+
+test "resolve_labels rejects invalid with atom-label threaded targets transactionally" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("with-invalid-target");
+    const probe_atom = try rt.internAtom("dynamicName");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(probe_atom);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 17;
+    input[0] = op.with_make_ref;
+    std.mem.writeInt(u32, input[1..5], probe_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 11, .little);
+    input[9] = 1;
+    input[10] = op.return_undef;
+    input[11] = op.goto;
+    std.mem.writeInt(u32, input[12..16], 18, .little);
+    input[16] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(probe_atom);
+    try bc.appendSourceLoc(0, 10, 2);
+
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try std.testing.expectError(error.InvalidBytecode, pipeline.resolve_labels.run(&ctx));
+
+    try std.testing.expectEqualSlices(u8, &input, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{probe_atom}, bc.atom_operands);
+    try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+}
+
 test "resolve_labels normalizes branches at the following instruction boundary" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

@@ -2392,6 +2392,24 @@ test "vm executes push constants arithmetic comparisons and return" {
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
+test "Engine executes both paths of a threaded with atom-label destructuring probe" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function withThread(obj, y) {
+        \\  with (obj) { [x] = y; }
+        \\  return obj.x;
+        \\}
+        \\var threadedTotal = withThread({ x: 0, y: [4] }, [9]) * 10 +
+        \\  withThread({ x: 0 }, [2]);
+        \\assert.sameValue(threadedTotal, 42);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -8191,8 +8191,7 @@ pub const pipeline_resolve_labels = struct {
         return cursor;
     }
 
-    fn threadedJumpTarget(code: []const u8, pc: usize) !usize {
-        const original = try jumpTarget(code, pc);
+    fn threadedTarget(code: []const u8, original: usize) !usize {
         var target = original;
         var depth: usize = 0;
         while (depth < 10) : (depth += 1) {
@@ -8203,6 +8202,18 @@ pub const pipeline_resolve_labels = struct {
             target = next;
         }
         return original;
+    }
+
+    fn threadedJumpTarget(code: []const u8, pc: usize) !usize {
+        return threadedTarget(code, try jumpTarget(code, pc));
+    }
+
+    /// QuickJS applies the same bounded `find_jump_target` walk to all five
+    /// `atom_label_u8` dynamic-environment probes. Unlike an ordinary goto,
+    /// the probe itself is never removed or replaced by a terminal opcode:
+    /// only its taken edge is retargeted past an intervening goto chain.
+    fn threadedAtomLabelTarget(code: []const u8, pc: usize) !usize {
+        return threadedTarget(code, try atomLabelTarget(code, pc));
     }
 
     fn resolvedJumpTarget(code: []const u8, pc: usize) !usize {
@@ -9105,7 +9116,7 @@ pub const pipeline_resolve_labels = struct {
                 try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
                 try enqueueReachable(states, worklist, &worklist_len, next);
             } else if (isAtomLabelU8Op(op_id)) {
-                try enqueueReachable(states, worklist, &worklist_len, try atomLabelTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, try threadedAtomLabelTarget(code, current));
                 try enqueueReachable(states, worklist, &worklist_len, next);
             } else if (!isTerminalOp(op_id)) {
                 try enqueueReachable(states, worklist, &worklist_len, next);
@@ -9541,7 +9552,7 @@ pub const pipeline_resolve_labels = struct {
 
     fn emitAtomLabelU8(code: []const u8, pc: usize, output: []u8, out_idx: *usize, positions: []const usize) !void {
         if (pc + 10 > code.len) return error.InvalidBytecode;
-        const target = try atomLabelTarget(code, pc);
+        const target = try threadedAtomLabelTarget(code, pc);
         const target_pc = positions[target];
         const current_pc = out_idx.*;
         const diff = @as(i64, @intCast(target_pc)) - @as(i64, @intCast(current_pc + 5));
