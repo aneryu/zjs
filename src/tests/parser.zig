@@ -8243,6 +8243,37 @@ test "try catch fixed topology removes calls to its empty finalizer" {
     const function = findFunctionConstantNamed(&parsed, rt, "noFinally") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.ret));
+}
+
+test "empty finally producer reaches the phase2 and phase3 cascade" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        "function emptyFinally(value) { try { if (value) return 1; } finally {} }",
+        .{ .mode = .script, .filename = "empty-syntactic-finalizer.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const function = findFunctionConstantNamed(&parsed, rt, "emptyFinally") orelse
+        return error.TestExpectedEqual;
+    try expectOpcodeSequence(function.byteCode(), &.{
+        qop.@"catch",
+        qop.get_arg0,
+        qop.if_false8,
+        qop.push_1,
+        qop.nip_catch,
+        qop.@"return",
+        qop.drop,
+        qop.return_undef,
+        qop.throw,
+    });
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.undefined));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.ret));
 }
 
 fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {

@@ -2155,6 +2155,223 @@ test "resolve_variables keeps return_async fallthrough for phase3" {
     try std.testing.expectEqualSlices(core.Atom, &.{retained_atom}, bc.atom_operands);
 }
 
+test "resolve_variables owns empty finalizer removal and enables the phase3 cascade" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("phase2-empty-finalizer");
+    const retained_atom = try rt.internAtom("phase2-empty-owner");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(retained_atom);
+    const base_ref_count = rt.atoms.refCount(retained_atom).?;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 30;
+    input[0] = op.push_atom_value;
+    std.mem.writeInt(u32, input[1..5], retained_atom, .little);
+    input[5] = op.drop;
+    input[6] = op.undefined;
+    input[7] = op.gosub;
+    std.mem.writeInt(u32, input[8..12], 18, .little);
+    input[12] = op.drop;
+    input[13] = op.goto;
+    std.mem.writeInt(u32, input[14..18], 24, .little);
+    input[18] = op.label;
+    std.mem.writeInt(u32, input[19..23], 1, .little);
+    input[23] = op.ret;
+    input[24] = op.label;
+    std.mem.writeInt(u32, input[25..29], 2, .little);
+    input[29] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(retained_atom);
+    for ([_]u32{ 0, 5, 6, 7, 12, 13, 18, 23, 24, 29 }, 0..) |pc, idx| {
+        try bc.appendSourceLoc(pc, @intCast(10 + idx), 1);
+    }
+
+    var variables_ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    try pipeline.resolve_variables.run(&variables_ctx);
+
+    var phase2_expected = [_]u8{0} ** 19;
+    phase2_expected[0] = op.push_atom_value;
+    std.mem.writeInt(u32, phase2_expected[1..5], retained_atom, .little);
+    phase2_expected[5] = op.drop;
+    phase2_expected[6] = op.undefined;
+    phase2_expected[7] = op.drop;
+    phase2_expected[8] = op.goto;
+    std.mem.writeInt(u32, phase2_expected[9..13], 13, .little);
+    phase2_expected[13] = op.label;
+    std.mem.writeInt(u32, phase2_expected[14..18], 2, .little);
+    phase2_expected[18] = op.return_undef;
+    try std.testing.expectEqualSlices(u8, &phase2_expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{retained_atom}, bc.atom_operands);
+    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(retained_atom).?);
+    const phase2_source_pcs = [_]u32{ 0, 5, 6, 7, 7, 8, 13, 13, 13, 18 };
+    try std.testing.expectEqual(phase2_source_pcs.len, bc.source_loc_slots.len);
+    for (phase2_source_pcs, bc.source_loc_slots) |expected_pc, slot| {
+        try std.testing.expectEqual(expected_pc, slot.pc);
+    }
+
+    var labels_ctx = pipeline.resolve_labels.JSContext.init(&bc);
+    try pipeline.resolve_labels.run(&labels_ctx);
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(retained_atom).?);
+    for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
+}
+
+test "resolve_variables only removes a direct ret finalizer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("phase2-nonempty-finalizer");
+    defer rt.atoms.free(name);
+    const op = bytecode.opcode.op;
+
+    {
+        var input = [_]u8{0} ** 14;
+        input[0] = op.undefined;
+        input[1] = op.gosub;
+        std.mem.writeInt(u32, input[2..6], 7, .little);
+        input[6] = op.drop;
+        input[7] = op.label;
+        std.mem.writeInt(u32, input[8..12], 1, .little);
+        input[12] = op.nop;
+        input[13] = op.ret;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+        try pipeline.resolve_variables.run(&ctx);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+    }
+
+    {
+        var input = [_]u8{0} ** 18;
+        input[0] = op.undefined;
+        input[1] = op.gosub;
+        std.mem.writeInt(u32, input[2..6], 7, .little);
+        input[6] = op.drop;
+        input[7] = op.label;
+        std.mem.writeInt(u32, input[8..12], 1, .little);
+        input[12] = op.goto;
+        std.mem.writeInt(u32, input[13..17], 17, .little);
+        input[17] = op.ret;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+        try pipeline.resolve_variables.run(&ctx);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+    }
+}
+
+fn runEmptyFinalizerPhase2AllocationFailure(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+
+    const retained_atom = try atoms.internString("phase2-empty-finalizer-oom");
+    defer atoms.free(retained_atom);
+    const base_ref_count = atoms.refCount(retained_atom).?;
+
+    var bc = bytecode.Bytecode.init(&account, &atoms, core.atom.ids.empty_string);
+    defer bc.deinit(cleanup_rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 30;
+    input[0] = op.push_atom_value;
+    std.mem.writeInt(u32, input[1..5], retained_atom, .little);
+    input[5] = op.drop;
+    input[6] = op.undefined;
+    input[7] = op.gosub;
+    std.mem.writeInt(u32, input[8..12], 18, .little);
+    input[12] = op.drop;
+    input[13] = op.goto;
+    std.mem.writeInt(u32, input[14..18], 24, .little);
+    input[18] = op.label;
+    std.mem.writeInt(u32, input[19..23], 1, .little);
+    input[23] = op.ret;
+    input[24] = op.label;
+    std.mem.writeInt(u32, input[25..29], 2, .little);
+    input[29] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(retained_atom);
+    try bc.appendSourceLoc(7, 10, 1);
+
+    const original_code_ptr = bc.code.ptr;
+    const original_code_capacity = bc.code_capacity;
+    const original_atom_ptr = bc.atom_operands.ptr;
+    const original_atom_capacity = bc.atom_operands_capacity;
+    const original_source_ptr = bc.source_loc_slots.ptr;
+    const original_source_capacity = bc.source_loc_capacity;
+    const original_atom_refs = atoms.refCount(retained_atom).?;
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
+    const first_result = pipeline.resolve_variables.run(&ctx);
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@intFromPtr(original_code_ptr), @intFromPtr(bc.code.ptr));
+        try std.testing.expectEqual(original_code_capacity, bc.code_capacity);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+        try std.testing.expectEqual(@intFromPtr(original_atom_ptr), @intFromPtr(bc.atom_operands.ptr));
+        try std.testing.expectEqual(original_atom_capacity, bc.atom_operands_capacity);
+        try std.testing.expectEqualSlices(core.Atom, &.{retained_atom}, bc.atom_operands);
+        try std.testing.expectEqual(@intFromPtr(original_source_ptr), @intFromPtr(bc.source_loc_slots.ptr));
+        try std.testing.expectEqual(original_source_capacity, bc.source_loc_capacity);
+        try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
+        try std.testing.expectEqual(@as(u32, 7), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(original_atom_refs, atoms.refCount(retained_atom).?);
+        try pipeline.resolve_variables.run(&ctx);
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    var expected = [_]u8{0} ** 19;
+    expected[0] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[1..5], retained_atom, .little);
+    expected[5] = op.drop;
+    expected[6] = op.undefined;
+    expected[7] = op.drop;
+    expected[8] = op.goto;
+    std.mem.writeInt(u32, expected[9..13], 13, .little);
+    expected[13] = op.label;
+    std.mem.writeInt(u32, expected[14..18], 2, .little);
+    expected[18] = op.return_undef;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{retained_atom}, bc.atom_operands);
+    try std.testing.expectEqual(base_ref_count + 1, atoms.refCount(retained_atom).?);
+    try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 7), bc.source_loc_slots[0].pc);
+    return failed;
+}
+
+test "resolve_variables empty finalizer removal is transactional across every allocation failure" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runEmptyFinalizerPhase2AllocationFailure(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    try std.testing.expect(fail_offset >= 8);
+}
+
 test "resolve_variables: scope_put_var → put_var" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6943,7 +7160,7 @@ test "resolve_labels relocates gosub directly to its finalizer" {
     try std.testing.expectEqual(op.ret, bc.code[9]);
 }
 
-test "resolve_labels removes gosub to an empty finalizer" {
+test "resolve_labels preserves empty gosub because phase2 owns its removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -6965,7 +7182,11 @@ test "resolve_labels removes gosub to an empty finalizer" {
 
     var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
-    try std.testing.expectEqualSlices(u8, &.{ op.undefined, op.drop, op.ret }, bc.code);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.undefined, op.gosub, 5, 0, 0, 0, op.drop, op.ret },
+        bc.code,
+    );
 }
 
 test "stack_size accepts nested gosub return PCs" {

@@ -6778,6 +6778,33 @@ pub const pipeline_resolve_variables = struct {
         worklist_len.* += 1;
     }
 
+    /// QuickJS removes an empty-finalizer call in `resolve_variables`
+    /// (`quickjs.c:34304-34320`) when the called label contains only `ret`.
+    /// Its label table points just past OP_label; zjs absolute targets point
+    /// at the phase-1 label itself, so skip that one representation-only
+    /// boundary before applying `code_match`'s line-marker tolerance.
+    fn isPhase2EmptyGosub(
+        code: []const u8,
+        nodes: []const Phase1CfgNode,
+        pc: usize,
+    ) bool {
+        if (pc >= code.len or code[pc] != opcode.op.gosub or pc + 5 > code.len) return false;
+        var target: usize = @intCast(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little));
+        if (target >= code.len or target >= nodes.len or nodes[target].size == 0) return false;
+
+        if (code[target] == opcode.op.label) {
+            target += nodes[target].size;
+        }
+        while (target < code.len and code[target] == opcode.op.line_num) {
+            if (target >= nodes.len or nodes[target].size == 0) return false;
+            target += nodes[target].size;
+        }
+        return target < code.len and
+            target < nodes.len and
+            nodes[target].size != 0 and
+            code[target] == opcode.op.ret;
+    }
+
     /// Build phase-1 instruction boundaries and solve reachability from entry.
     /// This is intentionally an explicit CFG rather than a "referenced label"
     /// scan: references originating in unreachable code must not keep a dead
@@ -6821,7 +6848,9 @@ pub const pipeline_resolve_variables = struct {
             const next = current + node.size;
             if (topologyLabelOperandOffset(op_id, node.is_temp)) |offset| {
                 const target = std.mem.readInt(u32, func.code[current + offset ..][0..4], .little);
-                try enqueuePhase1Reachable(nodes, worklist, &worklist_len, target);
+                if (!isPhase2EmptyGosub(func.code, nodes, current)) {
+                    try enqueuePhase1Reachable(nodes, worklist, &worklist_len, target);
+                }
                 if (op_id != opcode.op.goto) {
                     try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
                 }
@@ -7267,6 +7296,10 @@ pub const pipeline_resolve_variables = struct {
                 i += input_size;
                 continue;
             }
+            if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
+                i += input_size;
+                continue;
+            }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
                 if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
@@ -7580,6 +7613,11 @@ pub const pipeline_resolve_variables = struct {
             if (!isPhase1Reachable(phase1_reachability, i)) {
                 for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
                 if (topologyInstructionHasAtom(op, instr.is_temp)) in_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
+            if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
+                for (i + 1..i + input_size) |consumed_pc| pc_map[consumed_pc] = out_idx;
                 i += input_size;
                 continue;
             }
@@ -9241,16 +9279,6 @@ pub const pipeline_resolve_labels = struct {
         return in_size;
     }
 
-    /// QuickJS removes a call whose finalizer contains only `ret`.  The parser
-    /// still emits the uniform try/catch topology for a syntactic try/catch;
-    /// removing the empty `gosub` here keeps that topology free of runtime cost.
-    fn isEmptyGosub(code: []const u8, pc: usize) bool {
-        if (pc >= code.len or code[pc] != opcode.op.gosub) return false;
-        const target = jumpTarget(code, pc) catch return false;
-        const target_pc = skipLabels(code, target) catch return false;
-        return target_pc < code.len and code[target_pc] == opcode.op.ret;
-    }
-
     fn computeLayout(
         ctx: *const JSContext,
         positions: []usize,
@@ -9294,8 +9322,6 @@ pub const pipeline_resolve_labels = struct {
                 }
 
                 const new_size: usize = if (op == opcode.op.label)
-                    0
-                else if (isEmptyGosub(code, pc))
                     0
                 else if (try jumpTargetsNextInstruction(code, pc))
                     if (op == opcode.op.goto) 0 else instrSize(opcode.op.drop)
@@ -9677,8 +9703,6 @@ pub const pipeline_resolve_labels = struct {
                 i += raw_size;
             } else if (op == opcode.op.label) {
                 i += 5;
-            } else if (isEmptyGosub(func.code, i)) {
-                i += instrSize(op);
             } else if (try jumpTargetsNextInstruction(func.code, i)) {
                 if (op != opcode.op.goto) {
                     output[out_idx] = opcode.op.drop;
