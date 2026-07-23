@@ -24,7 +24,7 @@ pub const PropNameID = extern struct {
         try object.defineOwnProperty(rt, raw(self), descriptor);
     }
 
-    pub fn getProperty(self: PropNameID, object: *core.Object) core.JSValue {
+    pub fn getProperty(self: PropNameID, object: *core.Object) core.context.DynamicImportError!core.JSValue {
         return object.getProperty(raw(self));
     }
 

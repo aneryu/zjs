@@ -334,6 +334,25 @@ operation results.
 - Integer width differences between C and Zig.
 - Mutable shared buffers under concurrency.
 
+**Runtime thread ownership.** A `JSRuntime` is initialized, mutated, collected,
+and destroyed on one owner thread. Context construction/publication/release,
+class definition growth/unregistration, context-list and prototype-slot
+mutation, plugin install/unload, and GC commits all follow that token. Checked
+host boundaries reject a foreign caller with `error.WrongRuntimeThread` before
+allocation or mutation; infallible internal teardown paths assert the same
+precondition. Same-thread callback reentry is supported and must use the normal
+generation/reconciliation rules—thread ownership is not a non-reentrancy
+guard. No broad Runtime structural lock substitutes for this contract.
+
+Process-global class ID allocation is the exception: it has independent atomic
+synchronization so different owner-thread Runtimes can allocate stable IDs
+concurrently. A foreign `Atomics.waitAsync` notifier or test262 broadcast may
+only publish a mutex-protected, no-allocation completion signal. Promise/Realm
+mutation, settlement, cleanup, GC, JavaScript callbacks, and DSO callbacks run
+later on the Runtime owner thread, with no waiter/structural mutex held. test262
+workers and agents therefore create, use, and destroy their own Runtime inside
+the worker thread.
+
 ### A.9 Agent Behavior
 
 **A.9.1 Before writing code.**
@@ -405,10 +424,10 @@ correctness first, then performance.
 
 ```bash
 zig fmt .
-zig build quick-check --summary all
-zig build test --summary all
+zig build quick-check --seed 0 --summary all
+zig build test --seed 0 --summary all
 # 阶段收口档位 / phase-close tier:
-# zig build test-oom --summary all (OOM 注入门禁：corpus×注入+恢复金丝雀 / OOM injection gate: corpus x injection + recovery canaries)
+# zig build test-oom --seed 0 --summary all (OOM 注入门禁：corpus×注入+恢复金丝雀 / OOM injection gate: corpus x injection + recovery canaries)
 ```
 
 ### A.11 Conclusion
@@ -529,26 +548,36 @@ Use the cheapest tier that proves the changed surface, then escalate before
 handoff or release. Do not weaken skips, excludes, or assertions to make any
 tier pass.
 
-**Inner loop.** Use this while optimizing or fixing a focused issue:
+**Inner loop.** Start each focused edit with the narrowest changed-area target
+or direct reproducer. For example, replace `core` below with the matching
+subsystem:
 
 ```bash
-zig build quick-check --summary all
+zig build test-core --seed 0 --summary all
 git diff --check
 ```
 
 Also run the focused Zig test filter, JS fixture, or `run-test262 -d` / `-f`
-slice that directly reproduces the changed behavior. Use the matching explicit
-`test-core`, `test-parser`, `test-bytecode`, `test-exec`, `test-builtins`,
-`test-runtime`, or `test-runner` target when it is narrower than the unified
-suite. These targets apply compile-time namespace filters and fail if the
-selection becomes empty. For repeated edits, `mise run quick-watch` keeps quick-check incremental;
-stop the watcher before escalating to a broader gate. `quick-check`
-intentionally does not compile the separate test262 runner.
+slice that directly reproduces the changed behavior. The explicit `test-core`,
+`test-parser`, `test-bytecode`, `test-exec`, `test-builtins`, `test-runtime`,
+and `test-runner` targets apply compile-time namespace filters and fail if the
+selection becomes empty.
+
+After a coherent edit, run `mise run quick-check` for Debug CLI integration
+coverage. For several consecutive edits that all need CLI smoke feedback,
+`mise run quick-watch` keeps the compiler resident; stop the watcher before
+escalating to a broader gate. `quick-check` intentionally does not compile the
+separate test262 runner.
+
+Pass CLI `--seed 0` to direct one-shot `zig build` commands. Zig 0.16
+randomizes dependency traversal by default, which can produce duplicate cache
+artifacts for an otherwise unchanged build; the `mise` commands above include
+the stable seed.
 
 **Checkpoint.** Use this before handing off a non-trivial code-bearing change:
 
 ```bash
-zig build checkpoint-check --summary all
+mise run checkpoint-check
 ```
 
 This includes the unified Debug suite, Debug CLI smoke, architecture checks,
@@ -559,13 +588,14 @@ do not run `quick-check` first because checkpoint already supersedes it.
 evidence, or CI gates:
 
 ```bash
-zig build engine-production-gate --summary all
-zig build test -Doptimize=ReleaseSafe --summary all
+zig build engine-production-gate --seed 0 --summary all
+zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
 ```
 
-Run `zig build test-altrepr --summary all` when value representation semantics
-changed, `zig build test-oom --summary all` when allocator/OOM behavior changed,
-and the performance gate when runtime-sensitive performance changed.
+Run `zig build test-altrepr --seed 0 --summary all` when value representation
+semantics changed, `zig build test-oom --seed 0 --summary all` when allocator/OOM
+behavior changed, and the performance gate when runtime-sensitive performance
+changed.
 
 ### B.7 Durable Lessons
 

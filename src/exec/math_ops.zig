@@ -87,7 +87,6 @@ fn mathEntryWithHandler(
         .length = length,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(handler),
     };
@@ -99,7 +98,6 @@ fn mathUnaryEntry(comptime name: []const u8, comptime id: u32) core.host_functio
         .length = 1,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .f_f,
         .native_function = .{ .f_f = mathUnaryNative(id) },
         .fallback_function = &mathOpCall,
@@ -112,7 +110,6 @@ fn mathBinaryEntry(comptime name: []const u8, comptime id: u32) core.host_functi
         .length = 2,
         .id = id,
         .magic = id,
-        .prepared_call_ok = true,
         .cproto = .f_f_f,
         .native_function = .{ .f_f_f = mathBinaryNative(id) },
         .fallback_function = &mathOpCall,
@@ -183,10 +180,10 @@ fn xorshift64star(state: *u64) u64 {
     return x *% 0x2545F4914F6CDD1D;
 }
 
-/// qjs `js_math_random` (quickjs.c:47383): advance the per-runtime xorshift
+/// qjs `js_math_random` (quickjs.c:47383): advance the per-realm xorshift
 /// state and pack the top 52 bits into a [1.0, 2.0) double, returning d - 1.
-fn mathRandom(rt: *core.JSRuntime) f64 {
-    const v = xorshift64star(&rt.random_state);
+fn mathRandom(ctx: *core.JSContext) f64 {
+    const v = xorshift64star(&ctx.random_state);
     const bits: u64 = (@as(u64, 0x3ff) << 52) | (v >> 12);
     return @as(f64, @bitCast(bits)) - 1.0;
 }
@@ -198,19 +195,25 @@ fn mathOpCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (host_call.global == null) {
-        if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx.runtime));
+    if (host_call.func_obj == null and host_call.global == null) {
+        // Explicit bare-runtime algorithmic reuse. It has no callable whose
+        // realm could provide coercion or exception intrinsics.
+        if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx));
         const number = call(host_call.magic, host_call.args) catch return error.TypeError;
         return value_ops.numberToValue(number);
     }
-    return preparedOpCall(host_call.ctx, host_call.output, host_call.global.?, host_call.magic, host_call.args);
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    return preparedOpCall(host_call.ctx, host_call.output, global, host_call.magic, host_call.args);
 }
 
 /// Realm-path scalar `Math.*` computation (ids 1..36), shared by the record
-/// handler (`mathOpCall`) and the VM prepared-call fast path
-/// (`vm_call.callPreparedNativeTarget`). The prepared path calls this directly
-/// rather than through the record table's function pointer: the indirect call
-/// and table lookup measurably regress the hottest tight-loop scalar math
+/// handler (`mathOpCall`) and direct opcode helpers. The opcode helpers call
+/// this directly rather than through the record table's function pointer: the
+/// indirect call and table lookup measurably regress the hottest scalar math
 /// (Math.abs/sqrt/floor) by ~5%, so this is the documented hybrid: Math keeps
 /// a specialized prepared branch while every other migrated domain unifies on
 /// the table. Always invoked with a realm `global`; the bare-runtime fallback
@@ -225,7 +228,7 @@ pub fn preparedOpCall(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *co
         6 => qjsMathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
         7 => try qjsMathMinMax(ctx, output, global, args, false),
         8 => try qjsMathMinMax(ctx, output, global, args, true),
-        9 => mathRandom(ctx.runtime),
+        9 => mathRandom(ctx),
         10 => exp(try mathArg(ctx, output, global, args, 0)),
         11 => @sin(try mathArg(ctx, output, global, args, 0)),
         12 => @cos(try mathArg(ctx, output, global, args, 0)),
@@ -406,11 +409,12 @@ fn mathSumPreciseCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return qjsMathSumPrecise(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),

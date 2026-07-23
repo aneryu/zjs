@@ -20,17 +20,20 @@
 //           allocation marker (memory./allocator./alloc(/create(/dupe(/
 //           append(/toOwnedSlice/realloc/OutOfMemory) requires an entry.
 //
-// Chosen strength and current exemptions (2026-06): the allowlist is capped
-// at 10 entries and currently holds exactly 1 - the rope-flatten last
-// resort in src/core/string.zig (borrowed-slice readers cannot propagate
-// errors; it retries after one object-cycle collection before aborting).
-// All other historical OOM panics were retired by eecf6c8.
+// Chosen strength and current exemptions (2026-07): the allowlist is capped
+// at 10 entries and currently holds 5. One is the rope-flatten last resort in
+// src/core/string.zig (borrowed-slice readers cannot propagate errors; it
+// retries after one object-cycle collection before aborting). The other four
+// are named owner-thread/teardown API invariants, not OOM conversions. All
+// other historical OOM panics were retired by eecf6c8.
 //
 // Allowlist shape mirrors deps-allowlist.json: each entry carries
-// source/pattern/reason/exit_milestone, duplicates are rejected, each entry
-// covers exactly ONE occurrence of `pattern` in `source` (a second
-// occurrence in the same file is a violation), and entries that no longer
-// match anything fail the check as stale.
+// source/pattern/reason/exit_milestone and may carry an exact `contains`
+// substring to identify one finding. The legacy shape without `contains`
+// remains valid only while source+pattern has exactly one occurrence. Multiple
+// entries for the same source+pattern must all provide distinct `contains`
+// values. Duplicates and overlapping selectors are rejected, every entry must
+// cover exactly ONE occurrence, and entries that no longer match fail as stale.
 
 const fs = require('fs');
 const path = require('path');
@@ -62,19 +65,33 @@ function readAllowlist() {
     fail(`allowlist has ${entries.length} entries; the strict tier caps it at ${max_allowlist_entries}`);
   }
   const seen = new Set();
+  const entriesBySourcePattern = new Map();
   for (const [index, entry] of entries.entries()) {
     for (const field of ['source', 'pattern', 'reason', 'exit_milestone']) {
       if (typeof entry[field] !== 'string' || entry[field].length === 0) {
         fail(`allowlist entry ${index} is missing non-empty ${field}`);
       }
     }
+    if (entry.contains !== undefined && (typeof entry.contains !== 'string' || entry.contains.length === 0)) {
+      fail(`allowlist entry ${index} has a contains selector that is not a non-empty string`);
+    }
     if (!known_patterns.has(entry.pattern)) {
       fail(`allowlist entry ${index} has unknown pattern "${entry.pattern}" (expected one of: ${[...known_patterns].join(', ')})`);
     }
     entry.source = normalizeRepoPath(entry.source);
-    const key = allowKey(entry.source, entry.pattern);
+    const key = allowEntryKey(entry);
     if (seen.has(key)) fail(`duplicate allowlist entry for ${key} (each entry covers exactly one occurrence)`);
     seen.add(key);
+
+    const sourcePattern = allowKey(entry.source, entry.pattern);
+    const group = entriesBySourcePattern.get(sourcePattern) ?? [];
+    group.push(entry);
+    entriesBySourcePattern.set(sourcePattern, group);
+  }
+  for (const [sourcePattern, group] of entriesBySourcePattern) {
+    if (group.length > 1 && group.some((entry) => entry.contains === undefined)) {
+      fail(`multiple allowlist entries for ${sourcePattern} must all provide distinct contains selectors`);
+    }
   }
   return entries;
 }
@@ -93,6 +110,17 @@ function walk(dir, out) {
 
 function allowKey(source, pattern) {
   return `${source} :: ${pattern}`;
+}
+
+function allowEntryKey(entry) {
+  const base = allowKey(entry.source, entry.pattern);
+  return entry.contains === undefined ? base : `${base} :: contains ${JSON.stringify(entry.contains)}`;
+}
+
+function entryMatchesFinding(entry, finding) {
+  return entry.source === finding.source &&
+    entry.pattern === finding.pattern &&
+    (entry.contains === undefined || finding.text.includes(entry.contains));
 }
 
 const alloc_marker_re = /memory\.|allocator\.|\balloc\(|\bcreate\(|\bdupe\(|\bappend\(|toOwnedSlice|realloc|OutOfMemory/;
@@ -121,36 +149,33 @@ function findingsFor(source) {
 }
 
 const allowlist = readAllowlist();
-const allowBudget = new Map();
-for (const entry of allowlist) {
-  allowBudget.set(allowKey(entry.source, entry.pattern), { entry, budget: 1, used: 0 });
-}
 
 const files = [];
 walk(path.join(repoRoot, 'src'), files);
 
-const violations = [];
-let finding_count = 0;
+const findings = [];
 for (const source of files) {
   if (source.startsWith('src/tests/')) continue;
-  for (const finding of findingsFor(source)) {
-    finding_count += 1;
-    const key = allowKey(finding.source, finding.pattern);
-    const allow = allowBudget.get(key);
-    if (allow && allow.used < allow.budget) {
-      allow.used += 1;
-      continue;
-    }
-    violations.push(finding);
-  }
+  findings.push(...findingsFor(source));
 }
 
-const stale = allowlist.filter((entry) => {
-  const allow = allowBudget.get(allowKey(entry.source, entry.pattern));
-  return !allow || allow.used === 0;
-});
+const matchesByEntry = new Map();
+for (const entry of allowlist) {
+  matchesByEntry.set(entry, findings.filter((finding) => entryMatchesFinding(entry, finding)));
+}
 
-if (violations.length !== 0 || stale.length !== 0) {
+const stale = allowlist.filter((entry) => matchesByEntry.get(entry).length === 0);
+const nonUnique = allowlist.filter((entry) => matchesByEntry.get(entry).length > 1);
+const ownersByFinding = new Map(findings.map((finding) => [finding, []]));
+for (const entry of allowlist) {
+  for (const finding of matchesByEntry.get(entry)) {
+    ownersByFinding.get(finding).push(entry);
+  }
+}
+const overlapping = findings.filter((finding) => ownersByFinding.get(finding).length > 1);
+const violations = findings.filter((finding) => ownersByFinding.get(finding).length === 0);
+
+if (violations.length !== 0 || stale.length !== 0 || nonUnique.length !== 0 || overlapping.length !== 0) {
   if (violations.length !== 0) {
     console.error('\nOOM-panic rule violations:');
     for (const violation of violations) {
@@ -165,7 +190,23 @@ if (violations.length !== 0 || stale.length !== 0) {
       console.error(`    exit_milestone: ${entry.exit_milestone}`);
     }
   }
+  if (nonUnique.length !== 0) {
+    console.error('\nNon-unique OOM-panic allowlist entries (selector matches more than one occurrence):');
+    for (const entry of nonUnique) {
+      console.error(`  ${allowEntryKey(entry)}`);
+      console.error(`    matched occurrences: ${matchesByEntry.get(entry).length}`);
+    }
+  }
+  if (overlapping.length !== 0) {
+    console.error('\nOverlapping OOM-panic allowlist entries (one occurrence has multiple owners):');
+    for (const finding of overlapping) {
+      console.error(`  ${finding.source}:${finding.lineno}: ${finding.text}`);
+      for (const entry of ownersByFinding.get(finding)) {
+        console.error(`    ${allowEntryKey(entry)}`);
+      }
+    }
+  }
   process.exit(1);
 }
 
-console.log(`architecture OOM-panic check ok (${files.length} Zig files scanned, ${finding_count} matched occurrence(s), ${allowlist.length}/${max_allowlist_entries} allowlist entries)`);
+console.log(`architecture OOM-panic check ok (${files.length} Zig files scanned, ${findings.length} matched occurrence(s), ${allowlist.length}/${max_allowlist_entries} allowlist entries)`);

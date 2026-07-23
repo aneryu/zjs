@@ -2,11 +2,14 @@ const std = @import("std");
 
 const atom = @import("atom.zig");
 const class = @import("class.zig");
+const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const Object = object_mod.Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
-const exception = @import("exception.zig");
+const gc = @import("gc.zig");
 const runtime_mod = @import("runtime.zig");
+const property = @import("property.zig");
+const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -93,6 +96,8 @@ pub const DynamicImportError = error{
     DiskQuota,
     DivisionByZero,
     DuplicateClass,
+    DerivedConstructorReturn,
+    DerivedThisUninitialized,
     EvalError,
     FileBusy,
     FileLocksUnsupported,
@@ -207,8 +212,6 @@ pub const DynamicImportCallback = *const fn (
 pub const ContextOptions = struct {
     stack_size: ?usize = null,
     track_unhandled_rejections: bool = false,
-    dynamic_import_callback: ?DynamicImportCallback = null,
-    dynamic_import_userdata: ?*anyopaque = null,
 };
 
 pub const Options = ContextOptions;
@@ -384,32 +387,32 @@ pub const HostEventLoop = struct {
     }
 };
 
-pub const PendingPromiseJob = struct {
-    sequence: u64 = 0,
-    value: JSValue = JSValue.undefinedValue(),
-    value_symbol_rooted: bool = false,
+const class_prototype_inline_capacity: usize = class.ids.init_count;
 
-    pub fn init(ctx: *JSContext, sequence: u64, value: JSValue) !PendingPromiseJob {
-        var job = PendingPromiseJob{
-            .sequence = sequence,
-            .value = value.dup(),
-        };
-        errdefer job.value.free(ctx.runtime);
-        job.value_symbol_rooted = try ctx.runtime.registerExternalValueSymbolRoot(value);
-        return job;
-    }
-
-    pub fn deinit(self: PendingPromiseJob, rt: *JSRuntime) void {
-        if (self.value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.value);
-        self.value.free(rt);
-    }
-
-    pub fn traceRoots(self: *PendingPromiseJob, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.value);
-    }
+/// QuickJS `JSErrorEnum` subset whose intrinsic prototypes live in
+/// `JSContext.native_error_proto[]`. These are realm state, independent of the
+/// mutable constructor bindings on the global object.
+pub const NativeErrorKind = enum(u8) {
+    error_,
+    eval_error,
+    range_error,
+    reference_error,
+    syntax_error,
+    type_error,
+    uri_error,
+    internal_error,
+    aggregate_error,
+    suppressed_error,
+    count,
 };
 
-const class_prototype_inline_capacity: usize = class.ids.init_count;
+const native_error_kind_count: usize = @intFromEnum(NativeErrorKind.count);
+
+pub const RealmPublicationState = enum {
+    constructing,
+    live,
+    finalizing,
+};
 
 /// One tracked unhandled rejection: the rejected promise (undefined when the
 /// producer had no promise object at hand) plus its reason. Mirrors the qjs
@@ -425,12 +428,31 @@ pub const UnhandledRejectionEntry = struct {
 };
 
 pub const JSContext = struct {
+    pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.realm_context);
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
     pub const EvalTiming = ContextEvalTiming;
 
+    comptime {
+        std.debug.assert(@offsetOf(@This(), "header") == 0);
+    }
+
+    /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
+    /// collector node.  Keep this first; `MemoryAccount` places the common RC
+    /// metadata immediately before it.
+    header: gc.GCObjectHeader align(16) = .{},
     runtime: *JSRuntime,
-    exception_slot: exception.ExceptionSlot = .{},
+    /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
+    /// header links above are reserved exclusively for the collector.
+    runtime_prev: ?*JSContext = null,
+    runtime_next: ?*JSContext = null,
+    construction_prev: ?*JSContext = null,
+    construction_next: ?*JSContext = null,
+    publication_state: RealmPublicationState = .constructing,
+    construction_complete: bool = false,
+    /// Realm-local module map. Every linked record's list base-ref is an owned
+    /// Context -> ModuleRecord GC edge; record addresses stay stable.
+    modules: module.Registry,
     /// Not-yet-handled rejected promises, in rejection order. Mirrors the qjs
     /// CLI host tracker list (js_std_promise_rejection_tracker's
     /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
@@ -440,28 +462,31 @@ pub const JSContext = struct {
     /// same promise later gets handled; every remaining entry is reported.
     unhandled_rejections: []UnhandledRejectionEntry = &.{},
     unhandled_rejections_capacity: usize = 0,
-    stack_limit: usize = 0,
-    /// Logical JS call depth (recursive interpreter entries + inline frames).
-    call_depth: usize = 0,
-    /// Native interpreter recursion depth only (excludes inline frames, which
-    /// consume no native stack). Guards against native stack exhaustion.
-    native_call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
     /// contexts enable it; validation and embedding-style contexts keep it off.
     track_unhandled_rejections: bool = false,
-    formatting_error_stack: bool = false,
-    backtrace_frames: []BacktraceFrame = &.{},
-    backtrace_capacity: usize = 0,
-    current_backtrace_frame: ?*ActiveBacktraceFrame = null,
-    /// Exec-owned, stack-local state for the currently running typed native
-    /// function. Core deliberately keeps this opaque: native cproto handlers
-    /// receive their public ABI arguments directly, while exec can recover
-    /// realm/VM state without putting an exec-specific argument pack in the
-    /// runtime record table. Nested native calls save and restore this link.
-    active_native_call: ?*const anyopaque = null,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
+    native_error_prototypes: [native_error_kind_count]JSValue = @splat(JSValue.nullValue()),
+    cached_function_proto: ?*Object = null,
+    cached_promise_proto: ?*Object = null,
+    cached_values: [@intFromEnum(object_mod.RealmValueSlot.count)]?JSValue = @splat(null),
+    /// QuickJS's five context-owned initial shapes. Values live in each fresh
+    /// object's property cells; the realm owns only these immutable layouts.
+    array_shape: ?*shape.Shape = null,
+    arguments_shape: ?*shape.Shape = null,
+    mapped_arguments_shape: ?*shape.Shape = null,
+    regexp_shape: ?*shape.Shape = null,
+    regexp_result_shape: ?*shape.Shape = null,
+    regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
+    random_state: u64 = 0x1234_5678_9abc_def0,
+    /// QuickJS `JSContext.interrupt_counter`. The raw context allocation is
+    /// zero-filled, so the first semantic poll takes the slow arm and resets
+    /// this to `interrupt_counter_reset`; later callbacks are exactly one reset
+    /// interval apart. Runtime handler installation never mutates this state.
+    interrupt_counter: i32 = 0,
+    preallocated_oom_error: ?JSValue = null,
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
     /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
@@ -475,11 +500,7 @@ pub const JSContext = struct {
     /// Direct-eval syntax only evaluates as direct eval when the resolved
     /// callee is this object; otherwise OP_eval falls back to an ordinary call.
     eval_function: JSValue = JSValue.nullValue(),
-    dynamic_import_callback: ?DynamicImportCallback = null,
-    dynamic_import_userdata: ?*anyopaque = null,
     host_event_loop: ?HostEventLoop = null,
-    pending_promise_jobs: []PendingPromiseJob = &.{},
-    pending_promise_jobs_capacity: usize = 0,
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn create(rt: *JSRuntime) !*JSContext {
@@ -488,19 +509,34 @@ pub const JSContext = struct {
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
-        const ctx = try rt.memory.create(JSContext);
-        errdefer rt.memory.destroy(JSContext, ctx);
-        try ctx.init(rt, options);
+        return createWithPublication(rt, options, true);
+    }
+
+    /// Engine bootstrap constructor: the GC header is registered immediately,
+    /// but the realm stays off every public/live traversal until `publishLive`.
+    pub fn createConstructingWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+        return createWithPublication(rt, options, false);
+    }
+
+    fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*JSContext {
+        try rt.requireOwnerThread();
+        const ctx = try rt.createRuntime(JSContext);
+        var initialized = false;
+        errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(JSContext, ctx);
+        try ctx.initConstructing(rt, options);
+        initialized = true;
+        if (publish_immediately) try ctx.finishConstruction();
         return ctx;
     }
 
-    pub fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+    fn initConstructing(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+        if (options.stack_size) |stack_size| rt.setStackSize(stack_size);
         self.* = .{
+            .header = .{},
             .runtime = rt,
-            .stack_limit = options.stack_size orelse rt.stackSize(),
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .dynamic_import_callback = options.dynamic_import_callback,
-            .dynamic_import_userdata = options.dynamic_import_userdata,
+            .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
+            .random_state = runtime_mod.newRealmRandomSeed(),
         };
         const initial_len = rt.classes.records.len;
         if (initial_len <= self.class_prototypes_inline.len) {
@@ -511,13 +547,54 @@ pub const JSContext = struct {
             @memset(prototypes, JSValue.nullValue());
             self.class_prototypes = prototypes;
         }
-        var provider_registered = false;
-        errdefer {
-            if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
-            self.deinitClassPrototypeSlots();
+        errdefer self.deinitClassPrototypeSlots();
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
+        rt.linkConstructingContext(self);
+    }
+
+    pub fn publishLive(self: *JSContext) !void {
+        self.runtime.assertOwnerThread();
+        switch (self.publication_state) {
+            .live => return,
+            .constructing => {},
+            .finalizing => return error.InvalidBuiltinRegistry,
         }
-        try rt.registerRootProvider(self.rootProvider());
-        provider_registered = true;
+        if (!self.construction_complete) return error.InvalidBuiltinRegistry;
+        // This is the sole fallible step. If it triggers collection, the realm
+        // remains absent from every live traversal.
+        try self.runtime.registerRootProvider(self.rootProvider());
+        self.runtime.unlinkConstructingContext(self);
+        self.publication_state = .live;
+        self.runtime.linkContext(self);
+    }
+
+    /// Checked publication boundary for embedders that cannot statically prove
+    /// the Runtime owner thread. Engine bootstrap uses the asserting form above
+    /// so this contract error does not widen JavaScript execution errors.
+    pub fn publishLiveChecked(self: *JSContext) !void {
+        try self.runtime.requireOwnerThread();
+        return self.publishLive();
+    }
+
+    pub fn finishConstruction(self: *JSContext) !void {
+        self.runtime.assertOwnerThread();
+        if (self.publication_state == .live) return;
+        if (self.publication_state != .constructing) return error.InvalidBuiltinRegistry;
+        self.construction_complete = true;
+        try self.publishLive();
+    }
+
+    pub fn finishConstructionChecked(self: *JSContext) !void {
+        try self.runtime.requireOwnerThread();
+        return self.finishConstruction();
+    }
+
+    pub fn publicationState(self: *const JSContext) RealmPublicationState {
+        return self.publication_state;
+    }
+
+    pub fn isLive(self: *const JSContext) bool {
+        return self.publication_state == .live;
     }
 
     pub fn runtimePtr(self: *JSContext) *JSRuntime {
@@ -525,11 +602,27 @@ pub const JSContext = struct {
     }
 
     pub fn setStackLimit(self: *JSContext, size: usize) void {
-        self.stack_limit = size;
+        self.runtime.setStackSize(size);
     }
 
     pub fn stackLimit(self: JSContext) usize {
-        return self.stack_limit;
+        return self.runtime.stackSize();
+    }
+
+    pub const interrupt_counter_reset: i32 = 10_000;
+
+    /// Advance this Realm's persistent interrupt cadence. Returns true only
+    /// when the Runtime handler requests termination. The counter advances and
+    /// resets even while no handler is installed.
+    pub inline fn pollInterrupt(self: *JSContext) bool {
+        self.interrupt_counter -= 1;
+        if (self.interrupt_counter > 0) return false;
+        return self.pollInterruptSlow();
+    }
+
+    noinline fn pollInterruptSlow(self: *JSContext) bool {
+        self.interrupt_counter = interrupt_counter_reset;
+        return self.runtime.runInterruptHandler();
     }
 
     pub fn setTrackUnhandledRejections(self: *JSContext, enabled: bool) void {
@@ -582,6 +675,7 @@ pub const JSContext = struct {
     }
 
     pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
+        self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) {
             var next_len = if (self.class_prototypes.len == 0) @as(usize, 1) else self.class_prototypes.len + self.class_prototypes.len / 2;
@@ -612,6 +706,7 @@ pub const JSContext = struct {
     }
 
     pub fn clearClassPrototype(self: *JSContext, class_id: class.ClassId) void {
+        self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return;
         const old = self.class_prototypes[index];
@@ -629,44 +724,190 @@ pub const JSContext = struct {
         return @fieldParentPtr("header", header);
     }
 
-    pub fn deinit(self: *JSContext) void {
+    pub fn setNativeErrorPrototype(self: *JSContext, kind: NativeErrorKind, prototype: *Object) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(kind != .count);
+        const slot = &self.native_error_prototypes[@intFromEnum(kind)];
+        const old = slot.*;
+        slot.* = prototype.value().dup();
+        old.free(self.runtime);
+    }
+
+    pub fn nativeErrorPrototypeObject(self: *JSContext, kind: NativeErrorKind) ?*Object {
+        if (kind == .count) return null;
+        const value = self.native_error_prototypes[@intFromEnum(kind)];
+        if (!value.isObject()) return null;
+        const header = value.refHeader() orelse return null;
+        if (header.meta().kind != .object) return null;
+        return @fieldParentPtr("header", header);
+    }
+
+    pub fn initializeInitialShapes(
+        self: *JSContext,
+        object_prototype: ?*Object,
+        array_prototype: ?*Object,
+        regexp_prototype: ?*Object,
+    ) !void {
+        if (self.array_shape != null) return;
+        std.debug.assert(self.arguments_shape == null);
+        std.debug.assert(self.mapped_arguments_shape == null);
+        std.debug.assert(self.regexp_shape == null);
+        std.debug.assert(self.regexp_result_shape == null);
+
+        const data_hidden = property.Flags.data(true, false, true).bits();
+        const arguments_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.length, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("Symbol.iterator", .symbol).?, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = property.Flags.accessorFlags(false, false).bits() },
+        };
+        const mapped_arguments_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.length, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("Symbol.iterator", .symbol).?, .flags = data_hidden },
+            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = data_hidden },
+        };
+        const regexp_properties = [_]shape.InitialProperty{
+            .{ .atom_id = atom.ids.lastIndex, .flags = property.Flags.data(true, false, false).bits() },
+        };
+        // Array length is scalar storage in zjs, so the array and RegExp-result
+        // shapes omit QuickJS's ordinary length cell while preserving the same
+        // realm-owned shape identities and named-property order.
+        const regexp_result_properties = [_]shape.InitialProperty{
+            .{ .atom_id = comptime atom.predefinedId("index", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+            .{ .atom_id = comptime atom.predefinedId("input", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+            .{ .atom_id = comptime atom.predefinedId("groups", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+        };
+
+        const array_shape = try self.runtime.shapes.createInitialShape(array_prototype, &.{});
+        errdefer self.runtime.shapes.release(array_shape);
+        const arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &arguments_properties);
+        errdefer self.runtime.shapes.release(arguments_shape);
+        const mapped_arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &mapped_arguments_properties);
+        errdefer self.runtime.shapes.release(mapped_arguments_shape);
+        const regexp_shape = try self.runtime.shapes.createInitialShape(regexp_prototype, &regexp_properties);
+        errdefer self.runtime.shapes.release(regexp_shape);
+        const regexp_result_shape = try self.runtime.shapes.createInitialShape(array_prototype, &regexp_result_properties);
+        errdefer self.runtime.shapes.release(regexp_result_shape);
+
+        self.array_shape = array_shape;
+        self.arguments_shape = arguments_shape;
+        self.mapped_arguments_shape = mapped_arguments_shape;
+        self.regexp_shape = regexp_shape;
+        self.regexp_result_shape = regexp_result_shape;
+    }
+
+    fn releaseInitialShape(self: *JSContext, slot: *?*shape.Shape) void {
+        const owned = slot.* orelse return;
+        slot.* = null;
+        if (self.runtime.gc.phase == .remove_cycles and owned.header.metaConst().flags.cycle_visited) return;
+        self.runtime.shapes.release(owned);
+    }
+
+    fn clearIntrinsicBootstrapValues(self: *JSContext) void {
         const rt = self.runtime;
-        rt.unregisterRootProvider(self.rootProvider());
-        self.host_event_loop = null;
-        self.exception_slot.clear(rt);
-        self.clearUnhandledRejection();
         const old_eval = self.eval_function;
         self.eval_function = JSValue.nullValue();
+        old_eval.free(rt);
+        if (self.cached_function_proto) |prototype| prototype.value().free(rt);
+        self.cached_function_proto = null;
+        if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
+        self.cached_promise_proto = null;
+        for (&self.cached_values) |*slot| {
+            if (slot.*) |value| value.free(rt);
+            slot.* = null;
+        }
+        for (&self.native_error_prototypes) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(rt);
+        }
+        self.releaseInitialShape(&self.array_shape);
+        self.releaseInitialShape(&self.arguments_shape);
+        self.releaseInitialShape(&self.mapped_arguments_shape);
+        self.releaseInitialShape(&self.regexp_shape);
+        self.releaseInitialShape(&self.regexp_result_shape);
+        if (self.preallocated_oom_error) |value| value.free(rt);
+        self.preallocated_oom_error = null;
+    }
+
+    /// Roll back only the Realm-owned state published by intrinsic/global
+    /// bootstrap. The candidate global remains associated while this runs so
+    /// native-function Realm lookups stay valid during recursive release.
+    /// Dynamic class prototype slots belong to embedders and survive a retry;
+    /// the standard prefix is rebuilt with the next candidate global.
+    pub fn rollbackIntrinsicBootstrap(self: *JSContext) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.publication_state != .finalizing);
+        std.debug.assert(self.lexicals == null);
+        std.debug.assert(self.regexp_legacy_statics == null);
+        self.clearIntrinsicBootstrapValues();
+        const builtin_count = @min(self.class_prototypes.len, @as(usize, @intCast(class.ids.init_count)));
+        for (self.class_prototypes[0..builtin_count]) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(self.runtime);
+        }
+        if (self.publication_state == .constructing) self.construction_complete = false;
+    }
+
+    fn deinitResources(self: *JSContext) void {
+        const rt = self.runtime;
+        rt.assertOwnerThread();
+        switch (self.publication_state) {
+            .constructing => rt.unlinkConstructingContext(self),
+            .live => {
+                rt.unlinkContext(self);
+                rt.unregisterRootProvider(self.rootProvider());
+            },
+            .finalizing => unreachable,
+        }
+        self.publication_state = .finalizing;
+        // Drop Realm -> ModuleRecord base refs before releasing globals and
+        // intrinsics: module records may themselves own values in this Realm.
+        self.modules.deinit(rt);
+        self.host_event_loop = null;
+        self.clearUnhandledRejection();
         const old_lexicals = self.lexicals;
         self.lexicals = null;
         const old_global = self.global;
         self.global = null;
-        old_eval.free(rt);
         if (old_lexicals) |lexicals| lexicals.value().free(rt);
         if (old_global) |global| global.value().free(rt);
-        const pending_promise_jobs = self.pending_promise_jobs;
-        const pending_promise_jobs_capacity = self.pending_promise_jobs_capacity;
-        self.pending_promise_jobs = &.{};
-        self.pending_promise_jobs_capacity = 0;
-        for (pending_promise_jobs) |job| job.deinit(rt);
-        if (pending_promise_jobs_capacity != 0) rt.memory.free(PendingPromiseJob, pending_promise_jobs.ptr[0..pending_promise_jobs_capacity]);
-        const backtrace_frames = self.backtrace_frames;
-        const backtrace_capacity = self.backtrace_capacity;
-        self.backtrace_frames = &.{};
-        self.backtrace_capacity = 0;
-        for (backtrace_frames) |frame| {
-            rt.atoms.free(frame.function_name);
-            rt.atoms.free(frame.filename);
-            frame.function_value.free(rt);
+        self.clearIntrinsicBootstrapValues();
+        if (self.regexp_legacy_statics) |legacy| {
+            legacy.destroy(rt);
+            rt.destroyRuntime(object_mod.RegExpLegacyStatics, legacy);
+            self.regexp_legacy_statics = null;
         }
-        if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         self.deinitClassPrototypeSlots();
     }
 
     pub fn destroy(self: *JSContext) void {
-        const rt = self.runtime;
-        self.deinit();
-        rt.memory.destroy(JSContext, self);
+        self.runtime.assertOwnerThread();
+        gc.release(self.runtime, &self.header);
+    }
+
+    /// Checked release entry for hosts that cannot statically guarantee the
+    /// Runtime owner thread. A wrong-thread call does not decrement the Realm.
+    pub fn tryDestroy(self: *JSContext) runtime_mod.RuntimeMutationError!void {
+        try self.runtime.requireOwnerThread();
+        gc.release(self.runtime, &self.header);
+    }
+
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+        rt.assertOwnerThread();
+        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        self.deinitResources();
+        if (rt.gc.phase == .remove_cycles) {
+            rt.gc.deferCycleStructFree(header);
+            return;
+        }
+        rt.destroyRuntime(JSContext, self);
+    }
+
+    pub fn freeCycleDeferredStruct(rt: *JSRuntime, header: *gc.Header) void {
+        rt.assertOwnerThread();
+        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        rt.destroyRuntime(JSContext, self);
     }
 
     pub fn dupValue(self: *JSContext, value: JSValue) JSValue {
@@ -686,21 +927,73 @@ pub const JSContext = struct {
     }
 
     pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.exception_slot.value);
+        if (self.publication_state != .live) return;
         for (self.unhandled_rejections) |*entry| {
             try visitor.value(&entry.promise);
             try visitor.value(&entry.reason);
         }
         try visitor.value(&self.eval_function);
+        if (self.preallocated_oom_error) |*value| try visitor.value(value);
         try visitor.values(self.class_prototypes);
+        try visitor.values(&self.native_error_prototypes);
+        if (self.cached_function_proto) |prototype| {
+            var rooted: ?*Object = prototype;
+            try visitor.optionalObject(&rooted);
+            self.cached_function_proto = rooted;
+        }
+        if (self.cached_promise_proto) |prototype| {
+            var rooted: ?*Object = prototype;
+            try visitor.optionalObject(&rooted);
+            self.cached_promise_proto = rooted;
+        }
+        for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
+        if (self.regexp_legacy_statics) |legacy| {
+            if (legacy.input) |*value| try visitor.value(value);
+            if (legacy.last_match) |*value| try visitor.value(value);
+            if (legacy.last_paren) |*value| try visitor.value(value);
+            if (legacy.left_context) |*value| try visitor.value(value);
+            if (legacy.right_context) |*value| try visitor.value(value);
+            for (&legacy.captures) |*slot| if (slot.*) |*value| try visitor.value(value);
+        }
         try visitor.optionalObject(&self.global);
         try visitor.optionalObject(&self.lexicals);
-        for (self.pending_promise_jobs) |*job| {
-            try job.traceRoots(visitor);
-        }
         if (self.host_event_loop) |host_event_loop| {
             try host_event_loop.traceRoots(visitor);
         }
+    }
+
+    /// Infallible owned-edge enumeration used by the RC cycle collector.  The
+    /// runtime context-list link is deliberately absent: it is membership, not
+    /// ownership.
+    pub fn traceChildEdgesNoFail(self: *JSContext, visitor: anytype) void {
+        if (self.publication_state == .finalizing) return;
+        self.modules.traceChildEdgesNoFail(visitor);
+        for (self.unhandled_rejections) |*entry| {
+            visitor.visitValue(&entry.promise);
+            visitor.visitValue(&entry.reason);
+        }
+        visitor.visitValue(&self.eval_function);
+        if (self.preallocated_oom_error) |*value| visitor.visitValue(value);
+        for (self.class_prototypes) |*prototype| visitor.visitValue(prototype);
+        for (&self.native_error_prototypes) |*prototype| visitor.visitValue(prototype);
+        visitor.visitObject(&self.cached_function_proto);
+        visitor.visitObject(&self.cached_promise_proto);
+        if (self.array_shape) |owned| visitor.visitShape(owned);
+        if (self.arguments_shape) |owned| visitor.visitShape(owned);
+        if (self.mapped_arguments_shape) |owned| visitor.visitShape(owned);
+        if (self.regexp_shape) |owned| visitor.visitShape(owned);
+        if (self.regexp_result_shape) |owned| visitor.visitShape(owned);
+        for (&self.cached_values) |*slot| if (slot.*) |*value| visitor.visitValue(value);
+        if (self.regexp_legacy_statics) |legacy| {
+            if (legacy.input) |*value| visitor.visitValue(value);
+            if (legacy.last_match) |*value| visitor.visitValue(value);
+            if (legacy.last_paren) |*value| visitor.visitValue(value);
+            if (legacy.left_context) |*value| visitor.visitValue(value);
+            if (legacy.right_context) |*value| visitor.visitValue(value);
+            for (&legacy.captures) |*slot| if (slot.*) |*value| visitor.visitValue(value);
+        }
+        visitor.visitObject(&self.global);
+        visitor.visitObject(&self.lexicals);
     }
 
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
@@ -719,58 +1012,41 @@ pub const JSContext = struct {
         try self.traceRoots(visitor);
     }
 
-    pub fn ensurePendingPromiseJobCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.pending_promise_jobs_capacity >= min_capacity) return;
-        var next_capacity = if (self.pending_promise_jobs_capacity == 0) @as(usize, 4) else self.pending_promise_jobs_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.runtime.memory.alloc(PendingPromiseJob, next_capacity);
-        errdefer self.runtime.memory.free(PendingPromiseJob, next);
-        const old_jobs = self.pending_promise_jobs;
-        const old_capacity = self.pending_promise_jobs_capacity;
-        @memcpy(next[0..old_jobs.len], old_jobs);
-        self.pending_promise_jobs = next[0..old_jobs.len];
-        self.pending_promise_jobs_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.runtime.memory.free(PendingPromiseJob, old_jobs.ptr[0..old_capacity]);
-        }
-    }
-
-    pub fn peekPendingPromiseJobSequence(self: JSContext) ?u64 {
-        if (self.pending_promise_jobs.len == 0) return null;
-        return self.pending_promise_jobs[0].sequence;
-    }
-
-    pub fn takePendingPromiseJob(self: *JSContext) ?PendingPromiseJob {
-        if (self.pending_promise_jobs.len == 0) return null;
-        const job = self.pending_promise_jobs[0];
-        const old_len = self.pending_promise_jobs.len;
-        if (old_len == 1) {
-            const old_jobs = self.pending_promise_jobs.ptr[0..self.pending_promise_jobs_capacity];
-            self.pending_promise_jobs = &.{};
-            self.pending_promise_jobs_capacity = 0;
-            self.runtime.memory.free(PendingPromiseJob, old_jobs);
-            return job;
-        }
-        @memmove(self.pending_promise_jobs[0 .. old_len - 1], self.pending_promise_jobs[1..old_len]);
-        self.pending_promise_jobs = self.pending_promise_jobs.ptr[0 .. old_len - 1];
-        return job;
-    }
-
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
-        self.exception_slot.set(self.runtime, value);
+        const old = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
+        old.free(self.runtime);
+        self.runtime.current_exception = value;
         return JSValue.exception();
     }
 
+    pub fn setExceptionUncatchable(self: *JSContext, uncatchable: bool) void {
+        std.debug.assert(!uncatchable or self.hasException());
+        self.runtime.current_exception_uncatchable = uncatchable;
+    }
+
+    pub fn exceptionIsUncatchable(self: JSContext) bool {
+        return self.hasException() and self.runtime.current_exception_uncatchable;
+    }
+
     pub fn hasException(self: JSContext) bool {
-        return self.exception_slot.hasException();
+        return !self.runtime.current_exception.isUninitialized();
     }
 
     pub fn takeException(self: *JSContext) JSValue {
-        return self.exception_slot.take();
+        if (!self.hasException()) return JSValue.undefinedValue();
+        const result = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
+        return result;
     }
 
     pub fn clearException(self: *JSContext) void {
-        self.exception_slot.clear(self.runtime);
+        const old = self.runtime.current_exception;
+        self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
+        old.free(self.runtime);
     }
 
     pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
@@ -790,8 +1066,8 @@ pub const JSContext = struct {
             }
         }
         self.appendUnhandledRejection(promise, value) catch return;
-        if (!self.exception_slot.hasException()) {
-            self.exception_slot.set(self.runtime, value.dup());
+        if (!self.hasException()) {
+            _ = self.throwValue(value.dup());
         }
     }
 
@@ -889,13 +1165,13 @@ pub const JSContext = struct {
     }
 
     pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        frame.previous = self.current_backtrace_frame;
-        self.current_backtrace_frame = frame;
+        frame.previous = self.runtime.current_backtrace_frame;
+        self.runtime.current_backtrace_frame = frame;
     }
 
     pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        std.debug.assert(self.current_backtrace_frame == frame);
-        self.current_backtrace_frame = frame.previous;
+        std.debug.assert(self.runtime.current_backtrace_frame == frame);
+        self.runtime.current_backtrace_frame = frame.previous;
         frame.previous = null;
     }
 
@@ -906,7 +1182,7 @@ pub const JSContext = struct {
         // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
         {
-            var active = self.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
@@ -917,11 +1193,11 @@ pub const JSContext = struct {
             }
         }
 
-        const total = self.backtrace_frames.len + active_count;
+        const total = self.runtime.backtrace_frames.len + active_count;
         if (total == 0) return &.{};
         const frames = try self.runtime.memory.alloc(BacktraceFrame, total);
 
-        for (self.backtrace_frames, 0..) |frame, idx| {
+        for (self.runtime.backtrace_frames, 0..) |frame, idx| {
             frames[idx] = self.dupBacktraceFrame(frame);
         }
 
@@ -930,13 +1206,13 @@ pub const JSContext = struct {
         // order the previous per-node walk produced.
         var active_index = active_count;
         {
-            var active = self.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
                     if (snapshot.backtrace_barrier) break :fill;
                     active_index -= 1;
-                    frames[self.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
+                    frames[self.runtime.backtrace_frames.len + active_index] = self.dupActiveBacktraceFrameFromSnapshot(snapshot);
                 }
                 active = frame.previous;
             }
@@ -994,19 +1270,19 @@ pub const JSContext = struct {
         location_resolver: ?BacktraceLocationResolver,
         function_value: JSValue,
     ) !void {
-        if (self.backtrace_frames.len == self.backtrace_capacity) {
-            var next_capacity: usize = if (self.backtrace_capacity == 0) 16 else self.backtrace_capacity * 2;
-            if (next_capacity < self.backtrace_frames.len + 1) next_capacity = self.backtrace_frames.len + 1;
+        if (self.runtime.backtrace_frames.len == self.runtime.backtrace_capacity) {
+            var next_capacity: usize = if (self.runtime.backtrace_capacity == 0) 16 else self.runtime.backtrace_capacity * 2;
+            if (next_capacity < self.runtime.backtrace_frames.len + 1) next_capacity = self.runtime.backtrace_frames.len + 1;
             const next = try self.runtime.memory.alloc(BacktraceFrame, next_capacity);
-            const old_frames = self.backtrace_frames;
-            const old_capacity = self.backtrace_capacity;
+            const old_frames = self.runtime.backtrace_frames;
+            const old_capacity = self.runtime.backtrace_capacity;
             @memcpy(next[0..old_frames.len], old_frames);
-            self.backtrace_frames = next[0..old_frames.len];
-            self.backtrace_capacity = next_capacity;
+            self.runtime.backtrace_frames = next[0..old_frames.len];
+            self.runtime.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
         const stored_function_value = if (function_value.isObject()) function_value.dup() else JSValue.undefinedValue();
-        self.backtrace_frames.ptr[self.backtrace_frames.len] = .{
+        self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
             .function_name = self.runtime.atoms.dup(function_name),
             .filename = self.runtime.atoms.dup(filename),
             .line_num = line_num,
@@ -1015,38 +1291,38 @@ pub const JSContext = struct {
             .location_resolver = location_resolver,
             .function_value = stored_function_value,
         };
-        self.backtrace_frames = self.backtrace_frames.ptr[0 .. self.backtrace_frames.len + 1];
+        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0 .. self.runtime.backtrace_frames.len + 1];
     }
 
     pub fn popBacktraceFrame(self: *JSContext) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        const entry = self.backtrace_frames[idx];
-        self.backtrace_frames = self.backtrace_frames.ptr[0..idx];
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        const entry = self.runtime.backtrace_frames[idx];
+        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0..idx];
         self.runtime.atoms.free(entry.function_name);
         self.runtime.atoms.free(entry.filename);
         entry.function_value.free(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        self.backtrace_frames[idx].pc_source = null;
-        self.backtrace_frames[idx].pc = pc;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        self.runtime.backtrace_frames[idx].pc_source = null;
+        self.runtime.backtrace_frames[idx].pc = pc;
     }
 
     pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
-        if (self.backtrace_frames.len == 0) return;
-        self.backtrace_frames[self.backtrace_frames.len - 1].pc_source = pc_source;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        self.runtime.backtrace_frames[self.runtime.backtrace_frames.len - 1].pc_source = pc_source;
     }
 
     pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
-        if (self.backtrace_frames.len == 0) return;
-        const idx = self.backtrace_frames.len - 1;
-        self.backtrace_frames[idx].pc_source = null;
-        self.backtrace_frames[idx].pc = pc;
-        self.backtrace_frames[idx].line_num = line_num;
-        self.backtrace_frames[idx].col_num = col_num;
+        if (self.runtime.backtrace_frames.len == 0) return;
+        const idx = self.runtime.backtrace_frames.len - 1;
+        self.runtime.backtrace_frames[idx].pc_source = null;
+        self.runtime.backtrace_frames[idx].pc = pc;
+        self.runtime.backtrace_frames[idx].line_num = line_num;
+        self.runtime.backtrace_frames[idx].col_num = col_num;
     }
 
     pub fn takePendingException(self: *JSContext) JSValue {
@@ -1064,5 +1340,44 @@ pub const JSContext = struct {
             return cb(self);
         }
         return error.InvalidBuiltinRegistry;
+    }
+};
+
+/// Realm identity.  zjs keeps the public `JSContext` spelling for API
+/// compatibility; the two names intentionally denote the same QuickJS-style
+/// GC object, not a wrapper and a separate realm record.
+pub const RealmContext = JSContext;
+
+/// One owning context reference, matching `JS_DupContext` / `JS_FreeContext`.
+/// Runtime context-list membership is deliberately not represented here.
+pub const RealmRef = extern struct {
+    ptr: ?*RealmContext = null,
+
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == @sizeOf(?*RealmContext));
+    }
+
+    pub fn takeOwned(ctx: *RealmContext) RealmRef {
+        return .{ .ptr = ctx };
+    }
+
+    pub fn retain(ctx: *RealmContext) RealmRef {
+        gc.retain(&ctx.header);
+        return .{ .ptr = ctx };
+    }
+
+    pub fn clone(self: RealmRef) RealmRef {
+        if (self.ptr) |ctx| gc.retain(&ctx.header);
+        return self;
+    }
+
+    pub fn borrow(self: RealmRef) ?*RealmContext {
+        return self.ptr;
+    }
+
+    pub fn deinit(self: *RealmRef) void {
+        const ctx = self.ptr orelse return;
+        self.ptr = null;
+        gc.release(ctx.runtime, &ctx.header);
     }
 };

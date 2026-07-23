@@ -652,8 +652,7 @@ pub const MemoryAccount = struct {
     /// Total leading bytes reserved before a GC object so that (a) the 8-byte
     /// `Metadata` lands at `objectPtr - 8` (where `BlockHeader.meta()` looks) and
     /// (b) the object stays `@alignOf(T)`-aligned. For align<=8 types this is 8;
-    /// for over-aligned types (e.g. FunctionBytecode forces align 16 to keep its
-    /// `header` field at offset 0) it rounds up to the alignment.
+    /// for genuinely over-aligned GC payloads it rounds up to their alignment.
     inline fn gcPrefixSize(comptime T: type) usize {
         return comptime std.mem.alignForward(usize, gc_prefix_size, @alignOf(T));
     }

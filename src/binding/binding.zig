@@ -14,11 +14,9 @@ pub const BindingError = error{
 const MethodRuntime = struct {
     runtime: *core.JSRuntime,
     class_id: core.ClassId,
-    prototype: core.JSValueHandle,
 
     fn deinit(ptr: *anyopaque) void {
         const self: *MethodRuntime = @ptrCast(@alignCast(ptr));
-        self.prototype.deinit();
         self.runtime.memory.destroy(MethodRuntime, self);
     }
 };
@@ -102,11 +100,28 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         pub const storage = storage_spec;
 
         const Self = @This();
+        var class_id_slot: core.class.ClassIdSlot = .{};
 
+        /// Context-lifetime borrowed view of this host class in one realm.
+        /// The prototype is resolved through the realm's class-prototype table
+        /// on every use, so the binding cannot outlive or detach that table by
+        /// accidentally retaining a raw `*Object`.
         pub const Binding = struct {
-            runtime: *core.JSRuntime,
+            realm: *core.RealmContext,
             class_id: core.ClassId,
-            prototype: *core.Object,
+
+            pub fn prototype(self: Binding) ?*core.Object {
+                return self.realm.classPrototypeObject(self.class_id);
+            }
+
+            /// Promote a borrowed binding when native state genuinely escapes
+            /// the current context lifetime.
+            pub fn retain(self: Binding) OwnedBinding {
+                return .{
+                    .realm = core.RealmRef.retain(self.realm),
+                    .class_id = self.class_id,
+                };
+            }
 
             pub fn new(self: Binding, data: Arg) !core.JSValue {
                 return Self.newWithBinding(self, data);
@@ -114,6 +129,33 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
             pub fn payload(self: Binding, value: core.JSValue) ?*Payload {
                 return Self.payloadFromBinding(self, value);
+            }
+        };
+
+        /// Explicit owner counterpart to `Binding`. Call `deinit` when the
+        /// escaping native holder releases the binding.
+        pub const OwnedBinding = struct {
+            realm: core.RealmRef,
+            class_id: core.ClassId,
+
+            pub fn deinit(self: *OwnedBinding) void {
+                self.realm.deinit();
+            }
+
+            pub fn borrow(self: OwnedBinding) BindingError!Binding {
+                return .{
+                    .realm = self.realm.borrow() orelse return error.NotInstalled,
+                    .class_id = self.class_id,
+                };
+            }
+
+            pub fn new(self: OwnedBinding, data: Arg) !core.JSValue {
+                return Self.newWithBinding(try self.borrow(), data);
+            }
+
+            pub fn payload(self: OwnedBinding, value: core.JSValue) ?*Payload {
+                const borrowed = self.borrow() catch return null;
+                return Self.payloadFromBinding(borrowed, value);
             }
         };
 
@@ -173,12 +215,13 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
         fn installRuntime(rt: *core.JSRuntime) !void {
             if (installedClassId(rt)) |_| return;
-            const class_id = rt.newClassId(core.class.invalid_class_id);
+            const class_id = try class_id_slot.getOrAllocate();
             var runtime_state: ?*RuntimeState = null;
             if (comptime staticPropertyCount() != 0) {
                 runtime_state = try RuntimeState.create(rt);
             }
             errdefer if (runtime_state) |state| RuntimeState.finalize(@ptrCast(state));
+            try rt.ensureContextClassPrototypeCapacity(class_id);
             try rt.classes.register(class_id, .{
                 .class_name = className(),
                 .binding_identity = classIdentity(),
@@ -195,11 +238,10 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         pub fn binding(ctx: *core.JSContext) BindingError!Binding {
             const rt = ctx.runtimePtr();
             const class_id = installedClassId(rt) orelse return error.NotInstalled;
-            const prototype = ctx.classPrototypeObject(class_id) orelse return error.NotInstalled;
+            _ = ctx.classPrototypeObject(class_id) orelse return error.NotInstalled;
             return .{
-                .runtime = rt,
+                .realm = ctx,
                 .class_id = class_id,
-                .prototype = prototype,
             };
         }
 
@@ -229,15 +271,18 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         }
 
         fn newWithBinding(bound: Binding, data: Arg) !core.JSValue {
-            const object = try core.Object.create(bound.runtime, bound.class_id, bound.prototype);
-            errdefer core.Object.destroyFromHeader(bound.runtime, &object.header);
-            const payload_ptr = try installPayload(bound.runtime, object, data);
+            const rt = bound.realm.runtimePtr();
+            const prototype = bound.prototype() orelse return error.NotInstalled;
+            const object = try core.Object.create(rt, bound.class_id, prototype);
+            errdefer core.Object.destroyFromHeader(rt, &object.header);
+            const payload_ptr = try installPayload(rt, object, data);
             _ = payload_ptr;
             return object.value();
         }
 
         fn payloadFromBinding(bound: Binding, value: core.JSValue) ?*Payload {
-            return payloadFromClassAndPrototype(bound.class_id, bound.prototype, value);
+            const prototype = bound.prototype() orelse return null;
+            return payloadFromClassAndPrototype(bound.class_id, prototype, value);
         }
 
         fn payloadFromClassAndPrototype(class_id: core.ClassId, prototype: *core.Object, value: core.JSValue) ?*Payload {
@@ -334,7 +379,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 @compileError("zjs.binding.JSObject property entries must use zjs.binding.method(name, fn)");
             }
             const Stub = MethodStub(entry);
-            const function_value = try createMethodFunction(ctx, class_id, prototype, entry.name, callbackLength(entry.call), Stub.call);
+            const function_value = try createMethodFunction(ctx, class_id, entry.name, callbackLength(entry.call), Stub.call);
             defer function_value.free(ctx.runtimePtr());
 
             try key.defineDataProperty(ctx.runtimePtr(), prototype, core.Descriptor.data(function_value, true, false, true));
@@ -391,32 +436,23 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         fn createMethodFunction(
             ctx: *core.JSContext,
             class_id: core.ClassId,
-            prototype: *core.Object,
             name: []const u8,
             length: i32,
             call: core.host_function.ExternalCallFn,
         ) !core.JSValue {
             const rt = ctx.runtimePtr();
-            var prototype_handle = try rt.createPersistentValue(prototype.value());
-            errdefer prototype_handle.deinit();
-
             const runtime = try rt.memory.create(MethodRuntime);
             var runtime_owned = true;
-            errdefer if (runtime_owned) {
-                runtime.prototype.deinit();
-                rt.memory.destroy(MethodRuntime, runtime);
-            };
+            errdefer if (runtime_owned) rt.memory.destroy(MethodRuntime, runtime);
             runtime.* = .{
                 .runtime = rt,
                 .class_id = class_id,
-                .prototype = prototype_handle,
             };
-            prototype_handle = .{};
 
-            const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
-            errdefer function_object.value().free(rt);
-            try defineFunctionMetadata(rt, function_object, name, length);
-            try function_object.setFunctionRealmGlobalPtr(rt, try ctx.globalObject());
+            const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+            const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, name, length, 2);
+            errdefer function_value.free(rt);
+            const function_object = try core.Object.expect(function_value);
 
             const external_id = try rt.registerExternalHostFunction(.{
                 .ptr = @ptrCast(runtime),
@@ -427,14 +463,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
             function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
             function_object.externalHostFunctionIdSlot().* = external_id;
-            return function_object.value();
-        }
-
-        fn defineFunctionMetadata(rt: *core.JSRuntime, function_object: *core.Object, name: []const u8, length: i32) !void {
-            const name_value = (try core.string.String.createAscii(rt, name)).value();
-            defer name_value.free(rt);
-            try function_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-            try function_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(length), false, false, true));
+            return function_value;
         }
 
         fn MethodStub(comptime entry: anytype) type {
@@ -445,7 +474,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             return struct {
                 fn call(ptr: *anyopaque, host_call: core.host_function.ExternalCall) anyerror!core.JSValue {
                     const runtime: *MethodRuntime = @ptrCast(@alignCast(ptr));
-                    const prototype = objectFromValue(runtime.prototype.get()) orelse return error.TypeError;
+                    const prototype = host_call.realm.classPrototypeObject(runtime.class_id) orelse return error.TypeError;
                     const self_payload = payloadFromClassAndPrototype(runtime.class_id, prototype, host_call.this_value) orelse return error.TypeError;
                     return invoke(entry.call, self_payload, host_call);
                 }
@@ -586,7 +615,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
             switch (comptime callbackParamKind(Param)) {
                 .self_mut => return self_payload,
                 .self_const => return self_payload,
-                .context => return @ptrCast(@alignCast(host_call.ctx)),
+                .context => return host_call.realm,
                 .raw_call => return host_call,
                 .rest_values => {
                     const rest = host_call.args[js_index.*..];
@@ -706,7 +735,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
         }
 
         fn callContext(host_call: core.host_function.ExternalCall) *core.JSContext {
-            return @ptrCast(@alignCast(host_call.ctx));
+            return host_call.realm;
         }
     };
 }
@@ -1007,7 +1036,8 @@ test "JSObject binding is realm-local even when runtime class is installed" {
     try ObjectType.install(ctx_b);
     const binding_b = try ObjectType.binding(ctx_b);
     try std.testing.expectEqual(binding_a.class_id, binding_b.class_id);
-    try std.testing.expect(binding_a.prototype != binding_b.prototype);
+    try std.testing.expect(binding_a.realm != binding_b.realm);
+    try std.testing.expect(binding_a.prototype() != binding_b.prototype());
 
     const value_a = try binding_a.new(.{ .value = 1 });
     defer value_a.free(rt);
@@ -1020,6 +1050,32 @@ test "JSObject binding is realm-local even when runtime class is installed" {
     try std.testing.expect(binding_b.payload(value_a) == null);
     try std.testing.expect((try ObjectType.payload(ctx_a, value_b)) == null);
     try std.testing.expect((try ObjectType.payload(ctx_b, value_a)) == null);
+}
+
+test "JSObject owned binding explicitly retains its realm" {
+    const Payload = struct {
+        value: i32,
+    };
+    const ObjectType = JSObject(Payload, .{
+        .name = "KernelBindingOwnedRealmPayload",
+        .storage = Storage.inlineValue,
+    });
+
+    const rt = try createTestRuntime();
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    try ObjectType.install(ctx);
+
+    var binding = (try ObjectType.binding(ctx)).retain();
+    ctx.destroy();
+    try std.testing.expect(rt.firstContext() != null);
+
+    const value = try binding.new(.{ .value = 7 });
+    try std.testing.expectEqual(@as(i32, 7), binding.payload(value).?.value);
+    value.free(rt);
+
+    binding.deinit();
+    try std.testing.expect(rt.firstContext() == null);
 }
 
 test "JSObject prototype methods enforce realm-local binding" {
@@ -1046,10 +1102,10 @@ test "JSObject prototype methods enforce realm-local binding" {
     const ctx_b = try JSContext.create(rt);
     defer ctx_b.destroy();
 
-    try ObjectType.install(&ctx_a.core);
-    try ObjectType.install(&ctx_b.core);
-    const binding_a = try ObjectType.binding(&ctx_a.core);
-    const binding_b = try ObjectType.binding(&ctx_b.core);
+    try ObjectType.install(ctx_a.core);
+    try ObjectType.install(ctx_b.core);
+    const binding_a = try ObjectType.binding(ctx_a.core);
+    const binding_b = try ObjectType.binding(ctx_b.core);
 
     const value_a = try binding_a.new(.{ .value = 10 });
     defer value_a.free(rt);
@@ -1058,7 +1114,7 @@ test "JSObject prototype methods enforce realm-local binding" {
 
     const touch_key = try rt.internAtom("touch");
     defer rt.atoms.free(touch_key);
-    const touch_a = objectFromValue(value_a).?.getProperty(touch_key);
+    const touch_a = try objectFromValue(value_a).?.getProperty(touch_key);
     defer touch_a.free(rt);
 
     try std.testing.expectError(error.JSException, ctx_a.callFunction(touch_a, &.{}, .{ .this_value = value_b }));
@@ -1071,7 +1127,7 @@ test "JSObject prototype methods enforce realm-local binding" {
     try std.testing.expectEqual(@as(i32, 11), binding_a.payload(value_a).?.value);
 }
 
-test "JSObject method prototype roots release with external host records" {
+test "JSObject method records do not retain a second prototype root" {
     const Payload = struct {
         marker: u8,
 
@@ -1091,10 +1147,11 @@ test "JSObject method prototype roots release with external host records" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    _ = try ctx.globalObject();
 
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try ObjectType.install(ctx);
-    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
 
     rt.clearExternalHostFunctions();
     rt.drainDeferredNativeCleanups();
@@ -1115,13 +1172,13 @@ test "JSObject install does not export constructors to the global object" {
     const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(&ctx.core);
+    try ObjectType.install(ctx.core);
     const global = try ctx.globalObject();
     const name_atom = try rt.internAtom("KernelBindingNoGlobalConstructor");
     defer rt.atoms.free(name_atom);
     try std.testing.expect(!global.hasOwnProperty(name_atom));
 
-    const binding = try ObjectType.binding(&ctx.core);
+    const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{ .value = 1 });
     defer value.free(rt);
     try std.testing.expectEqual(@as(i32, 1), binding.payload(value).?.value);
@@ -1299,21 +1356,21 @@ test "JSObject installs prototype method with typed self and arguments" {
     const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try std.testing.expectError(error.NotInstalled, ObjectType.binding(&ctx.core));
-    try std.testing.expectError(error.NotInstalled, ObjectType.new(&ctx.core, .{ .total = 10 }));
-    try ObjectType.install(&ctx.core);
-    const binding = try ObjectType.binding(&ctx.core);
+    try std.testing.expectError(error.NotInstalled, ObjectType.binding(ctx.core));
+    try std.testing.expectError(error.NotInstalled, ObjectType.new(ctx.core, .{ .total = 10 }));
+    try ObjectType.install(ctx.core);
+    const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{ .total = 10 });
     defer value.free(rt);
 
     const object = objectFromValue(value).?;
     const add_key = try rt.internAtom("add");
     defer rt.atoms.free(add_key);
-    const add_value = object.getProperty(add_key);
+    const add_value = try object.getProperty(add_key);
     defer add_value.free(rt);
 
     const add_object = objectFromValue(add_value).?;
-    const length_value = add_object.getProperty(core.atom.ids.length);
+    const length_value = try add_object.getProperty(core.atom.ids.length);
     defer length_value.free(rt);
     try std.testing.expectEqual(@as(i32, 2), length_value.asInt32().?);
 
@@ -1345,17 +1402,19 @@ test "JSObject keeps static property names in runtime binding state" {
     const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
+    _ = try ctx.globalObject();
 
     const method_atom = try rt.internAtom(method_name);
     defer rt.atoms.free(method_atom);
 
     try ObjectType.install(ctx);
     const binding = try ObjectType.binding(ctx);
+    const class_id = binding.class_id;
     ctx.destroy();
 
     const before_unregister = rt.atoms.refCount(method_atom).?;
     try std.testing.expect(before_unregister >= 2);
-    rt.classes.unregisterDynamic(binding.class_id);
+    rt.classes.unregisterDynamic(class_id);
     try std.testing.expectEqual(before_unregister - 1, rt.atoms.refCount(method_atom).?);
 }
 
@@ -1398,8 +1457,8 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(&ctx.core);
-    const binding = try ObjectType.binding(&ctx.core);
+    try ObjectType.install(ctx.core);
+    const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{});
     defer value.free(rt);
 
@@ -1423,7 +1482,7 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     const object = objectFromValue(value).?;
     const mix_key = try rt.internAtom("mix");
     defer rt.atoms.free(mix_key);
-    const mix_value = object.getProperty(mix_key);
+    const mix_value = try object.getProperty(mix_key);
     defer mix_value.free(rt);
 
     const result = try ctx.callFunction(mix_value, &.{
@@ -1523,9 +1582,9 @@ test "JSObject typed method errors become pending JS exceptions" {
     const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(&ctx.core);
+    try ObjectType.install(ctx.core);
     const global = try ctx.globalObject();
-    const binding = try ObjectType.binding(&ctx.core);
+    const binding = try ObjectType.binding(ctx.core);
     const value = try binding.new(.{});
     defer value.free(rt);
 
@@ -1568,7 +1627,7 @@ test "JSObject typed method errors become pending JS exceptions" {
 fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    return object.getProperty(key);
+    return try object.getProperty(key);
 }
 
 fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
@@ -1583,6 +1642,7 @@ fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name
 
 fn createTestRuntime() !*core.JSRuntime {
     const rt = try core.JSRuntime.create(std.testing.allocator);
+    @import("../exec/root.zig").standard_globals.configureRuntime(rt);
     rt.materialize_context_global_cb = struct {
         fn cb(c: *core.JSContext) anyerror!*core.Object {
             return try @import("../exec/root.zig").zjs_vm.contextGlobal(c);

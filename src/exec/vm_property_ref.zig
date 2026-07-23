@@ -36,14 +36,14 @@ pub noinline fn withGetOrDelete(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
 ) !Step {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
-    const is_with = function.code[frame.pc + 8] != 0;
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
+    const is_with = function.byteCode()[frame.pc + 8] != 0;
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
@@ -54,12 +54,12 @@ pub noinline fn withGetOrDelete(
         return .continue_loop;
     };
     const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const blocked = if (is_with and has_binding)
         call_runtime.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
@@ -71,13 +71,13 @@ pub noinline fn withGetOrDelete(
     }
     const still_has_binding = if (opc == op.with_get_var or opc == op.with_get_ref)
         object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
         true;
-    if (opc == op.with_get_var and !still_has_binding and (function.flags.is_strict or function.flags.runtime_strict)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+    if (opc == op.with_get_var and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     switch (opc) {
@@ -115,8 +115,8 @@ pub noinline fn withGetOrDelete(
                     old_value.free(ctx.runtime);
                 }
             }
-            if (!deleted and function.flags.is_strict) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (!deleted and function.isStrictMode()) {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const dropped = try stack.pop();
@@ -145,12 +145,12 @@ pub noinline fn withGetOrDelete(
 pub noinline fn makeSlotRef(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     opc: u8,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const idx = readInt(u16, function.code[frame.pc + 4 ..][0..2]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const idx = readInt(u16, function.byteCode()[frame.pc + 4 ..][0..2]);
     frame.pc += 6;
 
     const cell: *core.VarRef = switch (opc) {
@@ -181,24 +181,37 @@ pub fn makeVarRef(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const global_value = global.value();
-    const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
-    const object_value = if (call_runtime.existingGlobalLexicalEnv(ctx)) |env|
-        if (env.hasOwnProperty(atom_id))
-            env.value()
-        else if (has_global_binding)
-            global_value
-        else
-            core.JSValue.undefinedValue()
-    else if (has_global_binding)
-        global_value
-    else
-        core.JSValue.undefinedValue();
+    const object_value = object_value: {
+        // QuickJS JS_GetGlobalVarRef checks global_var_obj before touching the
+        // global object. Its readonly/TDZ checks happen while the reference is
+        // created, including the non-optimized scope_make_ref fallback.
+        if (call_runtime.existingGlobalLexicalEnv(ctx)) |env| {
+            if (env.findProperty(atom_id)) |index| {
+                const flags = env.propFlagsAt(index);
+                if (!flags.deleted) {
+                    const is_uninitialized = switch (flags.kind) {
+                        .data => env.prop_values[index].slot.data.isUninitialized(),
+                        .var_ref => env.prop_values[index].slot.var_ref.varRefValue().isUninitialized(),
+                        .accessor, .auto_init => return error.InvalidBytecode,
+                    };
+                    if (is_uninitialized) return exception_ops.throwTdzReference(ctx);
+                    if (!flags.writable) {
+                        _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+                        return error.TypeError;
+                    }
+                    break :object_value env.value();
+                }
+            }
+        }
+        const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
+        break :object_value if (has_global_binding) global_value else core.JSValue.undefinedValue();
+    };
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     try stack.push(object_value);
@@ -210,12 +223,12 @@ pub noinline fn makeVarRefVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
     makeVarRef(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -226,7 +239,7 @@ pub fn getRefValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     if (stack.len() < 2) return error.StackUnderflow;
@@ -244,6 +257,16 @@ pub fn getRefValue(
     }
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
+    const object = try property_ops.expectObject(obj);
+    const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
+    if (!still_exists) {
+        if (function.isStrictMode() or function.runtimeStrictMode()) {
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "binding is not defined") catch |err| return err;
+            return error.ReferenceError;
+        }
+        try stack.push(core.JSValue.undefinedValue());
+        return;
+    }
     const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
@@ -254,12 +277,12 @@ pub noinline fn getRefValueVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
     getRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -270,7 +293,7 @@ pub fn putRefValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
@@ -280,7 +303,7 @@ pub fn putRefValue(
     var obj = try stack.pop();
     defer obj.free(ctx.runtime);
 
-    const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
+    const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (obj.isUndefined()) {
         if (runtime_strict) return error.ReferenceError;
         const global_value = global.value().dup();
@@ -320,12 +343,12 @@ pub noinline fn putRefValueVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
     putRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -336,13 +359,13 @@ pub noinline fn withPut(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
-    const mode: bytecode.opcode.WithPutMode = switch (function.code[frame.pc + 8]) {
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
+    const mode: bytecode.opcode.WithPutMode = switch (function.byteCode()[frame.pc + 8]) {
         @intFromEnum(bytecode.opcode.WithPutMode.var_object_probe) => .var_object_probe,
         @intFromEnum(bytecode.opcode.WithPutMode.selected_reference) => .selected_reference,
         @intFromEnum(bytecode.opcode.WithPutMode.with_probe) => .with_probe,
@@ -355,30 +378,30 @@ pub noinline fn withPut(
     if (obj.isUndefined()) return .continue_loop;
     if (mode != .selected_reference) {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_binding) return .continue_loop;
         if (mode == .with_probe) {
             const blocked = call_runtime.isBlockedByUnscopables(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (blocked) return .continue_loop;
         }
     }
     const still_exists = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    if (!still_exists and (function.flags.is_strict or function.flags.runtime_strict)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+    if (!still_exists and (function.isStrictMode() or function.runtimeStrictMode())) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
@@ -390,10 +413,10 @@ pub noinline fn deleteVar(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     // qjs JS_DeleteGlobalVar: declarative globals are not deletable; every
     // object-environment binding goes through the ordinary global property
@@ -412,7 +435,7 @@ pub noinline fn deletePropertyVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -424,26 +447,26 @@ pub noinline fn deletePropertyVm(
     // FIRST: user toString/Symbol.toPrimitive side effects (and their
     // exceptions) fire before any base check.
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isNull() or obj.isUndefined()) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
     const obj_value = if (obj.isObject()) obj.dup() else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer obj_value.free(ctx.runtime);
     const object = try property_ops.expectObject(obj_value);
     const deleted = if (object.proxyTarget() != null) blk: {
         break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
     } else if (object.isArray() and atom_id == core.atom.ids.length)
@@ -452,8 +475,8 @@ pub noinline fn deletePropertyVm(
         typed_deleted
     else
         object.deleteProperty(ctx.runtime, atom_id);
-    if (!deleted and function.flags.is_strict) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+    if (!deleted and function.isStrictMode()) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     try stack.pushOwned(core.JSValue.boolean(deleted));

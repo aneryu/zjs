@@ -225,6 +225,26 @@ test "production embedding can create external host function values" {
     const prototype = try ctx.getProperty(function, "prototype");
     defer prototype.free(rt);
     try std.testing.expect(prototype.isObject());
+
+    const global = try ctx.globalObject();
+    try ctx.defineDataProperty(global.value(), "HostCtor", function, .{});
+    const surface = try ctx.eval(
+        \\var prototypeDescriptor = Object.getOwnPropertyDescriptor(HostCtor, "prototype");
+        \\var constructorDescriptor = Object.getOwnPropertyDescriptor(HostCtor.prototype, "constructor");
+        \\if (Object.getPrototypeOf(HostCtor) !== Function.prototype ||
+        \\    Object.getPrototypeOf(HostCtor.prototype) !== Object.prototype ||
+        \\    prototypeDescriptor.writable !== true ||
+        \\    prototypeDescriptor.enumerable !== false ||
+        \\    prototypeDescriptor.configurable !== false ||
+        \\    constructorDescriptor.value !== HostCtor ||
+        \\    constructorDescriptor.writable !== true ||
+        \\    constructorDescriptor.enumerable !== false ||
+        \\    constructorDescriptor.configurable !== true) {
+        \\    throw new Error("invalid external constructor surface");
+        \\}
+    , .{});
+    defer surface.free(rt);
+    try std.testing.expect(surface.isUndefined());
 }
 
 test "production embedding can create objects and define data properties" {
@@ -569,7 +589,7 @@ test "production runtime can detach array buffers through public runtime API" {
     defer owned_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), owned_state.calls);
 
-    const detached = try zjs.runtime.detachArrayBuffer(&ctx.core, owned_value);
+    const detached = try zjs.runtime.detachArrayBuffer(ctx.core, owned_value);
     defer detached.free(rt);
     try std.testing.expect(detached.isUndefined());
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
@@ -586,7 +606,7 @@ test "production runtime can detach array buffers through public runtime API" {
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
     defer shared_value.free(rt);
-    try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(&ctx.core, shared_value));
+    try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(ctx.core, shared_value));
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
 
@@ -653,6 +673,32 @@ test "production embedding lifecycle deinitializes repeated script and module ev
         , .{ .mode = .module });
         defer module_result.free(rt);
     }
+}
+
+test "production module import.meta identity survives methods and nested closures" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try ctx.eval(
+        \\const rootMeta = import.meta;
+        \\class Holder {
+        \\  read() { return import.meta; }
+        \\}
+        \\function nested() {
+        \\  const arrow = () => import.meta;
+        \\  return [import.meta, arrow()];
+        \\}
+        \\const [nestedMeta, arrowMeta] = nested();
+        \\if (new Holder().read() !== rootMeta ||
+        \\    nestedMeta !== rootMeta ||
+        \\    arrowMeta !== rootMeta) {
+        \\  throw new Error("import.meta identity escaped its module");
+        \\}
+    , .{ .mode = .module });
+    defer result.free(rt);
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
@@ -863,25 +909,43 @@ test "production embedding can create independent realms" {
     const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
-    const realm = try ctx.createRealm();
-    defer realm.free(rt);
+    const retained = blk: {
+        const realm = try ctx.createRealm();
+        defer realm.free(rt);
 
-    const realm_global = try ctx.realmGlobal(realm);
-    defer realm_global.free(rt);
-    try std.testing.expect(realm_global.isObject());
+        const realm_global = try ctx.realmGlobal(realm);
+        defer realm_global.free(rt);
+        try std.testing.expect(realm_global.isObject());
 
-    const realm_global_object = try ctx.realmGlobalObject(realm);
-    try std.testing.expect(realm_global_object.isGlobal());
+        const realm_global_object = try ctx.realmGlobalObject(realm);
+        try std.testing.expect(realm_global_object.isGlobal());
 
-    const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
-    defer realm_global_this.free(rt);
-    try std.testing.expect(realm_global_this.sameValue(realm_global));
+        const realm_global_this = try ctx.getProperty(realm_global, "globalThis");
+        defer realm_global_this.free(rt);
+        try std.testing.expect(realm_global_this.sameValue(realm_global));
 
-    const current_array = try ctx.eval("Array", .{});
-    defer current_array.free(rt);
-    const realm_array = try ctx.getProperty(realm_global, "Array");
-    defer realm_array.free(rt);
-    try std.testing.expect(!realm_array.sameValue(current_array));
+        const current_array = try ctx.eval("Array", .{});
+        defer current_array.free(rt);
+        const realm_array = try ctx.getProperty(realm_global, "Array");
+        defer realm_array.free(rt);
+        try std.testing.expect(!realm_array.sameValue(current_array));
+
+        break :blk .{ try ctx.createValueHandle(realm_global), realm_global_object };
+    };
+
+    var realm_global_handle = retained[0];
+    defer realm_global_handle.deinit();
+    const realm_global_object = retained[1];
+    try std.testing.expect(rt.contextForGlobal(realm_global_object) != null);
+    {
+        const retained_global_this = try ctx.getProperty(realm_global_handle.get(), "globalThis");
+        defer retained_global_this.free(rt);
+        try std.testing.expect(retained_global_this.sameValue(realm_global_handle.get()));
+    }
+
+    realm_global_handle.deinit();
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.contextForGlobal(realm_global_object) == null);
 }
 
 test "production embedding can eval script source in explicit function realms" {

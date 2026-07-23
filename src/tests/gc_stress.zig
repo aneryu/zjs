@@ -163,9 +163,12 @@ test "gc stress finalization registry dead target queues pending job" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -196,13 +199,15 @@ test "gc stress finalization registry dead target queues pending job" {
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    // cleanup + registry + held object, plus the shared root shape and the
+    // cleanup + registry + held object + construction realm, plus the shared root shape and the
     // held object's one-property transition shape.
-    try std.testing.expectEqual(@as(usize, 5), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 6), rt.gc.liveCount());
 
     rt.clearPendingFinalizationJobs();
     registry.value().free(rt);
     cleanup.value().free(rt);
+    ctx.destroy();
+    ctx_alive = false;
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -222,17 +227,9 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     for (&functions, &captured) |*function_slot, *captured_slot| {
         const function = try core.Object.create(rt, core.class.ids.bytecode_function, null);
         const captured_obj = try core.Object.create(rt, core.class.ids.object, null);
-        const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-        const fb = &fb_slice[0];
-        fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-        try rt.gc.add(&fb.header);
-        {
-            const __cp = try rt.memory.alloc(core.JSValue, 1);
-            fb.cpool = __cp.ptr;
-            fb.cpool_count = @intCast(__cp.len);
-        }
-        fb.cpool[0] = captured_obj.value().dup();
-        fb.cpool_count = 1;
+        const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+        fb.cpoolSlice()[0] = captured_obj.value().dup();
+        fb.publishFixtureNoFail(rt);
 
         try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
         function_slot.* = function;

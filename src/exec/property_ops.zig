@@ -2,8 +2,9 @@ const std = @import("std");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
-pub fn getProperty(object: *core.Object, atom_id: core.Atom) core.JSValue {
-    return object.getProperty(atom_id);
+pub fn getProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !core.JSValue {
+    _ = rt;
+    return try object.getProperty(atom_id);
 }
 
 pub fn setProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
@@ -21,7 +22,7 @@ pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.A
 pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
     if (object_value.isGlobal() and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
-    return object_value.getProperty(atom_id);
+    return try object_value.getProperty(atom_id);
 }
 
 pub fn setPropertyValue(rt: *core.JSRuntime, object_value: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
@@ -34,12 +35,13 @@ pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_i
     _ = rt;
     if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
-    return object_value.getProperty(atom_id);
+    return try object_value.getProperty(atom_id);
 }
 
-pub fn getIndexValue(value: core.JSValue, index: u32) !core.JSValue {
+pub fn getIndexValue(rt: *core.JSRuntime, value: core.JSValue, index: u32) !core.JSValue {
     const object_value = try expectObject(value);
-    return object_value.getProperty(core.atom.atomFromUInt32(index));
+    _ = rt;
+    return try object_value.getProperty(core.atom.atomFromUInt32(index));
 }
 
 pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
@@ -69,7 +71,7 @@ pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: c
     const constructor: *core.Object = @fieldParentPtr("header", constructor_header);
     const prototype_key = try rt.internAtom("prototype");
     defer rt.atoms.free(prototype_key);
-    const prototype_value = constructor.getProperty(prototype_key);
+    const prototype_value = try constructor.getProperty(prototype_key);
     defer prototype_value.free(rt);
     const prototype_header = objectHeader(prototype_value) orelse return error.TypeError;
     const prototype: *core.Object = @fieldParentPtr("header", prototype_header);

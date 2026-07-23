@@ -16,7 +16,6 @@ const call_runtime = @import("call_runtime.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const call_mod = @import("call.zig");
-const eval_ops = @import("eval_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -94,20 +93,21 @@ const atom_number = core.atom.predefinedId("Number", .string).?;
 const atom_print = core.atom.predefinedId("print", .string).?;
 const atom_string = core.atom.predefinedId("String", .string).?;
 
-inline fn closureVarAt(function: *const bytecode.Bytecode, idx: u16) ?bytecode.function_def.ClosureVar {
-    if (idx >= function.closure_var.len) return null;
-    return function.closure_var[idx];
+inline fn closureVarAt(function: *const bytecode.FunctionBytecode, idx: u16) ?bytecode.function_bytecode.BytecodeClosureVar {
+    if (idx >= function.closureVar().len) return null;
+    return function.closureVar()[idx];
 }
 
 fn throwGlobalTdz(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
     const err = exception_ops.throwTdzReference(ctx);
-    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
 }
 
@@ -121,14 +121,14 @@ fn getVarFromGlobalObject(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
     atom_id: core.Atom,
 ) !Step {
     const value = value: {
-        if (function.flags.runtime_strict) {
+        if (function.runtimeStrictMode()) {
             if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
                 if (!lexical_value.isUninitialized()) break :value lexical_value;
                 lexical_value.free(ctx.runtime);
@@ -141,11 +141,11 @@ fn getVarFromGlobalObject(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -161,13 +161,13 @@ pub noinline fn getVar(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
 ) !Step {
     const site_pc = frame.pc - 1;
-    const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const ref_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
     frame.pc += 2;
     if (ref_idx < frame.var_refs.len) {
@@ -195,32 +195,15 @@ pub noinline fn getVar(
                 // non-lexical capture — resolves through the plain global
                 // OBJECT (JS_GetPropertyInternal(ctx->global_obj, ...)),
                 // never the lexical env.
-                const cv_is_lexical = if (closureVarAt(function, ref_idx)) |cv| cv.is_lexical else false;
+                const cv_is_lexical = if (closureVarAt(function, ref_idx)) |cv| cv.isLexical() else false;
                 if (cv_is_lexical and !cell.varRefIsDeletableSlot().*) {
-                    return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
-                }
-                // zjs frame-model adaptation: qjs resolves an in-function
-                // `arguments` read to the arguments pseudo-var at parse
-                // resolution (resolve_scope_var, quickjs.c:32970-32974), so
-                // its OP_get_var never carries that name. zjs's parser
-                // routes some implicit-`arguments` reads through get_var
-                // (cover-grammar shorthand `{arguments}`, reads after an
-                // annexB-skipped block-level `function arguments(){}`) and
-                // materializes the frame's arguments object at runtime —
-                // the same rescue the generic waterfall below applies
-                // (frameArgumentsObject), hoisted here because this arm
-                // returns before reaching it.
-                if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
-                    const args_value = try object_ops.frameArgumentsObject(ctx, global, frame);
-                    errdefer args_value.free(ctx.runtime);
-                    try stack.pushOwned(args_value);
-                    return .done;
+                    return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
                 }
                 return try getVarFromGlobalObject(ctx, output, global, stack, function, frame, catch_target, opc, atom_id);
             }
         }
     } else if (closureVarAt(function, ref_idx)) |cv| {
-        if (cv.is_lexical) return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+        if (cv.isLexical()) return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
     }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) {
@@ -241,7 +224,7 @@ pub noinline fn getVar(
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             errdefer lex_value.free(ctx.runtime);
@@ -253,33 +236,11 @@ pub noinline fn getVar(
         }
     }
     const value = value: {
-        const prefer_eval_arguments = atom_id == core.atom.ids.arguments and function.flags.is_arrow_function;
-        if (prefer_eval_arguments) {
-            if (call_runtime.lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
-                if (slot_value.isUninitialized()) {
-                    slot_value.free(ctx.runtime);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-                    return error.ReferenceError;
-                }
-                break :value slot_value;
-            }
-            if (call_runtime.lookupFrameVarRef(ctx, global, function, frame, atom_id)) |slot_value| {
-                if (slot_value.isUninitialized()) {
-                    slot_value.free(ctx.runtime);
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-                    return error.ReferenceError;
-                }
-                break :value slot_value;
-            }
-        }
         if (atom_id == core.atom.ids.undefined_) break :value core.JSValue.undefinedValue();
-        if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
-            break :value try object_ops.frameArgumentsObject(ctx, global, frame);
-        }
         if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value lex_value;
@@ -291,11 +252,11 @@ pub noinline fn getVar(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -346,7 +307,7 @@ fn printHostOutputAtomLiteral(rt: *core.JSRuntime, output: ?*std.Io.Writer, atom
 fn globalDataOrAutoInitValueForReadFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?FastGlobalReadValue {
@@ -360,7 +321,7 @@ fn globalDataOrAutoInitValueForReadFastPath(
         if (prop_flags.isAccessor()) return null;
         return switch (global.propKindAt(property_index)) {
             .data => .{ .value = global.prop_values[property_index].slot.data, .owned = false },
-            .auto_init => .{ .value = global.getProperty(atom_id), .owned = true },
+            .auto_init => .{ .value = try global.getProperty(atom_id), .owned = true },
             .var_ref, .accessor => null,
         };
     }
@@ -371,7 +332,7 @@ fn useFastGlobalDataValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -394,8 +355,8 @@ fn useFastGlobalDataValue(
     return .done;
 }
 
-fn stringNumberConstArgAt(function: *const bytecode.Bytecode, pc: usize) ?StringNumberConstArg {
-    const code = function.code;
+fn stringNumberConstArgAt(function: *const bytecode.FunctionBytecode, pc: usize) ?StringNumberConstArg {
+    const code = function.byteCode();
     if (pc >= code.len) return null;
     if (immediateInt32Operand(code, pc)) |immediate| {
         if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
@@ -413,8 +374,8 @@ fn stringNumberConstArgAt(function: *const bytecode.Bytecode, pc: usize) ?String
         else => return null,
     };
     if (call_pc >= code.len or code[call_pc] != op.call1) return null;
-    if (const_index >= function.constants.values.len) return null;
-    const input = function.constants.values[const_index];
+    if (const_index >= function.cpoolSlice().len) return null;
+    const input = function.cpoolSlice()[const_index];
     if (input.asInt32() == null and input.asFloat64() == null) return null;
     return .{ .value = input, .next_pc = call_pc + 1 };
 }
@@ -449,8 +410,8 @@ fn printHostOutputStringifiedNumber(output: ?*std.Io.Writer, value: core.JSValue
     try writer.writeByte('\n');
 }
 
-fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.Bytecode, pc: usize) ?StringNumberConstCall {
-    const code = function.code;
+fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, pc: usize) ?StringNumberConstCall {
+    const code = function.byteCode();
     if (pc >= code.len) return null;
     if (immediateInt32Operand(code, pc)) |immediate| {
         if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
@@ -471,7 +432,7 @@ fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.Bytec
     };
     if (call_pc >= code.len or code[call_pc] != op.call1) return null;
 
-    const input = function.constants.get(const_index) orelse return null;
+    const input = function.constantAt(const_index) orelse return null;
     defer input.free(rt);
     if (input.isObject() or input.isSymbol()) return null;
     if (input.asInt32() == null and input.asFloat64() == null) return null;
@@ -486,14 +447,14 @@ fn isStringConstructorValue(value: core.JSValue) bool {
     return native_ref.domain == .string and native_ref.id == @intFromEnum(method_ids.string.ConstructorMethod.call);
 }
 
-fn nextOpIsPostUpdate(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
-    if (frame.pc >= function.code.len) return false;
-    return function.code[frame.pc] == op.post_inc or function.code[frame.pc] == op.post_dec;
+fn nextOpIsPostUpdate(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
+    if (frame.pc >= function.byteCode().len) return false;
+    return function.byteCode()[frame.pc] == op.post_inc or function.byteCode()[frame.pc] == op.post_dec;
 }
 
 fn fastGlobalDataValueForAtomAtPcNoProfile(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     site_pc: usize,
@@ -507,9 +468,9 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
     return globalDataPropertyValueForFastPathNoProfile(ctx.runtime, global, function, site_pc, atom_id);
 }
 
-fn nextOpCanStartGlobalUriCall1(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
-    if (frame.pc >= function.code.len) return false;
-    const code = function.code;
+fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
+    if (frame.pc >= function.byteCode().len) return false;
+    const code = function.byteCode();
     return switch (code[frame.pc]) {
         op.push_atom_value => frame.pc + 6 <= code.len and code[frame.pc + 5] == op.call1,
         op.get_var_ref, op.get_var_ref_check => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
@@ -553,7 +514,7 @@ fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *co
 fn tryFoldFollowingGlobalInt32Term(
     ctx: *core.JSContext,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     pc: *usize,
     current: *const i32,
@@ -562,11 +523,11 @@ fn tryFoldFollowingGlobalInt32Term(
     const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom) orelse return null;
     var rhs_value = value.asInt32() orelse return null;
     var rhs_pc = get.next_pc;
-    while (tryFoldImmediateInt32At(function.code, &rhs_pc, &rhs_value)) |rhs_result| {
+    while (tryFoldImmediateInt32At(function.byteCode(), &rhs_pc, &rhs_value)) |rhs_result| {
         rhs_value = rhs_result.asInt32() orelse return null;
     }
-    if (rhs_pc >= function.code.len) return null;
-    const result = fastInt32ImmediateBinary(function.code[rhs_pc], current.*, rhs_value) orelse return null;
+    if (rhs_pc >= function.byteCode().len) return null;
+    const result = fastInt32ImmediateBinary(function.byteCode()[rhs_pc], current.*, rhs_value) orelse return null;
     pc.* = rhs_pc + 1;
     return result;
 }
@@ -600,14 +561,14 @@ pub noinline fn putVar(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     strict_unresolved_get_var: bool,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
 ) !Step {
-    const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const ref_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
     frame.pc += 2;
     const value = try stack.pop();
@@ -630,12 +591,12 @@ pub noinline fn putVar(
                 if (cell.is_lexical and core.VarRef.fromValue(current) == null) {
                     value.free(ctx.runtime);
                     if (current.isUninitialized()) {
-                        return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+                        return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
                     }
                     // qjs JS_ThrowTypeErrorReadOnly (18507); zjs reports
                     // the const violation through the same catchable
                     // TypeError channel the lexical-env write used.
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                     return error.TypeError;
                 }
                 // Non-lexical cell: fall to the global-object set below.
@@ -648,14 +609,14 @@ pub noinline fn putVar(
             }
         }
     } else if (closureVarAt(function, ref_idx)) |cv| {
-        if (cv.is_lexical) {
+        if (cv.isLexical()) {
             value.free(ctx.runtime);
-            return try throwGlobalTdz(ctx, global, stack, frame, catch_target);
+            return try throwGlobalTdz(ctx, output, global, stack, frame, catch_target);
         }
     }
     const opcode_profile = ctx.runtime.opcode_profile;
     if (opcode_profile != null) core.profile.recordGlobalLookup();
-    const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
+    const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (canUseFastGlobalVarWrite(ctx, function, atom_id, frame)) {
         if (call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
             value.free(ctx.runtime);
@@ -670,15 +631,9 @@ pub noinline fn putVar(
             return .continue_loop;
         }
     }
-    if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
-        const old_value = frame.argumentsObject();
-        (try frame.ensureCold(&ctx.runtime.memory)).arguments_object = value;
-        if (old_value) |stored| stored.free(ctx.runtime);
-        return .continue_loop;
-    }
     const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
         value.free(ctx.runtime);
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (updated_global_lexical) {
@@ -690,12 +645,12 @@ pub noinline fn putVar(
         defer global_value.free(ctx.runtime);
         const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
             value.free(ctx.runtime);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_global_binding) {
             value.free(ctx.runtime);
-            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
     }
@@ -703,7 +658,7 @@ pub noinline fn putVar(
         eval_global_var_bindings and
         !runtime_strict and
         evalFunctionDeclaresGlobalVar(ctx.runtime, function, atom_id) and
-        globalOwnAccessorWithoutSetter(ctx.runtime, global, atom_id))
+        (try globalOwnAccessorWithoutSetter(ctx.runtime, global, atom_id)))
     {
         value.free(ctx.runtime);
         return .continue_loop;
@@ -720,7 +675,7 @@ pub noinline fn putVar(
     const global_value = global.value().dup();
     defer global_value.free(ctx.runtime);
     _ = object_ops.setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -742,7 +697,7 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
     return false;
 }
 
-fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) !bool {
+fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) !bool {
     const rt = ctx.runtime;
     const site_pc = frame.pc - 3;
     return setGlobalWritableDataStoreForFastPathOwned(rt, ctx.lexicals, global, function, site_pc, atom_id, value);
@@ -750,11 +705,11 @@ fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, 
 
 fn numberStaticLiteralResultAt(
     rt: *core.JSRuntime,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     native_id: u32,
     pc: usize,
 ) ?NumberStaticLiteralResult {
-    const code = function.code;
+    const code = function.byteCode();
     const number_static = method_ids.number.StaticMethod;
     const number_parse = core.number;
     return switch (native_id) {
@@ -790,272 +745,146 @@ fn numberStaticLiteralResultAt(
 
 fn canUseFastGlobalVarWrite(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
 ) bool {
     if (!canFuseGlobalDataWrite(function, frame, atom_id)) return false;
-    if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return false;
+    if (functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return false;
     return true;
 }
 
 fn canUseFastGlobalUndefinedLookup(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *const frame_mod.Frame,
 ) bool {
-    if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, core.atom.ids.undefined_)) return false;
     return true;
 }
 
-fn evalFunctionDeclaresGlobalVar(rt: *core.JSRuntime, function: *const bytecode.Bytecode, atom_id: core.Atom) bool {
-    for (function.global_vars) |gv| {
-        if (gv.is_lexical) continue;
-        if (call_runtime.atomIdOrNameEql(rt, gv.var_name, atom_id)) return true;
+fn evalFunctionDeclaresGlobalVar(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, atom_id: core.Atom) bool {
+    for (function.closureVar()) |cv| {
+        if (cv.closureType() != .global_decl or cv.isLexical()) continue;
+        if (call_runtime.atomIdOrNameEql(rt, cv.var_name, atom_id)) return true;
     }
     return false;
 }
 
-fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    const desc = global.getOwnProperty(rt, atom_id) orelse return false;
+fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) !bool {
+    const desc = (try global.getOwnProperty(rt, atom_id)) orelse return false;
     defer desc.destroy(rt);
     return desc.kind == .accessor and desc.setter.isUndefined();
 }
 
-fn globalVarIsFunction(gv: core.function_bytecode.GlobalVar) bool {
-    return gv.cpool_idx >= 0 or gv.force_init;
-}
-
-fn shouldSkipRuntimeStrictGlobalFunctionVar(
-    function: *const bytecode.Bytecode,
-    is_eval_code: bool,
-    gv: core.function_bytecode.GlobalVar,
-) bool {
-    return function.flags.runtime_strict and !is_eval_code and globalVarIsFunction(gv);
+fn globalDeclIsFunction(cv: core.function_bytecode.BytecodeClosureVar) bool {
+    return cv.closureType() == .global_decl and cv.varKind() == .global_function_decl;
 }
 
 fn validateGlobalVarDeclaration(
     ctx: *core.JSContext,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
-    gv: core.function_bytecode.GlobalVar,
+    function: *const bytecode.FunctionBytecode,
+    cv: core.function_bytecode.BytecodeClosureVar,
     is_eval_code: bool,
 ) !void {
-    if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) return;
+    _ = function;
+    _ = is_eval_code;
 
-    const atom_id = gv.var_name;
+    const atom_id = cv.var_name;
     const has_global_lexical = call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id);
-    if (global.getOwnProperty(ctx.runtime, atom_id)) |desc| {
-        defer desc.destroy(ctx.runtime);
-        if (gv.is_lexical) {
-            if (desc.configurable != true) return error.SyntaxError;
-        } else if (globalVarIsFunction(gv) and desc.configurable != true) {
-            if (desc.kind == .accessor or desc.writable != true or desc.enumerable != true) return error.TypeError;
+    const own_flags: ?core.property.Flags = flags: {
+        const index = global.findProperty(atom_id) orelse break :flags null;
+        const flags = global.propFlagsAt(index);
+        break :flags if (flags.deleted) null else flags;
+    };
+    if (own_flags) |flags| {
+        // JS_CheckDefineGlobalVar reads the raw shape entry: it does not invoke
+        // exotic hooks or materialize JS_PROP_AUTOINIT during PASS1. PASS2's
+        // js_closure_define_global_var performs auto-init before cell surgery.
+        if (cv.isLexical()) {
+            if (!flags.configurable) return error.SyntaxError;
+        } else if (globalDeclIsFunction(cv) and !flags.configurable) {
+            if (flags.isAccessor() or !flags.writable or !flags.enumerable) return error.TypeError;
         }
-    } else if (!gv.is_lexical and !global.isExtensible()) {
+    } else if (!cv.isLexical() and !global.isExtensible()) {
         return error.TypeError;
     }
     if (has_global_lexical) return error.SyntaxError;
 }
 
-fn globalVarUsesGlobalEnvironment(
-    gv: core.function_bytecode.GlobalVar,
-    is_eval_code: bool,
-    eval_global_var_bindings: bool,
-) bool {
-    return switch (gv.eval_target) {
-        .global => true,
-        .closure, .var_object => false,
-        .unresolved => !is_eval_code or eval_global_var_bindings or gv.is_lexical,
-    };
-}
-
-fn defineEvalVarObjectDataBinding(
-    ctx: *core.JSContext,
-    frame: *frame_mod.Frame,
-    target_idx: u16,
-    atom_id: core.Atom,
-    value: core.JSValue,
-) !void {
-    if (target_idx >= frame.var_refs.len) return error.InvalidBytecode;
-    const var_object = objectFromValue(frame.var_refs[target_idx].varRefValue()) orelse return error.InvalidBytecode;
-
-    // Eval variable objects own ordinary configurable data properties. Replace
-    // an existing binding instead of writing through a stale descriptor kind.
-    if (var_object.findProperty(atom_id) != null and !var_object.deleteProperty(ctx.runtime, atom_id)) {
-        return error.TypeError;
-    }
-    var_object.defineOwnProperty(
-        ctx.runtime,
-        atom_id,
-        core.Descriptor.data(value, true, true, true),
-    ) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
-}
-
-fn ensureEvalVarObjectDataBinding(
-    ctx: *core.JSContext,
-    frame: *frame_mod.Frame,
-    target_idx: u16,
-    atom_id: core.Atom,
-) !void {
-    if (target_idx >= frame.var_refs.len) return error.InvalidBytecode;
-    const var_object = objectFromValue(frame.var_refs[target_idx].varRefValue()) orelse return error.InvalidBytecode;
-    if (var_object.hasOwnProperty(atom_id)) return;
-    var_object.defineOwnProperty(
-        ctx.runtime,
-        atom_id,
-        core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true),
-    ) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
-}
-
-fn defineGlobalVarDeclaration(
+/// qjs js_closure2 PASS1: GlobalVar is compile-only and has already been
+/// lowered into one GLOBAL_DECL ClosureVar per declaration. Validation consumes
+/// only that final descriptor table, exactly like JSFunctionBytecode.
+pub fn validateGlobalVarDeclarations(
     ctx: *core.JSContext,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    gv: core.function_bytecode.GlobalVar,
+    function: *const bytecode.FunctionBytecode,
     is_eval_code: bool,
-    eval_global_var_bindings: bool,
 ) !void {
-    const atom_id = gv.var_name;
-    if (gv.eval_var_object_fallback) |target_idx| {
-        try ensureEvalVarObjectDataBinding(ctx, frame, target_idx, atom_id);
+    for (function.closureVar()) |cv| {
+        if (cv.closureType() != .global_decl) continue;
+        try validateGlobalVarDeclaration(ctx, global, function, cv, is_eval_code);
     }
-    const explicit_global_target = switch (gv.eval_target) {
-        .global => true,
-        else => false,
-    };
-    if (gv.cpool_idx >= 0) {
-        const cpool_idx: usize = @intCast(gv.cpool_idx);
-        const function_value = function.constants.get(cpool_idx) orelse return error.InvalidBytecode;
-        defer function_value.free(ctx.runtime);
-        const func_val = try object_ops.createBytecodeFunctionObject(ctx, frame, function, global, function_value, atom_id, op.fclosure8, true);
-        defer func_val.free(ctx.runtime);
+}
 
-        switch (gv.eval_target) {
-            .closure => |target_idx| {
-                if (target_idx >= frame.var_refs.len) return error.InvalidBytecode;
-                slot_ops.replaceVarRefValueOwned(ctx, frame, target_idx, func_val.dup());
-                return;
-            },
-            .var_object => |target_idx| {
-                try defineEvalVarObjectDataBinding(ctx, frame, target_idx, atom_id, func_val);
-                return;
-            },
-            .unresolved, .global => {},
-        }
+test "QuickJS global declaration validation does not materialize auto-init properties" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    ctx.global = global;
+    _ = try global.ensureGlobalPayload(rt);
 
-        var updated_frame_local = false;
-        var updated_frame_ref = false;
-        const needs_legacy_frame_binding =
-            (function.flags.runtime_strict and !is_eval_code) or
-            (is_eval_code and !eval_global_var_bindings and !explicit_global_target);
-        if (needs_legacy_frame_binding) {
-            var local_value = func_val.dup();
-            updated_frame_local = try call_runtime.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
-            if (!updated_frame_local) local_value.free(ctx.runtime);
-            var frame_ref_value = func_val.dup();
-            updated_frame_ref = try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value);
-            if (!updated_frame_ref) frame_ref_value.free(ctx.runtime);
-        }
-        if (is_eval_code and !eval_global_var_bindings and !explicit_global_target) return;
+    const binding_name = try rt.internAtom("qjs-pass1-auto-init-binding");
+    defer rt.atoms.free(binding_name);
+    try global.defineAutoInitPropertyWithRealm(
+        rt,
+        binding_name,
+        "qjs-pass1-auto-init-binding",
+        0,
+        core.property.Flags.data(true, false, true),
+        global,
+    );
+    const property_index = global.findProperty(binding_name) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(core.property.Kind.auto_init, global.propKindAt(property_index));
 
-        if (function.flags.runtime_strict and !is_eval_code) {
-            if (!updated_frame_local and !updated_frame_ref) {
-                if (!call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id)) {
-                    try call_runtime.defineGlobalLexicalValue(ctx, atom_id, core.JSValue.uninitialized(), false);
-                }
-                var lexical_value = func_val.dup();
-                errdefer lexical_value.free(ctx.runtime);
-                const updated_global_lexical = try call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, lexical_value);
-                lexical_value.free(ctx.runtime);
-                if (!updated_global_lexical) return error.InvalidBytecode;
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    function.flags.is_global_var = true;
+    function.closure_var = try rt.memory.alloc(core.function_bytecode.BytecodeClosureVar, 1);
+    function.closure_var[0] = core.function_bytecode.BytecodeClosureVar.init(.{
+        .closure_type = .global_decl,
+        .var_idx = 0,
+        .var_name = rt.atoms.dup(binding_name),
+    });
+
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    try validateGlobalVarDeclarations(ctx, global, execution_function, true);
+    try std.testing.expectEqual(core.property.Kind.auto_init, global.propKindAt(property_index));
+}
+
+/// qjs js_closure2 PASS2: bind every GLOBAL_DECL cell in closure order. Function
+/// values are intentionally absent here; the fclosure/put_var_ref bytecode
+/// prologue runs only after this whole pass finishes.
+pub fn instantiateGlobalVarDeclarationCells(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.FunctionBytecode,
+    frame: *frame_mod.Frame,
+    is_eval_code: bool,
+) !void {
+    for (function.closureVar(), 0..) |cv, idx| {
+        if (cv.closureType() != .global_decl) continue;
+        const ref_idx = std.math.cast(u16, idx) orelse return error.InvalidBytecode;
+        if (cv.isLexical()) {
+            if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, global, function, frame, ref_idx, cv.var_name, cv.isConst())) {
+                try call_runtime.defineGlobalLexicalValue(ctx, cv.var_name, core.JSValue.uninitialized(), cv.isConst());
             }
-            return;
+        } else {
+            _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, ref_idx, cv.var_name, is_eval_code, globalDeclIsFunction(cv));
         }
-        try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, gv.is_configurable);
-        return;
-    }
-
-    switch (gv.eval_target) {
-        // A var declaration without an initializer never resets an existing
-        // caller binding, even when the parser marked the hoist force-init.
-        .closure => return,
-        .var_object => |target_idx| {
-            try ensureEvalVarObjectDataBinding(ctx, frame, target_idx, atom_id);
-            return;
-        },
-        .unresolved, .global => {},
-    }
-
-    if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) return;
-
-    if (gv.is_lexical) {
-        // Lexical cells are created in the dedicated cells pass of
-        // instantiateGlobalVarDeclarations (qjs js_closure2 PASS2 order:
-        // every global cell exists before any function value is assigned).
-        return;
-    } else if (is_eval_code and !eval_global_var_bindings and !explicit_global_target) {
-        return;
-    }
-    if (!global.hasOwnProperty(atom_id)) {
-        const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, gv.is_configurable);
-        const define_result = if (!global.hasExoticMethods() and !global.isArray() and global.isExtensible())
-            global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
-        else
-            global.defineOwnProperty(ctx.runtime, atom_id, desc);
-        define_result catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            else => return err,
-        };
-    }
-}
-
-pub fn instantiateGlobalVarDeclarations(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    is_eval_code: bool,
-    eval_global_var_bindings: bool,
-) !void {
-    if (function.global_vars.len == 0) return;
-    for (function.global_vars) |gv| {
-        if (!globalVarUsesGlobalEnvironment(gv, is_eval_code, eval_global_var_bindings)) continue;
-        try validateGlobalVarDeclaration(ctx, global, function, gv, is_eval_code);
-    }
-    for (function.global_vars) |gv| {
-        if (!globalVarUsesGlobalEnvironment(gv, is_eval_code, eval_global_var_bindings)) continue;
-        if (gv.is_lexical) continue;
-        if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) continue;
-        _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, gv.var_name, gv.is_configurable);
-    }
-    // qjs js_closure2 PASS2 (quickjs.c:17307-17334): every JS_CLOSURE_GLOBAL_DECL
-    // cell — var and lexical alike — is materialized before ANY function value is
-    // assigned (qjs creates function objects only later, via the bytecode
-    // fclosure prologue), so a closure created during value definition always
-    // captures the real cell, never a to-be-replaced TDZ placeholder.
-    for (function.global_vars) |gv| {
-        if (!globalVarUsesGlobalEnvironment(gv, is_eval_code, eval_global_var_bindings)) continue;
-        if (!gv.is_lexical) continue;
-        if (shouldSkipRuntimeStrictGlobalFunctionVar(function, is_eval_code, gv)) continue;
-        // qjs js_closure_define_global_var lexical arm (17134-17162): create or
-        // reuse (surgery / parked-capture) the shared ctx.lexicals VARREF cell
-        // and alias it into frame.var_refs for a top-level script let/const
-        // (.global_decl var-ref). Falls back to a plain lexical data property
-        // for module/eval paths.
-        if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, global, function, frame, gv.var_name, gv.is_const)) {
-            try call_runtime.defineGlobalLexicalValue(ctx, gv.var_name, core.JSValue.uninitialized(), gv.is_const);
-        }
-    }
-    for (function.global_vars) |gv| {
-        try defineGlobalVarDeclaration(ctx, global, function, frame, gv, is_eval_code, eval_global_var_bindings);
     }
 }
 
@@ -1080,24 +909,30 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
 
 pub noinline fn globalDefinition(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    eval_global_var_bindings: bool,
     opc: u8,
 ) !Step {
     switch (opc) {
         op.put_var_init => {
-            const ref_idx = readInt(u16, function.code[frame.pc..][0..2]);
+            const ref_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
             const atom_id = globalVarAtom(function, ref_idx) orelse return error.InvalidBytecode;
             frame.pc += 2;
             const value = try stack.pop();
             var value_owned = true;
             defer if (value_owned) value.free(ctx.runtime);
-            if (!function.flags.is_indirect_eval) {
+            // Whether this initialization targets the eval global-variable
+            // environment is an L0 entry fact, not a property of every nested
+            // function compiled from the same source. QuickJS's finalized FB
+            // therefore needs only its combined eval marker.
+            if (!eval_global_var_bindings) {
                 const fast_global_lexical = call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (fast_global_lexical) {
@@ -1105,7 +940,7 @@ pub noinline fn globalDefinition(
                     return .continue_loop;
                 }
                 const updated_global_lexical = call_runtime.setGlobalLexicalValueForGlobal(ctx, global, atom_id, value) catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (updated_global_lexical) return .continue_loop;

@@ -5,6 +5,7 @@
 //! statics through one typed generic+magic handler into their shared capability
 //! machinery.
 
+const std = @import("std");
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const promise_ops = @import("promise_ops.zig");
@@ -18,7 +19,6 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
         .length = 1,
         .id = @intFromEnum(StaticMethod.resolve),
         .magic = @intFromEnum(StaticMethod.resolve),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&promiseResolveCall),
     },
@@ -44,7 +44,6 @@ fn promiseStaticEntry(
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&promiseStaticCall),
     };
@@ -57,11 +56,12 @@ fn promiseResolveCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return promise_ops.qjsPromiseResolveStaticCall(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.this_value,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
@@ -76,7 +76,8 @@ fn promiseStaticCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     const mode: promise_ops.PromiseStaticMode = switch (host_call.magic) {
         @intFromEnum(StaticMethod.all) => .all,
         @intFromEnum(StaticMethod.race) => .race,
@@ -92,7 +93,7 @@ fn promiseStaticCall(
     return promise_ops.qjsPromiseStaticCall(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.this_value,
         host_call.args,
         mode,

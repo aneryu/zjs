@@ -6,8 +6,10 @@ pub fn build(b: *std.Build) void {
     // Zig defaults the build/test seed to a new random value for every
     // invocation. That changes test-runner arguments and destabilizes this
     // repository's large compile graph cache even when no source changed.
-    // Keep normal validation reproducible; randomized runs remain available
-    // through the explicit project option.
+    // This stabilizes child compile/test steps; canonical commands also pass
+    // CLI `--seed 0` so the build runner and dependency traversal are stable.
+    // Randomized test runs remain available through the explicit project
+    // option.
     const zjs_test_seed = b.option(u32, "zjs_test_seed", "Seed passed to Zig test runners (defaults to 0 for reproducible cached builds)") orelse 0;
     b.graph.random_seed = zjs_test_seed;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
@@ -695,8 +697,18 @@ pub fn build(b: *std.Build) void {
         "-Dzjs_nan_boxing=false"
     else
         "-Dzjs_nan_boxing=true";
+    const altrepr_seed = b.fmt("{d}", .{zjs_test_seed});
+    const altrepr_project_seed = b.fmt("-Dzjs_test_seed={d}", .{zjs_test_seed});
     const altrepr_tests = b.addSystemCommand(&.{
-        b.graph.zig_exe, "build", "test", altrepr_option, "--summary", "all",
+        b.graph.zig_exe,
+        "build",
+        "test",
+        altrepr_option,
+        altrepr_project_seed,
+        "--seed",
+        altrepr_seed,
+        "--summary",
+        "all",
     });
     const altrepr_step = b.step("test-altrepr", "Run the unified tests with the representation opposite the target default");
     altrepr_step.dependOn(&altrepr_tests.step);
@@ -712,7 +724,8 @@ pub fn build(b: *std.Build) void {
     const checkpoint_check_step = b.step("checkpoint-check", "Run checkpoint validation without the full test262, OOM-injection, or alternate-representation gates");
     checkpoint_check_step.dependOn(test_step);
     checkpoint_check_step.dependOn(smoke_dev_step);
-    checkpoint_check_step.dependOn(smoke_step);
+    // Debug smoke covers the CLI contract at checkpoint tier. Keep the second
+    // whole-engine ReleaseFast smoke compile exclusive to the production gate.
     checkpoint_check_step.dependOn(architecture_check_step);
     checkpoint_check_step.dependOn(test262_smoke_step);
 

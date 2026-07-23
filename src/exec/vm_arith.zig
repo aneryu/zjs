@@ -75,7 +75,7 @@ pub noinline fn binaryVm(
     global: *core.Object,
 ) !Step {
     binary(ctx, stack, binop, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -147,7 +147,7 @@ pub noinline fn compareVm(
     global: *core.Object,
 ) !Step {
     compare(ctx, stack, cmp, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -328,7 +328,7 @@ pub noinline fn unaryVm(
     global: *core.Object,
 ) !Step {
     unary(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -358,7 +358,7 @@ pub noinline fn bitNotVm(
     global: *core.Object,
 ) !Step {
     bitNot(ctx, stack, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -411,7 +411,7 @@ pub noinline fn postUpdateVm(
     global: *core.Object,
 ) !Step {
     postUpdate(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -419,14 +419,14 @@ pub noinline fn postUpdateVm(
 
 pub fn updateLocal(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     opcode_id: u8,
     output: ?*std.Io.Writer,
 ) !void {
-    if (frame.pc >= function.code.len) return error.InvalidBytecode;
-    const idx: u16 = function.code[frame.pc];
+    if (frame.pc >= function.byteCode().len) return error.InvalidBytecode;
+    const idx: u16 = function.byteCode()[frame.pc];
     frame.pc += 1;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
@@ -467,7 +467,7 @@ pub fn updateLocal(
 pub noinline fn updateLocalVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -475,7 +475,7 @@ pub noinline fn updateLocalVm(
     output: ?*std.Io.Writer,
 ) !Step {
     updateLocal(ctx, function, global, frame, opcode_id, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -551,13 +551,13 @@ pub fn updateLocalAt(
 pub fn addLocal(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     output: ?*std.Io.Writer,
 ) !void {
-    if (frame.pc >= function.code.len) return error.InvalidBytecode;
-    const idx: u16 = function.code[frame.pc];
+    if (frame.pc >= function.byteCode().len) return error.InvalidBytecode;
+    const idx: u16 = function.byteCode()[frame.pc];
     frame.pc += 1;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
@@ -672,14 +672,14 @@ noinline fn addLocalString(
 pub noinline fn addLocalVm(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     output: ?*std.Io.Writer,
 ) !Step {
     addLocal(ctx, stack, function, global, frame, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

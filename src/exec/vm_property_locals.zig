@@ -94,25 +94,25 @@ const atom_string = core.atom.predefinedId("String", .string).?;
 
 pub noinline fn loc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
 ) !void {
     switch (opc) {
         op.get_loc => {
-            const idx = readInt(u16, function.code[frame.pc..][0..2]);
+            const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
-        op.put_loc => try slot_ops.execPutLoc(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.set_loc => try slot_ops.execSetLoc(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.put_loc => try slot_ops.execPutLoc(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.set_loc => try slot_ops.execSetLoc(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
 
         op.get_loc8 => {
-            const idx = function.code[frame.pc];
+            const idx = function.byteCode()[frame.pc];
             try slot_ops.execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
-        op.put_loc8 => try slot_ops.execPutLoc(ctx, frame, stack, function.code[frame.pc], 1, opc),
-        op.set_loc8 => try slot_ops.execSetLoc(ctx, frame, stack, function.code[frame.pc], 1, opc),
+        op.put_loc8 => try slot_ops.execPutLoc(ctx, frame, stack, function.byteCode()[frame.pc], 1, opc),
+        op.set_loc8 => try slot_ops.execSetLoc(ctx, frame, stack, function.byteCode()[frame.pc], 1, opc),
 
         op.get_loc0 => {
             try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
@@ -140,15 +140,15 @@ pub noinline fn loc(
 
 pub noinline fn arg(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
 ) !void {
     switch (opc) {
-        op.get_arg => try slot_ops.execGetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.put_arg => try slot_ops.execPutArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.set_arg => try slot_ops.execSetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.get_arg => try slot_ops.execGetArg(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.put_arg => try slot_ops.execPutArg(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.set_arg => try slot_ops.execSetArg(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
         op.get_arg0 => try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc),
         op.get_arg1 => try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc),
         op.get_arg2 => try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc),
@@ -167,14 +167,15 @@ pub noinline fn arg(
 
 pub noinline fn checkedLocVm(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
 ) !Step {
-    const idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
@@ -185,24 +186,40 @@ pub noinline fn checkedLocVm(
             try frame.closeLocalBinding(ctx.runtime, idx);
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], core.JSValue.uninitialized());
         },
-        op.get_loc_check, op.get_loc_checkthis => {
+        op.get_loc_check => {
             if (frame.locals[idx].isUninitialized()) {
-                const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                const is_derived_this = function.isDerivedClassConstructor() and
+                    idx < function.varDefs().len and
+                    function.varDefs()[idx].var_name == core.atom.ids.this_;
+                const err = if (is_derived_this) blk: {
+                    _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
+                    unreachable;
+                } else exception_ops.throwTdzReference(ctx);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
+            }
+            try stack.push(frame.locals[idx]);
+        },
+        op.get_loc_checkthis => {
+            if (frame.locals[idx].isUninitialized()) {
+                // This opcode is the compiler-generated implicit return after
+                // derived-constructor return unwinding. QuickJS constructs its
+                // ReferenceError in caller_ctx, so leave it as a distinct
+                // sentinel for the caller frame instead of materializing here.
+                return error.DerivedThisUninitialized;
             }
             try stack.push(frame.locals[idx]);
         },
         op.put_loc_check => {
             if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = try stack.pop();
-            if (idx < function.vardefs.len and function.vardefs[idx].is_const) {
+            if (idx < function.varDefs().len and function.varDefs()[idx].isConst()) {
                 value.free(ctx.runtime);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
@@ -210,30 +227,30 @@ pub noinline fn checkedLocVm(
         op.set_loc_check => {
             if (frame.locals[idx].isUninitialized()) {
                 const err = exception_ops.throwTdzReference(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = stack.peek() orelse return error.StackUnderflow;
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
         },
         op.put_loc_check_init => {
-            const is_derived_this = function.flags.is_derived_class_constructor and
-                idx < function.vardefs.len and
-                function.vardefs[idx].var_name == core.atom.ids.this_;
+            // Only derived `this` has once-only init semantics (double-super ->
+            // "'this' can be initialized only once"). put_loc_check_init is also
+            // emitted for other lexical inits (e.g. AnnexB block-function var
+            // copies) that legitimately overwrite an already-set slot, so the
+            // once-only error must stay gated on the derived-this binding.
+            const is_derived_this = function.isDerivedClassConstructor() and
+                idx < function.varDefs().len and
+                function.varDefs()[idx].var_name == core.atom.ids.this_;
             if (is_derived_this and !frame.locals[idx].isUninitialized()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
-                return error.ReferenceError;
+                _ = exception_ops.throwReferenceErrorMessage(ctx, global, "'this' can be initialized only once") catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                unreachable;
             }
             const value = try stack.pop();
-            const constructor_this = if (is_derived_this)
-                value.dup()
-            else
-                core.JSValue.undefinedValue();
-            defer constructor_this.free(ctx.runtime);
             value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
-            if (!constructor_this.isUndefined()) {
-                slot_ops.replaceAdapterOwned(ctx, &frame.this_value, constructor_this.dup());
-            }
         },
         else => unreachable,
     }
@@ -242,52 +259,51 @@ pub noinline fn checkedLocVm(
 
 pub fn varRef(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !Step {
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
-            if (frame.pc + 2 > function.code.len) return error.TypeError;
-            const idx = readInt(u16, function.code[frame.pc..][0..2]);
+            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
             if (try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
-            if (frame.pc + 2 > function.code.len) return error.TypeError;
-            const idx = readInt(u16, function.code[frame.pc..][0..2]);
-            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc, eval_global_var_bindings, is_eval_code);
+            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
+            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc);
         },
         op.set_var_ref => {
-            if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try slot_ops.execSetVarRef(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc);
+            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            try slot_ops.execSetVarRef(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc);
         },
 
         op.get_var_ref0 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
             if (try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
-            if (try slot_ops.execGetVarRefMaybeTdz(ctx, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
-        op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref2 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref3 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc),
+        op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc),
+        op.put_var_ref2 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc),
+        op.put_var_ref3 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc),
         op.set_var_ref0 => try slot_ops.execSetVarRef(ctx, frame, stack, 0, 0, opc),
         op.set_var_ref1 => try slot_ops.execSetVarRef(ctx, frame, stack, 1, 0, opc),
         op.set_var_ref2 => try slot_ops.execSetVarRef(ctx, frame, stack, 2, 0, opc),
@@ -299,22 +315,21 @@ pub fn varRef(
 
 pub noinline fn varRefVm(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
     catch_target: *?usize,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    return varRef(ctx, output, function, global, frame, stack, opc, catch_target) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
 }
 
-fn tryFastDirectVarRefGet(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx: u16, consume: u8) !bool {
+fn tryFastDirectVarRefGet(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx: u16, consume: u8) !bool {
     if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) return false;
     const value = varRefReadableBorrowed(frame, idx) orelse return false;
     frame.pc += consume;
@@ -392,7 +407,7 @@ fn bindingPutNextPc(put: BindingPut) usize {
     return put.operand_pc + put.consume;
 }
 
-fn bindingCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, put: BindingPut) bool {
+fn bindingCompletionPutWritableForFastPath(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, put: BindingPut) bool {
     if (put.is_var_ref) return false;
     return localCompletionPutWritableForFastPath(function, frame, .{
         .idx = put.idx,
@@ -402,8 +417,8 @@ fn bindingCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, f
     });
 }
 
-fn decodeOptionalLocalStoreTail(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalStoreTail {
-    const code = function.code;
+fn decodeOptionalLocalStoreTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalStoreTail {
+    const code = function.byteCode();
     if (pc >= code.len or code[pc] != op.dup) return .{ .store_pc = pc };
 
     const store_pc = pc + 1;
@@ -422,8 +437,8 @@ fn decodeOptionalLocalStoreTail(function: *const bytecode.Bytecode, frame: *cons
     };
 }
 
-fn decodeOptionalBindingStoreTail(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalBindingStoreTail {
-    const code = function.code;
+fn decodeOptionalBindingStoreTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalBindingStoreTail {
+    const code = function.byteCode();
     if (pc >= code.len or code[pc] != op.dup) return .{ .store_pc = pc };
 
     const store_pc = pc + 1;
@@ -442,8 +457,8 @@ fn decodeOptionalBindingStoreTail(function: *const bytecode.Bytecode, frame: *co
     };
 }
 
-fn decodeDenseArrayPutTail(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, pc: usize) ?DenseArrayPutTail {
-    const code = function.code;
+fn decodeDenseArrayPutTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?DenseArrayPutTail {
+    const code = function.byteCode();
     if (pc >= code.len) return null;
     if (code[pc] == op.put_array_el) return .{ .tail_pc = pc + 1 };
     if (code[pc] != op.insert3) return null;
@@ -457,7 +472,7 @@ fn decodeDenseArrayPutTail(function: *const bytecode.Bytecode, frame: *const fra
 
 fn storeBindingInt32(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: BindingPut,
@@ -474,7 +489,7 @@ fn storeBindingInt32(
 
 fn storeBindingInt32WithCompletion(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     accumulator_put: BindingPut,
@@ -491,7 +506,7 @@ fn storeBindingInt32WithCompletion(
 
 fn storeBindingOwnedValueWithCompletion(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     accumulator_put: BindingPut,
@@ -512,7 +527,7 @@ fn storeBindingOwnedValueWithCompletion(
 
 fn storeLocalInt32WithCompletion(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     idx: u16,
@@ -531,7 +546,7 @@ fn storeLocalInt32WithCompletion(
 
 fn storeLocalOwnedValueWithCompletion(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     idx: u16,
@@ -809,7 +824,7 @@ const DenseArrayMulAndMaskFormula = struct {
 
 fn denseArrayAppendValueFromBytecode(
     frame: *const frame_mod.Frame,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     first_value_idx: u16,
     first_value_next_pc: usize,
 ) ?DenseArrayAppendValue {
@@ -818,7 +833,7 @@ fn denseArrayAppendValueFromBytecode(
     const value = frame.locals[first_value_idx];
     if (value.isUninitialized()) return null;
 
-    const code = function.code;
+    const code = function.byteCode();
     if (first_value_next_pc < code.len and code[first_value_next_pc] == op.put_array_el) {
         return .{ .value = value, .next_pc = first_value_next_pc };
     }
@@ -949,10 +964,10 @@ fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?
 
 pub noinline fn closeLoc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const idx = readInt(u16, function.code[frame.pc..][0..2]);
+    const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     try frame.closeLocalBinding(ctx.runtime, idx);
 }

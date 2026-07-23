@@ -15,7 +15,7 @@ Current design notes:
 Run the active multi-case self-baseline gate with:
 
 ```sh
-zig build perf-self-check --summary all
+zig build perf-self-check --seed 0 --summary all
 ```
 
 This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
@@ -25,7 +25,7 @@ This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
 Refresh the checked-in self baseline explicitly with:
 
 ```sh
-zig build perf-self-update-baseline --summary all
+zig build perf-self-update-baseline --seed 0 --summary all
 ```
 
 Only refresh the baseline when an intentional performance change has separate
@@ -34,7 +34,7 @@ semantic validation evidence.
 Run the current repeatable diagnostic benchmark with:
 
 ```sh
-zig build perf-benchmark --summary all
+zig build perf-benchmark --seed 0 --summary all
 ```
 
 This builds the ReleaseFast `zjs` CLI and runs
@@ -126,16 +126,16 @@ continue to pass.
 Focused runtime-profile shortcuts are also available:
 
 ```sh
-zig build perf-uri-profile --summary all
-zig build perf-uri-component-profile --summary all
-zig build perf-prop-global-profile --summary all
-zig build perf-proto-global-profile --summary all
-zig build perf-prop-poly3-profile --summary all
-zig build perf-call2-global-profile --summary all
-zig build perf-closure-call-global-profile --summary all
-zig build perf-string-loop-profile --summary all
-zig build perf-empty-loop-profile --summary all
-zig build perf-runtime-profiles --summary all
+zig build perf-uri-profile --seed 0 --summary all
+zig build perf-uri-component-profile --seed 0 --summary all
+zig build perf-prop-global-profile --seed 0 --summary all
+zig build perf-proto-global-profile --seed 0 --summary all
+zig build perf-prop-poly3-profile --seed 0 --summary all
+zig build perf-call2-global-profile --seed 0 --summary all
+zig build perf-closure-call-global-profile --seed 0 --summary all
+zig build perf-string-loop-profile --seed 0 --summary all
+zig build perf-empty-loop-profile --seed 0 --summary all
+zig build perf-runtime-profiles --seed 0 --summary all
 ```
 
 Compare two runtime-profile artifacts:
@@ -180,9 +180,9 @@ xcrun xctrace record \
 Run semantic checks before accepting performance-sensitive changes:
 
 ```sh
-zig build test --summary all
-zig build smoke --summary all
-zig build perf-self-check --summary all
+zig build test --seed 0 --summary all
+zig build smoke --seed 0 --summary all
+zig build perf-self-check --seed 0 --summary all
 ```
 
 Run a relevant test262 subset when the optimization touches observable

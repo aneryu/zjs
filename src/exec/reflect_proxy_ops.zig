@@ -39,11 +39,7 @@ pub fn methodId(name: []const u8) ?u32 {
 /// Standard-global bootstrap resolves names/lengths through its Reflect method
 /// list and `methodId`; `proxy_revocable` and the dynamically materialized
 /// `proxy_revoke` closure bind through `reflect_ops.proxyRevocable` directly.
-/// This array is consumed by the record-dispatch path (`rt.internal_builtins`). All records set
-/// `prepared_call_ok = false`: every Reflect method needs a realm global and/or
-/// the materialized function object, matching the prepared-call gate
-/// (`vm_call.nativeBuiltinSupportedWithoutFunctionObject` returns false for
-/// `.reflect`).
+/// This array is consumed by the record-dispatch path (`rt.internal_builtins`).
 pub const internal_entries = reflectEntries: {
     const Entry = core.host_function.InternalEntry;
     break :reflectEntries [_]Entry{
@@ -71,7 +67,6 @@ fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&reflectCall),
     };
@@ -80,9 +75,9 @@ fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
 /// Shared record handler for the `.reflect` domain. Mirrors the retired
 /// `call.zig` `callReflectNativeFunctionRecord`: the `Proxy.revocable` helper
 /// and its revoke closure run their exec reflect ops, while the 13 `Reflect.*`
-/// statics route through `call_runtime.qjsReflectCallForNativeRecord` when a
-/// realm global is available and fall back to the primitive-only exec ops in
-/// the bare-runtime (no global) path.
+/// statics route through `call_runtime.qjsReflectCallForNativeRecord`. These
+/// records have no algorithmic func-object-free reuse: every entry is an
+/// observable callable and therefore requires its atomic call realm view.
 fn reflectCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -92,8 +87,9 @@ fn reflectCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
-    const global = host_call.global;
-    const globals = host_call.globals;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == ctx);
+    const global = realm.global;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
@@ -109,16 +105,7 @@ fn reflectCall(
         // Proxy; revocable(t, h)`) work. No receiver validation.
         return reflect_ops.proxyRevocable(ctx.runtime, global, args);
     }
-    if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
-    return switch (id) {
-        @intFromEnum(StaticMethod.define_property) => try reflect_ops.reflectDefineProperty(ctx.runtime, args),
-        @intFromEnum(StaticMethod.get) => try reflect_ops.reflectGet(ctx.runtime, args),
-        @intFromEnum(StaticMethod.set) => try reflect_ops.reflectSet(ctx, output, global, args),
-        @intFromEnum(StaticMethod.has) => try reflect_ops.reflectHas(ctx, output, global, globals, args),
-        @intFromEnum(StaticMethod.construct) => try reflect_ops.reflectConstruct(ctx, args, globals),
-        @intFromEnum(StaticMethod.apply) => try reflect_ops.reflectApply(ctx, output, global, globals, args),
-        else => error.TypeError,
-    };
+    return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global, id, args, caller_function, caller_frame);
 }
 
 pub fn ownKeys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {

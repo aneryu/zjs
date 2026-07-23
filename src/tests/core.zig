@@ -7,6 +7,76 @@ const core = zjs.core;
 
 extern "c" fn tmpfile() ?*std.c.FILE;
 
+const ModuleAutoInitFixture = struct {
+    owner: core.property.AutoInitModuleOwner = .{ .resolve = resolve },
+    expected_realm: *core.gc.Header,
+    expected_atom: ?core.Atom = null,
+    calls: usize = 0,
+    failed_once: bool = false,
+    result: Result,
+
+    const Result = union(enum) {
+        value: core.JSValue,
+        var_ref: *core.VarRef,
+        fail_once: core.JSValue,
+        reenter: struct {
+            rt: *core.JSRuntime,
+            holder: *core.Object,
+            atom_id: core.Atom,
+            replacement: core.JSValue,
+            materialized: core.JSValue,
+        },
+    };
+
+    fn resolve(
+        owner: *const core.property.AutoInitModuleOwner,
+        realm_header: *core.gc.Header,
+        atom_id: core.Atom,
+    ) anyerror!core.property.AutoInitMaterialization {
+        const self: *ModuleAutoInitFixture = @constCast(@fieldParentPtr("owner", owner));
+        if (realm_header != self.expected_realm) return error.InvalidBuiltinRegistry;
+        if (self.expected_atom) |expected| {
+            if (atom_id != expected) return error.InvalidBuiltinRegistry;
+        }
+        self.calls += 1;
+        return switch (self.result) {
+            .value => |value| .{ .value = value.dup() },
+            .var_ref => |cell| .{ .var_ref = cell },
+            .fail_once => |value| blk: {
+                if (!self.failed_once) {
+                    self.failed_once = true;
+                    return error.OutOfMemory;
+                }
+                break :blk .{ .value = value.dup() };
+            },
+            .reenter => |entry| blk: {
+                try entry.holder.setProperty(entry.rt, entry.atom_id, entry.replacement);
+                break :blk .{ .value = entry.materialized.dup() };
+            },
+        };
+    }
+};
+
+fn publishFreshModule(
+    registry: *core.module.Registry,
+    module_name: core.Atom,
+    pending: *core.module.PendingDefinition,
+) !*core.ModuleRecord {
+    const prepared = try registry.prepareFreshTarget(module_name, pending);
+    if (!prepared.isFresh()) return error.TestUnexpectedResult;
+    return prepared.record();
+}
+
+fn publishEmptyModule(
+    rt: *core.JSRuntime,
+    registry: *core.module.Registry,
+    module_name: core.Atom,
+) !*core.ModuleRecord {
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    return publishFreshModule(registry, module_name, &pending);
+}
+
 test "QuickJS value tag constants are locked" {
     try std.testing.expectEqual(@as(i32, -9), core.Tag.first);
     try std.testing.expectEqual(@as(i32, -9), core.Tag.big_int);
@@ -225,6 +295,501 @@ test "runtime and context init-deinit are leak free" {
     }
 }
 
+test "RealmContext is header-first and RealmRef owns independently of runtime list membership" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.RealmContext, "header"));
+    try std.testing.expectEqual(@sizeOf(?*core.RealmContext), @sizeOf(core.RealmRef));
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.RealmContext.create(rt);
+    const second = try core.RealmContext.create(rt);
+
+    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().kind);
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    var owner = core.RealmRef.retain(first);
+    first.destroy();
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    second.destroy();
+    try std.testing.expectEqual(first, rt.firstContext().?);
+
+    owner.deinit();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "RealmContext construction stays unpublished and untraced until the live commit" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.createConstructingWithOptions(rt, .{});
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(.constructing, ctx.publicationState());
+    try std.testing.expect(rt.firstContext() == null);
+    try std.testing.expectEqual(ctx, rt.constructing_context_head.?);
+    try std.testing.expectError(error.InvalidBuiltinRegistry, ctx.publishLive());
+
+    const marker = 0x5151;
+    ctx.eval_function = core.JSValue.int32(marker);
+    const Counter = struct {
+        count: usize = 0,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asInt32() == marker) self.count += 1;
+        }
+
+        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var counter = Counter{};
+    var visitor = core.runtime.RootVisitor{
+        .context = &counter,
+        .visit_value = Counter.visitValue,
+        .visit_object = Counter.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 0), counter.count);
+
+    try ctx.finishConstruction();
+    try std.testing.expectEqual(.live, ctx.publicationState());
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    try std.testing.expect(rt.constructing_context_head == null);
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 1), counter.count);
+}
+
+test "RealmContext owns the five QuickJS initial layouts as Shapes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+
+    const object_prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer object_prototype.value().free(rt);
+    const array_prototype = try core.Object.createArray(rt, object_prototype);
+    defer array_prototype.value().free(rt);
+    const regexp_prototype = try core.Object.create(rt, core.class.ids.object, object_prototype);
+    defer regexp_prototype.value().free(rt);
+
+    try ctx.initializeInitialShapes(object_prototype, array_prototype, regexp_prototype);
+    const initial_shapes = [_]*core.Shape{
+        ctx.array_shape.?,
+        ctx.arguments_shape.?,
+        ctx.mapped_arguments_shape.?,
+        ctx.regexp_shape.?,
+        ctx.regexp_result_shape.?,
+    };
+    for (initial_shapes) |initial_shape| {
+        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().kind);
+    }
+    try std.testing.expectEqual(array_prototype, ctx.array_shape.?.proto.?);
+    try std.testing.expectEqual(object_prototype, ctx.arguments_shape.?.proto.?);
+    try std.testing.expectEqual(object_prototype, ctx.mapped_arguments_shape.?.proto.?);
+    try std.testing.expectEqual(regexp_prototype, ctx.regexp_shape.?.proto.?);
+    try std.testing.expectEqual(array_prototype, ctx.regexp_result_shape.?.proto.?);
+    try std.testing.expectEqual(@as(u32, 0), ctx.array_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.arguments_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.mapped_arguments_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 1), ctx.regexp_shape.?.prop_count);
+    try std.testing.expectEqual(@as(u32, 3), ctx.regexp_result_shape.?.prop_count);
+
+    const array = try core.Object.createArray(rt, array_prototype);
+    defer array.value().free(rt);
+    try std.testing.expectEqual(ctx.array_shape.?, array.shape_ref);
+}
+
+test "Runtime queues retain their originating Realm until owned jobs are released" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
+
+    const TestJob = struct {
+        fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
+            return core.JSValue.undefinedValue();
+        }
+    };
+    try rt.job_queue.enqueueFunc(ctx, TestJob.run, &.{});
+    try rt.enqueueFinalizationJobForRealm(ctx, core.JSValue.int32(12), core.JSValue.int32(13));
+
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+
+    var promise_job = rt.job_queue.takeFirst().?;
+    promise_job.deinit();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    var generic_job = rt.job_queue.takeFirst().?;
+    const generic_result = generic_job.run();
+    try std.testing.expect(!generic_result.isException());
+    generic_result.free(rt);
+    generic_job.deinit();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    var finalization_job = rt.job_queue.takeFirst().?;
+    finalization_job.deinit();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "caller-owned ClassIdSlot is process-stable while definitions stay per Runtime" {
+    var slot: core.class.ClassIdSlot = .{};
+    const class_id = try slot.getOrAllocate();
+    try std.testing.expectEqual(class_id, try slot.getOrAllocate());
+
+    const first_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer first_rt.destroy();
+    const second_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer second_rt.destroy();
+
+    try first_rt.classes.register(class_id, .{ .class_name = "ProcessStableClassFirstRuntime" });
+    try second_rt.classes.register(class_id, .{ .class_name = "ProcessStableClassSecondRuntime" });
+    try std.testing.expect(first_rt.classes.isRegistered(class_id));
+    try std.testing.expect(second_rt.classes.isRegistered(class_id));
+    try std.testing.expectEqual(class_id, try first_rt.newClassId(class_id));
+    try std.testing.expectEqual(class_id, try second_rt.newClassId(class_id));
+
+    const first_name = first_rt.classes.className(class_id).?;
+    defer first_rt.atoms.free(first_name);
+    const second_name = second_rt.classes.className(class_id).?;
+    defer second_rt.atoms.free(second_name);
+    try std.testing.expectEqualStrings("ProcessStableClassFirstRuntime", first_rt.atoms.name(first_name).?);
+    try std.testing.expectEqualStrings("ProcessStableClassSecondRuntime", second_rt.atoms.name(second_name).?);
+
+    const final_class_id = std.math.maxInt(core.ClassId);
+    try first_rt.classes.register(final_class_id, .{ .class_name = "FinalLegalClassId" });
+    try std.testing.expect(first_rt.classes.isRegistered(final_class_id));
+    try std.testing.expectEqual(final_class_id, try first_rt.newClassId(final_class_id));
+}
+
+test "Runtime owner thread rejects foreign structural mutation before publication" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const live = try core.RealmContext.create(rt);
+    var live_guard = core.RealmRef.retain(live);
+    const constructing = try core.RealmContext.createConstructingWithOptions(rt, .{});
+    defer constructing.destroy();
+
+    const registered_id: core.ClassId = 1024;
+    const foreign_growth_id: core.ClassId = 4096;
+    try rt.ensureContextClassPrototypeCapacity(registered_id);
+    try rt.classes.register(registered_id, .{ .class_name = "OwnerThreadRegistered" });
+    defer rt.classes.unregisterDynamic(registered_id);
+
+    const Attempt = struct {
+        rt: *core.JSRuntime,
+        live: *core.RealmContext,
+        constructing: *core.RealmContext,
+        registered_id: core.ClassId,
+        growth_id: core.ClassId,
+        owner_check_rejected: bool = false,
+        context_create_rejected: bool = false,
+        context_publish_rejected: bool = false,
+        context_destroy_rejected: bool = false,
+        context_destroy_succeeded: bool = false,
+        class_register_rejected: bool = false,
+        class_unregister_rejected: bool = false,
+        class_growth_rejected: bool = false,
+        gc_rejected: bool = false,
+        unexpected_context: ?*core.RealmContext = null,
+
+        fn run(self: *@This()) void {
+            self.owner_check_rejected = if (self.rt.requireOwnerThread()) |_| false else |err| err == error.WrongRuntimeThread;
+            self.context_create_rejected = if (core.RealmContext.create(self.rt)) |created| blk: {
+                self.unexpected_context = created;
+                break :blk false;
+            } else |err| err == error.WrongRuntimeThread;
+            self.context_publish_rejected = if (self.constructing.finishConstructionChecked()) |_| false else |err| err == error.WrongRuntimeThread;
+            if (self.live.tryDestroy()) |_| {
+                self.context_destroy_succeeded = true;
+            } else |err| {
+                self.context_destroy_rejected = err == error.WrongRuntimeThread;
+            }
+            self.class_register_rejected = if (self.rt.classes.register(self.growth_id, .{ .class_name = "ForeignGrowth" })) |_| false else |err| err == error.WrongRuntimeThread;
+            self.class_unregister_rejected = if (self.rt.classes.tryUnregisterDynamic(self.registered_id)) |_| false else |err| err == error.WrongRuntimeThread;
+            self.class_growth_rejected = if (self.rt.ensureContextClassPrototypeCapacity(self.growth_id)) |_| false else |err| err == error.WrongRuntimeThread;
+            self.gc_rejected = if (self.rt.pollGCChecked(null, .urgent)) |_| false else |err| err == error.WrongRuntimeThread;
+        }
+    };
+
+    var attempt = Attempt{
+        .rt = rt,
+        .live = live,
+        .constructing = constructing,
+        .registered_id = registered_id,
+        .growth_id = foreign_growth_id,
+    };
+    defer {
+        if (!attempt.context_destroy_succeeded) live.destroy();
+        live_guard.deinit();
+    }
+
+    const memory_before = rt.memory.allocated_bytes;
+    const class_capacity_before = rt.classes.records.len;
+    const live_slots_before = live.class_prototypes.len;
+    const constructing_slots_before = constructing.class_prototypes.len;
+    rt.requestGCForTest();
+    const gc_pending_before = rt.gcPendingForTest();
+
+    const thread = try std.Thread.spawn(.{}, Attempt.run, .{&attempt});
+    thread.join();
+    defer if (attempt.unexpected_context) |created| created.destroy();
+
+    try std.testing.expect(attempt.owner_check_rejected);
+    try std.testing.expect(attempt.context_create_rejected);
+    try std.testing.expect(attempt.context_publish_rejected);
+    try std.testing.expect(attempt.context_destroy_rejected);
+    try std.testing.expect(!attempt.context_destroy_succeeded);
+    try std.testing.expect(attempt.class_register_rejected);
+    try std.testing.expect(attempt.class_unregister_rejected);
+    try std.testing.expect(attempt.class_growth_rejected);
+    try std.testing.expect(attempt.gc_rejected);
+    try std.testing.expect(attempt.unexpected_context == null);
+
+    try std.testing.expectEqual(memory_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(class_capacity_before, rt.classes.records.len);
+    try std.testing.expectEqual(live_slots_before, live.class_prototypes.len);
+    try std.testing.expectEqual(constructing_slots_before, constructing.class_prototypes.len);
+    try std.testing.expectEqual(gc_pending_before, rt.gcPendingForTest());
+    try std.testing.expectEqual(live, rt.firstContext().?);
+    try std.testing.expect(rt.classes.isRegistered(registered_id));
+    try std.testing.expect(!rt.classes.unregisterPending(registered_id));
+    try std.testing.expect(!rt.classes.isRegistered(foreign_growth_id));
+    try std.testing.expectError(error.InvalidBuiltinRegistry, constructing.publishLive());
+}
+
+test "process-global ClassId allocation is atomic across owner-thread Runtimes" {
+    const worker_count = 4;
+    const ids_per_worker = 12;
+    var shared_slot: core.class.ClassIdSlot = .{};
+
+    const Worker = struct {
+        shared_slot: *core.class.ClassIdSlot,
+        shared_id: core.ClassId = core.class.invalid_class_id,
+        ids: [ids_per_worker]core.ClassId = @splat(core.class.invalid_class_id),
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            const rt = core.JSRuntime.create(std.heap.page_allocator) catch {
+                self.failed = true;
+                return;
+            };
+            defer rt.destroy();
+
+            self.shared_id = self.shared_slot.getOrAllocate() catch {
+                self.failed = true;
+                return;
+            };
+            for (&self.ids) |*id| {
+                id.* = rt.newClassId(core.class.invalid_class_id) catch {
+                    self.failed = true;
+                    return;
+                };
+            }
+        }
+    };
+
+    var workers: [worker_count]Worker = undefined;
+    var threads: [worker_count]std.Thread = undefined;
+    for (&workers, 0..) |*worker, index| {
+        worker.* = .{ .shared_slot = &shared_slot };
+        threads[index] = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+    for (threads) |thread| thread.join();
+
+    const shared_id = workers[0].shared_id;
+    try std.testing.expect(shared_id != core.class.invalid_class_id);
+    for (workers) |worker| {
+        try std.testing.expect(!worker.failed);
+        try std.testing.expectEqual(shared_id, worker.shared_id);
+    }
+    for (workers, 0..) |worker, worker_index| {
+        for (worker.ids, 0..) |id, id_index| {
+            try std.testing.expect(id != core.class.invalid_class_id);
+            try std.testing.expect(id != shared_id);
+            for (workers[0..worker_index]) |earlier_worker| {
+                for (earlier_worker.ids) |earlier_id| try std.testing.expect(id != earlier_id);
+            }
+            for (worker.ids[0..id_index]) |earlier_id| try std.testing.expect(id != earlier_id);
+        }
+    }
+}
+
+test "RealmContext participates in cycle collection through typed RealmRef edges" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const realm_record = try core.Object.create(rt, core.class.ids.object, null);
+    var realm_owner = core.RealmRef.retain(ctx);
+    try realm_record.installOwnedRealmRef(rt, &realm_owner);
+    const record_key = try rt.internAtom("realmCycleRecord");
+    defer rt.atoms.free(record_key);
+    try global.defineOwnProperty(
+        rt,
+        record_key,
+        core.Descriptor.data(realm_record.value(), true, true, true),
+    );
+    realm_record.value().free(rt);
+
+    ctx.destroy();
+    try std.testing.expect(rt.firstContext() != null);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "FunctionBytecode RealmRef edge participates in realm-global cycle collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const code = [_]u8{engine.bytecode.opcode.op.return_undef};
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = ctx,
+        .arg_count = 1,
+        .var_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+        .has_extension = true,
+    });
+    const expected_layout = try engine.bytecode.FunctionLayout.init(
+        true,
+        true,
+        1,
+        1,
+        1,
+        1,
+        code.len,
+    );
+    try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
+    try std.testing.expect(fb.famBytes() > @sizeOf(engine.bytecode.function_bytecode.DebugInfo));
+    fb.publishFixtureNoFail(rt);
+    const fb_value = core.JSValue.functionBytecode(&fb.header);
+    var fb_value_alive = true;
+    defer if (fb_value_alive) fb_value.free(rt);
+
+    const cycle_key = try rt.internAtom("functionBytecodeRealmCycle");
+    defer rt.atoms.free(cycle_key);
+    try global.defineOwnProperty(
+        rt,
+        cycle_key,
+        core.Descriptor.data(fb_value, true, true, true),
+    );
+    fb_value.free(rt);
+    fb_value_alive = false;
+
+    // Only the cycle remains: Context -> global -> FB -> RealmRef(Context).
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(rt.firstContext() != null);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "FinalizationRegistry RealmRef edge participates in realm-global cycle collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
+    const cycle_key = try rt.internAtom("finalizationRegistryRealmCycle");
+    defer rt.atoms.free(cycle_key);
+    try global.defineOwnProperty(
+        rt,
+        cycle_key,
+        core.Descriptor.data(registry.value(), true, true, true),
+    );
+    registry.value().free(rt);
+
+    // Only the cycle remains: Context -> global -> registry -> RealmRef(Context).
+    // The registry's typed realm edge must participate in decref/scan/restore,
+    // then release exactly once when the condemned payload is destroyed.
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(rt.firstContext() != null);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "FinalizationRegistry RealmRef retains and releases its construction realm exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const base_ref_count = ctx.header.meta().rc;
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    try std.testing.expectEqual(base_ref_count + 1, ctx.header.meta().rc);
+    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
+
+    registry.value().free(rt);
+    try std.testing.expectEqual(base_ref_count, ctx.header.meta().rc);
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(rt.firstContext() == null);
+}
+
+test "dynamic class registration reserves slots in live and future realms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first = try core.RealmContext.create(rt);
+    defer first.destroy();
+    const second = try core.RealmContext.create(rt);
+    defer second.destroy();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.ensureContextClassPrototypeCapacity(class_id);
+    try rt.classes.register(class_id, .{ .class_name = "RealmCapacityTest" });
+    try std.testing.expect(first.classPrototypeObject(class_id) == null);
+    try std.testing.expect(second.classPrototypeObject(class_id) == null);
+
+    const future = try core.RealmContext.create(rt);
+    defer future.destroy();
+    try std.testing.expect(future.classPrototypeObject(class_id) == null);
+    _ = try future.ensureClassPrototypeSlot(class_id);
+}
+
+test "dynamic class prototype capacity and clearing include constructing realms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const constructing = try core.RealmContext.createConstructingWithOptions(rt, .{});
+    defer constructing.destroy();
+
+    const class_id: core.ClassId = 1024;
+    try rt.ensureContextClassPrototypeCapacity(class_id);
+    try std.testing.expect(constructing.class_prototypes.len > class_id);
+    try rt.classes.register(class_id, .{ .class_name = "ConstructingRealmClass" });
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    const prototype_value = prototype.value();
+    defer prototype_value.free(rt);
+    try constructing.setClassPrototype(class_id, prototype);
+    try std.testing.expectEqual(prototype, constructing.classPrototypeObject(class_id).?);
+
+    rt.clearContextClassPrototype(class_id);
+    rt.classes.unregisterDynamic(class_id);
+    try std.testing.expect(constructing.classPrototypeObject(class_id) == null);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+}
+
 test "runtime-resident indexes outlive a temporary allocator" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.heap.page_allocator, .{});
@@ -262,40 +827,70 @@ test "atom replace handles self-assignment without releasing dynamic atom" {
     rt.atoms.free(slot);
 }
 
-test "context takes pending promise jobs without allocation" {
+test "runtime takes typed Promise jobs without allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    try ctx.ensurePendingPromiseJobCapacity(2);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..2];
-    ctx.pending_promise_jobs[0] = .{ .sequence = 3, .value = core.JSValue.int32(10) };
-    ctx.pending_promise_jobs[1] = .{ .sequence = 4, .value = core.JSValue.int32(11) };
+    try rt.job_queue.ensureCapacity(2);
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
 
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes);
-    const first = ctx.takePendingPromiseJob().?;
+    var first = rt.job_queue.takeFirst().?;
     rt.setMemoryLimit(null);
-    defer first.deinit(rt);
+    defer first.deinit();
 
-    try std.testing.expectEqual(@as(u64, 3), first.sequence);
-    try std.testing.expectEqual(@as(?i32, 10), first.value.asInt32());
-    try std.testing.expectEqual(@as(usize, 1), ctx.pending_promise_jobs.len);
-    try std.testing.expectEqual(@as(usize, 4), ctx.pending_promise_jobs_capacity);
-    try std.testing.expectEqual(@as(?u64, 4), ctx.peekPendingPromiseJobSequence());
-    try std.testing.expectEqual(@as(?i32, 11), ctx.pending_promise_jobs[0].value.asInt32());
+    try std.testing.expectEqual(@as(?i32, 10), first.payload.promise.value.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+    try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.asInt32());
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
 
-    const second = ctx.takePendingPromiseJob().?;
-    defer second.deinit(rt);
-    try std.testing.expectEqual(@as(u64, 4), second.sequence);
-    try std.testing.expectEqual(@as(?i32, 11), second.value.asInt32());
-    try std.testing.expectEqual(@as(usize, 0), ctx.pending_promise_jobs.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.pending_promise_jobs_capacity);
-    try std.testing.expect(ctx.takePendingPromiseJob() == null);
+    var second = rt.job_queue.takeFirst().?;
+    defer second.deinit();
+    try std.testing.expectEqual(@as(?i32, 11), second.payload.promise.value.asInt32());
+    try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+    try std.testing.expect(rt.job_queue.takeFirst() == null);
+}
+
+test "typed job reservations preserve capacity without claiming a FIFO position" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(12));
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
+
+    try rt.job_queue.reserveEntries(1);
+
+    // A reentrant ordinary enqueue owns the next FIFO position, but cannot
+    // consume the slot promised to the prepared transaction.
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(20));
+    try std.testing.expectEqual(@as(usize, 8), rt.job_queue.capacity);
+
+    const reserved_value = try core.Object.create(rt, core.class.ids.object, null);
+    defer reserved_value.value().free(rt);
+    rt.job_queue.enqueueOwnedPromiseObjectPrepared(ctx, reserved_value.value().dup());
+
+    const expected = [_]i32{ 10, 11, 12, 20 };
+    for (expected) |value| {
+        var job = rt.job_queue.takeFirst().?;
+        defer job.deinit();
+        try std.testing.expectEqual(@as(?i32, value), job.payload.promise.value.asInt32());
+    }
+    var reserved_job = rt.job_queue.takeFirst().?;
+    defer reserved_job.deinit();
+    try std.testing.expect(reserved_job.payload.promise.value.same(reserved_value.value()));
+    try std.testing.expect(rt.job_queue.takeFirst() == null);
 }
 
 fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.BacktraceLocation {
@@ -354,16 +949,16 @@ test "context backtrace can borrow VM frame pc lazily" {
 
     var pc: usize = 7;
     ctx.borrowBacktracePc(&pc);
-    try std.testing.expectEqual(@as(i32, 6), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 16), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 6), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 16), ctx.runtime.backtrace_frames[0].location().col_num);
 
     pc = 12;
-    try std.testing.expectEqual(@as(i32, 11), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 21), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 11), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 21), ctx.runtime.backtrace_frames[0].location().col_num);
 
     ctx.updateBacktracePc(3);
-    try std.testing.expectEqual(@as(i32, 3), ctx.backtrace_frames[0].location().line_num);
-    try std.testing.expectEqual(@as(i32, 13), ctx.backtrace_frames[0].location().col_num);
+    try std.testing.expectEqual(@as(i32, 3), ctx.runtime.backtrace_frames[0].location().line_num);
+    try std.testing.expectEqual(@as(i32, 13), ctx.runtime.backtrace_frames[0].location().col_num);
 }
 
 test "predefined atoms preserve QuickJS order and kinds" {
@@ -398,25 +993,41 @@ test "predefined atoms preserve QuickJS order and kinds" {
     }
 }
 
-test "private brand property replacement retains stored private atom" {
+test "private brand property owns exactly one stored symbol value across replacement" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    defer object.value().free(rt);
+    var object_alive = true;
+    defer if (object_alive) object.value().free(rt);
 
     const brand = try rt.atoms.newSymbol("privateBrandReplacement", .private);
-    try object.defineOwnProperty(
-        rt,
-        core.atom.ids.Private_brand,
-        core.Descriptor.data(try rt.symbolValue(brand), true, true, true),
-    );
+    {
+        const initial = try rt.symbolValue(brand);
+        defer initial.free(rt);
+        try object.defineOwnProperty(
+            rt,
+            core.atom.ids.Private_brand,
+            core.Descriptor.data(initial, true, true, true),
+        );
+    }
     rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
-    try object.setProperty(rt, core.atom.ids.Private_brand, try rt.symbolValue(brand));
+    {
+        const replacement = try rt.symbolValue(brand);
+        defer replacement.free(rt);
+        try object.setProperty(rt, core.atom.ids.Private_brand, replacement);
+    }
     try std.testing.expect(rt.atoms.name(brand) != null);
-    const stored = object.getProperty(core.atom.ids.Private_brand);
-    try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
+    {
+        const stored = try object.getProperty(core.atom.ids.Private_brand);
+        defer stored.free(rt);
+        try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
+    }
+
+    object.value().free(rt);
+    object_alive = false;
+    try std.testing.expect(rt.atoms.name(brand) == null);
 }
 
 test "atom table interns predefined dynamic and integer atoms" {
@@ -569,7 +1180,7 @@ test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "GC keeps runtime and context value slot unique symbol atoms" {
+test "GC keeps runtime exception and realm value slot unique symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -578,6 +1189,11 @@ test "GC keeps runtime and context value slot unique symbol atoms" {
 
     const runtime_symbol = try rt.atoms.newValueSymbol("gc-runtime-slot-symbol");
     rt.current_exception = try rt.symbolValue(runtime_symbol);
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(runtime_symbol) != null);
+    ctx.clearException();
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(runtime_symbol) == null);
 
     const exception_symbol = try rt.atoms.newValueSymbol("gc-context-exception-symbol");
     _ = ctx.throwValue(try rt.symbolValue(exception_symbol));
@@ -591,21 +1207,16 @@ test "GC keeps runtime and context value slot unique symbol atoms" {
     ctx.class_prototypes[0] = try rt.symbolValue(prototype_symbol);
 
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(runtime_symbol) != null);
     try std.testing.expect(rt.atoms.name(exception_symbol) != null);
     try std.testing.expect(rt.atoms.name(rejection_symbol) != null);
     try std.testing.expect(rt.atoms.name(prototype_symbol) != null);
 
-    const old_runtime_exception = rt.current_exception;
-    rt.current_exception = core.JSValue.uninitialized();
-    old_runtime_exception.free(rt);
     ctx.clearException();
     const old_prototype = ctx.class_prototypes[0];
     ctx.class_prototypes[0] = core.JSValue.nullValue();
     old_prototype.free(rt);
 
     _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(runtime_symbol) == null);
     try std.testing.expect(rt.atoms.name(exception_symbol) == null);
     try std.testing.expect(rt.atoms.name(rejection_symbol) != null);
     try std.testing.expect(rt.atoms.name(prototype_symbol) == null);
@@ -648,18 +1259,16 @@ test "GC keeps context pending promise job unique symbol atoms until release" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    try ctx.ensurePendingPromiseJobCapacity(1);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
     const pending_symbol = try rt.atoms.newValueSymbol("gc-context-pending-job-symbol");
     const pending_value = try rt.symbolValue(pending_symbol);
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, pending_value);
+    try rt.job_queue.enqueuePromise(ctx, pending_value);
     pending_value.free(rt);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pending_symbol) != null);
 
-    var pending = ctx.takePendingPromiseJob().?;
-    pending.deinit(rt);
+    var pending = rt.job_queue.takeFirst().?;
+    pending.deinit();
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pending_symbol) == null);
@@ -668,13 +1277,15 @@ test "GC keeps context pending promise job unique symbol atoms until release" {
 test "GC keeps finalization job unique symbol atoms after dequeue until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const callback_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-callback-symbol");
     const held_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-held-symbol");
 
     const callback_value = try rt.symbolValue(callback_symbol);
     const held_value = try rt.symbolValue(held_symbol);
-    try rt.enqueueFinalizationJob(callback_value, held_value);
+    try rt.enqueueFinalizationJobForRealm(ctx, callback_value, held_value);
     callback_value.free(rt);
     held_value.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pending_finalization_job_count);
@@ -684,9 +1295,9 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
     try std.testing.expect(rt.atoms.name(callback_symbol) != null);
     try std.testing.expect(rt.atoms.name(held_symbol) != null);
 
-    var job = rt.takePendingFinalizationJob().?;
+    var job = rt.job_queue.takeFirst().?;
     var job_alive = true;
-    defer if (job_alive) job.deinit(rt);
+    defer if (job_alive) job.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pending_finalization_job_count);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().finalizer_queue_length);
 
@@ -694,7 +1305,7 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
     try std.testing.expect(rt.atoms.name(callback_symbol) != null);
     try std.testing.expect(rt.atoms.name(held_symbol) != null);
 
-    job.deinit(rt);
+    job.deinit();
     job_alive = false;
 
     _ = rt.runObjectCycleRemoval();
@@ -705,34 +1316,30 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
 test "GC keeps dequeued finalization job function bytecode symbol constants until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
     const symbol_value = try rt.symbolValue(symbol_atom);
-    fb.cpool[0] = symbol_value;
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = symbol_value;
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     const bytecode_value = core.JSValue.functionBytecode(&fb.header);
-    try rt.enqueueFinalizationJob(bytecode_value, core.JSValue.undefinedValue());
+    try rt.enqueueFinalizationJobForRealm(ctx, bytecode_value, core.JSValue.undefinedValue());
     bytecode_value.free(rt);
 
-    var job = rt.takePendingFinalizationJob().?;
+    var job = rt.job_queue.takeFirst().?;
     var job_alive = true;
-    defer if (job_alive) job.deinit(rt);
+    defer if (job_alive) job.deinit();
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    job.deinit(rt);
+    job.deinit();
     job_alive = false;
 
     _ = rt.runObjectCycleRemoval();
@@ -742,19 +1349,22 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
 test "GC keeps module registry unique symbol atoms until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const module_name = try rt.internAtom("gc-module-symbols.mjs");
     defer rt.atoms.free(module_name);
     const binding_name = try rt.internAtom("localSymbol");
     defer rt.atoms.free(binding_name);
 
-    const record = try rt.modules.create(module_name);
-    try record.ensureLocalBinding(binding_name);
-    const binding_index = record.findLocalBindingIndex(binding_name).?;
-
     const binding_symbol = try rt.atoms.newValueSymbol("gc-module-binding-symbol");
-    record.local_bindings[binding_index].initialized = true;
-    record.local_bindings[binding_index].cell = try rt.symbolValue(binding_symbol);
+    const binding_cell = try core.VarRef.createClosed(rt, try rt.symbolValue(binding_symbol));
+
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    try pending.addExport(binding_name, binding_name, 0);
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    record.publishRetainedExportCellNoFail(0, binding_cell.valueRef());
 
     const import_meta_symbol = try rt.atoms.newValueSymbol("gc-module-import-meta-symbol");
     record.import_meta = try rt.symbolValue(import_meta_symbol);
@@ -763,9 +1373,7 @@ test "GC keeps module registry unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(binding_symbol) != null);
     try std.testing.expect(rt.atoms.name(import_meta_symbol) != null);
 
-    const old_binding_cell = record.local_bindings[binding_index].cell;
-    record.local_bindings[binding_index].cell = core.JSValue.undefinedValue();
-    old_binding_cell.free(rt);
+    record.clearRetainedExportCellNoFail(rt, 0);
     if (record.import_meta) |old_import_meta| old_import_meta.free(rt);
     record.import_meta = null;
 
@@ -792,20 +1400,14 @@ test "GC keeps rooted function bytecode symbol constants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
     const symbol_value = try rt.symbolValue(symbol_atom);
-    fb.cpool[0] = symbol_value;
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = symbol_value;
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var rooted_value = core.JSValue.functionBytecode(&fb.header);
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_value }};
@@ -904,6 +1506,32 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
     try std.testing.expect(lone_surrogate.isWide());
     try std.testing.expectEqual(@as(usize, 1), lone_surrogate.len());
     try std.testing.expectEqual(@as(u16, 0xd800), lone_surrogate.codeUnitAt(0));
+}
+
+test "ASCII suffix concatenation preserves source width with one result allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const narrow_source = try core.string.String.createLatin1(rt, "ab");
+    defer narrow_source.value().free(rt);
+    const narrow_allocations = rt.memory.allocation_count;
+    const narrow = try core.string.String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
+    defer narrow.value().free(rt);
+    try std.testing.expect(!narrow.isWide());
+    try std.testing.expect(narrow.eqlBytes("aby"));
+    try std.testing.expectEqual(narrow_allocations + 1, rt.memory.allocation_count);
+
+    const wide_source = try core.string.String.createUtf16(rt, &.{ 0x0100, 'a' });
+    defer wide_source.value().free(rt);
+    const wide_allocations = rt.memory.allocation_count;
+    const wide = try core.string.String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
+    defer wide.value().free(rt);
+    try std.testing.expect(wide.isWide());
+    try std.testing.expectEqual(@as(usize, 3), wide.len());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
+    try std.testing.expectEqual(@as(u16, 'a'), wide.codeUnitAt(1));
+    try std.testing.expectEqual(@as(u16, 'y'), wide.codeUnitAt(2));
+    try std.testing.expectEqual(wide_allocations + 1, rt.memory.allocation_count);
 }
 
 test "flat strings store characters inline in a single fixed-size allocation" {
@@ -1137,7 +1765,8 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(@as(core.ClassId, 65), core.class.ids.std_file);
     try std.testing.expectEqual(@as(core.ClassId, 66), core.class.ids.disposable_stack);
     try std.testing.expectEqual(@as(core.ClassId, 67), core.class.ids.async_disposable_stack);
-    try std.testing.expectEqual(@as(core.ClassId, 68), core.class.ids.init_count);
+    try std.testing.expectEqual(@as(core.ClassId, 68), core.class.ids.global_object);
+    try std.testing.expectEqual(@as(core.ClassId, 69), core.class.ids.init_count);
     try std.testing.expect(rt.classes.isRegistered(core.class.ids.object));
     try std.testing.expect(rt.classes.isRegistered(core.class.ids.generator));
     try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
@@ -1146,8 +1775,8 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     defer rt.atoms.free(object_name);
     try std.testing.expectEqual(core.atom.ids.Object, object_name);
 
-    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
-    try std.testing.expectEqual(core.class.ids.init_count, dynamic_id);
+    const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
+    try std.testing.expect(dynamic_id >= core.class.ids.init_count);
     try rt.classes.register(dynamic_id, .{ .class_name = "HostThing", .has_exotic = true });
     try std.testing.expect(rt.classes.isRegistered(dynamic_id));
     const record = rt.classes.record(dynamic_id).?;
@@ -1174,7 +1803,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(core.class.PayloadKind.generator, rt.classes.record(core.class.ids.generator).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.c_function).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.bytecode_function).?.payload_kind);
-    try std.testing.expectEqual(core.class.PayloadKind.module_namespace, rt.classes.record(core.class.ids.module_ns).?.payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, rt.classes.record(core.class.ids.module_ns).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.weak_ref, core.class.standardPayloadKind(core.class.ids.weak_ref));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.disposable_stack));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.async_disposable_stack));
@@ -1251,6 +1880,73 @@ const TestExternalPayload = struct {
 
 const TestExternalObjectPayload = struct {
     object: ?*core.Object = null,
+};
+
+const ClassConstructionUnregisterProbe = struct {
+    rt: *core.JSRuntime,
+    class_id: core.ClassId,
+    fired: bool = false,
+
+    fn trigger(raw: ?*anyopaque, _: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (self.fired) return;
+        self.fired = true;
+        self.rt.classes.unregisterDynamic(self.class_id);
+    }
+};
+
+const ClassConstructionGrowthProbe = struct {
+    rt: *core.JSRuntime,
+    target_id: core.ClassId,
+    growth_id: core.ClassId,
+    fired: bool = false,
+    register_failed: bool = false,
+    target_record_after_growth: usize = 0,
+
+    fn trigger(raw: ?*anyopaque, _: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (self.fired) return;
+        self.fired = true;
+        self.rt.classes.register(self.growth_id, .{ .class_name = "GrowthDuringConstruction" }) catch {
+            self.register_failed = true;
+            return;
+        };
+        self.target_record_after_growth = @intFromPtr(self.rt.classes.recordPtr(self.target_id).?);
+    }
+};
+
+const InlineClassFinalizerReentry = struct {
+    var target_id: core.ClassId = core.class.invalid_class_id;
+    var growth_id: core.ClassId = core.class.invalid_class_id;
+    var calls: usize = 0;
+    var register_failed: bool = false;
+    var definition_visible_after_unregister: bool = false;
+    var property_storage_was_stripped: bool = false;
+    var owner_thread_observed: bool = false;
+
+    fn reset() void {
+        target_id = core.class.invalid_class_id;
+        growth_id = core.class.invalid_class_id;
+        calls = 0;
+        register_failed = false;
+        definition_visible_after_unregister = false;
+        property_storage_was_stripped = false;
+        owner_thread_observed = false;
+    }
+
+    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
+        calls += 1;
+        owner_thread_observed = rt.isOwnerThread() and rt.classes.isOwnerThread();
+        property_storage_was_stripped = !object.hasPropertyStorage();
+        rt.classes.unregisterDynamic(target_id);
+        definition_visible_after_unregister = rt.classes.isRegistered(target_id) and rt.classes.unregisterPending(target_id);
+        rt.classes.register(growth_id, .{ .class_name = "GrowthDuringInlineFinalizer" }) catch {
+            register_failed = true;
+        };
+        payload.* = null;
+    }
 };
 
 fn finalizeTestExternalPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
@@ -1383,11 +2079,175 @@ fn markTestExternalObjectPayload(
     visitor.object(@ptrCast(&typed.object));
 }
 
+test "class registration growth OOM does not publish a partial definition and retry succeeds" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_id: core.ClassId = 4096;
+    const record_bytes = @sizeOf(core.class.Record) * (@as(usize, class_id) + 1);
+    rt.setMemoryLimit(rt.memory.allocated_bytes + record_bytes);
+    try std.testing.expectError(error.OutOfMemory, rt.classes.register(class_id, .{ .class_name = "Object" }));
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(rt.classes.recordPtr(class_id) == null);
+
+    rt.setMemoryLimit(null);
+    try rt.classes.register(class_id, .{ .class_name = "Object" });
+    try std.testing.expect(rt.classes.isRegistered(class_id));
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "object creation rejects an unregistered dynamic class generation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try std.testing.expectError(error.InvalidClassId, core.Object.create(rt, class_id, null));
+
+    try rt.classes.register(class_id, .{ .class_name = "RegisteredGeneration" });
+    const object = try core.Object.create(rt, class_id, null);
+    object.value().free(rt);
+    rt.classes.unregisterDynamic(class_id);
+
+    try std.testing.expectError(error.InvalidClassId, core.Object.create(rt, class_id, null));
+}
+
+test "class construction pins its definition across reentrant unregister" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "PinnedConstructionDefinition",
+        .payload_kind = .object_data,
+        .has_exotic = true,
+    });
+
+    var probe = ClassConstructionUnregisterProbe{ .rt = rt, .class_id = class_id };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = ClassConstructionUnregisterProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_context;
+    }
+
+    const object = try core.Object.create(rt, class_id, null);
+    try std.testing.expect(probe.fired);
+    try std.testing.expect(rt.classes.isRegistered(class_id));
+    try std.testing.expect(rt.classes.unregisterPending(class_id));
+    try std.testing.expectError(error.InvalidClassId, core.Object.create(rt, class_id, null));
+    try std.testing.expectEqual(core.class.PayloadKind.object_data, object.flags.class_payload_kind);
+    try std.testing.expect(object.u.payload != null);
+    try std.testing.expect(object.flags.has_exotic_methods);
+
+    object.value().free(rt);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(!rt.classes.unregisterPending(class_id));
+}
+
+test "class construction scalar plan survives record table growth" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const target_id: core.ClassId = 1024;
+    const growth_id: core.ClassId = 4096;
+    try rt.classes.register(target_id, .{
+        .class_name = "ConstructionGrowthTarget",
+        .payload_kind = .object_data,
+        .has_exotic = true,
+    });
+    const target_record_before_growth = @intFromPtr(rt.classes.recordPtr(target_id).?);
+
+    var probe = ClassConstructionGrowthProbe{
+        .rt = rt,
+        .target_id = target_id,
+        .growth_id = growth_id,
+    };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = ClassConstructionGrowthProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_context;
+    }
+
+    const object = try core.Object.create(rt, target_id, null);
+    try std.testing.expect(probe.fired);
+    try std.testing.expect(!probe.register_failed);
+    try std.testing.expect(probe.target_record_after_growth != target_record_before_growth);
+    try std.testing.expectEqual(core.class.PayloadKind.object_data, object.flags.class_payload_kind);
+    try std.testing.expect(object.flags.has_exotic_methods);
+
+    object.value().free(rt);
+    rt.classes.unregisterDynamic(target_id);
+    rt.classes.unregisterDynamic(growth_id);
+}
+
+test "inline class finalizer reentry keeps definition pinned while growing the table" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    InlineClassFinalizerReentry.reset();
+    defer InlineClassFinalizerReentry.reset();
+    const target_id: core.ClassId = 2048;
+    const growth_id: core.ClassId = 8192;
+    InlineClassFinalizerReentry.target_id = target_id;
+    InlineClassFinalizerReentry.growth_id = growth_id;
+    try rt.classes.register(target_id, .{
+        .class_name = "InlineFinalizerReentryTarget",
+        .inline_payload_size = 32,
+        .inline_payload_align = 8,
+        .payload_finalizer = InlineClassFinalizerReentry.finalize,
+    });
+
+    const object = try core.Object.create(rt, target_id, null);
+    const property_atom = try rt.internAtom("owned-before-inline-finalizer");
+    defer rt.atoms.free(property_atom);
+    try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try std.testing.expect(object.hasPropertyStorage());
+    object.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), InlineClassFinalizerReentry.calls);
+    try std.testing.expect(InlineClassFinalizerReentry.definition_visible_after_unregister);
+    try std.testing.expect(InlineClassFinalizerReentry.property_storage_was_stripped);
+    try std.testing.expect(InlineClassFinalizerReentry.owner_thread_observed);
+    try std.testing.expect(!InlineClassFinalizerReentry.register_failed);
+    try std.testing.expect(!rt.classes.isRegistered(target_id));
+    try std.testing.expect(rt.classes.isRegistered(growth_id));
+    rt.classes.unregisterDynamic(growth_id);
+}
+
+test "dynamic class definition stays pinned until a weak husk is reclaimed" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "WeakHuskDefinitionPin",
+        .payload_kind = .object_data,
+    });
+    const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
+    const target = try core.Object.create(rt, class_id, null);
+    try weak_ref.setWeakRefTarget(rt, target.value());
+
+    rt.classes.unregisterDynamic(class_id);
+    target.value().free(rt);
+    try std.testing.expect(rt.classes.isRegistered(class_id));
+    try std.testing.expect(rt.classes.unregisterPending(class_id));
+    try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
+
+    weak_ref.value().free(rt);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(!rt.classes.unregisterPending(class_id));
+}
+
 test "class finalizers and context prototype slots are wired" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
+    const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(dynamic_id, .{
         .class_name = "FinalizedThing",
         .payload_kind = .iterator,
@@ -1437,7 +2297,7 @@ test "object destruction defers class payload finalizers" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const payloadless_id = rt.newClassId(core.class.invalid_class_id);
+    const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(payloadless_id, .{
         .class_name = "PayloadlessFinalized",
         .payload_finalizer = countPayloadFinalizer,
@@ -1454,7 +2314,7 @@ test "object destruction defers class payload finalizers" {
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadFinalized",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -1478,7 +2338,7 @@ test "strong collection clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantCollectionClear",
         .payload_finalizer = reentrantCollectionClearFinalizer,
@@ -1517,7 +2377,7 @@ test "dense array delete defers element finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantArrayDelete",
         .payload_finalizer = reentrantArrayDeleteFinalizer,
@@ -1554,7 +2414,7 @@ test "ordinary property delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantPropertyDelete",
         .payload_finalizer = reentrantPropertyDeleteFinalizer,
@@ -1582,13 +2442,13 @@ test "ordinary property delete defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), reentrant_property_delete_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
-    var before_cleanup = object.getProperty(key);
+    var before_cleanup = try object.getProperty(key);
     defer before_cleanup.free(rt);
     try std.testing.expect(before_cleanup.isUndefined());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
-    const after = object.getProperty(key);
+    const after = try object.getProperty(key);
     defer after.free(rt);
     try std.testing.expect(after.isUndefined());
 }
@@ -1597,17 +2457,17 @@ test "regexp lastIndex set defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantRegExpLastIndexSet",
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
     });
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
-    regexp.regexpLastIndexWritableSlot().* = true;
+    try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    regexp.regexpLastIndexSlot().* = value.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1634,17 +2494,17 @@ test "regexp lastIndex define defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantRegExpLastIndexDefine",
         .payload_finalizer = reentrantRegExpLastIndexFinalizer,
     });
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
-    regexp.regexpLastIndexWritableSlot().* = true;
+    try regexp.initializeRegExpLastIndex(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
-    regexp.regexpLastIndexSlot().* = value.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, value.value());
     value.value().free(rt);
 
     payload_finalizer_calls = 0;
@@ -1675,7 +2535,7 @@ test "mapped arguments binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsSet",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1716,7 +2576,7 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsVarRefSet",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1757,7 +2617,7 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantMappedArgumentsDelete",
         .payload_finalizer = reentrantMappedArgumentsFinalizer,
@@ -1790,14 +2650,14 @@ test "mapped arguments binding delete defers value finalizer reentry" {
     try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
     try expectOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
-    var before_cleanup = arguments.getProperty(key);
+    var before_cleanup = try arguments.getProperty(key);
     defer before_cleanup.free(rt);
     try std.testing.expect(before_cleanup.isUndefined());
     try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
-    const after = arguments.getProperty(key);
+    const after = try arguments.getProperty(key);
     defer after.free(rt);
     try std.testing.expectEqual(@as(?i32, 99), after.asInt32());
 }
@@ -1806,7 +2666,7 @@ test "cached iterator next clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantCachedIteratorNextClear",
         .payload_finalizer = reentrantCachedIteratorNextFinalizer,
@@ -1842,7 +2702,7 @@ test "exception slot clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantExceptionSlotClear",
         .payload_finalizer = reentrantExceptionSlotFinalizer,
@@ -1876,7 +2736,7 @@ test "array iterator target clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const reentrant_id = rt.newClassId(core.class.invalid_class_id);
+    const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(reentrant_id, .{
         .class_name = "ReentrantArrayIteratorTargetClear",
         .payload_finalizer = reentrantArrayIteratorFinalizer,
@@ -1918,12 +2778,12 @@ test "runtime cycle removal follows class payload mark hooks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const payloadless_id = rt.newClassId(core.class.invalid_class_id);
+    const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(payloadless_id, .{
         .class_name = "PayloadlessInCycle",
         .payload_finalizer = countPayloadFinalizer,
     });
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadInCycle",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -1944,6 +2804,10 @@ test "runtime cycle removal follows class payload mark hooks" {
     payload_mark_calls = 0;
     external.value().free(rt);
     payloadless.value().free(rt);
+    rt.classes.unregisterDynamic(payloadless_id);
+    rt.classes.unregisterDynamic(external_id);
+    try std.testing.expect(rt.classes.unregisterPending(payloadless_id));
+    try std.testing.expect(rt.classes.unregisterPending(external_id));
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
@@ -1951,13 +2815,15 @@ test "runtime cycle removal follows class payload mark hooks" {
     try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 2), rt.runDeferredClassPayloadFinalizerBudgeted(2));
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
+    try std.testing.expect(!rt.classes.isRegistered(payloadless_id));
+    try std.testing.expect(!rt.classes.isRegistered(external_id));
 }
 
 test "pending class payload finalizers trace payload value roots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "PendingExternalPayloadRoot",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -2012,11 +2878,74 @@ test "pending class payload finalizers trace payload value roots" {
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
+test "deferred payload callback pins the old generation through unregister" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "DeferredDefinitionPin",
+        .payload_finalizer = finalizeTestExternalPayload,
+        .payload_mark = markTestExternalPayload,
+    });
+
+    const wrapper = try core.Object.create(rt, class_id, null);
+    const old_generation = rt.classes.destructionPlan(class_id).?.generation;
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    const child_header = &child.header;
+    const payload = try rt.memory.create(TestExternalPayload);
+    payload.* = .{ .value = child.value().dup() };
+    wrapper.u.payload = @ptrCast(payload);
+    child.value().free(rt);
+
+    payload_finalizer_calls = 0;
+    payload_mark_calls = 0;
+    wrapper.value().free(rt);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    rt.classes.unregisterDynamic(class_id);
+    try std.testing.expect(rt.classes.isRegistered(class_id));
+    try std.testing.expect(rt.classes.unregisterPending(class_id));
+
+    const Counter = struct {
+        expected: *core.gc.Header,
+        count: usize = 0,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.refHeader()) |header| {
+                if (header == self.expected) self.count += 1;
+            }
+        }
+
+        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var counter = Counter{ .expected = child_header };
+    var visitor = core.runtime.RootVisitor{
+        .context = &counter,
+        .visit_value = Counter.visitValue,
+        .visit_object = Counter.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 1), counter.count);
+    try std.testing.expect(payload_mark_calls > 0);
+
+    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(!rt.classes.unregisterPending(class_id));
+
+    try rt.classes.register(class_id, .{ .class_name = "DeferredDefinitionPinRetry" });
+    var next_generation = try rt.classes.beginConstruction(class_id);
+    defer next_generation.abort();
+    try std.testing.expect(next_generation.definition.generation != old_generation);
+    rt.classes.unregisterDynamic(class_id);
+}
+
 test "runtime cycle removal clears class payload object slots before finalizers" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadObjectSlotCycle",
         .payload_finalizer = finalizeTestExternalObjectPayload,
@@ -2185,21 +3114,18 @@ test "runtime root tracer visits async roots" {
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var ctx: core.JSContext = undefined;
-    try ctx.init(&rt, .{});
-    defer ctx.deinit();
+    const ctx = try core.JSContext.create(&rt);
+    defer ctx.destroy();
 
-    try ctx.ensurePendingPromiseJobCapacity(1);
-    ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
-    ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(&ctx, 1, core.JSValue.int32(101));
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(101));
 
     const TestJob = struct {
         fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
             return core.JSValue.undefinedValue();
         }
     };
-    try rt.job_queue.enqueueFunc(&ctx, TestJob.run, &.{core.JSValue.int32(106)});
-    try rt.enqueueFinalizationJob(core.JSValue.int32(107), core.JSValue.int32(108));
+    try rt.job_queue.enqueueFunc(ctx, TestJob.run, &.{core.JSValue.int32(106)});
+    try rt.enqueueFinalizationJobForRealm(ctx, core.JSValue.int32(107), core.JSValue.int32(108));
 
     const Counter = struct {
         count: usize = 0,
@@ -2315,25 +3241,29 @@ test "value root buffer exposes mutable copied slice" {
     try std.testing.expectEqual(@as(?i32, 302), buffer.values[0].asInt32());
 }
 
-test "regexp state uses payload storage" {
+test "regexp internals use inline storage and lastIndex uses first shape slot" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source = try core.string.String.createAscii(rt, "a+");
     defer source.value().free(rt);
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
     defer regexp.value().free(rt);
 
-    try std.testing.expect(regexp.u.payload != null);
     try std.testing.expectEqual(core.class.PayloadKind.regexp, regexp.flags.class_payload_kind);
-    regexp.regexpSourceSlot().* = source.value().dup();
+    try regexp.initializeRegExpLastIndex(rt);
+    try regexp.setRegexpSource(rt, source.value());
     try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    regexp.regexpLastIndexSlot().* = core.JSValue.int32(3);
-    regexp.regexpLastIndexWritableSlot().* = false;
+    try regexp.defineOwnProperty(
+        rt,
+        core.atom.ids.lastIndex,
+        core.Descriptor.data(core.JSValue.int32(3), false, false, false),
+    );
 
     try std.testing.expect(regexp.regexpSource() != null);
     try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
+    try std.testing.expectEqual(core.atom.ids.lastIndex, regexp.propAtomAt(0));
     try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
@@ -2436,9 +3366,9 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
 
     try std.testing.expect(arguments.flags.fast_array);
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, arguments.arrayElementStorageMode());
-    try std.testing.expectEqual(@as(?i32, 2), arguments.getProperty(core.atom.ids.length).asInt32());
-    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 32), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try arguments.getProperty(core.atom.ids.length)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).asInt32());
+    try std.testing.expectEqual(@as(?i32, 32), (try arguments.getProperty(core.atom.atomFromUInt32(1))).asInt32());
     try std.testing.expect(arguments.externalClassPayload() == null);
 
     // Redefining a dense numeric property materializes the run into ordinary
@@ -2449,9 +3379,9 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
         core.Descriptor.data(core.JSValue.int32(41), false, false, false),
     );
     try std.testing.expect(!arguments.flags.fast_array);
-    try std.testing.expectEqual(@as(?i32, 31), arguments.getProperty(core.atom.atomFromUInt32(0)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 41), arguments.getProperty(core.atom.atomFromUInt32(1)).asInt32());
-    try std.testing.expectEqual(@as(?i32, 0), template.getProperty(core.atom.ids.length).asInt32());
+    try std.testing.expectEqual(@as(?i32, 31), (try arguments.getProperty(core.atom.atomFromUInt32(0))).asInt32());
+    try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(core.atom.atomFromUInt32(1))).asInt32());
+    try std.testing.expectEqual(@as(?i32, 0), (try template.getProperty(core.atom.ids.length)).asInt32());
 }
 
 test "object data state uses payload storage" {
@@ -2550,12 +3480,48 @@ test "generator state uses payload storage" {
     try std.testing.expect(generator.generatorJustYielded());
 }
 
+test "generator bound and proxy payloads carry no realm compensation" {
+    try std.testing.expect(!@hasField(core.object.GeneratorPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.GeneratorPayload, "borrowed_holder_index_lo"));
+    try std.testing.expect(!@hasField(core.object.GeneratorPayload, "borrowed_holder_index_mid"));
+    try std.testing.expect(!@hasField(core.object.GeneratorPayload, "borrowed_holder_index_hi"));
+    try std.testing.expect(!@hasField(core.object.BoundFunctionPayload, "realm_global"));
+    try std.testing.expect(!@hasField(core.object.BoundFunctionPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.ProxyPayload, "realm_global_ptr"));
+}
+
+test "leaf noncarrier payloads carry no borrowed realm compensation" {
+    try std.testing.expect(!@hasField(core.object.OrdinaryPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.ObjectDataPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.OrdinaryPayload, "typed_array_array_buffer_prototype"));
+    try std.testing.expect(!@hasField(core.object.FunctionRarePayload, "primitive_prototypes"));
+    try std.testing.expect(!@hasField(core.object.FunctionRarePayload, "realm_type_error_constructor"));
+    try std.testing.expect(!@hasField(core.object.BufferPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.ArgumentsPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.VarRefPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.StdFilePayload, "realm_global_ptr"));
+    try std.testing.expectEqual(core.class.PayloadKind.none, core.class.standardPayloadKind(core.class.ids.module_ns));
+    try std.testing.expect(!@hasField(core.object.PromisePayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.WeakRefPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.RegExpPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.TypedArrayPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.IteratorPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.CollectionPayload, "realm_global_ptr"));
+    try std.testing.expect(!@hasField(core.object.DisposableStackPayload, "realm_global_ptr"));
+}
+
+test "object payloads carry no private-name remap side tables" {
+    try std.testing.expect(!@hasField(core.object.OrdinaryPayload, "private_remap_from"));
+    try std.testing.expect(!@hasField(core.object.OrdinaryPayload, "private_remap_to"));
+    try std.testing.expect(!@hasField(core.object.FunctionRarePayload, "private_remap_from"));
+    try std.testing.expect(!@hasField(core.object.FunctionRarePayload, "private_remap_to"));
+    try std.testing.expect(!@hasField(core.object.FunctionRarePayload, "super_constructor"));
+}
+
 test "generator completion eagerly releases the resident execution owners" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const realm = try core.Object.create(rt, core.class.ids.object, null);
-    defer realm.value().free(rt);
     const current_function = try core.Object.create(rt, core.class.ids.object, null);
     defer current_function.value().free(rt);
     const this_object = try core.Object.create(rt, core.class.ids.object, null);
@@ -2568,7 +3534,6 @@ test "generator completion eagerly releases the resident execution owners" {
     generator.setGeneratorCurrentFunction(rt, current_function.value().dup());
     generator.setGeneratorThis(rt, this_object.value().dup());
     generator.setGeneratorYieldStarIterator(rt, delegate.value().dup());
-    try generator.setFunctionRealmGlobalPtr(rt, realm);
     generator.generatorActualArgCountSlot().* = 1;
     generator.generatorJustYieldedSlot().* = true;
     generator.generatorYieldStarSuspendedSlot().* = true;
@@ -2584,7 +3549,7 @@ test "generator completion eagerly releases the resident execution owners" {
     };
     generator.generatorExecutionStateSlot().replaceStorageOwned(17, 23, &replacement, rt);
 
-    try std.testing.expect(rt.borrowedReferenceHolderRegistered(generator));
+    try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
     try std.testing.expect(generator.generatorExecutionState().has_frame);
     generator.completeGeneratorExecution(rt);
 
@@ -2601,7 +3566,7 @@ test "generator completion eagerly releases the resident execution owners" {
     try std.testing.expect(!generator.generatorJustYielded());
     try std.testing.expect(!generator.generatorYieldStarSuspended());
     try std.testing.expectEqual(@as(i32, 0), generator.generatorResumeCompletionType());
-    try std.testing.expect(generator.functionRealmGlobalPtr() == null);
+    try std.testing.expect(generator.generatorFunctionRealmGlobalPtr() == null);
     try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
 
     // Async-generator completion can reach the same boundary after the VM
@@ -2686,9 +3651,13 @@ test "native function state uses payload storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const home = try core.Object.create(rt, core.class.ids.object, null);
-    defer home.value().free(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const home = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try home.ensureGlobalPayload(rt);
+    ctx.global = home;
     const function = try core.Object.create(rt, core.class.ids.c_function, null);
+    function.setNativeFunctionRealm(ctx);
     defer function.value().free(rt);
     const source = try core.string.String.createAscii(rt, "function f(){}");
     defer source.value().free(rt);
@@ -2698,29 +3667,60 @@ test "native function state uses payload storage" {
     (try function.functionSourceSlot(rt)).* = source.value().dup();
     function.hostFunctionKindSlot().* = 11;
     function.nativeFunctionIdSlot().* = 22;
-    (try function.functionClassFieldsInitSlot(rt)).* = core.JSValue.int32(44);
-    (try function.functionLexicalThisSlot(rt)).* = core.JSValue.int32(77);
-    const remap_from = try rt.memory.alloc(core.Atom, 1);
-    remap_from[0] = try rt.internAtom("oldPrivate");
-    (try function.privateRemapFromSlotEnsured(rt)).* = remap_from;
-    const remap_to = try rt.memory.alloc(core.Atom, 1);
-    remap_to[0] = try rt.internAtom("newPrivate");
-    (try function.privateRemapToSlotEnsured(rt)).* = remap_to;
     (try function.functionRealmGlobalSlot(rt)).* = home.value().dup();
-    try function.setFunctionRealmGlobalPtr(rt, home);
 
     try std.testing.expect(function.functionSource() != null);
     try std.testing.expectEqual(@as(i32, 11), function.hostFunctionKind());
     try std.testing.expectEqual(@as(i32, 22), function.nativeFunctionId());
     try std.testing.expect(function.functionBytecode() == null);
-    try std.testing.expectEqual(@as(?i32, 44), function.functionClassFieldsInit().?.asInt32());
     try std.testing.expectEqual(@as(usize, 0), function.functionCaptures().len);
-    try std.testing.expectEqual(@as(?i32, 77), function.functionLexicalThis().?.asInt32());
     try std.testing.expect(function.functionHomeObject() == null);
-    try std.testing.expectEqual(@as(usize, 1), function.privateRemapFrom().len);
-    try std.testing.expectEqual(@as(usize, 1), function.privateRemapTo().len);
     try std.testing.expect(function.functionRealmGlobal() != null);
+    try std.testing.expectEqual(ctx, function.nativeFunctionRealm().?);
     try std.testing.expectEqual(home, function.functionRealmGlobalPtr().?);
+}
+
+test "true C functions own their construction realm while data functions do not" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
+    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 1);
+
+    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
+    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, native_object.class_id);
+    try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
+    try std.testing.expectEqual(core.class.ids.c_function_data, data_object.class_id);
+    try std.testing.expect(data_object.nativeFunctionRealm() == null);
+    try std.testing.expectEqual(function_proto, native_object.getPrototype().?);
+    try std.testing.expectEqual(function_proto, data_object.getPrototype().?);
+
+    const data_name = (try data_object.getOwnProperty(rt, core.atom.ids.name)).?;
+    defer data_name.destroy(rt);
+    try std.testing.expect(data_name.value.asStringBody().?.eqlBytes("data"));
+    try std.testing.expectEqual(false, data_name.writable.?);
+    try std.testing.expectEqual(false, data_name.enumerable.?);
+    try std.testing.expectEqual(true, data_name.configurable.?);
+
+    const data_length = (try data_object.getOwnProperty(rt, core.atom.ids.length)).?;
+    defer data_length.destroy(rt);
+    try std.testing.expectEqual(@as(?i32, 1), data_length.value.asInt32());
+    try std.testing.expectEqual(false, data_length.writable.?);
+    try std.testing.expectEqual(false, data_length.enumerable.?);
+    try std.testing.expectEqual(true, data_length.configurable.?);
+
+    // The DATA carrier has no direct RealmRef. Its ordinary prototype edge is
+    // still a real JS graph edge, so release it before isolating the native
+    // function's direct construction-realm ownership below.
+    data.free(rt);
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    native.free(rt);
+    try std.testing.expect(rt.firstContext() == null);
 }
 
 test "bytecode function state uses the inline qjs function arm" {
@@ -2733,23 +3733,20 @@ test "bytecode function state uses the inline qjs function arm" {
     defer function.value().free(rt);
 
     try std.testing.expectEqual(core.class.PayloadKind.function, function.flags.class_payload_kind);
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    const closure_vars = try rt.memory.alloc(engine.bytecode.function_def.ClosureVar, 1);
-    closure_vars[0] = .{
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .closure_var_count = 1 });
+    fb.closureVar()[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
         .var_name = rt.atoms.dup(core.atom.ids.empty_string),
-    };
-    fb.closure_var = closure_vars.ptr;
-    fb.var_refs_len = 1;
-    try rt.gc.add(&fb.header);
+    });
+    fb.publishFixtureNoFail(rt);
+    const attach_alloc_calls = rt.memory.alloc_calls;
+    const attach_create_calls = rt.memory.create_calls;
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
+    try std.testing.expectEqual(attach_alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(attach_create_calls, rt.memory.create_calls);
     try std.testing.expectEqual(fb, function.bytecodeFunctionStoragePtr().function_bytecode.?);
-    // Every published bytecode function carries its immutable execution view;
-    // hot call-target resolution must never allocate or decline on a null cache.
-    try std.testing.expect(fb.cached_view != null);
+    try std.testing.expect(!@hasField(engine.bytecode.FunctionBytecode, "cached_view"));
     const captures = try rt.memory.alloc(*core.VarRef, 1);
     captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     function.setFunctionCaptures(rt, captures);
@@ -2762,15 +3759,40 @@ test "bytecode function state uses the inline qjs function arm" {
     try std.testing.expectEqual(home, function.functionHomeObject().?);
 }
 
-test "module namespace uses payload storage" {
+test "module namespace uses shape-only live-binding storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
     defer namespace.value().free(rt);
+    const export_name = try rt.internAtom("value");
+    defer rt.atoms.free(export_name);
 
-    try std.testing.expect(namespace.u.payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.module_namespace, namespace.flags.class_payload_kind);
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.int32(17));
+    cell.is_const = true;
+    try namespace.defineModuleVarRefProperty(rt, export_name, cell);
+    namespace.preventExtensions();
+
+    try std.testing.expect(namespace.u.payload == null);
+    try std.testing.expectEqual(core.class.PayloadKind.none, namespace.flags.class_payload_kind);
+    try std.testing.expectEqual(@as(usize, 1), namespace.shape_ref.prop_count);
+    try std.testing.expectEqual(core.property.Kind.var_ref, namespace.propKindAt(0));
+    try std.testing.expectEqual(cell, namespace.prop_values[0].slot.var_ref);
+
+    const desc = (try namespace.getOwnProperty(rt, export_name)).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(@as(?bool, true), desc.writable);
+    try std.testing.expectEqual(@as(?bool, true), desc.enumerable);
+    try std.testing.expectEqual(@as(?bool, false), desc.configurable);
+    try std.testing.expectEqual(@as(?i32, 17), desc.value.asInt32());
+
+    try std.testing.expectError(error.ReadOnly, namespace.setProperty(rt, export_name, core.JSValue.int32(18)));
+    try namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(17), true, true, false));
+    try std.testing.expectError(
+        error.ReadOnly,
+        namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(18), true, true, false)),
+    );
+    try std.testing.expect(!namespace.deleteProperty(rt, export_name));
 }
 
 test "shapes retain property atoms and compare transitions" {
@@ -2958,8 +3980,8 @@ test "ordinary object additions reuse transition shapes" {
 
     try std.testing.expectEqual(first.shape_ref, second.shape_ref);
     try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(?i32, 1), first.getProperty(a).asInt32());
-    try std.testing.expectEqual(@as(?i32, 4), second.getProperty(b).asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), (try first.getProperty(a)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 4), (try second.getProperty(b)).asInt32());
 }
 
 test "unique transition shape appends in place across FAM relocation" {
@@ -3002,7 +4024,7 @@ test "unique transition shape appends in place across FAM relocation" {
     try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(@as(u32, atoms.len), object.shape_ref.prop_count);
     for (atoms, 0..) |name, index| {
-        try std.testing.expectEqual(@as(?i32, @intCast(index)), object.getProperty(name).asInt32());
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(name)).asInt32());
         try std.testing.expect(object.shape_ref.firstPropertyIndex(name) != core.shape.no_property_index);
     }
 }
@@ -3043,7 +4065,7 @@ test "first property append OOM restores the no-storage sentinel" {
     // Retrying the same mutation proves the failed append restored a valid
     // empty-object state rather than leaving a dangling pseudo-allocation.
     try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 2), object.getProperty(name).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try object.getProperty(name)).asInt32());
 }
 
 test "failed new property definition rolls back retained entry" {
@@ -3135,7 +4157,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
     // A retry on the same object proves its value buffer still agrees with the
     // shape capacity and catches the former out-of-bounds write on index four.
     try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 5), object.getProperty(atoms[4]).asInt32());
+    try std.testing.expectEqual(@as(?i32, 5), (try object.getProperty(atoms[4])).asInt32());
 }
 
 test "context lexicals property alias releases context strong reference" {
@@ -3161,6 +4183,12 @@ test "failed auto-init property definition rolls back retained entry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
@@ -3185,7 +4213,7 @@ test "failed auto-init property definition rolls back retained entry" {
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineAutoInitProperty(rt, e, "auto_rollback_e", 0, core.property.Flags.data(true, false, true)),
+        object.defineAutoInitPropertyWithRealm(rt, e, "auto_rollback_e", 0, core.property.Flags.data(true, false, true), global),
     );
     rt.setMemoryLimit(null);
 
@@ -3200,9 +4228,11 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
@@ -3266,7 +4296,7 @@ test "property replacement preserves references under memory cap" {
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
-    const stored = object.getProperty(key);
+    const stored = try object.getProperty(key);
     defer stored.free(rt);
     try std.testing.expectEqual(&replacement.header, stored.refHeader().?);
 }
@@ -3476,7 +4506,7 @@ test "large object property lookup uses shape hash across delete and re-add" {
 
     const target = try rt.internAtom("prop_96");
     defer rt.atoms.free(target);
-    const before = obj.getProperty(target);
+    const before = try obj.getProperty(target);
     defer before.free(rt);
     try std.testing.expectEqual(@as(?i32, 96), before.asInt32());
 
@@ -3484,7 +4514,7 @@ test "large object property lookup uses shape hash across delete and re-add" {
     try std.testing.expect(!obj.hasOwnProperty(target));
 
     try obj.defineOwnProperty(rt, target, core.Descriptor.data(core.JSValue.int32(777), true, true, true));
-    const after = obj.getProperty(target);
+    const after = try obj.getProperty(target);
     defer after.free(rt);
     try std.testing.expectEqual(@as(?i32, 777), after.asInt32());
 }
@@ -3626,26 +4656,68 @@ test "gc process memory pressure policy maps rss and cgroup usage to major reque
 }
 
 test "function bytecode registration is old-space accounted" {
+    const fixture_layout = try engine.bytecode.FunctionLayout.init(
+        true,
+        true,
+        64,
+        3,
+        5,
+        4,
+        1,
+    );
+    // Keep this above the 512-byte small-object ceiling even in the alternate
+    // 8-byte JSValue representation. The main FAM must therefore use one
+    // standalone GC metadata prefix and one matching destroyWithFam call.
+    try std.testing.expect(fixture_layout.mainPayloadBytes() > 512);
+    try std.testing.expect(fixture_layout.total_size > 512);
+
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
         .gc_policy = .{
             .old_weight = 3,
-            .major_debt_threshold = @sizeOf(engine.bytecode.FunctionBytecode) * 3,
+            .major_debt_threshold = fixture_layout.total_size * 3,
         },
     });
     defer rt.deinit();
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
+    const baseline_bytes = rt.memory.allocated_bytes;
+    const baseline_allocations = rt.memory.allocation_count;
+    const baseline_create_calls = rt.memory.create_calls;
+    const baseline_destroy_calls = rt.memory.destroy_calls;
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(&rt, .{
+        .arg_count = 3,
+        .var_count = 5,
+        .defined_arg_count = 2,
+        .closure_var_count = 4,
+        .cpool_count = 64,
+        .byte_code = &.{engine.bytecode.opcode.op.return_undef},
+        .has_debug = true,
+        .has_extension = true,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(&rt);
+
+    try std.testing.expectEqual(fixture_layout.total_size, fb.layout().total_size);
+    try std.testing.expectEqual(fixture_layout.total_size, fb.heapByteSize());
+    try std.testing.expect(!fb.header.meta().flags.metadata_in_slab);
+    try std.testing.expectEqual(
+        baseline_bytes + fixture_layout.total_size + core.gc.metadata_prefix_size,
+        rt.memory.allocated_bytes,
+    );
+    try std.testing.expectEqual(baseline_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
+
+    fb.publishFixtureNoFail(&rt);
+    fb_published = true;
     const value = core.JSValue.functionBytecode(&fb.header);
-    defer value.free(&rt);
+    var value_alive = true;
+    defer if (value_alive) value.free(&rt);
 
     // old_allocated_bytes / old_alloc_count are derived lazily from live space
     // bytes and the GC object list, not stored per allocation.
     const fb_stats = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), fb_stats.old_allocated_bytes);
+    try std.testing.expectEqual(fb.heapByteSize(), fb_stats.old_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), fb_stats.old_alloc_count);
     // Heap object registration no longer accrues weighted allocation_debt; that
     // counter is reserved for the off-heap external-memory trigger. Even with a
@@ -3657,6 +4729,13 @@ test "function bytecode registration is old-space accounted" {
         try std.testing.expect(!rt.gc.hasPendingMajorRequest());
         try std.testing.expectEqual(@as(?core.gc.RequestReason, null), rt.gcLastRequestReasonForTest());
     }
+
+    value.free(&rt);
+    value_alive = false;
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls + 1, rt.memory.destroy_calls);
 }
 
 test "runtime exposes stable gc stats snapshot" {
@@ -3669,7 +4748,7 @@ test "runtime exposes stable gc stats snapshot" {
     });
     defer rt.deinit();
 
-    const owner = try core.Object.create(&rt, core.class.ids.c_function, null);
+    const owner = try core.Object.create(&rt, core.class.ids.c_function_data, null);
     defer owner.value().free(&rt);
     const child = try core.Object.create(&rt, core.class.ids.object, null);
     defer child.value().free(&rt);
@@ -3962,7 +5041,7 @@ test "object child edge tracing exposes mutable value slots" {
     try std.testing.expectEqual(@as(usize, 1), rewriter.count_401);
     try std.testing.expectEqual(@as(usize, 1), rewriter.count_402);
 
-    const property_value = array_obj.getProperty(key);
+    const property_value = try array_obj.getProperty(key);
     defer property_value.free(rt);
     try std.testing.expectEqual(@as(?i32, 501), property_value.asInt32());
     try std.testing.expectEqual(@as(?i32, 502), array_obj.arrayElements()[0].asInt32());
@@ -4061,7 +5140,7 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "TraceErrorExternalPayload",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -4251,6 +5330,31 @@ test "pollGC runs pending collection and clears pending flag" {
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.manual), rt.gcLastRequestReasonForTest());
     const result = try rt.pollGC(null, .normal);
     try expectClosedPropertyCycleReclaimed(rt, result.freed_objects);
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "pollGC preserves a pending major request during refcount teardown" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    rt.requestGCForTest();
+    const collections_before = rt.gc.stats.collections;
+    rt.gc.phase = .decref;
+    defer rt.gc.phase = .none;
+
+    const nested = try rt.pollGC(null, .urgent);
+    try std.testing.expectEqual(@as(usize, 0), nested.freed_objects);
+    try std.testing.expectEqual(collections_before, rt.gc.stats.collections);
+    try std.testing.expect(rt.gcPendingForTest());
+
+    // The object-allocation boundary delegates to pollGC, so it must preserve
+    // the same pending request rather than nesting through this phase too.
+    rt.collectBeforeObjectAllocation(@sizeOf(core.Object));
+    try std.testing.expectEqual(collections_before, rt.gc.stats.collections);
+    try std.testing.expect(rt.gcPendingForTest());
+
+    rt.gc.phase = .none;
+    _ = try rt.pollGC(null, .urgent);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -4478,7 +5582,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const continuation = try core.Object.create(rt, core.class.ids.c_function, null);
+    const continuation = try core.Object.create(rt, core.class.ids.c_function_data, null);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     const key = try rt.internAtom("continuation");
     defer rt.atoms.free(key);
@@ -4508,17 +5612,25 @@ test "async generator promise cycle is released by runtime cycle removal" {
     try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
 }
 
-test "shared lazy native function cache cycle is released by runtime cycle removal" {
+test "materialized native function cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    // The focused cycle fixture does not run exec's full intrinsic bootstrap;
+    // provide an in-graph Function.prototype stand-in so auto-init exercises
+    // the production direct-prototype constructor instead of a null-prototype
+    // compatibility path.
+    try global.setCachedFunctionProto(rt, global);
     const cached_key = try rt.internAtom("cached");
     defer rt.atoms.free(cached_key);
     const global_key = try rt.internAtom("global");
     defer rt.atoms.free(global_key);
 
-    try global.defineAutoInitPropertyWithRealmNativeAndCache(
+    try global.defineAutoInitPropertyWithRealmAndNative(
         rt,
         cached_key,
         "cached",
@@ -4526,24 +5638,19 @@ test "shared lazy native function cache cycle is released by runtime cycle remov
         core.property.Flags.data(true, false, true),
         global,
         0,
-        1,
     );
 
-    const cached_value = global.getProperty(cached_key);
+    const cached_value = try global.getProperty(cached_key);
     const cached_function: *core.Object = @fieldParentPtr("header", cached_value.refHeader().?);
     try cached_function.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
     cached_value.free(rt);
-    global.value().free(rt);
+    ctx.destroy();
 
-    // L2: materializing the cached auto-init placeholder now flips the owning
-    // shape's `Flags.kind` (auto_init -> data) in lockstep with the slot, which
-    // clones the global's (transition-cacheable) shape to a uniquely-owned one.
-    // The old shape is released by refcount at clone time, so it is reclaimed
-    // there instead of by cycle removal -- one fewer object in the cycle sweep
-    // (4 not 5). `expectNoLiveGc` below still confirms a fully-collected graph
-    // (liveCount==0, shapes.len==0), i.e. no leak.
-    try expectCycleReclaimedIncludingShapes(rt, 4, rt.runObjectCycleRemoval());
+    // Global materialization publishes the function through a fresh VarRef;
+    // that true C function independently owns the context. The collector must
+    // reclaim context -> global -> VarRef -> function -> context in one batch.
+    try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
 
 test "function bytecode constant object cycle is released by runtime cycle removal" {
@@ -4557,17 +5664,12 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     const function_key = try rt.internAtom("function");
     defer rt.atoms.free(function_key);
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
-    try rt.gc.add(&fb.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
-    fb.cpool[0] = captured.value().dup();
-    fb.cpool_count = 1;
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = name,
+        .cpool_count = 1,
+    });
+    fb.cpoolSlice()[0] = captured.value().dup();
+    fb.publishFixtureNoFail(rt);
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
@@ -4583,17 +5685,9 @@ test "runtime destroy releases callback bytecode before object registries" {
 
     const captured = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
-    fb.cpool[0] = captured.value().dup();
-    fb.cpool_count = 1;
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    fb.cpoolSlice()[0] = captured.value().dup();
+    fb.publishFixtureNoFail(rt);
 
     captured.value().free(rt);
 
@@ -4603,22 +5697,18 @@ test "runtime destroy releases callback bytecode before object registries" {
 test "runtime destroy releases nested callback bytecode in owner order" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
 
-    const child_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const child = &child_slice[0];
-    child.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&child.header);
+    const child = try engine.bytecode.FunctionBytecode.createFixture(rt, .{});
+    var child_published = false;
+    errdefer if (!child_published) child.destroyUnpublishedFixture(rt);
+    const parent = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var parent_published = false;
+    errdefer if (!parent_published) parent.destroyUnpublishedFixture(rt);
 
-    const parent_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const parent = &parent_slice[0];
-    parent.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&parent.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        parent.cpool = __cp.ptr;
-        parent.cpool_count = @intCast(__cp.len);
-    }
-    parent.cpool[0] = core.JSValue.functionBytecode(&child.header);
-    parent.cpool_count = 1;
+    parent.cpoolSlice()[0] = core.JSValue.functionBytecode(&child.header);
+    child.publishFixtureNoFail(rt);
+    child_published = true;
+    parent.publishFixtureNoFail(rt);
+    parent_published = true;
 
     rt.destroy();
 }
@@ -4626,22 +5716,18 @@ test "runtime destroy releases nested callback bytecode in owner order" {
 test "runtime destroy revisits callback bytecode after parent release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
 
-    const child_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const child = &child_slice[0];
-    child.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&child.header);
+    const child = try engine.bytecode.FunctionBytecode.createFixture(rt, .{});
+    var child_published = false;
+    errdefer if (!child_published) child.destroyUnpublishedFixture(rt);
+    const parent = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var parent_published = false;
+    errdefer if (!parent_published) parent.destroyUnpublishedFixture(rt);
 
-    const parent_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const parent = &parent_slice[0];
-    parent.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&parent.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        parent.cpool = __cp.ptr;
-        parent.cpool_count = @intCast(__cp.len);
-    }
-    parent.cpool[0] = core.JSValue.functionBytecode(&child.header).dup();
-    parent.cpool_count = 1;
+    child.publishFixtureNoFail(rt);
+    child_published = true;
+    parent.publishFixtureNoFail(rt);
+    parent_published = true;
+    parent.cpoolSlice()[0] = core.JSValue.functionBytecode(&child.header).dup();
 
     rt.destroy();
 }
@@ -4649,30 +5735,19 @@ test "runtime destroy revisits callback bytecode after parent release" {
 test "runtime destroy releases cyclic callback bytecode constants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
 
-    const left_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const left = &left_slice[0];
-    left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&left.header);
+    const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var left_published = false;
+    errdefer if (!left_published) left.destroyUnpublishedFixture(rt);
+    const right = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var right_published = false;
+    errdefer if (!right_published) right.destroyUnpublishedFixture(rt);
 
-    const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const right = &right_slice[0];
-    right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&right.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        left.cpool = __cp.ptr;
-        left.cpool_count = @intCast(__cp.len);
-    }
-    left.cpool[0] = core.JSValue.functionBytecode(&right.header).dup();
-    left.cpool_count = 1;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        right.cpool = __cp.ptr;
-        right.cpool_count = @intCast(__cp.len);
-    }
-    right.cpool[0] = core.JSValue.functionBytecode(&left.header).dup();
-    right.cpool_count = 1;
+    left.publishFixtureNoFail(rt);
+    left_published = true;
+    right.publishFixtureNoFail(rt);
+    right_published = true;
+    left.cpoolSlice()[0] = core.JSValue.functionBytecode(&right.header).dup();
+    right.cpoolSlice()[0] = core.JSValue.functionBytecode(&left.header).dup();
 
     rt.destroy();
 }
@@ -4680,53 +5755,19 @@ test "runtime destroy releases cyclic callback bytecode constants" {
 test "runtime destroy releases callback bytecode constants with transferred ownership" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
 
-    const left_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const left = &left_slice[0];
-    left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&left.header);
+    const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var left_published = false;
+    errdefer if (!left_published) left.destroyUnpublishedFixture(rt);
+    const right = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var right_published = false;
+    errdefer if (!right_published) right.destroyUnpublishedFixture(rt);
 
-    const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const right = &right_slice[0];
-    right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&right.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        left.cpool = __cp.ptr;
-        left.cpool_count = @intCast(__cp.len);
-    }
-    left.cpool[0] = core.JSValue.functionBytecode(&right.header);
-    left.cpool_count = 1;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        right.cpool = __cp.ptr;
-        right.cpool_count = @intCast(__cp.len);
-    }
-    right.cpool[0] = core.JSValue.functionBytecode(&left.header);
-    right.cpool_count = 1;
-
-    rt.destroy();
-}
-
-test "runtime destroy releases callback bytecode class fields init with transferred ownership" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-
-    const left_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const left = &left_slice[0];
-    left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&left.header);
-
-    const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const right = &right_slice[0];
-    right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&right.header);
-
-    const left_box = try rt.memory.create(core.JSValue);
-    left_box.* = core.JSValue.functionBytecode(&right.header);
-    left.class_fields_init = left_box;
-    const right_box = try rt.memory.create(core.JSValue);
-    right_box.* = core.JSValue.functionBytecode(&left.header);
-    right.class_fields_init = right_box;
+    left.cpoolSlice()[0] = core.JSValue.functionBytecode(&right.header);
+    right.cpoolSlice()[0] = core.JSValue.functionBytecode(&left.header);
+    left.publishFixtureNoFail(rt);
+    left_published = true;
+    right.publishFixtureNoFail(rt);
+    right_published = true;
 
     rt.destroy();
 }
@@ -4735,55 +5776,19 @@ test "bytecode-only callback constant cycle is released by runtime cycle removal
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const left_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const left = &left_slice[0];
-    left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&left.header);
+    const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var left_published = false;
+    errdefer if (!left_published) left.destroyUnpublishedFixture(rt);
+    const right = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var right_published = false;
+    errdefer if (!right_published) right.destroyUnpublishedFixture(rt);
 
-    const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const right = &right_slice[0];
-    right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&right.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        left.cpool = __cp.ptr;
-        left.cpool_count = @intCast(__cp.len);
-    }
-    left.cpool[0] = core.JSValue.functionBytecode(&right.header);
-    left.cpool_count = 1;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        right.cpool = __cp.ptr;
-        right.cpool_count = @intCast(__cp.len);
-    }
-    right.cpool[0] = core.JSValue.functionBytecode(&left.header);
-    right.cpool_count = 1;
-
-    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-}
-
-test "bytecode-only class fields init cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const left_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const left = &left_slice[0];
-    left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&left.header);
-
-    const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const right = &right_slice[0];
-    right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&right.header);
-
-    const left_box = try rt.memory.create(core.JSValue);
-    left_box.* = core.JSValue.functionBytecode(&right.header);
-    left.class_fields_init = left_box;
-    const right_box = try rt.memory.create(core.JSValue);
-    right_box.* = core.JSValue.functionBytecode(&left.header);
-    right.class_fields_init = right_box;
+    left.cpoolSlice()[0] = core.JSValue.functionBytecode(&right.header);
+    right.cpoolSlice()[0] = core.JSValue.functionBytecode(&left.header);
+    left.publishFixtureNoFail(rt);
+    left_published = true;
+    right.publishFixtureNoFail(rt);
+    right_published = true;
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -4803,17 +5808,12 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     const second_key = try rt.internAtom("second");
     defer rt.atoms.free(second_key);
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
-    try rt.gc.add(&fb.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
-    fb.cpool[0] = captured.value().dup();
-    fb.cpool_count = 1;
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = name,
+        .cpool_count = 1,
+    });
+    fb.cpoolSlice()[0] = captured.value().dup();
+    fb.publishFixtureNoFail(rt);
 
     const bytecode_value = core.JSValue.functionBytecode(&fb.header);
     try first.setFunctionBytecodeValue(rt, bytecode_value.dup());
@@ -4837,21 +5837,15 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
     const function_key = try rt.internAtom("capturedFunction");
     defer rt.atoms.free(function_key);
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    const closure_vars = try rt.memory.alloc(engine.bytecode.function_def.ClosureVar, 1);
-    closure_vars[0] = .{
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .closure_var_count = 1 });
+    fb.closureVar()[0] = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .ref,
         .var_idx = 0,
         .var_name = rt.atoms.dup(core.atom.ids.empty_string),
-    };
-    fb.closure_var = closure_vars.ptr;
-    fb.var_refs_len = 1;
-    try rt.gc.add(&fb.header);
+    });
+    fb.publishFixtureNoFail(rt);
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
-    try function.bindBytecodeFunctionRealmGlobal(global);
     const captures = try rt.memory.alloc(*core.VarRef, 1);
     captures[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(1));
     function.setFunctionCaptures(rt, captures);
@@ -4877,30 +5871,25 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     const function_key = try rt.internAtom("function");
     defer rt.atoms.free(function_key);
 
-    const outer_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const outer = &outer_slice[0];
-    outer.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, outer_name);
-    try rt.gc.add(&outer.header);
+    const outer = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = outer_name,
+        .cpool_count = 1,
+    });
+    var outer_published = false;
+    errdefer if (!outer_published) outer.destroyUnpublishedFixture(rt);
+    const inner = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = inner_name,
+        .cpool_count = 1,
+    });
+    var inner_published = false;
+    errdefer if (!inner_published) inner.destroyUnpublishedFixture(rt);
 
-    const inner_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const inner = &inner_slice[0];
-    inner.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, inner_name);
-    try rt.gc.add(&inner.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        outer.cpool = __cp.ptr;
-        outer.cpool_count = @intCast(__cp.len);
-    }
-    outer.cpool[0] = core.JSValue.functionBytecode(&inner.header);
-    outer.cpool_count = 1;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        inner.cpool = __cp.ptr;
-        inner.cpool_count = @intCast(__cp.len);
-    }
-    inner.cpool[0] = captured.value().dup();
-    inner.cpool_count = 1;
+    outer.cpoolSlice()[0] = core.JSValue.functionBytecode(&inner.header);
+    inner.cpoolSlice()[0] = captured.value().dup();
+    outer.publishFixtureNoFail(rt);
+    outer_published = true;
+    inner.publishFixtureNoFail(rt);
+    inner_published = true;
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
@@ -4924,31 +5913,26 @@ test "cyclic internal function bytecode references are released by runtime cycle
     const function_key = try rt.internAtom("function");
     defer rt.atoms.free(function_key);
 
-    const outer_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const outer = &outer_slice[0];
-    outer.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, outer_name);
-    try rt.gc.add(&outer.header);
+    const outer = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = outer_name,
+        .cpool_count = 1,
+    });
+    var outer_published = false;
+    errdefer if (!outer_published) outer.destroyUnpublishedFixture(rt);
+    const inner = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = inner_name,
+        .cpool_count = 2,
+    });
+    var inner_published = false;
+    errdefer if (!inner_published) inner.destroyUnpublishedFixture(rt);
 
-    const inner_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const inner = &inner_slice[0];
-    inner.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, inner_name);
-    try rt.gc.add(&inner.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        outer.cpool = __cp.ptr;
-        outer.cpool_count = @intCast(__cp.len);
-    }
-    outer.cpool[0] = core.JSValue.functionBytecode(&inner.header);
-    outer.cpool_count = 1;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 2);
-        inner.cpool = __cp.ptr;
-        inner.cpool_count = @intCast(__cp.len);
-    }
-    inner.cpool[0] = core.JSValue.functionBytecode(&outer.header).dup();
-    inner.cpool[1] = captured.value().dup();
-    inner.cpool_count = 2;
+    outer.cpoolSlice()[0] = core.JSValue.functionBytecode(&inner.header);
+    inner.cpoolSlice()[1] = captured.value().dup();
+    outer.publishFixtureNoFail(rt);
+    outer_published = true;
+    inner.publishFixtureNoFail(rt);
+    inner_published = true;
+    inner.cpoolSlice()[0] = core.JSValue.functionBytecode(&outer.header).dup();
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
     try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
@@ -4963,7 +5947,7 @@ test "class payload function bytecode constant object cycle is released by runti
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const external_id = rt.newClassId(core.class.invalid_class_id);
+    const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
         .class_name = "ExternalPayloadBytecodeCycle",
         .payload_finalizer = finalizeTestExternalPayload,
@@ -4977,21 +5961,18 @@ test "class payload function bytecode constant object cycle is released by runti
     const external_key = try rt.internAtom("external");
     defer rt.atoms.free(external_key);
 
-    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
-    try rt.gc.add(&fb.header);
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
-    fb.cpool[0] = captured.value().dup();
-    fb.cpool_count = 1;
-
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = name,
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const payload = try rt.memory.create(TestExternalPayload);
+    fb.cpoolSlice()[0] = captured.value().dup();
     payload.* = .{ .value = core.JSValue.functionBytecode(&fb.header) };
     external.u.payload = @ptrCast(payload);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
     try captured.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), true, true, true));
 
     payload_finalizer_calls = 0;
@@ -5008,11 +5989,14 @@ test "class payload function bytecode constant object cycle is released by runti
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-test "realm cached prototypes are strong cycle-collected references" {
+test "realm context owns cached prototype references" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const ctx = try core.JSContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     const promise_proto = try core.Object.create(rt, core.class.ids.object, null);
     const global_key = try rt.internAtom("global");
@@ -5027,25 +6011,27 @@ test "realm cached prototypes are strong cycle-collected references" {
     try std.testing.expectEqual(@as(i32, 2), function_proto.header.meta().rc);
     try std.testing.expectEqual(@as(i32, 2), promise_proto.header.meta().rc);
 
-    global.value().free(rt);
+    ctx.destroy();
     function_proto.value().free(rt);
     promise_proto.value().free(rt);
 
-    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-test "destroyed realm global clears borrowed realm pointers and auto init metadata" {
+test "auto-init slot owns its Realm until the property is deleted" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const lazy_key = try rt.internAtom("lazy");
     defer rt.atoms.free(lazy_key);
 
-    try holder.setFunctionRealmGlobalPtr(rt, global);
-    try holder.defineAutoInitPropertyWithRealmNativeAndCache(
+    try holder.defineAutoInitPropertyWithRealmAndNative(
         rt,
         lazy_key,
         "lazy",
@@ -5053,98 +6039,238 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
         core.property.Flags.data(true, false, true),
         global,
         0,
-        1,
     );
 
-    try std.testing.expectEqual(global, holder.functionRealmGlobalPtr().?);
-    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
+    const slot = holder.prop_values[0].slot.auto_init;
+    try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
+    try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
 
-    global.value().free(rt);
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
 
-    try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
-    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
-
-    const lazy = holder.getProperty(lazy_key);
-    defer lazy.free(rt);
-    try std.testing.expect(lazy.isObject());
+    try std.testing.expect(holder.deleteProperty(rt, lazy_key));
+    try std.testing.expectEqual(@as(?*core.RealmContext, null), rt.firstContext());
 
     holder.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
 }
 
-test "borrowed realm bookkeeping does not force ordinary property slow paths" {
+test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
-    const holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer holder.value().free(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const value_holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer value_holder.value().free(rt);
+    const cell_holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer cell_holder.value().free(rt);
+    const value_key = try rt.internAtom("module_namespace_value");
+    defer rt.atoms.free(value_key);
+    const cell_key = try rt.internAtom("module_namespace_cell");
+    defer rt.atoms.free(cell_key);
+    const flags = core.property.Flags.data(true, false, true);
 
-    try std.testing.expect(!holder.needsSlowPropertyAccess());
-    try holder.setFunctionRealmGlobalPtr(rt, global);
-    try std.testing.expect(rt.borrowedReferenceHolderRegistered(holder));
-    try std.testing.expect(!holder.needsSlowPropertyAccess());
+    var value_fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .value = core.JSValue.int32(41) },
+    };
+    try value_holder.defineModuleAutoInitPropertyForFixture(rt, value_key, flags, ctx, &value_fixture.owner);
+    try std.testing.expectEqual(core.property.AutoInitId.module_ns, value_holder.prop_values[0].slot.auto_init.realm_and_id.id());
+    const namespace_value = try value_holder.getProperty(value_key);
+    defer namespace_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 41), namespace_value.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), value_fixture.calls);
+    try std.testing.expectEqual(core.property.Kind.data, value_holder.propKindAt(0));
+
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
+    defer cell.freeCell(rt);
+    var cell_fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .var_ref = cell },
+    };
+    try cell_holder.defineModuleAutoInitPropertyForFixture(rt, cell_key, flags, ctx, &cell_fixture.owner);
+    const first_cell_value = try cell_holder.getProperty(cell_key);
+    defer first_cell_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 7), first_cell_value.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), cell_fixture.calls);
+    try std.testing.expectEqual(core.property.Kind.var_ref, cell_holder.propKindAt(0));
+    try std.testing.expectEqual(cell, cell_holder.prop_values[0].slot.var_ref);
+
+    cell.setVarRefValue(rt, core.JSValue.int32(9));
+    const updated_cell_value = try cell_holder.getProperty(cell_key);
+    defer updated_cell_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 9), updated_cell_value.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), cell_fixture.calls);
 }
 
-test "cleared realm pointer unregisters empty borrowed holder" {
+test "MODULE_NS auto-init failure retains its slot Realm and retries once per read" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("module_namespace_retry");
+    defer rt.atoms.free(key);
+    const baseline_realm_refs = ctx.header.meta().rc;
+    var fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .fail_once = core.JSValue.int32(88) },
+    };
+
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try std.testing.expectError(error.OutOfMemory, holder.getProperty(key));
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expectEqual(core.property.Kind.auto_init, holder.propKindAt(0));
+    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+
+    const retried = try holder.getProperty(key);
+    defer retried.free(rt);
+    try std.testing.expectEqual(@as(?i32, 88), retried.asInt32());
+    try std.testing.expectEqual(@as(usize, 2), fixture.calls);
+    try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+}
+
+test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("module_namespace_reentry");
+    defer rt.atoms.free(key);
+    var fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .reenter = .{
+            .rt = rt,
+            .holder = holder,
+            .atom_id = key,
+            .replacement = core.JSValue.int32(99),
+            .materialized = core.JSValue.int32(1),
+        } },
+    };
+
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try std.testing.expectError(error.IncompatibleDescriptor, holder.getProperty(key));
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
+    const replacement = try holder.getProperty(key);
+    defer replacement.free(rt);
+    try std.testing.expectEqual(@as(?i32, 99), replacement.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+}
+
+test "auto-init slot clone and destroy retain and release the typed Realm edge exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("module_namespace_clone");
+    defer rt.atoms.free(key);
+    var fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .value = core.JSValue.int32(1) },
+    };
+    const baseline_realm_refs = ctx.header.meta().rc;
+
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    var clone = holder.prop_values[0].slot.auto_init.clone();
+    try std.testing.expectEqual(baseline_realm_refs + 2, ctx.header.meta().rc);
+    clone.deinit(rt);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try std.testing.expect(holder.deleteProperty(rt, key));
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+}
+
+test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    const lazy_key = try rt.internAtom("module_namespace_cycle");
+    defer rt.atoms.free(lazy_key);
+    const holder_key = try rt.internAtom("holder");
+    defer rt.atoms.free(holder_key);
+    var fixture = ModuleAutoInitFixture{
+        .expected_realm = &ctx.header,
+        .result = .{ .value = core.JSValue.int32(1) },
+    };
+
+    try holder.defineModuleAutoInitPropertyForFixture(rt, lazy_key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try global.defineOwnProperty(rt, holder_key, core.Descriptor.data(holder.value(), true, true, true));
+    ctx.destroy();
+    holder.value().free(rt);
+
+    // Realm -> global -> holder -> typed AUTOINIT Realm, plus the two
+    // one-property shapes.
+    try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
+}
+
+test "ordinary and object-data payloads ignore generic realm assignment" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
     _ = try global.ensureRealmPayload(rt);
-    const holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer holder.value().free(rt);
+    const ordinary = try core.Object.create(rt, core.class.ids.object, null);
+    defer ordinary.value().free(rt);
+    const object_data = try core.Object.create(rt, core.class.ids.number, null);
+    defer object_data.value().free(rt);
 
-    try holder.setFunctionRealmGlobalPtr(rt, global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-
-    try holder.setFunctionRealmGlobalPtr(rt, null);
-    try std.testing.expectEqual(@as(?*core.Object, null), holder.functionRealmGlobalPtr());
+    for ([_]*core.Object{ ordinary, object_data }) |holder| {
+        try holder.setFunctionRealmGlobalPtr(rt, global);
+        try holder.setFunctionRealmGlobalPtrIfNull(rt, global);
+        try std.testing.expect(holder.functionRealmGlobalPtr() == null);
+        try std.testing.expect(!rt.borrowedReferenceHolderRegistered(holder));
+        try std.testing.expect(holder.borrowedReferenceHolderIndex() == null);
+    }
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
 }
 
-test "native function borrowed holder cache follows swap removal" {
+test "native call carriers do not enter borrowed realm bookkeeping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
 
-    const first = try core.Object.create(rt, core.class.ids.c_function, null);
-    const second = try core.Object.create(rt, core.class.ids.c_function, null);
-    const third = try core.Object.create(rt, core.class.ids.c_function, null);
+    const native = try engine.core.function.nativeFunction(ctx, "native", 0);
+    defer native.free(rt);
+    const data = try engine.core.function.nativeDataFunctionWithPrototype(rt, function_proto, "data", 0);
+    defer data.free(rt);
+    const native_object: *core.Object = @fieldParentPtr("header", native.refHeader().?);
+    const data_object: *core.Object = @fieldParentPtr("header", data.refHeader().?);
 
-    try first.setFunctionRealmGlobalPtr(rt, global);
-    try second.setFunctionRealmGlobalPtr(rt, global);
-    try third.setFunctionRealmGlobalPtr(rt, global);
-    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
-
-    // Removing the first entry swaps the tail into its slot and must repair the
-    // moved function's cached index. Removing that moved entry repeats the same
-    // edge, exercising the FIFO teardown shape that used to be quadratic.
-    first.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-
-    try third.setFunctionRealmGlobalPtr(rt, null);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
-    third.value().free(rt);
-
-    try second.setFunctionRealmGlobalPtr(rt, null);
+    try data_object.setFunctionRealmGlobalPtr(rt, global);
+    try std.testing.expectEqual(ctx, native_object.nativeFunctionRealm().?);
+    try std.testing.expect(data_object.nativeFunctionRealm() == null);
+    try std.testing.expect(native_object.borrowedReferenceHolderIndex() == null);
+    try std.testing.expect(data_object.borrowedReferenceHolderIndex() == null);
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
-    second.value().free(rt);
 }
 
-test "generator borrowed holder cache follows swap removal" {
+test "generator noncarriers never enter borrowed realm bookkeeping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -5153,32 +6279,185 @@ test "generator borrowed holder cache follows swap removal" {
     _ = try global.ensureRealmPayload(rt);
 
     const first = try core.Object.create(rt, core.class.ids.generator, null);
+    defer first.value().free(rt);
     const second = try core.Object.create(rt, core.class.ids.async_generator, null);
+    defer second.value().free(rt);
     const third = try core.Object.create(rt, core.class.ids.generator, null);
+    defer third.value().free(rt);
 
     try first.setFunctionRealmGlobalPtr(rt, global);
-    try second.setFunctionRealmGlobalPtr(rt, global);
+    try second.setFunctionRealmGlobalPtrIfNull(rt, global);
     try third.setFunctionRealmGlobalPtr(rt, global);
-    try std.testing.expectEqual(@as(?usize, 0), first.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 2), third.borrowedReferenceHolderIndex());
-
-    // Generator instances carry the same borrowed realm edge as functions.
-    // Removing an early entry must repair the swapped tail's index so bulk
-    // generator teardown remains linear rather than rescanning the registry.
-    first.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 2), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), third.borrowedReferenceHolderIndex());
-    try std.testing.expectEqual(@as(?usize, 1), second.borrowedReferenceHolderIndex());
-
-    try third.setFunctionRealmGlobalPtr(rt, null);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@as(?usize, 0), second.borrowedReferenceHolderIndex());
-    third.value().free(rt);
-
-    try second.setFunctionRealmGlobalPtr(rt, null);
+    for ([_]*core.Object{ first, second, third }) |generator| {
+        try std.testing.expect(generator.functionRealmGlobalPtr() == null);
+        try std.testing.expect(generator.borrowedReferenceHolderIndex() == null);
+        try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
+    }
     try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
-    second.value().free(rt);
+}
+
+test "leaf payload noncarriers ignore generic realm assignment" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    _ = try global.ensureRealmPayload(rt);
+
+    const arguments_class = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(arguments_class, .{
+        .class_name = "ArgumentsPayloadNoncarrier",
+        .payload_kind = .arguments,
+    });
+    defer rt.classes.unregisterDynamic(arguments_class);
+
+    const var_ref_class = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(var_ref_class, .{
+        .class_name = "VarRefPayloadNoncarrier",
+        .payload_kind = .var_ref,
+    });
+    defer rt.classes.unregisterDynamic(var_ref_class);
+
+    const objects = [_]*core.Object{
+        try core.Object.create(rt, core.class.ids.array_buffer, null),
+        try core.Object.create(rt, arguments_class, null),
+        try core.Object.create(rt, var_ref_class, null),
+        try core.Object.create(rt, core.class.ids.std_file, null),
+        try core.Object.create(rt, core.class.ids.module_ns, null),
+    };
+    defer for (objects) |object| object.value().free(rt);
+
+    for (objects) |object| {
+        try object.setFunctionRealmGlobalPtr(rt, global);
+        try object.setFunctionRealmGlobalPtrIfNull(rt, global);
+        try std.testing.expect(object.functionRealmGlobalPtr() == null);
+        try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
+        try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
+    }
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+}
+
+test "promise weak-ref regexp and typed-array payloads ignore generic realm assignment" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    _ = try global.ensureRealmPayload(rt);
+
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    defer promise.value().free(rt);
+    const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
+    defer weak_ref.value().free(rt);
+    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
+    defer regexp.value().free(rt);
+    const typed_array = try core.Object.create(rt, core.class.ids.uint8_array, null);
+    defer typed_array.value().free(rt);
+
+    for ([_]*core.Object{ promise, weak_ref, regexp, typed_array }) |object| {
+        try object.setFunctionRealmGlobalPtr(rt, global);
+        try object.setFunctionRealmGlobalPtrIfNull(rt, global);
+        try std.testing.expect(object.functionRealmGlobalPtr() == null);
+        try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
+        try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
+    }
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+
+    // WeakRef's payload-resident lifetime list is real weak-edge machinery and
+    // remains independent from the retired generic realm registry entries.
+    try std.testing.expectEqual(weak_ref, rt.weak_reference_holder_head.?);
+    try std.testing.expectEqual(weak_ref, rt.weak_reference_holder_tail.?);
+    try std.testing.expect(weak_ref.weakReferenceHolderPrevious() == null);
+    try std.testing.expect(weak_ref.weakReferenceHolderNext() == null);
+}
+
+test "iterator collection and disposable payloads ignore generic realm assignment" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    _ = try global.ensureRealmPayload(rt);
+
+    const iterator = try core.Object.create(rt, core.class.ids.map_iterator, null);
+    defer iterator.value().free(rt);
+    const collection = try core.Object.create(rt, core.class.ids.map, null);
+    defer collection.value().free(rt);
+    const disposable = try core.Object.create(rt, core.class.ids.disposable_stack, null);
+    defer disposable.value().free(rt);
+
+    for ([_]*core.Object{ iterator, collection, disposable }) |object| {
+        try object.setFunctionRealmGlobalPtr(rt, global);
+        try object.setFunctionRealmGlobalPtrIfNull(rt, global);
+        try std.testing.expect(object.functionRealmGlobalPtr() == null);
+        try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
+        try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
+    }
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+}
+
+test "collection iterator prototype follows explicit active realm, never receiver" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_realm = try core.RealmContext.create(rt);
+    defer first_realm.destroy();
+    const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try first_global.ensureGlobalPayload(rt);
+    first_realm.global = first_global;
+
+    const second_realm = try core.RealmContext.create(rt);
+    defer second_realm.destroy();
+    const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try second_global.ensureGlobalPayload(rt);
+    second_realm.global = second_global;
+
+    const first_iterator_prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer first_iterator_prototype.value().free(rt);
+    const second_iterator_prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer second_iterator_prototype.value().free(rt);
+    first_realm.class_prototypes[core.class.ids.map_iterator] = first_iterator_prototype.value().dup();
+    second_realm.class_prototypes[core.class.ids.map_iterator] = second_iterator_prototype.value().dup();
+
+    const map = try core.Object.create(rt, core.class.ids.map, first_iterator_prototype);
+    defer map.value().free(rt);
+
+    const context_iterator_value = try engine.exec.collection_ops.methodCallWithContext(
+        second_realm,
+        map.value(),
+        @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
+        &.{},
+        &.{},
+    );
+    defer context_iterator_value.free(rt);
+    const context_iterator = try core.Object.expect(context_iterator_value);
+    try std.testing.expectEqual(second_iterator_prototype, context_iterator.getPrototype().?);
+
+    // The explicit active global wins even when the caller passes a different
+    // current context and the receiver belongs to that context's object graph.
+    const iterator_value = try engine.exec.collection_ops.methodCallWithGlobal(
+        first_realm,
+        second_global,
+        map.value(),
+        @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
+        &.{},
+        &.{},
+    );
+    defer iterator_value.free(rt);
+    const result_iterator = try core.Object.expect(iterator_value);
+    try std.testing.expectEqual(second_iterator_prototype, result_iterator.getPrototype().?);
+
+    // Payload-only helpers have no Realm authority and must fail rather than
+    // recovering one from the collection receiver.
+    try std.testing.expectError(
+        error.InvalidBuiltinRegistry,
+        engine.exec.collection_ops.methodCall(
+            rt,
+            map.value(),
+            @intFromEnum(engine.exec.collection_ops.PrototypeMethod.keys),
+            &.{},
+        ),
+    );
 }
 
 test "weak reference holders use a lifetime intrusive list" {
@@ -5290,72 +6569,82 @@ test "fresh object prototype rebinding reuses the shared empty root shape" {
     try std.testing.expectEqual(@as(u32, 0), first.shape_ref.prop_count);
 }
 
-test "replaced realm auto-init unregisters empty borrowed holder" {
+test "replacing auto-init transfers the owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const first_ctx = try core.RealmContext.create(rt);
+    defer first_ctx.destroy();
+    const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try first_global.ensureGlobalPayload(rt);
+    first_ctx.global = first_global;
+    const second_ctx = try core.RealmContext.create(rt);
+    defer second_ctx.destroy();
+    const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try second_global.ensureGlobalPayload(rt);
+    second_ctx.global = second_global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const key = try rt.internAtom("lazy_replace_realm");
     defer rt.atoms.free(key);
 
-    try holder.defineAutoInitPropertyWithRealmNativeAndCache(
+    try holder.defineAutoInitPropertyWithRealmAndNative(
         rt,
         key,
         "lazy_replace_realm",
         0,
         core.property.Flags.data(true, false, true),
-        global,
-        0,
+        first_global,
         0,
     );
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
-    try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
+    try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 
-    try holder.replaceAutoInitPropertyWithRealmNativeAndCache(
+    try holder.replaceAutoInitPropertyWithRealmAndNative(
         rt,
         key,
         "lazy_replace_realm",
         0,
         core.property.Flags.data(true, false, true),
-        null,
-        0,
+        second_global,
         0,
     );
 
-    try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 }
 
-test "deleted realm auto-init unregisters empty borrowed holder" {
+test "deleting auto-init releases its owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const key = try rt.internAtom("lazy_delete_realm");
     defer rt.atoms.free(key);
 
+    const baseline_realm_refs = ctx.header.meta().rc;
     try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
 
     try std.testing.expect(holder.deleteProperty(rt, key));
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
 }
 
-test "ordinary replacement of realm auto-init unregisters empty borrowed holder" {
+test "ordinary auto-init replacement releases each owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const object_proto_slot = try global.cachedRealmValueSlot(rt, .object_prototype);
+    object_proto_slot.* = global.value().dup();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const define_key = try rt.internAtom("lazy_define_realm");
@@ -5367,37 +6656,41 @@ test "ordinary replacement of realm auto-init unregisters empty borrowed holder"
     const simple_set_key = try rt.internAtom("lazy_simple_set_realm");
     defer rt.atoms.free(simple_set_key);
 
+    const baseline_realm_refs = ctx.header.meta().rc;
     try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
 
     try holder.defineOwnProperty(rt, define_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
 
     try holder.definePerformanceAutoInitProperty(rt, set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
 
     try holder.setProperty(rt, set_key, core.JSValue.int32(2));
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
 
     try holder.definePerformanceAutoInitProperty(rt, own_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
 
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, own_set_key, core.JSValue.int32(3)));
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
 
     try holder.definePerformanceAutoInitProperty(rt, simple_set_key, core.property.Flags.data(true, false, true), global);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
 
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, simple_set_key, core.JSValue.int32(4)));
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
 }
 
-test "specialized auto-init realm metadata registers borrowed holders" {
+test "specialized auto-init producers retain the same typed Realm owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
     const navigator_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer navigator_holder.value().free(rt);
@@ -5426,8 +6719,8 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     try performance_holder.definePerformanceAutoInitProperty(rt, performance_key, flags, global);
     try namespace_holder.defineBuiltinNamespaceAutoInitProperty(rt, namespace_key, "Math", flags, global, .math_namespace);
     try host_holder.defineHostAutoInitProperty(rt, host_key, "gc", 0, flags, core.host_function.ids.output, false, global);
-    try replace_holder.defineAutoInitProperty(rt, replace_key, "replace", 0, flags);
-    try replace_holder.replaceAutoInitPropertyWithRealmNativeAndCache(rt, replace_key, "replace", 0, flags, global, 0, 0);
+    try replace_holder.defineAutoInitPropertyWithRealm(rt, replace_key, "replace", 0, flags, global);
+    try replace_holder.replaceAutoInitPropertyWithRealmAndNative(rt, replace_key, "replace", 0, flags, global, 0);
 
     const holders = [_]*core.Object{
         navigator_holder,
@@ -5437,24 +6730,23 @@ test "specialized auto-init realm metadata registers borrowed holders" {
         replace_holder,
     };
     for (holders) |holder| {
-        try std.testing.expectEqual(@intFromPtr(global), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
+        const slot = holder.prop_values[0].slot.auto_init;
+        try std.testing.expectEqual(core.property.AutoInitId.prop, slot.realm_and_id.id());
+        try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
     }
-
-    global.value().free(rt);
-
-    for (holders) |holder| {
-        try std.testing.expectEqual(@as(usize, 0), core.property.autoInitAt(rt, holder.prop_values[0].slot.auto_init).host_function_realm_global);
-    }
+    try std.testing.expectEqual(@as(i32, 1 + holders.len), ctx.header.meta().rc);
 }
 
-test "materialized auto-init function realm pointer registers borrowed holder" {
+test "materialized auto-init true C function owns its construction realm" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    _ = try global.ensureRealmPayload(rt);
+    const ctx = try core.RealmContext.create(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    try global.setCachedFunctionProto(rt, global);
     const holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer holder.value().free(rt);
     const host_key = try rt.internAtom("gc");
     defer rt.atoms.free(host_key);
 
@@ -5469,16 +6761,20 @@ test "materialized auto-init function realm pointer registers borrowed holder" {
         global,
     );
 
-    const function_value = holder.getProperty(host_key);
-    defer function_value.free(rt);
+    const function_value = try holder.getProperty(host_key);
     const function_header = function_value.refHeader().?;
     const function_object: *core.Object = @fieldParentPtr("header", function_header);
 
+    try std.testing.expectEqual(ctx, function_object.nativeFunctionRealm().?);
     try std.testing.expectEqual(global, function_object.functionRealmGlobalPtr().?);
 
-    global.value().free(rt);
+    ctx.destroy();
+    try std.testing.expectEqual(ctx, rt.firstContext().?);
+    try std.testing.expectEqual(global, function_object.functionRealmGlobalPtr().?);
 
-    try std.testing.expectEqual(@as(?*core.Object, null), function_object.functionRealmGlobalPtr());
+    function_value.free(rt);
+    holder.value().free(rt);
+    try std.testing.expect(rt.firstContext() == null);
 }
 
 test "dead weak collection key entry is swept when target is destroyed" {
@@ -5984,10 +7280,12 @@ test "finalization registry live target preserves held value" {
 test "finalization registry unregister cannot remove queued cleanup cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
     defer cleanup.value().free(rt);
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
     var registry_value = registry.value();
     defer registry_value.free(rt);
@@ -6021,6 +7319,64 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     try std.testing.expect(!registry.unregisterFinalizationRegistryCells(rt, token.value()));
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 
+    rt.clearPendingFinalizationJobs();
+}
+
+test "finalization registry enqueue OOM retains stable pending cells for same-runtime retry" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
+    defer cleanup.value().free(rt);
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
+    defer registry.value().free(rt);
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
+
+    var targets: [3]*core.Object = undefined;
+    for (&targets, 0..) |*slot, index| {
+        const target = try core.Object.create(rt, core.class.ids.object, null);
+        slot.* = target;
+        try registry.appendFinalizationRegistryCell(
+            rt,
+            target.value(),
+            core.JSValue.int32(@intCast(index + 1)),
+            core.JSValue.undefinedValue(),
+        );
+    }
+
+    // Warm the collector while all targets are live so the injected failure is
+    // specifically the first unified-FIFO publication allocation.
+    _ = try rt.tryRunObjectCycleRemoval();
+    for (targets) |target| target.value().free(rt);
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 3), registry.pendingFinalizationCellCountForTest());
+    try std.testing.expectEqual(@as(usize, 3), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(ctx, registry.finalizationRegistryRealmContext().?);
+
+    rt.setMemoryLimit(null);
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
+
+    for (rt.job_queue.jobs[0..3], 0..) |job, index| {
+        try std.testing.expectEqual(ctx, job.realm.borrow().?);
+        const payload = switch (job.payload) {
+            .finalization => |payload| payload,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(?i32, @intCast(index + 1)), payload.held_value.asInt32());
+    }
+
+    // A further weak sweep cannot publish any cell twice.
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 3), rt.pendingFinalizationJobCountForTest());
     rt.clearPendingFinalizationJobs();
 }
 
@@ -6139,29 +7495,22 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     try expectNoLiveGc(rt);
 }
 
-test "module namespace payload cell cycle is released by runtime cycle removal" {
+test "module namespace shape VarRef cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
-    const cell = try core.Object.create(rt, core.class.ids.object, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("namespace");
     defer rt.atoms.free(key);
     const export_name = try rt.internAtom("value");
+    defer rt.atoms.free(export_name);
 
-    try cell.initVarRefPayload(rt, target.value().dup());
     try target.defineOwnProperty(rt, key, core.Descriptor.data(namespace.value(), true, true, true));
-
-    const payload = namespace.moduleNamespacePayload().?;
-    payload.names = try rt.memory.alloc(core.Atom, 1);
-    payload.names[0] = export_name;
-    const cells = try rt.memory.alloc(core.JSValue, 1);
-    cells[0] = cell.value().dup();
-    try namespace.setModuleNamespaceCells(rt, cells);
+    const cell = try core.VarRef.createClosed(rt, target.value().dup());
+    try namespace.defineModuleVarRefProperty(rt, export_name, cell);
 
     namespace.value().free(rt);
-    cell.value().free(rt);
     target.value().free(rt);
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -6209,14 +7558,17 @@ test "typed-array buffer self-cycle is released by runtime cycle removal" {
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
 }
 
-test "regexp payload self-cycle is released by runtime cycle removal" {
+test "regexp lastIndex self-cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
-    regexp.regexpSourceSlot().* = regexp.value().dup();
+    const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
+    try regexp.initializeRegExpLastIndex(rt);
+    const source = try core.string.String.createAscii(rt, "a");
+    defer source.value().free(rt);
+    try regexp.setRegexpSource(rt, source.value());
     try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    regexp.regexpLastIndexSlot().* = regexp.value().dup();
+    try regexp.setProperty(rt, core.atom.ids.lastIndex, regexp.value());
 
     regexp.value().free(rt);
     try expectCycleReclaimedIncludingShapes(rt, single_object_self_cycle_reclaimed_count, rt.runObjectCycleRemoval());
@@ -6374,9 +7726,250 @@ test "function records skip zero-length payload allocations" {
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
 }
 
-test "module records retain import export metadata and status" {
+test "realm module registry keeps published record addresses stable" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const first_name = try rt.internAtom("stable-first.mjs");
+    defer rt.atoms.free(first_name);
+    const first = try publishEmptyModule(rt, &ctx.modules, first_name);
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.ModuleRecord, "header"));
+    try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().kind);
+
+    var buffer: [48]u8 = undefined;
+    for (0..48) |index| {
+        const text = try std.fmt.bufPrint(&buffer, "stable-{d}.mjs", .{index});
+        const name = try rt.internAtom(text);
+        _ = try publishEmptyModule(rt, &ctx.modules, name);
+        rt.atoms.free(name);
+        try std.testing.expectEqual(first, ctx.modules.find(first_name).?);
+    }
+}
+
+test "module registries isolate records between realms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const first_ctx = try core.JSContext.create(rt);
+    defer first_ctx.destroy();
+    const second_ctx = try core.JSContext.create(rt);
+    defer second_ctx.destroy();
+
+    const module_name = try rt.internAtom("shared-name.mjs");
+    defer rt.atoms.free(module_name);
+    const binding_name = try rt.internAtom("only-in-first");
+    defer rt.atoms.free(binding_name);
+
+    var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer first_pending.deinit(rt);
+    try first_pending.addExport(binding_name, binding_name, 0);
+    const first = try publishFreshModule(&first_ctx.modules, module_name, &first_pending);
+    const second = try publishEmptyModule(rt, &second_ctx.modules, module_name);
+    try std.testing.expect(first != second);
+    try std.testing.expectEqual(first, first_ctx.modules.find(module_name).?);
+    try std.testing.expectEqual(second, second_ctx.modules.find(module_name).?);
+
+    first.setStatus(.linked);
+    try std.testing.expectEqual(@as(usize, 1), first.exports.len);
+    try std.testing.expectEqual(core.module.Status.linked, first.status);
+    try std.testing.expectEqual(@as(usize, 0), second.exports.len);
+    try std.testing.expectEqual(core.module.Status.unlinked, second.status);
+}
+
+test "module registry ownership is one-way and does not retain its realm" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const module_name = try rt.internAtom("no-module-realm-backref.mjs");
+    defer rt.atoms.free(module_name);
+    const realm_refs = ctx.header.meta().rc;
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+
+    record.retain();
+    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+    record.release(rt);
+    try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
+}
+
+test "module finalizer self-unlinks a still-linked realm registry node" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const module_name = try rt.internAtom("finalizer-self-unlink.mjs");
+    defer rt.atoms.free(module_name);
+    const owner_atom_refs = rt.atoms.refCount(module_name).?;
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
+    try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
+
+    // Internal finalizer-path probe: consume the registry base-ref while the
+    // node is still linked. This is deliberately not a caller-facing release
+    // pattern; it verifies ModuleRecord.destroyFromHeader splices itself before
+    // Realm teardown later sees the now-empty registry.
+    record.release(rt);
+    try std.testing.expect(ctx.modules.head == null);
+    try std.testing.expect(ctx.modules.tail == null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
+    try std.testing.expect(ctx.modules.find(module_name) == null);
+    try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+    try rt.gc.verifyHeapAccounting(rt);
+}
+
+test "externally retained module outlives realm registry teardown" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const module_name = try rt.internAtom("retained-after-realm.mjs");
+    defer rt.atoms.free(module_name);
+    const owner_atom_refs = rt.atoms.refCount(module_name).?;
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+    var record_retained = false;
+    defer if (record_retained) record.release(rt);
+    record.retain();
+    record_retained = true;
+
+    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
+    try std.testing.expectEqual(@as(i32, 2), record.header.meta().rc);
+
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(rt.firstContext() == null);
+    try std.testing.expect(record.registry == null);
+    try std.testing.expectEqual(@as(i32, 1), record.header.meta().rc);
+    try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
+
+    record.release(rt);
+    record_retained = false;
+    try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
+}
+
+test "module namespace strong edge participates in realm object cycle collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const module_name = try rt.internAtom("realm-module-cycle.mjs");
+    defer rt.atoms.free(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+
+    const realm_record = try core.Object.create(rt, core.class.ids.object, null);
+    var object_transferred = false;
+    defer if (!object_transferred) realm_record.value().free(rt);
+    var realm_owner = core.RealmRef.retain(ctx);
+    defer realm_owner.deinit();
+    try realm_record.installOwnedRealmRef(rt, &realm_owner);
+    record.publishModuleNamespaceNoFail(realm_record.value());
+    object_transferred = true;
+
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(rt.firstContext() != null);
+    try std.testing.expectEqual(@as(usize, 1), rt.memoryUsage().module_count);
+
+    try std.testing.expect(rt.runObjectCycleRemoval() >= 3);
+    try std.testing.expect(rt.firstContext() == null);
+    try std.testing.expectEqual(@as(usize, 0), rt.memoryUsage().module_count);
+}
+
+test "Nth module allocation OOM leaves registry and Atom ownership recoverable" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(failing_allocator.allocator());
+    defer rt.destroy();
+    defer failing_allocator.fail_index = std.math.maxInt(usize);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var names: [64]core.Atom = undefined;
+    var names_initialized: usize = 0;
+    defer for (names[0..names_initialized]) |name| rt.atoms.free(name);
+    var buffer: [48]u8 = undefined;
+    while (names_initialized < names.len) : (names_initialized += 1) {
+        const text = try std.fmt.bufPrint(&buffer, "nth-oom-{d}.mjs", .{names_initialized});
+        names[names_initialized] = try rt.internAtom(text);
+    }
+
+    // Seed one record, then fail a later backing allocation so several
+    // publications commit before the selected Nth create is rejected.
+    _ = try publishEmptyModule(rt, &ctx.modules, names[0]);
+    const successful_creates_before_failure = 7;
+    failing_allocator.fail_index = failing_allocator.alloc_index + successful_creates_before_failure;
+
+    var failed_index: ?usize = null;
+    create_until_failure: for (1..names.len) |index| {
+        _ = publishEmptyModule(rt, &ctx.modules, names[index]) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failed_index = index;
+            break :create_until_failure;
+        };
+    }
+    const failed = failed_index orelse return error.TestUnexpectedResult;
+    try std.testing.expect(failed > 1);
+    try std.testing.expectEqual(failed, ctx.modules.count);
+    try std.testing.expect(ctx.modules.find(names[failed]) == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(names[failed]).?);
+    try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed - 1]).?);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    const recovered = try publishEmptyModule(rt, &ctx.modules, names[failed]);
+    try std.testing.expectEqual(recovered, ctx.modules.find(names[failed]).?);
+    try std.testing.expectEqual(failed + 1, ctx.modules.count);
+    try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed]).?);
+}
+
+test "runtime memory usage counts linked and realm-unlinked retained modules" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    const empty = rt.memoryUsage();
+    try std.testing.expectEqual(@as(usize, 0), empty.module_count);
+    try std.testing.expectEqual(@as(usize, 0), empty.module_bytes);
+
+    const module_name = try rt.internAtom("memory-usage-module.mjs");
+    defer rt.atoms.free(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
+    const linked = rt.memoryUsage();
+    try std.testing.expectEqual(@as(usize, 1), linked.module_count);
+    try std.testing.expectEqual(@sizeOf(core.ModuleRecord), linked.module_bytes);
+    try rt.gc.verifyHeapAccounting(rt);
+
+    record.retain();
+    var record_retained = true;
+    defer if (record_retained) record.release(rt);
+    ctx.destroy();
+    ctx_alive = false;
+    const unlinked_retained = rt.memoryUsage();
+    try std.testing.expect(record.registry == null);
+    try std.testing.expectEqual(@as(usize, 1), unlinked_retained.module_count);
+    try std.testing.expectEqual(@sizeOf(core.ModuleRecord), unlinked_retained.module_bytes);
+    try rt.gc.verifyHeapAccounting(rt);
+
+    record.release(rt);
+    record_retained = false;
+    const released = rt.memoryUsage();
+    try std.testing.expectEqual(@as(usize, 0), released.module_count);
+    try std.testing.expectEqual(@as(usize, 0), released.module_bytes);
+    try rt.gc.verifyHeapAccounting(rt);
+}
+
+test "module publication retains indexed metadata and all strong value edges" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const module_name = try rt.internAtom("main.mjs");
     const dep_name = try rt.internAtom("dep.mjs");
@@ -6385,75 +7978,121 @@ test "module records retain import export metadata and status" {
     const export_name = try rt.internAtom("default");
     const attr_key = try rt.internAtom("type");
     const attr_value = try rt.internAtom("json");
+    defer {
+        rt.atoms.free(module_name);
+        rt.atoms.free(dep_name);
+        rt.atoms.free(import_name);
+        rt.atoms.free(local_name);
+        rt.atoms.free(export_name);
+        rt.atoms.free(attr_key);
+        rt.atoms.free(attr_value);
+    }
 
-    const record = try rt.modules.create(module_name);
-    try record.addRequestedModule(dep_name);
-    try record.addImport(dep_name, import_name, local_name);
-    try record.addExport(export_name, local_name);
-    try record.addIndirectExport(dep_name, export_name, import_name);
-    try record.addStarExport(dep_name, core.atom.predefinedId("*", .string).?);
-    try record.addImportAttribute(dep_name, attr_key, attr_value);
-    record.has_top_level_await = true;
+    const dependency = try publishEmptyModule(rt, &ctx.modules, dep_name);
+
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    const request_index = try pending.addRequest(dep_name);
+    try pending.addImport(request_index, import_name, local_name, 3, false);
+    try pending.addExport(export_name, local_name, 4);
+    try pending.addIndirectExport(request_index, import_name, export_name, false);
+    try pending.addStarExport(request_index);
+    try pending.addImportAttribute(request_index, attr_key, attr_value);
+    pending.synthetic_kind = .json;
+    pending.has_top_level_await = true;
+
+    const function_owner = try core.Object.create(rt, core.class.ids.object, null);
+    pending.adoptFuncObjectValueNoFail(function_owner.value());
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    record.setRequestModuleNoFail(request_index, dependency);
+
+    const namespace_owner = try core.Object.create(rt, core.class.ids.module_ns, null);
+    record.publishModuleNamespaceNoFail(namespace_owner.value());
+    const retained_cell = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
+    record.publishRetainedExportCellNoFail(0, retained_cell.valueRef());
+    const import_meta_owner = try core.Object.create(rt, core.class.ids.object, null);
+    record.import_meta = import_meta_owner.value();
+    const exception_owner = try core.Object.create(rt, core.class.ids.object, null);
+    record.setEvalException(rt, exception_owner.value());
     record.setStatus(.linked);
 
-    rt.atoms.free(module_name);
-    rt.atoms.free(dep_name);
-    rt.atoms.free(import_name);
-    rt.atoms.free(local_name);
-    rt.atoms.free(export_name);
-    rt.atoms.free(attr_key);
-    rt.atoms.free(attr_value);
-
     try std.testing.expectEqual(core.module.Status.linked, record.status);
-    try std.testing.expectEqual(@as(usize, 1), record.requested_modules.len);
+    try std.testing.expectEqual(@as(usize, 1), record.requests.len);
+    try std.testing.expectEqual(dep_name, record.requests[0].module_name);
+    try std.testing.expectEqual(dependency, record.requests[0].module.?);
     try std.testing.expectEqual(@as(usize, 1), record.imports.len);
+    try std.testing.expectEqual(request_index, record.imports[0].request_index);
+    try std.testing.expectEqual(@as(u16, 3), record.imports[0].var_idx);
     try std.testing.expectEqual(@as(usize, 1), record.exports.len);
+    try std.testing.expectEqual(@as(u16, 4), record.exports[0].var_idx);
     try std.testing.expectEqual(@as(usize, 1), record.indirect_exports.len);
     try std.testing.expectEqual(@as(usize, 1), record.star_exports.len);
     try std.testing.expectEqual(@as(usize, 1), record.import_attributes.len);
-    try std.testing.expectEqual(@as(usize, 0), record.resolved_imports.len);
-    try std.testing.expectEqual(@as(usize, 0), record.local_bindings.len);
+    try std.testing.expectEqual(request_index, record.import_attributes[0].request_index);
+    try std.testing.expectEqual(core.module.SyntheticKind.json, record.synthetic_kind);
     try std.testing.expect(record.has_top_level_await);
     try std.testing.expect(rt.atoms.name(record.module_name) != null);
     try std.testing.expect(rt.atoms.name(record.imports[0].local_name) != null);
+    try std.testing.expectEqual(&function_owner.header, record.funcObjectValue().refHeader().?);
+    try std.testing.expectEqual(&namespace_owner.header, record.moduleNamespaceValue().refHeader().?);
+    try std.testing.expectEqual(retained_cell, core.VarRef.fromValue(record.retainedExportCellValue(0).?).?);
+    try std.testing.expectEqual(&import_meta_owner.header, record.import_meta.?.refHeader().?);
+    try std.testing.expectEqual(&exception_owner.header, record.eval_exception.?.refHeader().?);
 }
 
-test "module record add failure releases duplicated atom references" {
+test "pending module metadata and publication OOM are atomic" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const module_name = try rt.internAtom("oom-main.mjs");
     defer rt.atoms.free(module_name);
 
     const dep_name = try rt.internAtom("oom-dep.mjs");
+    defer rt.atoms.free(dep_name);
     const import_name = try rt.internAtom("oom-import");
+    defer rt.atoms.free(import_name);
     const local_name = try rt.internAtom("oom-local");
+    defer rt.atoms.free(local_name);
 
-    const record = try rt.modules.create(module_name);
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    const request_index = try pending.addRequest(dep_name);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, record.addImport(dep_name, import_name, local_name));
+    try std.testing.expectError(error.OutOfMemory, pending.addImport(request_index, import_name, local_name, 0, false));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 0), record.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 0), pending.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(import_name).?);
+    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(local_name).?);
+    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
 
-    rt.atoms.free(dep_name);
-    rt.atoms.free(import_name);
-    rt.atoms.free(local_name);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.OutOfMemory, ctx.modules.prepareFreshTarget(module_name, &pending));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(@as(usize, 1), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
+    try std.testing.expect(ctx.modules.find(module_name) == null);
 
-    try std.testing.expect(rt.atoms.name(dep_name) == null);
-    try std.testing.expect(rt.atoms.name(import_name) == null);
-    try std.testing.expect(rt.atoms.name(local_name) == null);
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    try std.testing.expectEqual(@as(usize, 0), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 1), record.requests.len);
 }
 
 test "module registry resolves local indirect star and ambiguous exports" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const main_name = try rt.internAtom("main.mjs");
     const dep_a_name = try rt.internAtom("dep-a.mjs");
     const dep_b_name = try rt.internAtom("dep-b.mjs");
     const dep_c_name = try rt.internAtom("dep-c.mjs");
+    const unique_name = try rt.internAtom("unique.mjs");
     const value_name = try rt.internAtom("value");
     const other_name = try rt.internAtom("other");
     const local_a_name = try rt.internAtom("localA");
@@ -6463,151 +8102,281 @@ test "module registry resolves local indirect star and ambiguous exports" {
         rt.atoms.free(dep_a_name);
         rt.atoms.free(dep_b_name);
         rt.atoms.free(dep_c_name);
+        rt.atoms.free(unique_name);
         rt.atoms.free(value_name);
         rt.atoms.free(other_name);
         rt.atoms.free(local_a_name);
         rt.atoms.free(local_b_name);
     }
 
-    _ = try rt.modules.create(main_name);
-    _ = try rt.modules.create(dep_a_name);
-    _ = try rt.modules.create(dep_b_name);
-    _ = try rt.modules.create(dep_c_name);
+    var dep_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_a_pending.deinit(rt);
+    try dep_a_pending.addExport(value_name, local_a_name, 0);
+    const dep_a = try publishFreshModule(&ctx.modules, dep_a_name, &dep_a_pending);
 
-    const main = &rt.modules.modules[rt.modules.findIndex(main_name).?];
-    const dep_a = &rt.modules.modules[rt.modules.findIndex(dep_a_name).?];
-    const dep_b = &rt.modules.modules[rt.modules.findIndex(dep_b_name).?];
-    const dep_c = &rt.modules.modules[rt.modules.findIndex(dep_c_name).?];
+    var dep_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_b_pending.deinit(rt);
+    try dep_b_pending.addExport(value_name, local_b_name, 0);
+    const dep_b = try publishFreshModule(&ctx.modules, dep_b_name, &dep_b_pending);
 
-    try dep_a.addExport(value_name, local_a_name);
-    try dep_b.addExport(value_name, local_b_name);
-    try dep_c.addIndirectExport(dep_a_name, other_name, value_name);
+    var dep_c_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_c_pending.deinit(rt);
+    const dep_c_to_a = try dep_c_pending.addRequest(dep_a_name);
+    try dep_c_pending.addIndirectExport(dep_c_to_a, other_name, value_name, false);
+    const dep_c = try publishFreshModule(&ctx.modules, dep_c_name, &dep_c_pending);
+    dep_c.setRequestModuleNoFail(dep_c_to_a, dep_a);
 
-    try main.addIndirectExport(dep_c_name, other_name, other_name);
-    try main.addStarExport(dep_a_name, core.atom.predefinedId("*", .string).?);
+    var unique_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer unique_pending.deinit(rt);
+    const unique_to_a = try unique_pending.addRequest(dep_a_name);
+    try unique_pending.addStarExport(unique_to_a);
+    const unique = try publishFreshModule(&ctx.modules, unique_name, &unique_pending);
+    unique.setRequestModuleNoFail(unique_to_a, dep_a);
 
-    const indirect = try rt.modules.resolveExport(main_name, other_name);
+    var main_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer main_pending.deinit(rt);
+    const main_to_c = try main_pending.addRequest(dep_c_name);
+    const main_to_a = try main_pending.addRequest(dep_a_name);
+    const main_to_b = try main_pending.addRequest(dep_b_name);
+    try main_pending.addIndirectExport(main_to_c, other_name, other_name, false);
+    try main_pending.addStarExport(main_to_a);
+    try main_pending.addStarExport(main_to_b);
+    const main = try publishFreshModule(&ctx.modules, main_name, &main_pending);
+    main.setRequestModuleNoFail(main_to_c, dep_c);
+    main.setRequestModuleNoFail(main_to_a, dep_a);
+    main.setRequestModuleNoFail(main_to_b, dep_b);
+
+    const indirect = try ctx.modules.resolveExport(main, other_name);
     try std.testing.expectEqual(core.module.ResolvedExport.resolved, std.meta.activeTag(indirect));
-    try std.testing.expectEqual(local_a_name, indirect.resolved.local_name);
+    try std.testing.expectEqual(dep_a, indirect.resolved.module);
+    try std.testing.expectEqual(local_a_name, indirect.resolved.bindingName());
 
-    const star = try rt.modules.resolveExport(main_name, value_name);
+    const star = try ctx.modules.resolveExport(unique, value_name);
     try std.testing.expectEqual(core.module.ResolvedExport.resolved, std.meta.activeTag(star));
-    try std.testing.expectEqual(local_a_name, star.resolved.local_name);
+    try std.testing.expectEqual(dep_a, star.resolved.module);
+    try std.testing.expectEqual(local_a_name, star.resolved.bindingName());
 
-    try main.addStarExport(dep_b_name, core.atom.predefinedId("*", .string).?);
-    const ambiguous = try rt.modules.resolveExport(main_name, value_name);
+    const ambiguous = try ctx.modules.resolveExport(main, value_name);
     try std.testing.expectEqual(core.module.ResolvedExport.ambiguous, std.meta.activeTag(ambiguous));
 }
 
-test "module registry createFresh replaces stale records by name" {
+test "existing published module generation is not overwritten by pending definition" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const module_name = try rt.internAtom("fresh.mjs");
-    const export_name = try rt.internAtom("old");
+    const old_export_name = try rt.internAtom("old");
+    const replacement_export_name = try rt.internAtom("replacement");
     defer {
         rt.atoms.free(module_name);
-        rt.atoms.free(export_name);
+        rt.atoms.free(old_export_name);
+        rt.atoms.free(replacement_export_name);
     }
 
-    const first = try rt.modules.createFresh(rt, module_name);
-    try first.addExport(export_name, export_name);
+    var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer first_pending.deinit(rt);
+    try first_pending.addExport(old_export_name, old_export_name, 0);
+    const first = try publishFreshModule(&ctx.modules, module_name, &first_pending);
     first.setStatus(.linked);
 
-    const second = try rt.modules.createFresh(rt, module_name);
-    try std.testing.expectEqual(@as(usize, 1), rt.modules.modules.len);
-    try std.testing.expectEqual(core.module.Status.unlinked, second.status);
-    try std.testing.expectEqual(@as(usize, 0), second.exports.len);
+    var replacement = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer replacement.deinit(rt);
+    try replacement.addExport(replacement_export_name, replacement_export_name, 1);
+    const prepared = try ctx.modules.prepareFreshTarget(module_name, &replacement);
+
+    try std.testing.expect(!prepared.isFresh());
+    try std.testing.expectEqual(first, prepared.record());
+    try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
+    try std.testing.expectEqual(core.module.Status.linked, first.status);
+    try std.testing.expectEqual(@as(usize, 1), first.exports.len);
+    try std.testing.expectEqual(old_export_name, first.exports[0].export_name);
+    // Existing lookup must leave the complete candidate untouched for the
+    // caller to deinit or reuse.
+    try std.testing.expectEqual(@as(usize, 1), replacement.exports.len);
+    try std.testing.expectEqual(replacement_export_name, replacement.exports[0].export_name);
 }
 
-test "module registry link validates dependencies imports and ambiguous exports" {
+test "indexed module resolution is pure across not-found ambiguous and cyclic graphs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    const main_name = try rt.internAtom("link-main.mjs");
-    const dep_name = try rt.internAtom("link-dep.mjs");
-    const cycle_name = try rt.internAtom("link-cycle.mjs");
-    const missing_main_name = try rt.internAtom("missing-main.mjs");
-    const ambiguous_main_name = try rt.internAtom("ambiguous-main.mjs");
-    const ambiguous_consumer_name = try rt.internAtom("ambiguous-consumer.mjs");
+    const dep_name = try rt.internAtom("resolve-dep.mjs");
+    const missing_name = try rt.internAtom("resolve-missing.mjs");
+    const unresolved_name = try rt.internAtom("resolve-unresolved-request.mjs");
+    const cycle_a_name = try rt.internAtom("resolve-cycle-a.mjs");
+    const cycle_b_name = try rt.internAtom("resolve-cycle-b.mjs");
+    const ambiguous_name = try rt.internAtom("resolve-ambiguous.mjs");
     const amb_a_name = try rt.internAtom("amb-a.mjs");
     const amb_b_name = try rt.internAtom("amb-b.mjs");
     const value_name = try rt.internAtom("value");
-    const local_name = try rt.internAtom("local");
+    const local_a_name = try rt.internAtom("local-a");
+    const local_b_name = try rt.internAtom("local-b");
     defer {
-        rt.atoms.free(main_name);
         rt.atoms.free(dep_name);
-        rt.atoms.free(cycle_name);
-        rt.atoms.free(missing_main_name);
-        rt.atoms.free(ambiguous_main_name);
-        rt.atoms.free(ambiguous_consumer_name);
+        rt.atoms.free(missing_name);
+        rt.atoms.free(unresolved_name);
+        rt.atoms.free(cycle_a_name);
+        rt.atoms.free(cycle_b_name);
+        rt.atoms.free(ambiguous_name);
         rt.atoms.free(amb_a_name);
         rt.atoms.free(amb_b_name);
         rt.atoms.free(value_name);
-        rt.atoms.free(local_name);
+        rt.atoms.free(local_a_name);
+        rt.atoms.free(local_b_name);
     }
 
-    _ = try rt.modules.create(main_name);
-    _ = try rt.modules.create(dep_name);
-    _ = try rt.modules.create(cycle_name);
-    _ = try rt.modules.create(missing_main_name);
-    _ = try rt.modules.create(ambiguous_main_name);
-    _ = try rt.modules.create(ambiguous_consumer_name);
-    _ = try rt.modules.create(amb_a_name);
-    _ = try rt.modules.create(amb_b_name);
+    var dep_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_pending.deinit(rt);
+    try dep_pending.addExport(value_name, local_a_name, 0);
+    const dep = try publishFreshModule(&ctx.modules, dep_name, &dep_pending);
+    const missing = try publishEmptyModule(rt, &ctx.modules, missing_name);
 
-    const main = &rt.modules.modules[rt.modules.findIndex(main_name).?];
-    const dep = &rt.modules.modules[rt.modules.findIndex(dep_name).?];
-    const cycle = &rt.modules.modules[rt.modules.findIndex(cycle_name).?];
-    const missing_main = &rt.modules.modules[rt.modules.findIndex(missing_main_name).?];
-    const ambiguous_main = &rt.modules.modules[rt.modules.findIndex(ambiguous_main_name).?];
-    const ambiguous_consumer = &rt.modules.modules[rt.modules.findIndex(ambiguous_consumer_name).?];
-    const amb_a = &rt.modules.modules[rt.modules.findIndex(amb_a_name).?];
-    const amb_b = &rt.modules.modules[rt.modules.findIndex(amb_b_name).?];
+    var unresolved_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer unresolved_pending.deinit(rt);
+    const unresolved_request = try unresolved_pending.addRequest(dep_name);
+    try unresolved_pending.addStarExport(unresolved_request);
+    const unresolved = try publishFreshModule(&ctx.modules, unresolved_name, &unresolved_pending);
 
-    try dep.addExport(value_name, local_name);
-    try dep.addRequestedModule(cycle_name);
-    try cycle.addRequestedModule(dep_name);
-    try main.addRequestedModule(dep_name);
-    try main.addImport(dep_name, value_name, local_name);
-    try rt.modules.linkModule(rt, main_name);
-    try std.testing.expectEqual(core.module.Status.linked, main.status);
+    var cycle_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer cycle_a_pending.deinit(rt);
+    const cycle_a_to_b = try cycle_a_pending.addRequest(cycle_b_name);
+    try cycle_a_pending.addStarExport(cycle_a_to_b);
+    const cycle_a = try publishFreshModule(&ctx.modules, cycle_a_name, &cycle_a_pending);
+
+    var cycle_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer cycle_b_pending.deinit(rt);
+    const cycle_b_to_a = try cycle_b_pending.addRequest(cycle_a_name);
+    try cycle_b_pending.addStarExport(cycle_b_to_a);
+    const cycle_b = try publishFreshModule(&ctx.modules, cycle_b_name, &cycle_b_pending);
+    cycle_a.setRequestModuleNoFail(cycle_a_to_b, cycle_b);
+    cycle_b.setRequestModuleNoFail(cycle_b_to_a, cycle_a);
+
+    var amb_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer amb_a_pending.deinit(rt);
+    try amb_a_pending.addExport(value_name, local_a_name, 0);
+    const amb_a = try publishFreshModule(&ctx.modules, amb_a_name, &amb_a_pending);
+
+    var amb_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer amb_b_pending.deinit(rt);
+    try amb_b_pending.addExport(value_name, local_b_name, 0);
+    const amb_b = try publishFreshModule(&ctx.modules, amb_b_name, &amb_b_pending);
+
+    var ambiguous_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer ambiguous_pending.deinit(rt);
+    const ambiguous_to_a = try ambiguous_pending.addRequest(amb_a_name);
+    const ambiguous_to_b = try ambiguous_pending.addRequest(amb_b_name);
+    try ambiguous_pending.addStarExport(ambiguous_to_a);
+    try ambiguous_pending.addStarExport(ambiguous_to_b);
+    const ambiguous = try publishFreshModule(&ctx.modules, ambiguous_name, &ambiguous_pending);
+    ambiguous.setRequestModuleNoFail(ambiguous_to_a, amb_a);
+    ambiguous.setRequestModuleNoFail(ambiguous_to_b, amb_b);
+
+    dep.setStatus(.linked);
+    missing.setStatus(.evaluating);
+    unresolved.setStatus(.evaluated);
+    cycle_a.setStatus(.linking);
+    cycle_b.setStatus(.errored);
+    ambiguous.setStatus(.evaluating);
+
+    const local_resolution = try ctx.modules.resolveExport(dep, value_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(local_resolution));
+    try std.testing.expectEqual(dep, local_resolution.resolved.module);
+    try std.testing.expectEqual(local_a_name, local_resolution.resolved.bindingName());
+
+    const not_found = try ctx.modules.resolveExport(missing, value_name);
+    try std.testing.expectEqual(.not_found, std.meta.activeTag(not_found));
+    try std.testing.expectError(error.ModuleNotFound, ctx.modules.resolveExport(unresolved, value_name));
+
+    const cycle = try ctx.modules.resolveExport(cycle_a, value_name);
+    try std.testing.expectEqual(.not_found, std.meta.activeTag(cycle));
+    const ambiguous_resolution = try ctx.modules.resolveExport(ambiguous, value_name);
+    try std.testing.expectEqual(.ambiguous, std.meta.activeTag(ambiguous_resolution));
+
     try std.testing.expectEqual(core.module.Status.linked, dep.status);
-    try std.testing.expectEqual(core.module.Status.linked, cycle.status);
-    try std.testing.expectEqual(@as(usize, 0), main.local_bindings.len);
-    try std.testing.expectEqual(@as(usize, 1), dep.local_bindings.len);
-    try std.testing.expectEqual(local_name, dep.local_bindings[0].name);
-    try std.testing.expect(!dep.local_bindings[0].initialized);
-    try dep.markLocalBindingInitialized(local_name);
-    try std.testing.expect(dep.local_bindings[0].initialized);
-    try std.testing.expectEqual(@as(usize, 1), main.resolved_imports.len);
-    try std.testing.expectEqual(local_name, main.resolved_imports[0].local_name);
-    try std.testing.expectEqual(rt.modules.findIndex(dep_name).?, main.resolved_imports[0].module_index);
-    try std.testing.expectEqual(local_name, main.resolved_imports[0].binding_name);
+    try std.testing.expectEqual(core.module.Status.evaluating, missing.status);
+    try std.testing.expectEqual(core.module.Status.evaluated, unresolved.status);
+    try std.testing.expectEqual(core.module.Status.linking, cycle_a.status);
+    try std.testing.expectEqual(core.module.Status.errored, cycle_b.status);
+    try std.testing.expectEqual(core.module.Status.evaluating, ambiguous.status);
+}
 
-    try missing_main.addRequestedModule(amb_a_name);
-    try missing_main.addImport(amb_a_name, value_name, local_name);
-    try std.testing.expectError(error.MissingExport, rt.modules.linkModule(rt, missing_main_name));
-    try std.testing.expectEqual(core.module.Status.errored, missing_main.status);
-    try std.testing.expectEqual(@as(usize, 0), missing_main.resolved_imports.len);
+test "module resolution follows local exports of ordinary imports" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    try amb_a.addExport(value_name, local_name);
-    try amb_b.addExport(value_name, value_name);
-    try ambiguous_main.addRequestedModule(amb_a_name);
-    try ambiguous_main.addRequestedModule(amb_b_name);
-    try ambiguous_main.addStarExport(amb_a_name, core.atom.predefinedId("*", .string).?);
-    try ambiguous_main.addStarExport(amb_b_name, core.atom.predefinedId("*", .string).?);
-    try ambiguous_consumer.addRequestedModule(ambiguous_main_name);
-    try ambiguous_consumer.addImport(ambiguous_main_name, value_name, local_name);
-    try std.testing.expectError(error.AmbiguousExport, rt.modules.linkModule(rt, ambiguous_consumer_name));
-    try std.testing.expectEqual(core.module.Status.linked, ambiguous_main.status);
-    try std.testing.expectEqual(core.module.Status.errored, ambiguous_consumer.status);
-    try std.testing.expectEqual(@as(usize, 0), ambiguous_consumer.resolved_imports.len);
+    const source_name = try rt.internAtom("source");
+    const direct_name = try rt.internAtom("direct");
+    const imported_name = try rt.internAtom("imported");
+    const root_name = try rt.internAtom("root");
+    const foo_name = try rt.internAtom("foo");
+    const source_local_name = try rt.internAtom("source-local");
+    defer {
+        rt.atoms.free(source_name);
+        rt.atoms.free(direct_name);
+        rt.atoms.free(imported_name);
+        rt.atoms.free(root_name);
+        rt.atoms.free(foo_name);
+        rt.atoms.free(source_local_name);
+    }
+
+    var source_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer source_pending.deinit(rt);
+    try source_pending.addExport(foo_name, source_local_name, 0);
+    const source = try publishFreshModule(&ctx.modules, source_name, &source_pending);
+
+    var direct_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer direct_pending.deinit(rt);
+    const direct_to_source = try direct_pending.addRequest(source_name);
+    try direct_pending.addIndirectExport(direct_to_source, foo_name, foo_name, false);
+    const direct = try publishFreshModule(&ctx.modules, direct_name, &direct_pending);
+    direct.setRequestModuleNoFail(direct_to_source, source);
+
+    var imported_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer imported_pending.deinit(rt);
+    const imported_to_source = try imported_pending.addRequest(source_name);
+    try imported_pending.addImport(imported_to_source, foo_name, foo_name, 0, false);
+    try imported_pending.addExport(foo_name, foo_name, 0);
+    const imported = try publishFreshModule(&ctx.modules, imported_name, &imported_pending);
+    imported.setRequestModuleNoFail(imported_to_source, source);
+
+    var root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer root_pending.deinit(rt);
+    const root_to_direct = try root_pending.addRequest(direct_name);
+    const root_to_imported = try root_pending.addRequest(imported_name);
+    try root_pending.addStarExport(root_to_direct);
+    try root_pending.addStarExport(root_to_imported);
+    const root = try publishFreshModule(&ctx.modules, root_name, &root_pending);
+    root.setRequestModuleNoFail(root_to_direct, direct);
+    root.setRequestModuleNoFail(root_to_imported, imported);
+
+    const direct_resolution = try ctx.modules.resolveExport(direct, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(direct_resolution));
+    try std.testing.expectEqual(source, direct_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, direct_resolution.resolved.bindingName());
+
+    const imported_resolution = try ctx.modules.resolveExport(imported, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(imported_resolution));
+    try std.testing.expectEqual(source, imported_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, imported_resolution.resolved.bindingName());
+    try std.testing.expect(direct_resolution.resolved.sameIdentity(imported_resolution.resolved));
+
+    const root_resolution = try ctx.modules.resolveExport(root, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(root_resolution));
+    try std.testing.expectEqual(source, root_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, root_resolution.resolved.bindingName());
 }
 
 test "module resolution normalizes namespace re-export bindings" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const target_name = try rt.internAtom("target");
     const star_a_name = try rt.internAtom("star-a");
@@ -6633,75 +8402,100 @@ test "module resolution normalizes namespace re-export bindings" {
         rt.atoms.free(default_name);
     }
 
-    _ = try rt.modules.create(target_name);
-    _ = try rt.modules.create(star_a_name);
-    _ = try rt.modules.create(star_b_name);
-    _ = try rt.modules.create(import_a_name);
-    _ = try rt.modules.create(import_b_name);
-    _ = try rt.modules.create(star_root_name);
-    _ = try rt.modules.create(import_root_name);
-    _ = try rt.modules.create(mixed_root_name);
+    const target = try publishEmptyModule(rt, &ctx.modules, target_name);
 
-    const star_a = &rt.modules.modules[rt.modules.findIndex(star_a_name).?];
-    const star_b = &rt.modules.modules[rt.modules.findIndex(star_b_name).?];
-    const import_a = &rt.modules.modules[rt.modules.findIndex(import_a_name).?];
-    const import_b = &rt.modules.modules[rt.modules.findIndex(import_b_name).?];
-    const star_root = &rt.modules.modules[rt.modules.findIndex(star_root_name).?];
-    const import_root = &rt.modules.modules[rt.modules.findIndex(import_root_name).?];
-    const mixed_root = &rt.modules.modules[rt.modules.findIndex(mixed_root_name).?];
+    var star_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_a_pending.deinit(rt);
+    const star_a_to_target = try star_a_pending.addRequest(target_name);
+    try star_a_pending.addIndirectExport(star_a_to_target, foo_name, star_atom, true);
+    try star_a_pending.addIndirectExport(star_a_to_target, default_name, star_atom, true);
+    const star_a = try publishFreshModule(&ctx.modules, star_a_name, &star_a_pending);
+    star_a.setRequestModuleNoFail(star_a_to_target, target);
 
-    try star_a.addRequestedModule(target_name);
-    try star_a.addStarExport(target_name, foo_name);
-    try star_a.addStarExport(target_name, default_name);
-    try star_b.addRequestedModule(target_name);
-    try star_b.addStarExport(target_name, foo_name);
-    try import_a.addRequestedModule(target_name);
-    try import_a.addImport(target_name, star_atom, foo_name);
-    try import_a.addExport(foo_name, foo_name);
-    try import_b.addRequestedModule(target_name);
-    try import_b.addImport(target_name, star_atom, foo_name);
-    try import_b.addExport(foo_name, foo_name);
+    var star_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_b_pending.deinit(rt);
+    const star_b_to_target = try star_b_pending.addRequest(target_name);
+    try star_b_pending.addIndirectExport(star_b_to_target, foo_name, star_atom, true);
+    const star_b = try publishFreshModule(&ctx.modules, star_b_name, &star_b_pending);
+    star_b.setRequestModuleNoFail(star_b_to_target, target);
 
-    try star_root.addRequestedModule(star_a_name);
-    try star_root.addRequestedModule(star_b_name);
-    try star_root.addStarExport(star_a_name, star_atom);
-    try star_root.addStarExport(star_b_name, star_atom);
-    try import_root.addRequestedModule(import_a_name);
-    try import_root.addRequestedModule(import_b_name);
-    try import_root.addStarExport(import_a_name, star_atom);
-    try import_root.addStarExport(import_b_name, star_atom);
-    try mixed_root.addRequestedModule(star_a_name);
-    try mixed_root.addRequestedModule(import_a_name);
-    try mixed_root.addStarExport(star_a_name, star_atom);
-    try mixed_root.addStarExport(import_a_name, star_atom);
+    var import_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_a_pending.deinit(rt);
+    const import_a_to_target = try import_a_pending.addRequest(target_name);
+    try import_a_pending.addImport(import_a_to_target, star_atom, foo_name, 0, true);
+    try import_a_pending.addExport(foo_name, foo_name, 0);
+    const import_a = try publishFreshModule(&ctx.modules, import_a_name, &import_a_pending);
+    import_a.setRequestModuleNoFail(import_a_to_target, target);
 
-    try rt.modules.linkModule(rt, star_root_name);
-    try rt.modules.linkModule(rt, import_root_name);
-    try rt.modules.linkModule(rt, mixed_root_name);
+    var import_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_b_pending.deinit(rt);
+    const import_b_to_target = try import_b_pending.addRequest(target_name);
+    try import_b_pending.addImport(import_b_to_target, star_atom, foo_name, 0, true);
+    try import_b_pending.addExport(foo_name, foo_name, 0);
+    const import_b = try publishFreshModule(&ctx.modules, import_b_name, &import_b_pending);
+    import_b.setRequestModuleNoFail(import_b_to_target, target);
 
-    const star_resolution = try rt.modules.resolveExport(star_root_name, foo_name);
+    var star_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_root_pending.deinit(rt);
+    const star_root_to_a = try star_root_pending.addRequest(star_a_name);
+    const star_root_to_b = try star_root_pending.addRequest(star_b_name);
+    try star_root_pending.addStarExport(star_root_to_a);
+    try star_root_pending.addStarExport(star_root_to_b);
+    const star_root = try publishFreshModule(&ctx.modules, star_root_name, &star_root_pending);
+    star_root.setRequestModuleNoFail(star_root_to_a, star_a);
+    star_root.setRequestModuleNoFail(star_root_to_b, star_b);
+
+    var import_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_root_pending.deinit(rt);
+    const import_root_to_a = try import_root_pending.addRequest(import_a_name);
+    const import_root_to_b = try import_root_pending.addRequest(import_b_name);
+    try import_root_pending.addStarExport(import_root_to_a);
+    try import_root_pending.addStarExport(import_root_to_b);
+    const import_root = try publishFreshModule(&ctx.modules, import_root_name, &import_root_pending);
+    import_root.setRequestModuleNoFail(import_root_to_a, import_a);
+    import_root.setRequestModuleNoFail(import_root_to_b, import_b);
+
+    var mixed_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer mixed_root_pending.deinit(rt);
+    const mixed_root_to_star = try mixed_root_pending.addRequest(star_a_name);
+    const mixed_root_to_import = try mixed_root_pending.addRequest(import_a_name);
+    try mixed_root_pending.addStarExport(mixed_root_to_star);
+    try mixed_root_pending.addStarExport(mixed_root_to_import);
+    const mixed_root = try publishFreshModule(&ctx.modules, mixed_root_name, &mixed_root_pending);
+    mixed_root.setRequestModuleNoFail(mixed_root_to_star, star_a);
+    mixed_root.setRequestModuleNoFail(mixed_root_to_import, import_a);
+
+    const star_resolution = try ctx.modules.resolveExport(star_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(star_resolution));
-    try std.testing.expectEqual(rt.modules.findIndex(target_name).?, star_resolution.resolved.module_index);
-    try std.testing.expectEqual(star_atom, star_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, star_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(star_resolution.resolved.entry));
 
-    const explicit_default_resolution = try rt.modules.resolveExport(star_a_name, default_name);
+    const explicit_default_resolution = try ctx.modules.resolveExport(star_a, default_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(explicit_default_resolution));
-    try std.testing.expectEqual(rt.modules.findIndex(target_name).?, explicit_default_resolution.resolved.module_index);
-    try std.testing.expectEqual(star_atom, explicit_default_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, explicit_default_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(explicit_default_resolution.resolved.entry));
 
-    const import_resolution = try rt.modules.resolveExport(import_root_name, foo_name);
+    const import_resolution = try ctx.modules.resolveExport(import_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(import_resolution));
-    try std.testing.expectEqual(rt.modules.findIndex(target_name).?, import_resolution.resolved.module_index);
-    try std.testing.expectEqual(star_atom, import_resolution.resolved.local_name);
+    try std.testing.expectEqual(import_a, import_resolution.resolved.module);
+    try std.testing.expectEqual(.local_export, std.meta.activeTag(import_resolution.resolved.entry));
 
-    const mixed_resolution = try rt.modules.resolveExport(mixed_root_name, foo_name);
+    const mixed_resolution = try ctx.modules.resolveExport(mixed_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(mixed_resolution));
-    try std.testing.expectEqual(rt.modules.findIndex(target_name).?, mixed_resolution.resolved.module_index);
-    try std.testing.expectEqual(star_atom, mixed_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, mixed_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(mixed_resolution.resolved.entry));
+
+    // Locators remain indexed into their originating records, while identity
+    // comparison normalizes both explicit namespace re-exports and local
+    // exports of namespace imports to the same target namespace.
+    try std.testing.expect(star_resolution.resolved.sameIdentity(explicit_default_resolution.resolved));
+    try std.testing.expect(star_resolution.resolved.sameIdentity(import_resolution.resolved));
+    try std.testing.expect(star_resolution.resolved.sameIdentity(mixed_resolution.resolved));
 }
 
-fn interruptOnce(rt: *core.JSRuntime, _: ?*anyopaque) bool {
-    rt.random_state +%= 1;
+fn interruptOnce(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
+    const count: *usize = @ptrCast(@alignCast(userdata.?));
+    count.* += 1;
     return true;
 }
 
@@ -6719,11 +8513,49 @@ test "runtime stack and interrupt state are stored" {
     try std.testing.expectEqual(std.math.maxInt(u62), rt.vm_stack_arena_policy.limit);
     rt.setStackSize(4096);
     try std.testing.expect(!rt.hasInterruptHandler());
-    rt.setInterruptHandler(interruptOnce, null);
+    var interrupt_count: usize = 0;
+    rt.setInterruptHandler(interruptOnce, &interrupt_count);
     try std.testing.expect(rt.hasInterruptHandler());
-    const before = rt.random_state;
     try std.testing.expect(rt.runInterruptHandler());
-    try std.testing.expectEqual(before +% 1, rt.random_state);
+    try std.testing.expectEqual(@as(usize, 1), interrupt_count);
+}
+
+test "realm interrupt cadence advances without a handler and is realm-local" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const realm_a = try core.JSContext.create(rt);
+    defer realm_a.destroy();
+    const realm_b = try core.JSContext.create(rt);
+    defer realm_b.destroy();
+
+    const interval: usize = @intCast(core.JSContext.interrupt_counter_reset);
+
+    // A raw QuickJS context starts at zero. Its first semantic poll therefore
+    // resets the counter even when the Runtime has no handler installed.
+    try std.testing.expect(!realm_a.pollInterrupt());
+    for (0..(interval - 1)) |_| {
+        try std.testing.expect(!realm_a.pollInterrupt());
+    }
+
+    var interrupt_count: usize = 0;
+    rt.setInterruptHandler(interruptOnce, &interrupt_count);
+    defer rt.setInterruptHandler(null, null);
+
+    // Installing a handler does not reset the already-advanced Realm budget.
+    try std.testing.expect(realm_a.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 1), interrupt_count);
+
+    // Every Realm owns an independent counter with the same initial-zero rule.
+    try std.testing.expect(realm_b.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 2), interrupt_count);
+
+    // Callback-to-callback distance is exactly the QuickJS 10,000-poll reset.
+    for (0..(interval - 1)) |_| {
+        try std.testing.expect(!realm_a.pollInterrupt());
+    }
+    try std.testing.expect(realm_a.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 3), interrupt_count);
 }
 
 test "ordinary objects define own data properties and descriptors" {
@@ -6737,7 +8569,7 @@ test "ordinary objects define own data properties and descriptors" {
     defer rt.atoms.free(key);
 
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
-    const desc = obj.getOwnProperty(rt, key).?;
+    const desc = (try obj.getOwnProperty(rt, key)).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
     try std.testing.expectEqual(@as(?i32, 42), desc.value.asInt32());
@@ -6745,7 +8577,7 @@ test "ordinary objects define own data properties and descriptors" {
     try std.testing.expect(obj.hasOwnProperty(key));
 
     try obj.setProperty(rt, key, core.JSValue.int32(7));
-    const updated = obj.getProperty(key);
+    const updated = try obj.getProperty(key);
     try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
 }
 
@@ -6791,7 +8623,7 @@ test "accessor descriptors store getter setter placeholders" {
     getter.value().free(rt);
     setter.value().free(rt);
 
-    const desc = obj.getOwnProperty(rt, key).?;
+    const desc = (try obj.getOwnProperty(rt, key)).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
     try std.testing.expect(desc.getter.isObject());
@@ -6813,7 +8645,7 @@ test "prototype traversal and cycle checks are enforced" {
 
     try std.testing.expect(!child.hasOwnProperty(key));
     try std.testing.expect(child.hasProperty(key));
-    try std.testing.expectEqual(@as(?i32, 11), child.getProperty(key).asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), (try child.getProperty(key)).asInt32());
     try std.testing.expectError(error.PrototypeCycle, proto.setPrototype(rt, child));
 }
 
@@ -6865,7 +8697,7 @@ test "extensibility seal and freeze update descriptor flags" {
     try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.JSValue.int32(2), true, true, true)));
 
     try obj.freeze(rt);
-    const desc = obj.getOwnProperty(rt, key).?;
+    const desc = (try obj.getOwnProperty(rt, key)).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(false, desc.configurable.?);
     try std.testing.expectEqual(false, desc.writable.?);
@@ -6914,7 +8746,7 @@ test "array indexed delete does not let dense holes mask ordinary properties" {
     const index_0 = core.atom.atomFromUInt32(0);
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(1)));
     try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try std.testing.expectEqual(@as(?i32, 2), array_obj.getProperty(index_0).asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), (try array_obj.getProperty(index_0)).asInt32());
 
     try std.testing.expect(array_obj.deleteProperty(rt, index_0));
     try std.testing.expect(!array_obj.hasOwnProperty(index_0));
@@ -6967,7 +8799,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const exotic_id = rt.newClassId(core.class.invalid_class_id);
+    const exotic_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(exotic_id, .{ .class_name = "ExoticDispatchHooksForTest" });
     const exotic = core.object.ExoticMethods{
         .get_own_property = exoticGet,
@@ -6985,7 +8817,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     const key = try rt.internAtom("hooked");
     defer rt.atoms.free(key);
 
-    const desc = obj.getOwnProperty(rt, key).?;
+    const desc = (try obj.getOwnProperty(rt, key)).?;
     defer desc.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
     try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
@@ -7041,6 +8873,8 @@ test "stored symbol value preserves and releases across GC without external valu
 test "finalization registry pending jobs preserve callback and held symbols" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const cleanup_sym = try rt.atoms.newValueSymbol("finalization-cleanup-callback");
     const cleanup_val = try rt.symbolValue(cleanup_sym);
@@ -7056,7 +8890,7 @@ test "finalization registry pending jobs preserve callback and held symbols" {
     try target_obj.defineOwnProperty(rt, target_sym, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
     rt.atoms.free(target_sym);
 
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val.dup();
     var registry_val = registry.value();
     defer registry_val.free(rt);

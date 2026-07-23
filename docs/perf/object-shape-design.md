@@ -102,8 +102,8 @@ needed by ordinary objects on the hot path.
 For object/shape changes, run at least:
 
 ```sh
-zig build test --summary all
-zig build smoke --summary all
+zig build test --seed 0 --summary all
+zig build smoke --seed 0 --summary all
 git diff --check
 ```
 

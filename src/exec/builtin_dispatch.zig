@@ -16,10 +16,13 @@ const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;
 
-pub const Bytecode = bytecode.Bytecode;
+var empty_realm_globals: [0]core.global_slots.Slot = .{};
+
+pub const Bytecode = bytecode.FunctionBytecode;
 pub const Frame = frame_mod.Frame;
 
 const NativeCallEnvironment = struct {
+    callable_realm: ?CallRealmView,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
@@ -30,11 +33,87 @@ const NativeCallEnvironment = struct {
     caller_frame: ?*Frame,
 };
 
+/// Atomic execution authority for one observable callable invocation.  The
+/// global is a borrowed alias of `realm.global`; keeping the pair in one value
+/// prevents native handlers from independently selecting a context and a
+/// global from different realms.
+pub const CallRealmView = struct {
+    realm: *core.RealmContext,
+    global: *core.Object,
+
+    pub fn caller(realm: *core.RealmContext) HostError!CallRealmView {
+        return .{
+            .realm = realm,
+            .global = realm.global orelse return error.InvalidBuiltinRegistry,
+        };
+    }
+
+    pub fn cFunction(object: *core.Object) HostError!CallRealmView {
+        if (object.class_id != core.class.ids.c_function) return error.InvalidBuiltinRegistry;
+        const realm = object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+        return caller(realm);
+    }
+};
+
+const FinalCallEnvironment = struct {
+    ctx: *core.RealmContext,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    callable_realm: ?CallRealmView,
+};
+
+/// Select the active realm at a proven final callable arm.  True C_FUNCTION
+/// objects use their owned construction realm; every caller-semantics class
+/// (including C_FUNCTION_DATA) uses the incoming realm.  The incoming `global`
+/// and legacy slot slice are intentionally ignored for observable calls: they
+/// are not independent authorities.  A null `func_obj` denotes an explicitly
+/// synthetic record invocation and retains the supplied algorithm-local view.
+pub fn finalCallableRealmView(
+    caller: *core.RealmContext,
+    object: *core.Object,
+) HostError!CallRealmView {
+    const view = if (object.class_id == core.class.ids.c_function)
+        try CallRealmView.cFunction(object)
+    else
+        try CallRealmView.caller(caller);
+    if (view.realm.runtime != caller.runtime) return error.InvalidBuiltinRegistry;
+    return view;
+}
+
+/// Resolve the final call carrier only after the caller has selected a record
+/// and completed its call-side preflight. True C_FUNCTION objects switch to
+/// their owned construction realm; C_FUNCTION_DATA and synthetic calls retain
+/// the incoming view. This mirrors js_call_c_function's late
+/// `ctx = p->u.cfunc.realm` assignment (quickjs.c:17586).
+fn finalCallEnvironment(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    globals: []core.global_slots.Slot,
+    func_obj: ?*core.Object,
+) HostError!FinalCallEnvironment {
+    const object = func_obj orelse return .{
+        .ctx = ctx,
+        .global = global,
+        .globals = globals,
+        .callable_realm = null,
+    };
+    const view = try finalCallableRealmView(ctx, object);
+    return .{
+        .ctx = view.realm,
+        .global = view.global,
+        .globals = empty_realm_globals[0..],
+        .callable_realm = view,
+    };
+}
+
 /// Exec-side convenience view for native implementations that need more than
 /// their typed cproto arguments. It is reconstructed from the current
 /// stack-local environment and is not stored in `InternalRecord`.
 pub const NativeCall = struct {
     ctx: *core.JSContext,
+    /// Non-null only for an observable JS callable invocation. Synthetic
+    /// algorithmic record reuse has no callable carrier and keeps this null.
+    callable_realm: ?CallRealmView,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
@@ -49,7 +128,7 @@ pub const NativeCall = struct {
 };
 
 inline fn activeNativeEnvironment(ctx: *core.JSContext) ?*const NativeCallEnvironment {
-    const opaque_ptr = ctx.active_native_call orelse return null;
+    const opaque_ptr = ctx.runtime.active_native_call orelse return null;
     return @ptrCast(@alignCast(opaque_ptr));
 }
 
@@ -64,6 +143,7 @@ pub inline fn nativeCall(
     const env = activeNativeEnvironment(ctx) orelse return null;
     return .{
         .ctx = ctx,
+        .callable_realm = env.callable_realm,
         .output = env.output,
         .global = env.global,
         .globals = env.globals,
@@ -76,6 +156,13 @@ pub inline fn nativeCall(
         .caller_function = env.caller_function,
         .caller_frame = env.caller_frame,
     };
+}
+
+/// Require the atomic authority attached to an observable JS callable. Native
+/// implementations with a separate algorithmic/bare-runtime entry should
+/// branch on `callable_realm == null` before calling this helper.
+pub inline fn callableRealm(call: NativeCall) HostError!CallRealmView {
+    return call.callable_realm orelse error.InvalidBuiltinRegistry;
 }
 
 pub fn genericMagicFunction(comptime implementation: core.host_function.NativeGenericMagicFn) core.host_function.NativeFunctionPtr {
@@ -193,31 +280,69 @@ pub inline fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
+    const view = try finalCallEnvironment(ctx, global, globals, func_obj);
+    return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+/// Final C-function terminal for a dispatcher that already loaded the record
+/// and RealmContext together from the function payload.  No generic realm
+/// resolver or caller-global transport is consulted after this boundary.
+pub inline fn callInternalRecordDirectInRealm(
+    view: CallRealmView,
+    output: ?*std.Io.Writer,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    if (func_obj.class_id != core.class.ids.c_function) return error.InvalidBuiltinRegistry;
+    if (func_obj.nativeFunctionRealm() != view.realm) return error.InvalidBuiltinRegistry;
+    return callInternalRecordDirectWithEnvironment(.{
+        .ctx = view.realm,
+        .global = view.global,
+        .globals = empty_realm_globals[0..],
+        .callable_realm = view,
+    }, output, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+inline fn callInternalRecordDirectWithEnvironment(
+    view: FinalCallEnvironment,
+    output: ?*std.Io.Writer,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
     // builtin captures the native callee before its bytecode caller. The data
     // is borrowed only for this synchronous invocation; snapshotting retains
     // the function value when an Error is materialized.
-    var native_scope = NativeBacktraceScope.init(ctx, func_obj);
+    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     native_scope.push();
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
+        .callable_realm = view.callable_realm,
         .output = output,
-        .global = global,
-        .globals = globals,
+        .global = view.global,
+        .globals = view.globals,
         .func_obj = func_obj,
         .is_constructor = false,
         .new_target = null,
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.active_native_call;
-    ctx.active_native_call = &native_env;
-    defer ctx.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.active_native_call;
+    view.ctx.runtime.active_native_call = &native_env;
+    defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(ctx, this_value, record, args) catch |err| {
-        try materializeRuntimeError(ctx, global, err);
+    return invokeResolvedInternalRecord(view.ctx, this_value, record, args) catch |err| {
+        try materializeRuntimeError(view.ctx, view.global, err);
         return err;
     };
 }
@@ -239,95 +364,65 @@ noinline fn callTypedInternalRecordDirect(
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     const native = record.native_function orelse return error.TypeError;
+    // `InternalRecord` is engine-owned and its table builder guarantees that
+    // the function union tag equals `cproto`. QuickJS likewise stores an
+    // untagged `JSCFunctionType` and interprets it solely through `cproto`;
+    // retain the invariant check in safe builds without redispatching on the
+    // duplicate union tag in every hot ABI arm.
+    std.debug.assert(std.meta.activeTag(native) == record.cproto);
     switch (record.cproto) {
         .generic => {
-            const native_fn = switch (native) {
-                .generic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.generic;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
-            const native_fn = switch (native) {
-                .constructor => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_or_func => {
-            const native_fn = switch (native) {
-                .constructor_or_func => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_or_func;
             return native_fn(ctx, this_value, args) catch |err| return @as(HostError, @errorCast(err));
         },
         .generic_magic => {
-            const native_fn = switch (native) {
-                .generic_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.generic_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_magic => {
             const env = activeNativeEnvironment(ctx) orelse return error.TypeError;
             if (!env.is_constructor) return error.TypeError;
-            const native_fn = switch (native) {
-                .constructor_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .constructor_or_func_magic => {
-            const native_fn = switch (native) {
-                .constructor_or_func_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.constructor_or_func_magic;
             return native_fn(ctx, this_value, args, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .getter => {
-            const native_fn = switch (native) {
-                .getter => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.getter;
             return native_fn(ctx, this_value) catch |err| return @as(HostError, @errorCast(err));
         },
         .setter => {
-            const native_fn = switch (native) {
-                .setter => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.setter;
             return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0]) catch |err| return @as(HostError, @errorCast(err));
         },
         .getter_magic => {
-            const native_fn = switch (native) {
-                .getter_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.getter_magic;
             return native_fn(ctx, this_value, record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .setter_magic => {
-            const native_fn = switch (native) {
-                .setter_magic => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.setter_magic;
             return native_fn(ctx, this_value, if (args.len == 0) core.JSValue.undefinedValue() else args[0], record.magic) catch |err| return @as(HostError, @errorCast(err));
         },
         .f_f => {
-            const native_fn = switch (native) {
-                .f_f => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.f_f;
             const value = primitiveF64Arg(args, 0) orelse
                 return callInternalRecordFallback(ctx, this_value, record, args);
             return value_ops.numberToValue(native_fn(value));
         },
         .f_f_f => {
-            const native_fn = switch (native) {
-                .f_f_f => |function| function,
-                else => return error.TypeError,
-            };
+            const native_fn = native.f_f_f;
             const lhs = primitiveF64Arg(args, 0) orelse
                 return callInternalRecordFallback(ctx, this_value, record, args);
             const rhs = primitiveF64Arg(args, 1) orelse
@@ -427,27 +522,29 @@ fn callConstructRecordImpl(
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.isConstructor()) return null;
-    var native_scope = NativeBacktraceScope.init(ctx, func_obj);
+    const view = try finalCallEnvironment(ctx, global, globals, func_obj);
+    var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     if (push_native_frame) native_scope.push();
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
+        .callable_realm = view.callable_realm,
         .output = output,
-        .global = global,
-        .globals = globals,
+        .global = view.global,
+        .globals = view.globals,
         .func_obj = func_obj,
         .is_constructor = true,
         .new_target = prototype,
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    const previous_native_call = ctx.active_native_call;
-    ctx.active_native_call = &native_env;
-    defer ctx.active_native_call = previous_native_call;
+    const previous_native_call = view.ctx.runtime.active_native_call;
+    view.ctx.runtime.active_native_call = &native_env;
+    defer view.ctx.runtime.active_native_call = previous_native_call;
 
-    return invokeResolvedInternalRecord(ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
+    return invokeResolvedInternalRecord(view.ctx, core.JSValue.undefinedValue(), record, args) catch |err| {
         const host_err = @as(HostError, @errorCast(err));
-        try materializeRuntimeError(ctx, global, host_err);
+        try materializeRuntimeError(view.ctx, view.global, host_err);
         return host_err;
     };
 }
@@ -481,5 +578,5 @@ pub fn callerFrame(call: NativeCall) ?*Frame {
 pub fn callerResultIsDropped(caller_function: ?*const Bytecode, caller_frame: ?*Frame) bool {
     const function = caller_function orelse return false;
     const frame = caller_frame orelse return false;
-    return frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.drop;
+    return frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.drop;
 }

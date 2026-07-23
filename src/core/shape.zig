@@ -33,6 +33,11 @@ pub const Property = packed struct(u64) {
     atom_id: atom.Atom = atom.null_atom,
 };
 
+pub const InitialProperty = struct {
+    atom_id: atom.Atom,
+    flags: u6,
+};
+
 /// Byte size of a shape's inline FAM region (hash table + prop array) for a
 /// given allocated prop capacity and bucket count. Mirrors qjs get_shape_size
 /// minus `sizeof(JSShape)` (quickjs.c:5121): `hash_size*4 + prop_size*8`, with
@@ -71,7 +76,9 @@ pub const Shape = extern struct {
     registry_hash_next: ?*Shape = null,
     proto: ?*Object = null,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
-    //   [hash buckets: u32 × bucketCount()] [pad to 8] [props: Property × prop_size]
+    //   [hash buckets: u32 × bucketCount()] [props: Property × prop_size]
+    // Every live shape has a power-of-two bucket count >= 4, so the bucket
+    // region is already aligned for the 8-byte Property records.
     // addressed through famBase()/hashBuckets()/props().
 
     /// Base of the inline FAM region (just past the struct fields). Mirrors qjs
@@ -93,10 +100,15 @@ pub const Shape = extern struct {
     }
 
     pub inline fn props(self: *const Shape) []Property {
-        if (self.prop_size == 0) return &.{};
+        // qjs `get_shape_prop` is just `(sh + 1) + hash_size`: its hash table
+        // is always large enough to leave the following 8-byte property array
+        // aligned. zjs maintains the same invariant in every shape constructor
+        // and relocation (bucket_count is a power of two and at least 4).
+        // Avoid recomputing a dynamic alignForward on every property lookup.
+        std.debug.assert(self.prop_size != 0);
         const bucket_bytes = @sizeOf(u32) * self.bucketCount();
-        const offset = std.mem.alignForward(usize, bucket_bytes, @alignOf(Property));
-        const ptr: [*]Property = @ptrCast(@alignCast(self.famBase() + offset));
+        std.debug.assert(bucket_bytes == std.mem.alignForward(usize, bucket_bytes, @alignOf(Property)));
+        const ptr: [*]Property = @ptrCast(@alignCast(self.famBase() + bucket_bytes));
         return ptr[0..self.prop_size];
     }
 
@@ -235,6 +247,20 @@ pub const Registry = struct {
             return shape;
         }
         return self.createShapeWithPropertyCapacity(proto, property_capacity);
+    }
+
+    /// Build one context-owned initial shape without ever materializing a
+    /// hidden template Object. The returned reference belongs to the caller.
+    pub fn createInitialShape(self: *Registry, proto: ?*Object, properties: []const InitialProperty) !*Shape {
+        // Preserve the object/value-buffer invariant used by mutation clones:
+        // every non-empty shape has at least `initial_prop_size` slots.
+        var result = try self.createObjectRootWithPropertyCapacity(proto, propertyCapacityForNeeded(properties.len));
+        var owned = true;
+        errdefer if (owned) self.release(result);
+        try self.prepareUpdate(&result);
+        for (properties) |prop| try self.addProperty(&result, prop.atom_id, prop.flags);
+        owned = false;
+        return result;
     }
 
     fn createShape(self: *Registry, proto: ?*Object) !*Shape {
@@ -448,6 +474,7 @@ pub const Registry = struct {
             if (new_shape.hasPropertyHash()) {
                 for (new_props[0..old_prop_count], 0..) |*prop, index| {
                     prop.hash_next = no_property_index;
+                    if (prop.atom_id == atom.null_atom) continue;
                     self.linkPropertyHash(new_shape, index);
                 }
             }
@@ -483,10 +510,38 @@ pub const Registry = struct {
     }
 
     pub fn markPropertyDeleted(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
-        _ = self;
         std.debug.assert(index < shape.prop_count);
-        shape.props()[index].flags = flags;
+        const props = shape.props();
+        const prop = &props[index];
+        const removed_atom = prop.atom_id;
+        std.debug.assert(removed_atom != atom.null_atom);
+
+        // QuickJS `delete_property` removes the tombstone from the shape hash
+        // chain before clearing its atom. Keeping deleted entries linked makes
+        // every later `find_own_property` decode and test a deleted flag even
+        // though the hash table can never legitimately resolve to a tombstone.
+        const bucket = propertyBucketIndex(shape.hash, removed_atom, shape.prop_hash_mask);
+        var current = shape.hashBuckets()[bucket];
+        var previous: ?usize = null;
+        while (current != no_property_index) {
+            const current_index: usize = @intCast(current);
+            if (current_index == index) {
+                if (previous) |previous_index| {
+                    props[previous_index].hash_next = prop.hash_next;
+                } else {
+                    shape.hashBuckets()[bucket] = prop.hash_next;
+                }
+                break;
+            }
+            previous = current_index;
+            current = props[current_index].hash_next;
+        } else unreachable;
+
+        prop.hash_next = no_property_index;
+        prop.flags = flags;
+        prop.atom_id = atom.null_atom;
         shape.deleted_prop_count += 1;
+        self.atoms.free(removed_atom);
     }
 
     pub fn updatePropertyFlags(self: *Registry, shape: *Shape, index: usize, flags: u6) void {
@@ -542,6 +597,7 @@ pub const Registry = struct {
         if (new_shape.hasPropertyHash()) {
             for (new_shape.props()[0..new_shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
+                if (prop.atom_id == atom.null_atom) continue;
                 self.linkPropertyHash(new_shape, index);
             }
         }
@@ -691,6 +747,7 @@ pub const Registry = struct {
         if (shape.hasPropertyHash()) {
             for (shape.props()[0..shape.prop_count], 0..) |*prop, index| {
                 prop.hash_next = no_property_index;
+                if (prop.atom_id == atom.null_atom) continue;
                 self.linkPropertyHash(shape, index);
             }
         }
@@ -753,6 +810,7 @@ pub const Registry = struct {
         std.debug.assert(shape.hasPropertyHash());
         std.debug.assert(index < shape.prop_count);
         const prop = &shape.props()[index];
+        std.debug.assert(prop.atom_id != atom.null_atom);
         const bucket = propertyBucketIndex(shape.hash, prop.atom_id, shape.prop_hash_mask);
         prop.hash_next = @intCast(shape.hashBuckets()[bucket]);
         shape.hashBuckets()[bucket] = @intCast(index);

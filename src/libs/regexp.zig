@@ -200,13 +200,8 @@ const REUndo = extern struct {
 
 const REExecContext = struct {
     allocator: std.mem.Allocator,
-    cbuf: Input,
-    cbuf_latin1: []const u8,
-    cbuf_utf16: []const u16,
+    cbuf: [*]const u8,
     cbuf_end: usize,
-    cbuf_type: CbufType,
-    bc_buf: []const u8,
-    bc_buf_end: usize,
     capture_count: usize,
     register_count: usize,
     alloc_count: usize,
@@ -429,6 +424,10 @@ pub fn compilePatternAndFlags(allocator: std.mem.Allocator, pattern: []const u8,
     return .{ .bytecode = try compile(allocator, pattern, flags_str) };
 }
 
+pub fn compilePatternWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) !Compiled {
+    return .{ .bytecode = try compileWithFlagBits(allocator, pattern, re_flags) };
+}
+
 pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
     return regexp_properties.isSupportedUnicodePropertyExpression(name);
 }
@@ -476,9 +475,9 @@ pub fn execIntoMatchWithOptions(
     return .match;
 }
 
-/// Fast path for bytecode produced by this compiler or by an equivalent
-/// validator. Trusted execution still validates the bytecode header and capture
-/// storage size, but skips per-opcode corruption checks inside the VM loop.
+/// Execution for bytecode produced by this compiler or by an equivalent
+/// validator. Like QuickJS's `lre_exec`, the release build trusts the compiled
+/// header and opcode operands; Debug assertions retain the internal contract.
 pub fn execIntoMatchTrustedWithOptions(
     allocator: std.mem.Allocator,
     bytecode: []const u8,
@@ -487,9 +486,9 @@ pub fn execIntoMatchTrustedWithOptions(
     options: ExecOptions,
     out_match: *Match,
 ) !ExecResult {
-    const header = try parseHeader(bytecode);
+    const header = parseHeaderTrusted(bytecode);
     var capture_buf = CaptureSlotBuffer{};
-    try capture_buf.init(allocator, try checkedAllocCount(header));
+    try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
 
     const result = try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots);
@@ -551,7 +550,7 @@ pub fn execCaptureSlotsSliceTrustedWithOptions(
     options: ExecOptions,
     capture: []usize,
 ) !ExecResult {
-    const header = try parseHeader(bytecode);
+    const header = parseHeaderTrusted(bytecode);
     return execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture);
 }
 
@@ -565,34 +564,37 @@ fn execCaptureSlotsParsed(
     header: REBytecodeHeader,
     capture: []usize,
 ) !ExecResult {
-    const alloc_count = try checkedAllocCount(header);
-    if (capture.len < alloc_count) return error.BytecodeCorrupt;
+    const alloc_count = if (comptime safety == .trusted)
+        header.capture_count * 2 + header.register_count
+    else
+        try checkedAllocCount(header);
+    if (comptime safety == .checked) {
+        if (capture.len < alloc_count) return error.BytecodeCorrupt;
+    } else {
+        std.debug.assert(capture.len >= alloc_count);
+    }
     if (start_index > input.len()) return .out_of_range;
-    if (input.len() >= compact_no_slot_value) return error.BytecodeCorrupt;
-    if (header_len + header.bytecode_len >= compact_no_slot_value) return error.BytecodeCorrupt;
+    if (comptime safety == .checked) {
+        if (input.len() >= compact_no_slot_value) return error.BytecodeCorrupt;
+        if (header_len + header.bytecode_len >= compact_no_slot_value) return error.BytecodeCorrupt;
+    } else {
+        std.debug.assert(input.len() < compact_no_slot_value);
+        std.debug.assert(header_len + header.bytecode_len < compact_no_slot_value);
+    }
     const cbuf_type: CbufType = switch (input) {
         .latin1 => .latin1,
         .utf16 => if ((header.flags & (flags.unicode | flags.unicode_sets)) != 0) .utf16_unicode else .utf16_units,
     };
     const initial_cptr = normalizeStartIndex(input, cbuf_type, start_index);
-    const cbuf_latin1: []const u8 = switch (input) {
-        .latin1 => |bytes| bytes,
-        .utf16 => &.{},
-    };
-    const cbuf_utf16: []const u16 = switch (input) {
-        .latin1 => &.{},
-        .utf16 => |units| units,
+    const cbuf: [*]const u8 = switch (input) {
+        .latin1 => |bytes| bytes.ptr,
+        .utf16 => |units| @ptrCast(units.ptr),
     };
 
     var ctx = REExecContext{
         .allocator = allocator,
-        .cbuf = input,
-        .cbuf_latin1 = cbuf_latin1,
-        .cbuf_utf16 = cbuf_utf16,
+        .cbuf = cbuf,
         .cbuf_end = input.len(),
-        .cbuf_type = cbuf_type,
-        .bc_buf = bytecode,
-        .bc_buf_end = header_len + header.bytecode_len,
         .capture_count = header.capture_count,
         .register_count = header.register_count,
         .alloc_count = alloc_count,
@@ -610,10 +612,11 @@ fn execCaptureSlotsParsed(
     defer ctx.deinit();
 
     @memset(capture[0..alloc_count], no_slot_value);
+    const bytecode_end = header_len + header.bytecode_len;
     const matched = switch (cbuf_type) {
-        .latin1 => try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, header_len, initial_cptr),
-        .utf16_units => try lreExecBacktrack(safety, .utf16_units, &ctx, capture.ptr, header_len, initial_cptr),
-        .utf16_unicode => try lreExecBacktrack(safety, .utf16_unicode, &ctx, capture.ptr, header_len, initial_cptr),
+        .latin1 => try lreExecBacktrack(safety, .latin1, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
+        .utf16_units => try lreExecBacktrack(safety, .utf16_units, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
+        .utf16_unicode => try lreExecBacktrack(safety, .utf16_unicode, &ctx, capture.ptr, bytecode, bytecode_end, header_len, initial_cptr),
     };
     return if (matched) .match else .no_match;
 }
@@ -633,9 +636,9 @@ pub fn testMatchWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, 
 /// Trusted test-only execution for compiler-produced bytecode.
 /// See `execIntoMatchTrustedWithOptions` for the safety contract.
 pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool {
-    const header = try parseHeader(bytecode);
+    const header = parseHeaderTrusted(bytecode);
     var capture_buf = CaptureSlotBuffer{};
-    try capture_buf.init(allocator, try checkedAllocCount(header));
+    try capture_buf.init(allocator, header.capture_count * 2 + header.register_count);
     defer capture_buf.deinit(allocator);
     return (try execCaptureSlotsParsed(.trusted, allocator, bytecode, input, start_index, options, header, capture_buf.slots)) == .match;
 }
@@ -645,45 +648,54 @@ pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []con
 const ExecState = struct {
     s: *REExecContext,
     capture: [*]usize,
+    bc_base: [*]const u8,
     pc: [*]const u8,
     bc_end: [*]const u8,
     bt_frames: [*]REBTFrame,
     undo_stack: [*]REUndo,
-    cbuf_latin1: [*]const u8,
-    cbuf_utf16: [*]const u16,
+    cbuf: [*]const u8,
     cptr: usize,
     bt_len: usize,
     bt_end: usize,
     undo_len: usize,
     undo_end: usize,
-    cbuf_type: CbufType,
     cbuf_end: usize,
 
     fn init(
         s: *REExecContext,
         capture: [*]usize,
+        bytecode: []const u8,
+        bytecode_end: usize,
         initial_pc: usize,
         initial_cptr: usize,
+        comptime safety: ExecSafety,
     ) !ExecState {
-        if (initial_pc > s.bc_buf_end) return error.BytecodeCorrupt;
-        const bc_ptr = s.bc_buf.ptr;
+        if (comptime safety == .checked) {
+            if (initial_pc > bytecode_end) return error.BytecodeCorrupt;
+        } else {
+            std.debug.assert(initial_pc <= bytecode_end);
+        }
+        const bc_ptr = bytecode.ptr;
         return .{
             .s = s,
             .capture = capture,
+            .bc_base = bc_ptr,
             .pc = bc_ptr + initial_pc,
-            .bc_end = bc_ptr + s.bc_buf_end,
+            .bc_end = bc_ptr + bytecode_end,
             .bt_frames = s.bt_frames.ptr,
             .undo_stack = s.undo_stack.ptr,
-            .cbuf_latin1 = s.cbuf_latin1.ptr,
-            .cbuf_utf16 = s.cbuf_utf16.ptr,
+            .cbuf = s.cbuf,
             .cptr = initial_cptr,
             .bt_len = 0,
             .bt_end = s.bt_frames.len,
             .undo_len = 0,
             .undo_end = s.undo_stack.len,
-            .cbuf_type = s.cbuf_type,
             .cbuf_end = s.cbuf_end,
         };
+    }
+
+    inline fn cbufUtf16(self: *const ExecState) [*]const u16 {
+        return @ptrCast(@alignCast(self.cbuf));
     }
 
     inline fn checkFrameSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void {
@@ -714,7 +726,7 @@ const ExecState = struct {
 
     inline fn ensurePc(self: *const ExecState, comptime safety: ExecSafety, ptr: [*]const u8, n: usize) !void {
         if (comptime safety == .trusted) return;
-        const base_addr = @intFromPtr(self.s.bc_buf.ptr);
+        const base_addr = @intFromPtr(self.bc_base);
         const ptr_addr = @intFromPtr(ptr);
         const end_addr = @intFromPtr(self.bc_end);
         if (ptr_addr < base_addr or ptr_addr > end_addr or end_addr - ptr_addr < n) return error.BytecodeCorrupt;
@@ -725,7 +737,7 @@ const ExecState = struct {
             const delta: usize = @bitCast(@as(isize, offset));
             return @ptrFromInt(@intFromPtr(self.pc) +% delta);
         }
-        const base_addr = @intFromPtr(self.s.bc_buf.ptr);
+        const base_addr = @intFromPtr(self.bc_base);
         const pc_addr = @intFromPtr(self.pc);
         const end_addr = @intFromPtr(self.bc_end);
         if (pc_addr < base_addr or pc_addr > end_addr) return error.BytecodeCorrupt;
@@ -808,27 +820,27 @@ const ExecState = struct {
         return if (value == compact_no_slot_value) no_slot_value else @as(usize, value);
     }
 
-    inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum {
-        if (comptime safety == .checked) {
-            if (frame.typ > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
-        }
-        return @enumFromInt(frame.typ);
-    }
-
     inline fn pcOffset(self: *const ExecState, comptime safety: ExecSafety, pc: [*]const u8) !u32 {
         try self.ensurePc(safety, pc, 0);
-        const base_addr = @intFromPtr(self.s.bc_buf.ptr);
+        const base_addr = @intFromPtr(self.bc_base);
         const pc_addr = @intFromPtr(pc);
         return compactIndex(safety, pc_addr - base_addr);
     }
 
     inline fn pcFromOffset(self: *const ExecState, comptime safety: ExecSafety, offset: u32) ![*]const u8 {
         if (comptime safety == .checked) {
-            if (offset > self.s.bc_buf_end) return error.BytecodeCorrupt;
+            if (offset > @intFromPtr(self.bc_end) - @intFromPtr(self.bc_base)) return error.BytecodeCorrupt;
         }
-        const pc = self.s.bc_buf.ptr + offset;
+        const pc = self.bc_base + offset;
         try self.ensurePc(safety, pc, 0);
         return pc;
+    }
+
+    inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum {
+        if (comptime safety == .checked) {
+            if (frame.typ > @intFromEnum(REExecStateEnum.negative_lookahead)) return error.BytecodeCorrupt;
+        }
+        return @enumFromInt(frame.typ);
     }
 
     inline fn pushExecState(self: *ExecState, comptime safety: ExecSafety, pc: [*]const u8, typ: REExecStateEnum) !void {
@@ -959,11 +971,11 @@ const ExecState = struct {
             if (comptime safety == .checked) {
                 if (pos.* >= end) return null;
             }
-            const code_point: u21 = self.cbuf_latin1[pos.*];
+            const code_point: u21 = self.cbuf[pos.*];
             pos.* += 1;
             return code_point;
         }
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         if (comptime safety == .checked) {
             if (pos.* >= end) return null;
         }
@@ -988,9 +1000,9 @@ const ExecState = struct {
                 if (pos.* > self.cbuf_end) return null;
             }
             pos.* -= 1;
-            return self.cbuf_latin1[pos.*];
+            return self.cbuf[pos.*];
         }
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         if (comptime safety == .checked) {
             if (pos.* > self.cbuf_end) return null;
         }
@@ -1008,11 +1020,11 @@ const ExecState = struct {
 
     inline fn getCharUnchecked(self: *ExecState, comptime cbuf_type: CbufType) u21 {
         if (comptime cbuf_type == .latin1) {
-            const code_point: u21 = self.cbuf_latin1[self.cptr];
+            const code_point: u21 = self.cbuf[self.cptr];
             self.cptr += 1;
             return code_point;
         }
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         var code_point: u21 = units[self.cptr];
         self.cptr += 1;
         if (comptime cbuf_type == .utf16_unicode) {
@@ -1027,10 +1039,10 @@ const ExecState = struct {
     inline fn peekChar(self: *const ExecState, comptime cbuf_type: CbufType) ?u21 {
         if (comptime cbuf_type == .latin1) {
             if (self.cptr >= self.cbuf_end) return null;
-            return self.cbuf_latin1[self.cptr];
+            return self.cbuf[self.cptr];
         }
         if (self.cptr >= self.cbuf_end) return null;
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         var code_point: u21 = units[self.cptr];
         const next = self.cptr + 1;
         if (comptime cbuf_type == .utf16_unicode) {
@@ -1045,10 +1057,10 @@ const ExecState = struct {
         if (self.cptr == 0) return null;
         if (comptime cbuf_type == .latin1) {
             if (self.cptr > self.cbuf_end) return null;
-            return self.cbuf_latin1[self.cptr - 1];
+            return self.cbuf[self.cptr - 1];
         }
         if (self.cptr > self.cbuf_end) return null;
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         const prev = self.cptr - 1;
         var code_point: u21 = units[prev];
         if (comptime cbuf_type == .utf16_unicode) {
@@ -1067,7 +1079,7 @@ const ExecState = struct {
             return;
         }
         if (self.cptr > self.cbuf_end) return error.BytecodeCorrupt;
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         var prev = self.cptr - 1;
         const code_point: u21 = units[prev];
         if (comptime cbuf_type == .utf16_unicode) {
@@ -1084,7 +1096,7 @@ const ExecState = struct {
         if (self.cptr >= self.cbuf_end) return false;
         var pos = self.cptr + 1;
         if (comptime cbuf_type == .latin1) {
-            const haystack = self.cbuf_latin1[pos..self.cbuf_end];
+            const haystack = self.cbuf[pos..self.cbuf_end];
             if (std.mem.indexOfScalar(u8, haystack, needle)) |offset| {
                 self.cptr = pos + offset;
                 return true;
@@ -1092,7 +1104,7 @@ const ExecState = struct {
             return false;
         }
 
-        const units = self.cbuf_utf16;
+        const units = self.cbufUtf16();
         while (pos < self.cbuf_end) : (pos += 1) {
             if (units[pos] == needle) {
                 self.cptr = pos;
@@ -1150,9 +1162,9 @@ const ExecState = struct {
         const input_start = self.cptr;
         const input_end = input_start + len;
         const matched = if (comptime cbuf_type == .latin1)
-            std.mem.eql(u8, self.cbuf_latin1[start..end], self.cbuf_latin1[input_start..input_end])
+            std.mem.eql(u8, self.cbuf[start..end], self.cbuf[input_start..input_end])
         else
-            std.mem.eql(u16, self.cbuf_utf16[start..end], self.cbuf_utf16[input_start..input_end]);
+            std.mem.eql(u16, self.cbufUtf16()[start..end], self.cbufUtf16()[input_start..input_end]);
         if (!matched) return false;
         self.cptr = input_end;
         return true;
@@ -1166,9 +1178,9 @@ const ExecState = struct {
         if (self.cptr < len) return false;
         const input_start = self.cptr - len;
         const matched = if (comptime cbuf_type == .latin1)
-            std.mem.eql(u8, self.cbuf_latin1[start..end], self.cbuf_latin1[input_start..self.cptr])
+            std.mem.eql(u8, self.cbuf[start..end], self.cbuf[input_start..self.cptr])
         else
-            std.mem.eql(u16, self.cbuf_utf16[start..end], self.cbuf_utf16[input_start..self.cptr]);
+            std.mem.eql(u16, self.cbufUtf16()[start..end], self.cbufUtf16()[input_start..self.cptr]);
         if (!matched) return false;
         self.cptr = input_start;
         return true;
@@ -1180,15 +1192,20 @@ fn lreExecBacktrack(
     comptime cbuf_type: CbufType,
     ctx: *REExecContext,
     capture: [*]usize,
+    bytecode: []const u8,
+    bytecode_end: usize,
     initial_pc: usize,
     initial_cptr: usize,
 ) !bool {
-    var st = try ExecState.init(ctx, capture, initial_pc, initial_cptr);
+    var st = try ExecState.init(ctx, capture, bytecode, bytecode_end, initial_pc, initial_cptr, safety);
 
     main: while (true) {
         dispatch_once: {
             const opcode_byte = try st.getU8(safety);
-            const opcode = decodeOp(opcode_byte) orelse return error.BytecodeCorrupt;
+            const opcode = if (comptime safety == .trusted)
+                @as(REOPCodeEnum, @enumFromInt(opcode_byte))
+            else
+                decodeOp(opcode_byte) orelse return error.BytecodeCorrupt;
             switch (opcode) {
                 .invalid => return error.BytecodeCorrupt,
                 .match => return true,
@@ -1320,7 +1337,9 @@ fn lreExecBacktrack(
                 },
                 .save_start, .save_end => {
                     const val = try st.getU8(safety);
-                    if (val >= st.s.capture_count) return error.BytecodeCorrupt;
+                    if (comptime safety == .checked) {
+                        if (val >= st.s.capture_count) return error.BytecodeCorrupt;
+                    }
                     const idx = 2 * @as(usize, val) + @intFromEnum(opcode) - @intFromEnum(REOPCodeEnum.save_start);
                     try st.saveCapture(safety, idx, st.cptr);
                     continue :main;
@@ -1635,6 +1654,18 @@ fn parseHeader(bytecode: []const u8) !REBytecodeHeader {
     };
 }
 
+fn parseHeaderTrusted(bytecode: []const u8) REBytecodeHeader {
+    std.debug.assert(bytecode.len >= header_len);
+    const bytecode_len = std.mem.readInt(u32, bytecode[re_header_bytecode_len..header_len], .little);
+    std.debug.assert(header_len + bytecode_len <= bytecode.len);
+    return .{
+        .flags = std.mem.readInt(u16, bytecode[0..2], .little),
+        .capture_count = bytecode[re_header_capture_count],
+        .register_count = bytecode[re_header_register_count],
+        .bytecode_len = bytecode_len,
+    };
+}
+
 fn checkedAllocCount(header: REBytecodeHeader) !usize {
     if (header.capture_count == 0 or header.capture_count > max_captures) return error.BytecodeCorrupt;
     if (header.register_count > register_count_max) return error.BytecodeCorrupt;
@@ -1844,8 +1875,10 @@ const REStringListBuildContext = struct {
 };
 
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) CompileError![]u8 {
-    const re_flags = try parseFlags(flags_str);
+    return compileWithFlagBits(allocator, pattern, try parseFlagBits(flags_str));
+}
 
+pub fn compileWithFlagBits(allocator: std.mem.Allocator, pattern: []const u8, re_flags: u16) CompileError![]u8 {
     var s = REParseState{
         .allocator = allocator,
         .byte_code = .empty,
@@ -1878,7 +1911,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []c
     return try s.byte_code.toOwnedSlice(allocator);
 }
 
-fn parseFlags(flag_bytes: []const u8) CompileError!u16 {
+pub fn parseFlagBits(flag_bytes: []const u8) CompileError!u16 {
     var seen: [256]bool = [_]bool{false} ** 256;
     var re_flags: u16 = 0;
     var saw_u = false;

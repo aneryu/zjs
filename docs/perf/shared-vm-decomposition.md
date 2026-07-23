@@ -66,15 +66,15 @@ place until there is a stable domain boundary.
 Minimum validation for a small move:
 
 ```sh
-zig build zjs --summary all
+zig build zjs --seed 0 --summary all
 git diff --check
 ```
 
 For multi-domain moves or any observable behavior risk:
 
 ```sh
-zig build test --summary all
-zig build smoke --summary all
+zig build test --seed 0 --summary all
+zig build smoke --seed 0 --summary all
 ```
 
 Run a relevant test262 slice when the moved code handles visible JavaScript

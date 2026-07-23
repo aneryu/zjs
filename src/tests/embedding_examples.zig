@@ -322,11 +322,11 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
     const ctx_b = try zjs.JSContext.create(rt);
     defer ctx_b.destroy();
 
-    try ObjectType.install(&ctx_a.core);
-    const binding_a = try ObjectType.binding(&ctx_a.core);
+    try ObjectType.install(ctx_a.core);
+    const binding_a = try ObjectType.binding(ctx_a.core);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    if (ObjectType.install(&ctx_b.core)) {
+    if (ObjectType.install(ctx_b.core)) {
         rt.setMemoryLimit(null);
         return error.TestExpectedError;
     } else |err| {
@@ -334,14 +334,14 @@ test "embedding public NativeBinding failed realm install leaves binding absent"
         try std.testing.expectEqual(error.OutOfMemory, err);
     }
 
-    try std.testing.expectError(error.NotInstalled, ObjectType.binding(&ctx_b.core));
+    try std.testing.expectError(error.NotInstalled, ObjectType.binding(ctx_b.core));
 
     const value_a = try binding_a.new(.{ .value = 7 });
     defer value_a.free(rt);
     try std.testing.expectEqual(@as(i32, 7), binding_a.payload(value_a).?.value);
 
-    try ObjectType.install(&ctx_b.core);
-    const binding_b = try ObjectType.binding(&ctx_b.core);
+    try ObjectType.install(ctx_b.core);
+    const binding_b = try ObjectType.binding(ctx_b.core);
     const value_b = try binding_b.new(.{ .value = 11 });
     defer value_b.free(rt);
     try std.testing.expectEqual(@as(i32, 11), binding_b.payload(value_b).?.value);
@@ -365,10 +365,10 @@ test "embedding public runtime Plugin failed install preserves target properties
     defer target.free(rt);
     try ctx.defineDataProperty(target, "add", zjs.JSValue.int32(1), .{});
 
-    try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(&ctx.core, target, .{}));
+    try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(ctx.core, target, .{}));
     try std.testing.expect(plugin.consumed);
     try std.testing.expect(plugin.loaded != null);
-    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(&ctx.core, target, .{ .overwrite = true }));
+    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx.core, target, .{ .overwrite = true }));
 
     const add = try ctx.getProperty(target, "add");
     defer add.free(rt);

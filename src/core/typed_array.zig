@@ -48,13 +48,14 @@ const JSRuntime = @import("runtime.zig").JSRuntime;
 const Object = object.Object;
 const Atom = atom.Atom;
 const Descriptor = descriptor.Descriptor;
+const DynamicImportError = @import("context.zig").DynamicImportError;
 
 const AppendStringError = error{
     OutOfMemory,
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || DynamicImportError;
 
 // --- ArrayBuffer construction / storage helpers (engine core) ---------------
 
@@ -1027,7 +1028,7 @@ fn appendArrayString(rt: *JSRuntime, buffer: *std.ArrayList(u8), obj: *Object) A
     var index: u32 = 0;
     while (index < obj.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = obj.getProperty(atom.atomFromUInt32(index));
+        const value = try obj.getProperty(atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

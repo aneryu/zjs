@@ -90,7 +90,7 @@ pub fn qjsBigIntAsN(
     global: *core.Object,
     args: []const core.JSValue,
     unsigned: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = caller_function;
@@ -163,7 +163,7 @@ pub fn qjsDateToPrimitiveNativeRecord(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return date_vm.qjsDateToPrimitiveCall(ctx, output, global, this_value, args, caller_function, caller_frame);
@@ -188,7 +188,7 @@ pub fn qjsGlobalParseInt(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -215,7 +215,7 @@ pub fn qjsGlobalParseFloat(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -246,7 +246,7 @@ pub fn qjsArrayNativeRecord(
     function_object: ?*core.Object,
     id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (id) {
@@ -468,7 +468,7 @@ pub fn qjsSymbolFor(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const key = if (args.len >= 1)
@@ -488,14 +488,16 @@ pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JS
 }
 
 pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try core.function.nativeFunction(rt, name, length);
-    errdefer function.free(rt);
-    const object = objectFromValue(function) orelse return error.TypeError;
-    try object.setFunctionRealmGlobalPtr(rt, global);
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
-        try object.setPrototype(rt, function_proto);
-    }
-    return function;
+    const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+    const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
+    return core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, 2);
+}
+
+/// C_FUNCTION_DATA analogue for internal callbacks whose semantics explicitly
+/// use the caller realm rather than the realm in which the carrier was made.
+pub fn qjsCreateDataFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
+    const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
+    return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
 }
 
 pub fn constructCollectionFromVm(
@@ -506,8 +508,9 @@ pub fn constructCollectionFromVm(
     kind: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const prototype = try constructorPrototypeObject(ctx.runtime, constructor);
-    return constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
+    var prototype = try constructorPrototypeObject(ctx.runtime, constructor);
+    defer prototype.deinit(ctx.runtime);
+    return constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
 }
 
 pub fn addCollectionEntriesFromIterator(
@@ -599,10 +602,9 @@ pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_
 // Realm slot and native-method helpers (moved from the VM call runtime).
 
 pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    _ = rt;
     if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| return constructor;
-    const function_value = global.getProperty(core.atom.ids.Function);
-    defer function_value.free(rt);
-    return property_ops.expectObject(function_value) catch null;
+    return null;
 }
 
 pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot, value: core.JSValue) !void {
@@ -610,10 +612,10 @@ pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.obj
     try global.setOptionalValueSlot(rt, cached, value.dup());
 }
 
-pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
+pub fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
@@ -621,10 +623,10 @@ pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: [
 /// Same as `defineNativeDataMethod`, but stamps the function object with a
 /// native-builtin record id so calls dispatch through the integer record
 /// mechanism instead of the legacy name chain.
-pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
+pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try core.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);

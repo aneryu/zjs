@@ -3,7 +3,6 @@ const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const exceptions = @import("exceptions.zig");
-const object_ops = @import("object_ops.zig");
 
 const HostError = exceptions.HostError;
 
@@ -55,9 +54,7 @@ pub fn next(index: *usize, length: usize) Result {
 /// the static helpers reach the for-of machinery. Standard-global bootstrap
 /// resolves names through its iterator static/prototype method lists plus the
 /// accessor/dispose enum ids; this table is consumed by the record-dispatch
-/// path (`rt.internal_builtins`). None of these
-/// records are prepared-call eligible (the prepared gate in
-/// `vm_call.zig` reports `.iterator => false`).
+/// path (`rt.internal_builtins`).
 pub const internal_entries = iteratorEntries: {
     const Entry = core.host_function.InternalEntry;
     break :iteratorEntries [_]Entry{
@@ -94,7 +91,6 @@ fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u3
         .length = length,
         .id = id,
         .magic = @intCast(id),
-        .prepared_call_ok = false,
         .cproto = .generic_magic,
         .native_function = builtin_dispatch.genericMagicFunction(&iteratorCall),
     };
@@ -113,12 +109,12 @@ fn iteratorCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const ctx = host_call.ctx;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
     const id: u32 = host_call.magic;
-    const active_global = host_call.global orelse object_ops.objectRealmGlobal(host_call.func_obj orelse return error.TypeError) orelse ctx.global orelse return error.TypeError;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
-    if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, host_call.output, active_global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
+    if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, host_call.output, realm.global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
 

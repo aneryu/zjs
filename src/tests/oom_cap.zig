@@ -35,7 +35,7 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const wrapper: *BindingContext = @ptrCast(ctx);
+    var wrapper = BindingContext.borrowCore(ctx);
 
     // Unbounded eager string growth must hit the cap, surface as a
     // catchable InternalError inside JS, and leave the engine alive.
@@ -161,7 +161,7 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const wrapper: *BindingContext = @ptrCast(ctx);
+    var wrapper = BindingContext.borrowCore(ctx);
 
     var state = ExhaustState{ .rt = rt, .counting = &counting };
     try wrapper.defineGlobalFunction("__exhaust", 0, &state, ExhaustState.exhaust, null);

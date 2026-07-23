@@ -5,13 +5,11 @@ const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
-const object_ops = @import("object_ops.zig");
 const value_slot = @import("value_slot.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
@@ -22,9 +20,7 @@ const globalLexicalHasForGlobal = call_runtime.globalLexicalHasForGlobal;
 const globalLexicalValue = call_runtime.globalLexicalValue;
 const globalLexicalValueForGlobal = call_runtime.globalLexicalValueForGlobal;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
-const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const pushAdapterValue = array_ops.pushAdapterValue;
-const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
 const setGlobalLexicalValueForGlobal = call_runtime.setGlobalLexicalValueForGlobal;
 const throwTdzReference = exception_ops.throwTdzReference;
@@ -153,7 +149,8 @@ pub fn execGetVarRef(
 
 pub fn execGetVarRefMaybeTdz(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    output: ?*std.Io.Writer,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -176,7 +173,7 @@ pub fn execGetVarRefMaybeTdz(
                 if (lexical_value.isUninitialized()) {
                     lexical_value.free(ctx.runtime);
                     const err = throwTdzReference(ctx);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+                    if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                         return true;
                     }
                     return err;
@@ -187,7 +184,7 @@ pub fn execGetVarRefMaybeTdz(
             }
         }
         if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
-            const value = global.getProperty(atom_id);
+            const value = try global.getProperty(atom_id);
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
             return false;
@@ -202,13 +199,19 @@ pub fn execGetVarRefMaybeTdz(
         // eval-created binding (qjs remove_global_object_property):
         // plain ReferenceError, not the TDZ message.
         if (cell.varRefIsDeletableSlot().*) {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
+            if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) {
                 return true;
             }
             return error.ReferenceError;
         }
-        const err = throwTdzReference(ctx);
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        // Captured derived `this` uses ordinary get_var_ref_check in QuickJS,
+        // so it remains catchable in the current (callee) realm while keeping
+        // the constructor-specific message.
+        const err = if (idx < function.varRefNamesLen() and function.varRefName(idx) == core.atom.ids.this_) blk: {
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
+            unreachable;
+        } else throwTdzReference(ctx);
+        if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return true;
         }
         return err;
@@ -219,15 +222,13 @@ pub fn execGetVarRefMaybeTdz(
 
 pub fn execPutVarRef(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
     consume: u8,
     opc: u8,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
 ) !void {
     frame.pc += consume;
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
@@ -241,7 +242,8 @@ pub fn execPutVarRef(
         const current = cell.varRefValue();
         if (!current.isUninitialized()) {
             value.free(ctx.runtime);
-            return error.ReferenceError;
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| return err;
+            unreachable;
         }
     }
     if (opc == op.put_var_ref_check) {
@@ -251,22 +253,19 @@ pub fn execPutVarRef(
             return throwTdzReference(ctx);
         }
     }
-    const capture_is_function_name = idx < function.closure_var.len and
-        function.closure_var[idx].var_kind == .function_name;
-    const capture_is_const = idx < function.closure_var.len and
-        function.closure_var[idx].is_const;
+    const capture_is_function_name = idx < function.closureVar().len and
+        function.closureVar()[idx].varKind() == .function_name;
+    const capture_is_const = idx < function.closureVar().len and
+        function.closureVar()[idx].isConst();
     if (cell.varRefIsFunctionNameSlot().* or capture_is_function_name) {
         value.free(ctx.runtime);
-        if (function.flags.is_strict) return error.TypeError;
+        if (function.isStrictMode()) return error.TypeError;
         return;
     }
     if ((cell.varRefIsConstSlot().* or capture_is_const) and !constVarRefWriteAllowed(cell, opc)) {
         value.free(ctx.runtime);
         _ = throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
         return error.TypeError;
-    }
-    if (value.isObject()) {
-        try publishTopLevelFunctionVarRef(ctx.runtime, function, global, frame, idx, value, eval_global_var_bindings, is_eval_code);
     }
     var assigned = value;
     if (varRefCellFromValue(value) != null) {
@@ -289,70 +288,6 @@ pub fn isVarRefInitOpcode(opc: u8) bool {
 pub fn constVarRefWriteAllowed(cell: *core.VarRef, opc: u8) bool {
     _ = cell;
     return isVarRefInitOpcode(opc);
-}
-
-pub noinline fn publishTopLevelFunctionVarRef(
-    rt: *core.JSRuntime,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    idx: u16,
-    value: core.JSValue,
-    eval_global_var_bindings: bool,
-    is_eval_code: bool,
-) !void {
-    if (idx >= function.varRefNamesLen()) return;
-    if (!value.isObject()) return;
-    if (function.flags.is_module) return;
-    if (is_eval_code and !eval_global_var_bindings) return;
-    // Only NON-lexical top-level bindings (`var`/`function` declarations) reflect
-    // their function value onto the global object. A top-level LEXICAL binding
-    // (`let`/`const`/`class`, a JS_CLOSURE_GLOBAL_DECL with is_lexical) lives in
-    // the global lexical environment record only — qjs never creates a global
-    // object property for it (a top-level `class A{}` / `let f = function(){}`
-    // must leave `globalThis.A` undefined; `language/global-code/decl-lex.js`).
-    const eval_annex_b_function = is_eval_code and eval_global_var_bindings and idx < function.closure_var.len and
-        (function.closure_var[idx].var_kind == .function_decl or function.closure_var[idx].var_kind == .new_function_decl);
-    if (function.varRefIsLexicalAt(idx) and !eval_annex_b_function) return;
-    if (!sameObjectIdentity(frame.this_value, global.value())) return;
-    const object = property_ops.expectObject(value) catch return;
-    if (!isFunctionLikeClass(object.class_id)) return;
-    try defineGlobalFunctionBindingValue(rt, global, function.varRefName(idx), value, is_eval_code);
-}
-
-pub fn defineGlobalFunctionBindingValue(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    atom_id: core.Atom,
-    value: core.JSValue,
-    configurable: bool,
-) !void {
-    if (global.findProperty(atom_id)) |index| {
-        const flags = global.propFlagsAt(index);
-        if (!flags.deleted and !flags.isAccessor()) {
-            if (global.asVarRefAt(index)) |cell| {
-                cell.setVarRefValue(rt, value.dup());
-                return;
-            }
-        }
-    }
-
-    const desc = if (global.getOwnProperty(rt, atom_id)) |current| blk: {
-        defer current.destroy(rt);
-        if (current.configurable == true) {
-            break :blk core.Descriptor.data(value, true, true, configurable);
-        }
-        break :blk core.Descriptor{
-            .kind = .data,
-            .value = value,
-            .value_present = true,
-        };
-    } else core.Descriptor.data(value, true, true, configurable);
-
-    global.defineOwnProperty(rt, atom_id, desc) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-        else => return err,
-    };
 }
 
 pub fn execSetVarRef(

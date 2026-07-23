@@ -2,13 +2,12 @@
 
 Use this checklist for an engine-only Production v1 release decision.
 
-`zig build engine-production-gate --summary all` is the semantic and
+`zig build engine-production-gate --seed 0 --summary all` is the semantic and
 architecture gate. It is required release evidence, but it does not replace the
 ReleaseSafe, hygiene, and performance checks below.
 
-`zig build quick-check --summary all` and `zig build checkpoint-check --summary
-all` are iteration and handoff shortcuts. Do not rerun them as prerequisites
-for the aggregate release gate.
+`mise run quick-check` and `mise run checkpoint-check` are iteration and handoff
+shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 ## API
 
@@ -33,17 +32,17 @@ for the aggregate release gate.
 
 ## Compatibility
 
-- `zig build engine-production-gate --summary all` passes from a clean
+- `zig build engine-production-gate --seed 0 --summary all` passes from a clean
   checkout; it includes the unified Debug suite, ReleaseFast CLI smoke,
   architecture checks, OOM-cap coverage, and the full test262 gate.
-- `zig build test -Doptimize=ReleaseSafe --summary all` passes once as the
-  optimized-loop safety gate.
+- `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` passes once as
+  the optimized-loop safety gate.
 - Focused test262 slices were run for every changed semantic area.
 
 ## Boundary
 
-- `zig build architecture-check --summary all` passes, including dependency
-  rules and public API snapshot validation.
+- `zig build architecture-check --seed 0 --summary all` passes, including
+  dependency rules and public API snapshot validation.
 - `docs/security-boundary.md` is accurate for the release.
 - `COMPATIBILITY.md` and `LIMITATIONS.md` do not overclaim.
 - Release notes state that the engine is trusted-code only.
@@ -51,8 +50,8 @@ for the aggregate release gate.
 ## Hygiene
 
 - `git diff --check` passes.
-- `zig build perf-self-check --summary all` passes when the release includes
-  performance-sensitive runtime changes.
+- `zig build perf-self-check --seed 0 --summary all` passes when the release
+  includes performance-sensitive runtime changes.
 - No temporary debug output, generated noise, or unrelated refactors are in the
   release diff.
 - Non-trivial validation evidence is in the PR, issue, or release notes.

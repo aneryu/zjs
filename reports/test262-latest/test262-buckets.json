@@ -1,13 +1,13 @@
 {
-  "total_failed": 2,
+  "total_failed": 24,
   "buckets": {
-    "SyntaxError": 0,
+    "SyntaxError": 7,
     "TypeError": 2,
-    "Test262Error": 0,
+    "Test262Error": 14,
     "RangeError": 0,
     "ReferenceError": 0,
     "UnhandledPromiseRejection": 0,
     "Other": 0,
-    "Empty": 0
+    "Empty": 1
   }
 }

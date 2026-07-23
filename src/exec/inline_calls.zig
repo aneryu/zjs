@@ -15,6 +15,7 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
+const op = bytecode.opcode.op;
 const core = @import("../core/root.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -37,6 +38,26 @@ pub const RegionLayout = enum {
     method,
 };
 
+/// Compile-time `this` arm of an empty-leaf frame constructor. The published
+/// leaf bit is mode-independent; the call adapter picks the arm from the call
+/// shape (plain vs method region) and the function's strict-mode flags,
+/// mirroring qjs JS_CallInternal where `this_obj` is the caller-supplied
+/// raw word and only OP_push_this consults the callee's strict flag
+/// (quickjs.c:17924-17944).
+pub const LeafThis = enum {
+    /// Sloppy plain call: borrow the realm global as the frame's `this`.
+    sloppy_global,
+    /// Raw-`this` strict plain call: preserve undefined `this` (no
+    /// substitution). Arrow bytecode never consults the frame slot —
+    /// lexical `this`/`new.target` are ordinary closure cells — so arrows
+    /// use either plain arm according to their enclosing strictness.
+    raw_undefined,
+    /// Method call: move the raw receiver into the frame's owned `this`;
+    /// identical for strict and sloppy callees (coercion, when sloppy,
+    /// stays deferred to the this-reading opcodes).
+    receiver,
+};
+
 pub const InlineTarget = struct {
     /// qjs `p->u.func.var_refs`, resolved once while the callable Object is hot.
     /// The callable below roots the owning Object; the immutable count lives on
@@ -47,49 +68,38 @@ pub const InlineTarget = struct {
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
-    /// The pointer-stable per-FB cached execution view (`cachedBytecodeView`,
-    /// built once per FB). Cache construction failure declines the same-Machine
-    /// path before an InlineTarget exists; the authoritative generic call can
-    /// execute the FB without this compatibility cache. qjs's OP_call hands
-    /// `JS_CallInternal` only the 16B `func_obj` and the callee prologue
-    /// dereferences `p->u.func.function_bytecode` (quickjs.c:17800) — zero
-    /// struct freight. Keeping only pointers here keeps the target (and the
-    /// `InlineCallRequest` riding through the dispatch driver) at qjs's
-    /// scalars-only scale instead of dragging a by-value `Bytecode` through
-    /// every call.
-    view: *const bytecode.Bytecode,
+    /// Immutable call-policy snapshot loaded with the FunctionBytecode while
+    /// resolving the callable.  The two 16-bit halves are adjacent in the
+    /// W1c4 extension, so resolution pays one locator and one 32-bit load;
+    /// frame selectors must not walk the optional tail again.
+    call_facts: bytecode.CallFacts,
     /// Raw receiver before [[Call]] `this` boxing: `undefined` for plain calls,
     /// the property base for method calls, or Function.call's explicit thisArg.
     /// Arrow bytecode ignores this frame binding and reads its ordinary lexical
     /// capture instead. Borrowed from the rooted operand region.
     this_value: core.JSValue,
-    /// `new.target` is undefined for ordinary [[Call]]. Arrow bytecode reads
-    /// its lexical value through the ordinary closure capture installed at
-    /// creation time.
-    new_target: core.JSValue,
     pub inline fn captureSlice(self: InlineTarget) []*core.VarRef {
-        return self.var_refs[0..self.fb.var_refs_len];
+        return self.var_refs[0..self.fb.closureVarCount()];
     }
 };
 
 /// The receiver-independent result of proving that a callable is eligible for
-/// same-Machine bytecode execution. Plain-call handlers may inspect the cached
-/// execution view before binding the wider InlineTarget: the published empty
-/// leaf shape needs only that view, while every other shape materializes the
+/// same-Machine bytecode execution. Plain-call handlers may inspect the final
+/// FunctionBytecode before binding the wider InlineTarget: the published empty
+/// leaf shape needs only that record, while every other shape materializes the
 /// receiver/callable/capture record on demand.
 pub const ResolvedInlineFunction = struct {
     var_refs: [*]*core.VarRef,
     fb: *const bytecode.FunctionBytecode,
-    view: *const bytecode.Bytecode,
+    call_facts: bytecode.CallFacts,
 
     pub inline fn bind(self: ResolvedInlineFunction, receiver: core.JSValue, func: core.JSValue) InlineTarget {
         return .{
             .var_refs = self.var_refs,
             .callable = func,
             .fb = self.fb,
-            .view = self.view,
+            .call_facts = self.call_facts,
             .this_value = receiver,
-            .new_target = core.JSValue.undefinedValue(),
         };
     }
 };
@@ -101,32 +111,33 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_data = function_object.bytecodeFunctionStoragePtr();
     const fb = function_data.function_bytecode orelse return null;
-    std.debug.assert(function_data.captureSlice().len == fb.var_refs_len);
-    if (fb.flags.func_kind != .normal) return null;
-    if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
+    const captures = function_data.captureSlice();
+    std.debug.assert(captures.len == fb.closureVarCount());
+    if (fb.functionKind() != .normal) return null;
+    // Production callable publication proves the exact non-empty FAM layout;
+    // take the three-load code+len hot-tail path instead of rechecking the
+    // optional fixture/legacy shapes on every call.
+    const call_facts = fb.canonicalCallFacts();
+    if (fb.isDerivedClassConstructor()) return null;
+    const code = fb.byteCode();
+    if (code.len == 0 or code[0] == op.check_ctor) return null;
     // Realm gate: qjs reads `ctx = b->realm` from the shared FB. With FB now
     // resident directly in Object.u.func this is one dependent load, without a
     // per-closure realm cache or borrowed-holder registration.
-    const function_global = if (fb.realm_global_header) |realm_header|
-        @as(*core.Object, @fieldParentPtr("header", realm_header))
-    else
-        global;
+    const function_realm = fb.realmContext() orelse return null;
+    const function_global = function_realm.global orelse return null;
     if (function_global != global) return null;
-    // Bytecode-function publication creates this immutable compatibility view
-    // once. qjs executes the FB directly; until zjs does too, a proven function
-    // object makes the cached pointer non-null by construction.
-    std.debug.assert(fb.cached_view != null);
     return .{
-        .var_refs = function_data.var_refs,
+        .var_refs = captures.ptr,
         .fb = fb,
-        .view = fb.cached_view.?,
+        .call_facts = call_facts,
     };
 }
 
 /// Resolve `func` to an inline-eligible bytecode call target for a call with
 /// receiver `receiver` (`undefined` for plain calls, the property base for
 /// method calls). Mirrors the plain-call leg of
-/// `callValueOrBytecodeClassModeDispatch`; any condition that path
+/// `callValueOrBytecodeDispatch`; any condition that path
 /// special-cases (class constructors, cross-realm calls, and async/generator
 /// kinds) disqualifies the target so the slow
 /// path keeps handling it. Direct eval captures use the ordinary indexed
@@ -141,7 +152,7 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
 }
 
 /// One active inline call level. Entries live in chunked, pointer-stable
-/// storage; `frame`, `stack`, and the frame's execution view are referenced by
+/// storage; `frame`, `stack`, and the frame's FunctionBytecode are referenced by
 /// the dispatch loop and backtrace pc borrows while the level is alive.
 /// Work the caller must finish after an inline callee returns. Ordinary calls
 /// push the result and resume immediately. Proxy `get` validates the trap
@@ -189,10 +200,25 @@ pub const Entry = struct {
         simple: bool = false,
         has_native_caller: bool = false,
         empty_leaf: bool = false,
-        _padding: u5 = 0,
+        /// Exact-args leaf twin of `empty_leaf`: same warm construction and
+        /// one-ldp resume record, plus a caller-region args window whose
+        /// values the return epilogue releases. Kept as a separate bit so
+        /// the established zero-arg return arm retains its exact single-bit
+        /// test (no args len probe on the argc==0 leaf family).
+        exact_args_leaf: bool = false,
+        /// Function.prototype.call forwarding into a published zero-arg leaf
+        /// (O3): empty-leaf frame geometry PLUS the owned synthetic native
+        /// `call` frame. A separate bit (never combined with `empty_leaf`)
+        /// because the default-repr resume record overlays `native_caller`
+        /// storage, which this shape needs live for observable backtraces —
+        /// its return arm re-derives the caller resume through `prev`
+        /// instead of reading the record, and the established leaf arms keep
+        /// their exact single-bit tests.
+        forwarded_leaf: bool = false,
+        _padding: u3 = 0,
     };
 
-    /// The Entry's sole persistent execution-view source is `frame.function`;
+    /// The Entry's sole persistent FunctionBytecode source is `frame.function`;
     /// `Vm.function` is only a reloadable hot dispatch cache. qjs likewise
     /// dispatches through one `JSFunctionBytecode *b` instead of mirroring it
     /// in an outer frame wrapper.
@@ -201,7 +227,7 @@ pub const Entry = struct {
     /// after moving `new.target` out of the hot Frame. The extra default-repr
     /// word restores the 248-byte Entry whose closure/negative-control layout
     /// is stable; a 240-byte layout regressed those probes despite fewer ops.
-    _stride_padding: [if (core.value.nan_boxing) 2 * @sizeOf(usize) else 0]u8,
+    _stride_padding: [if (core.value.nan_boxing) 2 * @sizeOf(usize) else 0]u8 align(if (core.value.nan_boxing) @alignOf(usize) else 1),
     stack: stack_mod.Stack,
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
@@ -241,6 +267,51 @@ pub const Entry = struct {
         return self.teardown.empty_leaf;
     }
 
+    pub inline fn isExactArgsLeaf(self: *const Entry) bool {
+        return self.teardown.exact_args_leaf;
+    }
+
+    pub inline fn isForwardedLeaf(self: *const Entry) bool {
+        return self.teardown.forwarded_leaf;
+    }
+
+    /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
+    /// storage that is dead for empty-leaf entries. Default repr: the 16-byte
+    /// `native_caller` value is live ONLY under `teardown.has_native_caller`
+    /// (Function.prototype.call forwarding — never an empty leaf; every reader
+    /// checks the flag first, including the backtrace resolver). Nan-boxed
+    /// repr: `_stride_padding` is pure layout padding. The record holds the
+    /// caller's {resume pc, resume sp} so the return arm restores them with
+    /// one ldp instead of re-deriving them through the
+    /// prev→frame.function→code.ptr→(+frame.pc) load chain that feeds the
+    /// caller's next dispatch branch. Written once per empty-leaf push by
+    /// `finishEmptyLeafFrame` (the single constructor tail for the shape).
+    inline fn emptyLeafResumeWords(self: *Entry) *[2]usize {
+        if (comptime core.value.nan_boxing) {
+            comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) == 2 * @sizeOf(usize));
+            return @ptrCast(@alignCast(&self._stride_padding));
+        }
+        comptime std.debug.assert(@sizeOf(core.JSValue) == 2 * @sizeOf(usize));
+        return @ptrCast(@alignCast(&self.native_caller));
+    }
+
+    pub inline fn setEmptyLeafResume(self: *Entry, resume_pc: [*]const u8, resume_sp: [*]core.JSValue) void {
+        std.debug.assert(!self.teardown.has_native_caller);
+        const words = self.emptyLeafResumeWords();
+        words[0] = @intFromPtr(resume_pc);
+        words[1] = @intFromPtr(resume_sp);
+    }
+
+    pub inline fn emptyLeafResumePc(self: *Entry) [*]const u8 {
+        std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
+        return @ptrFromInt(self.emptyLeafResumeWords()[0]);
+    }
+
+    pub inline fn emptyLeafResumeSp(self: *Entry) [*]core.JSValue {
+        std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
+        return @ptrFromInt(self.emptyLeafResumeWords()[1]);
+    }
+
     /// Move post-call work from a retired frame into its tail-call replacement.
     fn adoptContinuation(self: *Entry, continuation: *ReturnContinuation) void {
         std.debug.assert(self.return_action == .next);
@@ -271,7 +342,15 @@ pub const Entry = struct {
     /// authoritative Stack/Frame cleanup instead of using the normal-return
     /// leaf epilogue.
     inline fn deinit(self: *Entry, ctx: *core.JSContext) void {
-        if (self.teardown.empty_leaf)
+        // Exact-args leaves must ALSO route through general teardown here:
+        // their `frame.locals` is the empty-slice default (not the stack
+        // base deinitSimple's live_values derivation assumes), and general
+        // teardown releases the caller-region args window exactly once via
+        // `deinitInlineCall` while leaving its borrowed backing untouched.
+        // Forwarded leaves (O3) share the empty-slice geometry and rely on
+        // general teardown's established `has_native_caller` release.
+        if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
+            self.teardown.forwarded_leaf)
             self.deinitGeneral(ctx)
         else if (self.canUseSimpleTeardown())
             self.deinitSimple(ctx)
@@ -279,35 +358,128 @@ pub const Entry = struct {
             self.deinitGeneral(ctx);
     }
 
-    /// Normal-return teardown. The return handler has already moved the result
-    /// out and published the retreated sp, proving the empty leaf has no live
-    /// operand values; only this completion edge may use its narrow epilogue.
+    /// Normal-return teardown. The narrow leaf epilogue additionally requires
+    /// an EMPTY callee operand window: the parser elides trailing
+    /// expression-statement drops and leaves switch discriminants on the
+    /// stack at `return` (qjs frees them in the done: local_buf..sp loop,
+    /// quickjs.c:20701-20706), and the driver-side falloff completion peeks
+    /// its result without popping. Those returns route through general
+    /// teardown, which releases the remaining operand values exactly once.
     inline fn deinitReturned(self: *Entry, ctx: *core.JSContext) void {
-        if (self.teardown.empty_leaf)
+        if (self.teardown.empty_leaf and self.stack.len() == 0)
             self.deinitEmptyLeaf(ctx)
         else
             self.deinit(ctx);
     }
 
-    /// Return epilogue for a published empty leaf. The bytecode view proves
-    /// this frame has no arguments/local/capture/open-ref windows and cannot
-    /// materialize FrameCold through arguments or direct eval. Exact argc=0 is
-    /// checked by the call adapter before setting the flag. The callable is the
-    /// sole owned JSValue; the arena watermark and optional profile guard are
-    /// the only remaining resources.
+    /// Outline wrapper for the cold consumers of the empty-leaf epilogue
+    /// (driver-side `.returned` / falloff completions). The hot in-handler
+    /// return arm uses `deinitEmptyLeafInline` directly so its non-zero
+    /// refcount leg and arena restore run without a bl/ret round trip, with
+    /// `destroyZeroRef` remaining the only (cold) call.
     noinline fn deinitEmptyLeaf(self: *Entry, ctx: *core.JSContext) void {
+        self.deinitEmptyLeafInline(ctx);
+    }
+
+    /// Return epilogue for a published empty leaf. The FunctionBytecode proves
+    /// this frame has no arguments/local/capture/open-ref windows and cannot
+    /// materialize FrameCold through arguments or direct eval — and, via the
+    /// static return-balance proof gating publication
+    /// (`codeProvesLeafReturnBalance`), that every return site completes with
+    /// an EMPTY operand window (parser-elided leftover shapes are refused the
+    /// flag), so the len==0 assert below holds without a runtime guard on the
+    /// hot return arm. Exact argc=0 is
+    /// checked by the call adapter before setting the flag. The callable —
+    /// plus, for the method shape, the moved-in receiver (`this` `.owned`,
+    /// mirroring `setupSimpleInlineEntryImpl`'s method arm and `deinitSimple`'s
+    /// conditional release) — are the only owned JSValues; the arena watermark
+    /// and optional profile guard are the only remaining resources. Plain
+    /// leaves keep the borrowed sloppy-global `this`, so their ownership test
+    /// stays a predicted-not-taken branch.
+    inline fn deinitEmptyLeafInline(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
         std.debug.assert(!self.teardown.has_native_caller);
         std.debug.assert(frame.cold == null);
-        std.debug.assert(frame.ownership.this_value == .borrowed);
         std.debug.assert(frame.ownership.current_function == .owned);
         std.debug.assert(frame.ownership.storage == .borrowed);
         std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
         std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
         std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
         frame.current_function.freeObjectAssumeObject(rt);
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    /// Exact-args twin of `deinitEmptyLeafInline`: identical narrow normal-
+    /// return epilogue plus the caller-region args release — qjs OP_call's
+    /// post-return `for(i = -1; i < call_argc; i++) JS_FreeValue(ctx,
+    /// call_argv[i])` (quickjs.c:18229-18232) collapsed into the callee
+    /// teardown that runs at the same point on this path. The args window
+    /// borrows the caller's operand slots above the retreated top, so only
+    /// the VALUES are released; the backing region is reused by the caller's
+    /// next push. Only the normal-return arm may use this: abrupt completion
+    /// keeps general teardown (live operand values, cold state).
+    ///
+    /// Capture leaves (O2) publish the same teardown bit: their frame is the
+    /// zero-arg member of this family (args window empty — the release loop
+    /// zero-trips — with the same borrowed capture array), and they need this
+    /// arm's operand-window guard because inherited-capture bodies read free
+    /// names and may carry parser-elided leftovers at `return`.
+    inline fn deinitExactArgsLeafInline(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.teardown.simple);
+        std.debug.assert(self.teardown.exact_args_leaf and !self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(frame.cold == null);
+        std.debug.assert(frame.ownership.current_function == .owned);
+        std.debug.assert(frame.ownership.storage == .borrowed);
+        std.debug.assert(frame.locals.len == 0);
+        std.debug.assert(frame.args.len == frame.function.arg_count);
+        std.debug.assert(frame.args.len != 0 or frame.var_refs.len != 0);
+        // Inherited captures are borrowed from the closure's cell array and
+        // are never released here (deinitSimple's exact contract for
+        // borrowed var_refs); the callee can never CREATE cells.
+        std.debug.assert(frame.ownership.var_refs == .borrowed);
+        std.debug.assert(frame.open_var_refs.len == 0);
+        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        frame.current_function.freeObjectAssumeObject(rt);
+        for (frame.args) |v| v.free(rt);
+        rt.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    /// Forwarded-leaf twin of `deinitEmptyLeafInline` (O3): identical narrow
+    /// normal-return epilogue plus the owned synthetic native `call` frame
+    /// release. The forwarding adapter proved `native_caller` is a callable
+    /// object (its record's `forwards_call` gate), so the release skips the
+    /// full JSValue classifier exactly like the callable itself — qjs frees
+    /// both the argument buffer entry for the target and the native frame's
+    /// func_obj with plain object decrements on the same return edge
+    /// (js_call_c_function done:, quickjs.c:18229-18232). Only the
+    /// normal-return arm may use this: abrupt completion keeps general
+    /// teardown, whose established cold `releaseNativeCaller` handles the
+    /// same ownership.
+    inline fn deinitForwardedLeafInline(self: *Entry, ctx: *core.JSContext) void {
+        const rt = ctx.runtime;
+        const frame = &self.frame;
+        std.debug.assert(self.teardown.simple);
+        std.debug.assert(self.teardown.forwarded_leaf and !self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.exact_args_leaf);
+        std.debug.assert(self.teardown.has_native_caller);
+        std.debug.assert(frame.cold == null);
+        std.debug.assert(frame.ownership.current_function == .owned);
+        std.debug.assert(frame.ownership.storage == .borrowed);
+        std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
+        std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
+        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        if (frame.ownership.this_value == .owned) frame.this_value.free(rt);
+        frame.current_function.freeObjectAssumeObject(rt);
+        self.native_caller.freeObjectAssumeObject(rt);
         rt.vm_stack.restore(self.arena_mark);
         self.profile_guard.deinit();
     }
@@ -352,15 +524,15 @@ comptime {
 }
 
 /// The mutable execution resources for one active bytecode level. `frame`
-/// owns the authoritative execution view (`frame.function`); the operand
+/// owns the authoritative FunctionBytecode pointer (`frame.function`); the operand
 /// stack and catch slot stay separate only because their storage lifetimes
-/// differ from the frame slab. The struct itself is a borrowed view.
+/// differ from the frame slab. The struct itself is a borrowed bundle.
 pub const ExecutionLevel = struct {
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     catch_target: *?usize,
 
-    pub inline fn function(self: ExecutionLevel) *const bytecode.Bytecode {
+    pub inline fn function(self: ExecutionLevel) *const bytecode.FunctionBytecode {
         return self.frame.function;
     }
 };
@@ -373,6 +545,7 @@ pub const L0State = struct {
     level: ExecutionLevel,
     is_eval_code: bool = false,
     eval_global_var_bindings: bool = false,
+    direct_eval_vars_reach_global: bool = false,
     strict_unresolved_get_var: bool = false,
     generator_state: ?*core.Object = null,
     stop_on_yield: bool = false,
@@ -445,13 +618,8 @@ pub const Machine = struct {
 
     /// Drains any leftover inline frames (error propagation out of the
     /// dispatch loop without a catch handler) and releases chunk storage.
-    /// Draining mirrors the per-level `errdefer` of the recursive path:
-    /// abrupt-completion destructuring iterators are closed before each
-    /// frame is torn down.
     pub fn deinit(self: *Machine) void {
         while (self.depth > 0) {
-            const entry = self.topEntry();
-            call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(self.ctx, self.output, self.global, &entry.stack, &entry.frame);
             var continuation = self.popFrame();
             continuation.deinit(self.ctx.runtime);
         }
@@ -604,9 +772,15 @@ pub const Machine = struct {
     /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
     /// would redo the chunk multiply for nothing.
     fn pushFrame(self: *Machine, comptime setup_path: FrameSetupPath, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
-        try vm_call.enterInlineCallDepth(self.ctx, global);
-        errdefer self.ctx.call_depth -= 1;
-        const entry = try self.acquireSlot(global);
+        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
+        errdefer self.ctx.runtime.call_depth -= 1;
+        const entry = self.acquireSlot(global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         // Generic calls own an ordinary `.next` continuation immediately.
         // The moved and borrowed-iterator instances are reached only through
         // scoped push helpers, which publish their real action/payload after
@@ -648,21 +822,23 @@ pub const Machine = struct {
     }
 
     /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
-    /// a sloppy, non-arrow plain call (no receiver, undefined `this` → global)
+    /// a sloppy plain call (no receiver, undefined frame `this` → global)
     /// with simple parameters (no original-args snapshot), no global-var rebinds,
     /// args that can be borrowed in place, and all-cell closure captures
     /// (borrowable as `var_refs`). Each rejected condition is exactly a branch
     /// the lean path elides; method, moved-method, arity-padding, and snapshot
-    /// variants are selected by the outlined fallback. `setupInlineEntry`
-    /// remains authoritative for arrows and non-simple parameters.
+    /// variants are selected by the outlined fallback. Arrow lexical `this`
+    /// remains an ordinary capture cell and does not affect frame eligibility;
+    /// `setupInlineEntry` remains authoritative for non-simple parameters.
     fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
-        const function = target.view;
-        // fb-derived half (normal, non-arrow, sloppy, simple params, no
-        // global-var rebinds) is precomputed at view build:
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        // fb-derived half (normal, sloppy, simple params, no
+        // global-var rebinds) is precomputed during FunctionBytecode finalization:
         // one byte test instead of ~6 scattered FunctionBytecode bool loads
         // (the `ldrb [fb,#…]` cluster that dominated op_call). The remaining
         // checks below depend on the call site, not the bytecode.
-        if (!function.simple_inline_eligible) return false;
+        if (!execution.simple_inline_eligible) return false;
         if (source.metadata.moved) return false; // tail-call reuse keeps the general path
         if (source.metadata.has_receiver) return false;
         if (!target.this_value.isUndefined()) return false;
@@ -698,13 +874,14 @@ pub const Machine = struct {
     /// Keep this call-site-dependent classification in the outlined fallback
     /// so exact-arity `pushFrame` retains its established hot shape.
     fn paddedSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?PaddedSimpleInlineMode {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         if (source.metadata.moved or source.metadata.has_receiver) return null;
         if (!target.this_value.isUndefined()) return null;
         if (source.argCount() >= function.arg_count) return null;
-        if (function.simple_inline_eligible) return .sloppy;
-        if (function.strict_simple_inline_eligible) return .strict;
-        if (function.strict_simple_snapshot_inline_eligible) return .strict_snapshot;
+        if (execution.simple_inline_eligible) return .sloppy;
+        if (execution.strict_simple_inline_eligible) return .strict;
+        if (execution.strict_simple_snapshot_inline_eligible) return .strict_snapshot;
         return null;
     }
 
@@ -715,12 +892,13 @@ pub const Machine = struct {
     /// JS_CallInternal frame and performs sloppy substitution or boxing only
     /// at OP_push_this (quickjs.c:17924-17944).
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         if (!source.metadata.has_receiver) return null;
         if (!target.this_value.same(source.values[0])) return null;
 
-        const snapshot = function.strict_simple_snapshot_inline_eligible;
-        const no_snapshot = function.simple_inline_eligible or function.strict_simple_inline_eligible;
+        const snapshot = execution.strict_simple_snapshot_inline_eligible;
+        const no_snapshot = execution.simple_inline_eligible or execution.strict_simple_inline_eligible;
         if (!snapshot and !no_snapshot) return null;
         const padded = sourceArgCount(source) < function.arg_count;
         return if (!source.metadata.moved)
@@ -744,11 +922,12 @@ pub const Machine = struct {
     /// sloppy substitutes the realm global. A separate precomputed flag and
     /// setup instantiation keep that choice off the established sloppy path.
     fn isStrictSimpleInlineFrame(comptime snapshot_args: bool, target: *const InlineTarget, source: ArgsSource) bool {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         const eligible = if (snapshot_args)
-            function.strict_simple_snapshot_inline_eligible
+            execution.strict_simple_snapshot_inline_eligible
         else
-            function.strict_simple_inline_eligible;
+            execution.strict_simple_inline_eligible;
         if (!eligible) return false;
         if (source.metadata.moved or source.metadata.has_receiver) return false;
         if (!target.this_value.isUndefined()) return false;
@@ -813,7 +992,7 @@ pub const Machine = struct {
 
     inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        const function = target.view;
+        const function = target.fb;
         entry.catch_target = null;
         // Whole-byte assignment also clears the native-caller ownership bit
         // left by any prior occupant of this reusable Entry slot.
@@ -867,17 +1046,29 @@ pub const Machine = struct {
             (open_var_ref_count * @sizeOf(?*core.VarRef) + (@sizeOf(core.JSValue) - 1)) / @sizeOf(core.JSValue);
         const total = arg_storage_count + var_count + stack_count + open_slots + snapshot_count;
 
-        entry.arena_mark = rt.vm_stack.mark();
-        errdefer rt.vm_stack.restore(entry.arena_mark);
-
         // `local_buf = alloca(alloca_size)` (17846); the VM stack arena is
-        // zjs's C stack. Heap fallback only when the arena is exhausted.
+        // zjs's C stack. Warm arm first: one `carveActiveMarked` snapshot
+        // yields the watermark and the window behind a single capacity branch
+        // (the oversized-frame bound is subsumed — used never exceeds
+        // chunk_slots), and `entry.arena_mark` is published only after the
+        // carve, so LLVM no longer reloads chunk_count/active/used across a
+        // may-alias Entry store the way the previous mark()+carve() pair did.
+        // A miss is pure (arena untouched); the authoritative carve below
+        // keeps chunk switching and first use, with heap fallback only when
+        // the arena is exhausted.
         var storage_on_heap = false;
-        const slab_values = rt.vm_stack.carve(&rt.memory, total) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, total);
-            storage_on_heap = true;
-            break :blk heap;
+        const slab_values = if (rt.vm_stack.carveActiveMarked(total)) |active_carve| blk: {
+            entry.arena_mark = active_carve.mark;
+            break :blk active_carve.window;
+        } else blk: {
+            entry.arena_mark = rt.vm_stack.mark();
+            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
+                const heap = try rt.memory.alloc(core.JSValue, total);
+                storage_on_heap = true;
+                break :heap heap;
+            };
         };
+        errdefer rt.vm_stack.restore(entry.arena_mark);
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
 
         // Pointer-arithmetic partition (17855-17866). Padded args occupy the
@@ -970,7 +1161,32 @@ pub const Machine = struct {
     /// straight-line setup implementation: depth guard, stable slot, frame
     /// setup, and link are one unit; every other shape retains the generic
     /// fallback above.
+    ///
+    /// The out-of-line symbol stays authoritative for every cold caller
+    /// (driver fallback, strict/method shapes). The fixed-arity hot call
+    /// handlers alone expand `pushExactSimpleFrameImpl` in place, so their
+    /// steady-state loop crosses no bl/outparam seam: the error-union result
+    /// otherwise round-trips through a caller stack slot (`strh`+`str` in the
+    /// callee epilogue against an immediate `ldrh`+`ldr` readback after the
+    /// return — a store-to-load forward across the call boundary) and the
+    /// callee re-saves the caller's entire callee-saved register file.
     noinline fn pushExactSimpleFrame(
+        self: *Machine,
+        comptime strict_this: bool,
+        comptime snapshot_args: bool,
+        comptime method_receiver: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) HostError!*Entry {
+        return pushExactSimpleFrameImpl(self, strict_this, snapshot_args, method_receiver, global, target, source);
+    }
+
+    /// Shared straight-line body of `pushExactSimpleFrame`. `inline` is the
+    /// point: the sloppy-exact instantiation expands directly inside the
+    /// fixed-arity call opcode handlers while the noinline owner above keeps
+    /// the single cold symbol for every other caller.
+    inline fn pushExactSimpleFrameImpl(
         self: *Machine,
         comptime strict_this: bool,
         comptime snapshot_args: bool,
@@ -983,20 +1199,27 @@ pub const Machine = struct {
         if (method_receiver) {
             std.debug.assert(!source.metadata.moved and source.metadata.has_receiver);
             std.debug.assert(target.this_value.same(source.values[0]));
-            std.debug.assert(source.argCount() >= @as(usize, target.view.arg_count));
+            std.debug.assert(source.argCount() >= @as(usize, target.fb.arg_count));
             if (snapshot_args) {
-                std.debug.assert(target.view.strict_simple_snapshot_inline_eligible);
+                std.debug.assert(target.call_facts.execution.strict_simple_snapshot_inline_eligible);
             } else {
-                std.debug.assert(target.view.simple_inline_eligible or target.view.strict_simple_inline_eligible);
+                std.debug.assert(target.call_facts.execution.simple_inline_eligible or
+                    target.call_facts.execution.strict_simple_inline_eligible);
             }
         } else if (strict_this) {
             std.debug.assert(isStrictSimpleInlineFrame(false, target, source));
         } else {
             std.debug.assert(isSimpleInlineFrame(target, source));
         }
-        try vm_call.enterInlineCallDepth(self.ctx, global);
-        errdefer self.ctx.call_depth -= 1;
-        const entry = try self.acquireSlot(global);
+        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
+        errdefer self.ctx.runtime.call_depth -= 1;
+        const entry = self.acquireSlot(global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         entry.return_action = .next;
         entry.continuation_payload = 0;
         if (snapshot_args and method_receiver) {
@@ -1015,29 +1238,44 @@ pub const Machine = struct {
     }
 
     /// Deep constructor for the published empty-leaf shape. Its adapter has
-    /// already proved a sloppy plain call with exact argc=0, no locals,
+    /// already proved a call with exact argc (0 for the empty family,
+    /// == arg_count for the exact-args family) and no locals,
     /// captures, open bindings, arguments materialization, or direct eval.
     /// Keeping that proof at this interface removes the general setup's
     /// geometry/capture selectors and initializes only the operand-stack arena
-    /// that executing the leaf can actually use.
+    /// that executing the leaf can actually use. `leaf_this` selects the
+    /// region layout and the frame's `this` arm: `[callable, args...]` for
+    /// plain calls (sloppy borrows the realm global, strict preserves
+    /// undefined), `[receiver, callable, args...]` for method calls whose
+    /// receiver becomes the callee's raw `this`. `exact_args` frames borrow
+    /// the args window in place from the caller region (qjs `arg_buf = argv`,
+    /// quickjs.c:17841).
     noinline fn pushEmptyLeafFrame(
         self: *Machine,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
-        callable_slot: *core.JSValue,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        region_start: [*]core.JSValue,
     ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
+        assertLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(function.arg_count == 0 and function.var_count == 0);
-        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
 
         // The caller already retreated its logical operand top. Until the last
-        // infallible transfer below, this slot remains the sole owner and must
-        // be released even when depth/Entry acquisition fails.
-        errdefer freeSourceSlot(rt, callable_slot);
+        // infallible transfer below, these slots remain the sole owners and
+        // must be released even when depth/Entry acquisition fails — the same
+        // full-region cleanup `cleanupStackSource` performs for the general
+        // setup's failure arm.
+        errdefer {
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
         try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.call_depth -= 1;
+        errdefer ctx.runtime.call_depth -= 1;
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1056,29 +1294,298 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishEmptyLeafFrame(entry, global, function, callable_slot, stack_window, storage_on_heap);
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
+    /// Exact-args authoritative constructor (O1) — the deep fallible twin of
+    /// `pushEmptyLeafFrame` for a leaf whose call supplies exactly
+    /// `arg_count > 0` arguments in the caller region
+    /// (`[callable, args...]` / `[receiver, callable, args...]`). Kept as a
+    /// SEPARATE body (not a comptime variant of the zero-arg constructor) so
+    /// the established empty-leaf instantiations compile from byte-identical
+    /// source: sharing one parameterized body measurably re-scheduled the
+    /// zero-arg warm arms (LLVM tail-merged their frame-store blocks, adding
+    /// a branch to the established sloppy const path).
+    noinline fn pushExactArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
+        std.debug.assert(function.var_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
+
+        // Same sole-owner contract as the zero-arg constructor, extended over
+        // the args window (reverse index order, mirroring cleanupStackSource).
+        errdefer {
+            var index: usize = argc;
+            while (index > 0) {
+                index -= 1;
+                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
+            }
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.runtime.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
+    /// Capture-leaf authoritative constructor (O2) — the deep fallible twin
+    /// of `pushEmptyLeafFrame` for the zero-arg leaf whose only frame window
+    /// is the inherited capture array (`() => this.x`, zero-arg closures
+    /// over upvalues). Region layout is the zero-arg `[callable]` /
+    /// `[receiver, callable]` — no args window, so the sole-owner errdefer
+    /// is the zero-arg form. Kept as a SEPARATE body (not a comptime variant
+    /// of either established constructor) for the same reason the exact-args
+    /// twin is: sharing one parameterized body measurably re-scheduled the
+    /// established zero-arg warm arms.
+    noinline fn pushCaptureLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(function.arg_count == 0 and function.var_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
+        std.debug.assert(captures.len != 0);
+
+        // Same sole-owner contract as the zero-arg constructor: the caller
+        // already retreated its logical operand top, so these slots must be
+        // released when depth/Entry acquisition fails.
+        errdefer {
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.runtime.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
+    /// Padded-args authoritative constructor (Q3) — the deep fallible twin
+    /// of `pushExactArgsLeafFrame` for the `argc < arg_count` call shape.
+    /// The dispatch arm's capacity gate covers this path too (a warm miss
+    /// re-enters with the same already-proved region), and the pad fill
+    /// happens only inside the infallible publication tail
+    /// (`finishPaddedArgsLeafFrame`), so the sole-owner errdefer below
+    /// releases exactly the supplied `argc` values plus callable/receiver —
+    /// a pad slot is never written on a failure path. Kept as a SEPARATE
+    /// body (see `pushExactArgsLeafFrame` for the tail-merge re-scheduling
+    /// hazard).
+    noinline fn pushPaddedArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const ctx = self.ctx;
+        const rt = ctx.runtime;
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(argc < function.arg_count);
+        std.debug.assert(function.var_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
+
+        // Same sole-owner contract as the exact-args constructor, over the
+        // SUPPLIED args window only (reverse index order, mirroring
+        // cleanupStackSource). The missing tail has not been written.
+        errdefer {
+            var index: usize = argc;
+            while (index > 0) {
+                index -= 1;
+                freeSourceSlot(rt, &region_start[@as(usize, @intFromBool(method_receiver)) + 1 + index]);
+            }
+            freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
+            if (method_receiver) freeSourceSlot(rt, &region_start[0]);
+        }
+        try vm_call.enterInlineCallDepth(ctx, global);
+        errdefer ctx.runtime.call_depth -= 1;
+        const entry = try self.acquireSlot(global);
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        errdefer entry.profile_guard.deinit();
+
+        entry.arena_mark = rt.vm_stack.mark();
+        errdefer rt.vm_stack.restore(entry.arena_mark);
+        const stack_count = @as(usize, function.stack_size) + 1;
+        var storage_on_heap = false;
+        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
+            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+            storage_on_heap = true;
+            break :blk heap;
+        };
+        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+    }
+
+    /// Debug-only proof that the comptime `this` arm matches the published
+    /// per-policy eligibility bit and the callee's frame-`this` policy: the
+    /// sloppy arm substitutes the realm global and the raw arm preserves
+    /// undefined for strict functions (the same is_strict|runtime_strict
+    /// disjunction execution-flag publication folds into `strict_mode`).
+    /// Arrow lexical `this` is a capture cell, independent of this policy.
+    /// The receiver arm is policy-independent: every leaf transfers the raw
+    /// receiver.
+    inline fn assertLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(execution.simple_inline_empty_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_empty_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_empty_leaf or
+                execution.raw_this_inline_empty_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Exact-args twin of `assertLeafEligible` against the O1 policy bytes.
+    inline fn assertExactArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(execution.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_exact_args_leaf or
+                execution.raw_this_inline_exact_args_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Capture-leaf twin of `assertLeafEligible` against the O2 fused kind
+    /// byte (the sole published eligibility carrier for this family).
+    inline fn assertCaptureLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const capture_kind = call_facts.execution.capture_leaf_kind;
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(capture_kind == .sloppy),
+            .raw_undefined => std.debug.assert(capture_kind == .raw_this),
+            .receiver => std.debug.assert(capture_kind != .none),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
+        }
+    }
+
+    /// Padded-args twin of `assertExactArgsLeafEligible` (Q3): the padded
+    /// call shape reuses the O1 family's publication byte verbatim — the
+    /// published conditions already prove what padding relies on
+    /// (`has_simple_parameter_list` excludes default/rest parameter
+    /// initializers via `simple_inline_base`, and the leaf body geometry
+    /// excludes `arguments` materialization), so a missing parameter
+    /// slot is exactly the spec's plain `undefined` binding.
+    inline fn assertPaddedArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
+        switch (comptime leaf_this) {
+            .sloppy_global => std.debug.assert(execution.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_exact_args_leaf or
+                execution.raw_this_inline_exact_args_leaf),
+        }
+        if (comptime leaf_this != .receiver) {
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
+        }
     }
 
     /// Infallible publication tail shared by the cold authoritative
     /// constructor and the warm active-chunk constructor below.
+    /// `resume_pc` is the caller's post-operand resume pointer
+    /// (`caller_code_base + caller_frame.pc`), captured here together with the
+    /// caller's operand top (`region_start`, asserted == topPtr by both
+    /// constructors) as the empty-leaf resume record: the return arm restores
+    /// both with one ldp instead of chasing prev→function→code.ptr→frame.pc.
+    /// The receiver instantiation moves the receiver into the frame's raw
+    /// `this` exactly like `setupSimpleInlineEntryImpl`'s method arm
+    /// (take + `.owned`; sloppy coercion stays deferred to the this-reading
+    /// opcodes); the sloppy plain instantiation keeps the borrowed sloppy
+    /// global and the raw plain instantiation preserves undefined —
+    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm. Arrow lexical
+    /// `this` remains in its capture cell under either frame policy.
     inline fn finishEmptyLeafFrame(
         self: *Machine,
+        comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
-        callable_slot: *core.JSValue,
+        function: *const bytecode.FunctionBytecode,
+        region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        resume_pc: [*]const u8,
     ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
         const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
-            .this_value = global.value(),
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
             .current_function = takeSourceSlot(callable_slot),
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
-                .this_value = .borrowed,
+                .this_value = if (method_receiver) .owned else .borrowed,
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
@@ -1087,28 +1594,259 @@ pub const Machine = struct {
             .simple = true,
             .empty_leaf = !storage_on_heap,
         };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
         return entry;
     }
 
+    /// Exact-args publication tail (O1) — the parallel twin of
+    /// `finishEmptyLeafFrame` (separate body; see `pushExactArgsLeafFrame`
+    /// for why the zero-arg source is not shared). Adds exactly the args
+    /// window binding: the frame borrows the caller-region slots in place —
+    /// qjs `arg_buf = argv` (quickjs.c:17841). Value ownership transfers to
+    /// the frame (the caller's logical top already retreated below the
+    /// window); the backing slots stay caller storage, the same
+    /// `initArgumentsBorrowedSlots` contract the exact simple frame uses.
+    /// The teardown publishes the `exact_args_leaf` bit instead of
+    /// `empty_leaf`, so the zero-arg return arm keeps its single-bit test
+    /// and abrupt completion routes to general teardown (which releases the
+    /// args values exactly once and never frees their borrowed backing).
+    inline fn finishExactArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        const args_window: []core.JSValue =
+            (region_start + @as(usize, @intFromBool(method_receiver)) + 1)[0..argc];
+        // No failable operation follows the ownership transfer. `var_refs`
+        // borrows the closure's cell array (qjs `var_refs =
+        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
+        // `current_function` until teardown. Unconditionally `.borrowed`
+        // (the general path publishes `.owned` for the empty slice, but both
+        // dispositions are teardown no-ops at len 0 and the constant byte
+        // keeps a len test off this path).
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .actual_arg_count = argc,
+            .args = args_window,
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// Capture-leaf publication tail (O2) — the parallel twin of
+    /// `finishEmptyLeafFrame` plus exactly the capture binding: `var_refs`
+    /// borrows the closure's cell array (qjs `var_refs = p->u.func.var_refs`,
+    /// quickjs.c:17844), rooted by the owned `current_function` until
+    /// teardown, `.borrowed` so no teardown path ever releases or closes the
+    /// cells (they belong to the still-live closure). No args window binds:
+    /// `args` keeps the empty default, so the published `exact_args_leaf`
+    /// teardown's release loop zero-trips and its
+    /// `args.len == function.arg_count` invariant holds at 0 == 0. The
+    /// teardown bit buys this family the GUARDED return arm — inherited-
+    /// capture bodies read free names, so leftover-carrying returns
+    /// (parser-elided trailing drops, switch discriminants) must route
+    /// through general teardown — while the zero-arg empty-leaf return arm
+    /// keeps its established unguarded single-bit form. Separate body from
+    /// both established tails (see `pushExactArgsLeafFrame`).
+    inline fn finishCaptureLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        // No failable operation follows the ownership transfer.
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// Padded-args publication tail (Q3) — the parallel twin of
+    /// `finishExactArgsLeafFrame` for the `argc < arg_count` call shape of a
+    /// published exact-args leaf callee (separate body; see
+    /// `pushExactArgsLeafFrame` for the tail-merge re-scheduling hazard).
+    /// The ONLY divergence from the exact tail: the args window spans the
+    /// full `arg_count` parameter slots of the caller region and the missing
+    /// tail `[argc..arg_count)` is filled with undefined HERE, after the
+    /// last failable point — the leaf form of qjs's `arg_buf` missing-tail
+    /// fill (`for(i = argc; i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`,
+    /// quickjs.c:17856-17857) without the argv copy: the supplied prefix
+    /// already lives where the borrowed window wants it, and the dispatch
+    /// arm's capacity gate (`paddedLeafRegionHasCapacity`) proved the pad
+    /// slots stay inside the caller's fixed operand backing. Constructor
+    /// failure paths therefore release exactly the supplied `argc` values
+    /// (their errdefers never see a pad), while every teardown that runs
+    /// after publication releases the whole window exactly once (undefined
+    /// frees are tag-test no-ops). The teardown publishes the SAME
+    /// `exact_args_leaf` bit: after construction the frame is
+    /// indistinguishable from an exact-args leaf (`args.len == arg_count`),
+    /// so the O1 return arm and both teardown epilogues apply unchanged.
+    /// `actual_arg_count = argc` stays truthful for the
+    /// excluded-by-publication consumers (arguments/rest/super never
+    /// materialize in a leaf body).
+    inline fn finishPaddedArgsLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        stack_window: []core.JSValue,
+        storage_on_heap: bool,
+        resume_pc: [*]const u8,
+    ) *Entry {
+        const method_receiver = comptime leaf_this == .receiver;
+        const rt = self.ctx.runtime;
+        const callable_slot = &region_start[@intFromBool(method_receiver)];
+        const args_base = region_start + @as(usize, @intFromBool(method_receiver)) + 1;
+        const args_window: []core.JSValue = args_base[0..function.arg_count];
+        // Missing-tail fill, in place. No failable operation follows (or
+        // precedes, within this tail), so an abandoned construction can
+        // never leave a written pad behind for a source-cleanup errdefer to
+        // double-free.
+        @memset(args_base[argc..function.arg_count], core.JSValue.undefinedValue());
+        // Ownership transfers mirror `finishExactArgsLeafFrame` exactly:
+        // `var_refs` borrows the closure's cell array (qjs `var_refs =
+        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
+        // `current_function` until teardown.
+        entry.frame = .{
+            .function = function,
+            .this_value = switch (comptime leaf_this) {
+                .receiver => takeSourceSlot(&region_start[0]),
+                .raw_undefined => core.JSValue.undefinedValue(),
+                .sloppy_global => global.value(),
+            },
+            .current_function = takeSourceSlot(callable_slot),
+            .actual_arg_count = argc,
+            .args = args_window,
+            .var_refs = captures,
+            .storage_values = if (storage_on_heap) stack_window else &.{},
+            .ownership = .{
+                .this_value = if (method_receiver) .owned else .borrowed,
+                .var_refs = .borrowed,
+                .storage = if (storage_on_heap) .owned else .borrowed,
+            },
+        };
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .exact_args_leaf = !storage_on_heap,
+        };
+        // Dead bytes for the heap-fallback (non-leaf) shape; the generic
+        // return path never reads the record.
+        entry.setEmptyLeafResume(resume_pc, region_start);
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// The caller's post-operand resume pointer, exactly what
+    /// `reloadAfterPop` re-derives on return. Every empty-leaf constructor
+    /// runs after the call opcode published the caller's resume offset
+    /// (handlers sync frame.pc before target resolution; driver-side pushes
+    /// run after the cold call helpers advanced it past the operand).
+    inline fn callerResumePc(self: *const Machine) [*]const u8 {
+        const caller_frame: *const frame_mod.Frame = if (self.top) |caller| &caller.frame else self.l0.level.frame;
+        return caller_frame.function.byteCode().ptr + caller_frame.pc;
+    }
+
     /// Warm, allocation-free empty-leaf construction. A null result is a pure
     /// miss: call depth, arena watermark, source ownership, and Machine links
     /// are unchanged, so the caller can invoke pushEmptyLeafCall to handle
     /// first-use Entry allocation, chunk switching, heap fallback, OOM, or a
-    /// logical stack-overflow exception.
+    /// logical stack-overflow exception. `resume_pc` is the caller's
+    /// register-resident post-operand pc (== what `callerResumePc` derives);
+    /// the warm adapter passes it through so the resume record is stored
+    /// without reloading frame state.
     pub inline fn tryPushEmptyLeafCallFast(
         self: *Machine,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
+        resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
+        assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
-        if (ctx.call_depth >= ctx.stack_limit) return null;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1119,13 +1857,153 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.call_depth += 1;
+        ctx.runtime.call_depth += 1;
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishEmptyLeafFrame(entry, global, function, &region_start[0], carve.window, false);
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free exact-args leaf construction (O1) — the
+    /// parallel twin of `tryPushEmptyLeafCallFast` (separate body; see
+    /// `pushExactArgsLeafFrame` for why the zero-arg source is not shared).
+    /// A null result is the same pure miss contract: call depth, arena
+    /// watermark, source ownership (callable, optional receiver, and the
+    /// args window), and Machine links are unchanged, so the caller can
+    /// invoke `pushExactArgsLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling.
+    pub inline fn tryPushExactArgsLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
+        const ctx = self.ctx;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.runtime.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free capture-leaf construction (O2) — the parallel
+    /// twin of `tryPushEmptyLeafCallFast` plus the borrowed capture binding.
+    /// A null result is the same pure miss contract: call depth, arena
+    /// watermark, source ownership (callable and optional receiver), and
+    /// Machine links are unchanged, so the caller can invoke
+    /// `pushCaptureLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling. Separate
+    /// body from both established warm constructors (see
+    /// `pushExactArgsLeafFrame`).
+    pub inline fn tryPushCaptureLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(captures.len != 0);
+        const ctx = self.ctx;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.runtime.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, resume_pc);
+    }
+
+    /// Warm, allocation-free padded-args leaf construction (Q3) — the
+    /// `argc < arg_count` sibling of `tryPushExactArgsLeafCallFast`. The
+    /// dispatch arm has already proved the caller's operand backing keeps
+    /// `arg_count` slots addressable at the region's args base
+    /// (`paddedLeafRegionHasCapacity` — asserted below), so the publication
+    /// tail fills the missing slots with undefined IN PLACE and the frame
+    /// binds the same borrowed caller-region args window as the exact
+    /// family. Same pure-miss contract: a null result leaves call depth,
+    /// arena watermark, source ownership, the untouched pad slots, and
+    /// Machine links unchanged, so the caller can invoke
+    /// `pushPaddedArgsLeafCall` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling. Kept as a
+    /// SEPARATE body (see `pushExactArgsLeafFrame` for the tail-merge
+    /// re-scheduling hazard).
+    pub inline fn tryPushPaddedArgsLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+        resume_pc: [*]const u8,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(argc < function.arg_count);
+        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
+            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
+        const ctx = self.ctx;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.runtime.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -1137,10 +2015,9 @@ pub const Machine = struct {
     /// resource is released via the errdefers below.
     pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        // Point at the pointer-stable per-FB cached view (no copy). Target
-        // resolution declines this same-Machine path if the once-per-FB cache
-        // allocation fails, so general frame setup has no nullable-view arm.
-        const function = target.view;
+        // Point directly at the pointer-stable final FunctionBytecode. Target
+        // resolution and frame setup neither copy nor allocate bytecode state.
+        const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{};
         entry.profile_guard = vm_call.enterCallProfile(rt);
@@ -1160,14 +2037,15 @@ pub const Machine = struct {
         // Keep qjs's raw `this_obj` for method receivers, including sloppy
         // primitives. The established plain-undefined specialization remains
         // allocation-free (strict undefined / sloppy global); observed method
-        // bindings materialize later through OP_push_this/arrow/eval.
-        const fb_strict = target.fb.flags.is_strict_mode or target.fb.flags.runtime_strict_mode;
+        // bindings materialize later through OP_push_this/eval. Arrow lexical
+        // `this` is read from its capture cell, never this frame slot.
+        const fb_strict = target.fb.isStrictMode() or target.fb.runtimeStrictMode();
         const receiver_slot = sourceReceiverSlot(source);
-        // Arrow bytecode reads lexical this through its ordinary closure cell.
-        // Preserve the empty frame binding used before that capture conversion;
+        // Plain calls choose only the strict/sloppy frame policy. Arrow
+        // bytecode reads lexical this through its ordinary closure cell;
         // method/Function.call receiver slots are still transferred below so
         // the ignored value has one clear owner until teardown.
-        const plain_undefined_this = !target.fb.flags.is_arrow_function and receiver_slot == null and target.this_value.isUndefined();
+        const plain_undefined_this = receiver_slot == null and target.this_value.isUndefined();
         const effective_this = if (plain_undefined_this)
             if (fb_strict) core.JSValue.undefinedValue() else global.value()
         else
@@ -1191,15 +2069,13 @@ pub const Machine = struct {
         // these flags, and the frame.deinit errdefer above covers a later
         // failure):
         //   current_function .take -> owns the callable's transferred ref
-        //   new_target .borrow -> not owned
-        //   constructor_this keeps Frame.init's undefined/unowned default
+        //   new_target keeps Frame.init's absent cold-state default
         //   this .borrow, unless taken raw from the receiver slot (method call)
         //   -> then .take/owned. Lazy materialization updates this slot once.
         // `takeSourceSlot` nulls the source slot so the popped stack region
         // never double-frees the value (the leak guard the method-call comment
         // below describes).
         entry.frame.current_function = takeSourceSlot(callable_slot);
-        std.debug.assert(target.new_target.isUndefined());
         if (take_receiver_as_this) {
             entry.frame.this_value = takeSourceSlot(receiver_slot.?);
             entry.frame.ownership.this_value = .owned;
@@ -1225,7 +2101,7 @@ pub const Machine = struct {
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
         // free (the still-live function object owns the cells).
-        const borrow_var_refs = function.global_vars.len == 0 and
+        const borrow_var_refs = !function.isGlobalVar() and
             frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
@@ -1289,14 +2165,13 @@ pub const Machine = struct {
         } else if (open_var_ref_count != 0) {
             try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack, true);
         }
-        try vm_call.linkDerivedConstructorThisLocal(ctx, function, &entry.frame);
         if (borrow_var_refs) {
             // Alias the closure's captures (mutable slice; no merge replaced it).
             // The function object stays alive via
             // `frame.current_function`, so the cells outlive the frame.
             entry.frame.var_refs = target.captureSlice();
             entry.frame.ownership.var_refs = .borrowed;
-        } else if (frame_var_refs.len != 0 or function.var_ref_names.len != 0) {
+        } else if (frame_var_refs.len != 0 or function.varRefNamesLen() != 0) {
             try vm_call.initFrameVarRefs(ctx, global, function, &entry.frame, frame_var_refs, true, frame_windows);
         }
     }
@@ -1309,10 +2184,10 @@ pub const Machine = struct {
         if (iterator_record.len != 2) return false;
         if (!target.this_value.same(iterator_record[0])) return false;
         if (!target.callable.same(iterator_record[1])) return false;
-        const function = target.view;
-        return function.simple_inline_eligible or
-            function.strict_simple_inline_eligible or
-            function.strict_simple_snapshot_inline_eligible;
+        const execution = target.call_facts.execution;
+        return execution.simple_inline_eligible or
+            execution.strict_simple_inline_eligible or
+            execution.strict_simple_snapshot_inline_eligible;
     }
 
     /// Zero-argument method prologue for an iterator record borrowed from the
@@ -1323,7 +2198,7 @@ pub const Machine = struct {
     /// perturb their selector or register allocation.
     noinline fn setupBorrowedIteratorEntry(ctx: *core.JSContext, entry: *Entry, target: *const InlineTarget) HostError!void {
         const rt = ctx.runtime;
-        const function = target.view;
+        const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
         entry.profile_guard = vm_call.enterCallProfile(rt);
@@ -1415,7 +2290,7 @@ pub const Machine = struct {
         return source.values[args_start..][0..source.argCount()];
     }
 
-    fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
+    fn canBorrowSourceArgs(function: *const bytecode.FunctionBytecode, source: ArgsSource) bool {
         const argc = sourceArgCount(source);
         if (@max(argc, @as(usize, @intCast(function.arg_count))) != argc) return false;
         return !source.metadata.moved;
@@ -1459,8 +2334,12 @@ pub const Machine = struct {
     /// Push a plain inline call whose raw source is `[callable, args...]`.
     /// Exact sloppy/strict frames enter the deep constructor; all remaining
     /// plain shapes retain the authoritative generic setup implementation.
+    /// `inline_exact` (fixed-arity hot call handlers only) expands the
+    /// sloppy-exact constructor body in place of its out-of-line symbol; the
+    /// strict and generic arms always keep their cold calls.
     pub inline fn pushPlainCall(
         self: *Machine,
+        comptime inline_exact: bool,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         target: *const InlineTarget,
@@ -1468,11 +2347,17 @@ pub const Machine = struct {
         argc: u16,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        if (target.view.flags.simple_inline_empty_leaf and argc == 0) {
-            return self.pushEmptyLeafCall(global, caller_stack, target.view, region_start);
+        if (target.call_facts.execution.simple_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.sloppy_global, global, caller_stack, target.fb, target.call_facts, region_start);
+        }
+        if (target.call_facts.execution.raw_this_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.raw_undefined, global, caller_stack, target.fb, target.call_facts, region_start);
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
+            if (inline_exact) {
+                return self.pushExactSimpleFrameImpl(false, false, false, global, target, source);
+            }
             return self.pushExactSimpleFrame(false, false, false, global, target, source);
         }
         if (isStrictSimpleInlineFrame(false, target, source)) {
@@ -1481,28 +2366,108 @@ pub const Machine = struct {
         return self.pushFrame(.generic_after_exact_plain, global, target, source);
     }
 
-    /// Enter a receiver-free argc=0 leaf after resolveInlineFunction published
-    /// its eligibility proof. The bytecode flag carries the remaining static
-    /// facts (normal sloppy function, no captures/locals/arguments/eval).
+    /// Enter an argc=0 leaf after resolveInlineFunction published its
+    /// eligibility proof. The bytecode flag carries the remaining static
+    /// facts (normal function, no captures/locals/arguments/eval).
+    /// `leaf_this` selects the `[callable]` / `[receiver, callable]` region
+    /// layout and the frame's `this` arm; the receiver instantiation rides
+    /// the receiver into the frame's raw `this`.
     pub inline fn pushEmptyLeafCall(
         self: *Machine,
+        comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        std.debug.assert(function.flags.simple_inline_empty_leaf);
-        return self.pushEmptyLeafFrame(global, function, &region_start[0]);
+        assertLeafEligible(leaf_this, function, call_facts);
+        return self.pushEmptyLeafFrame(leaf_this, global, function, call_facts, region_start);
+    }
+
+    /// Exact-args twin of `pushEmptyLeafCall`: authoritative fallible entry
+    /// for a leaf whose call supplies exactly `arg_count > 0` arguments in
+    /// the caller region. Region layout gains the trailing args window that
+    /// the frame borrows in place.
+    pub inline fn pushExactArgsLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
+        return self.pushExactArgsLeafFrame(leaf_this, global, function, call_facts, captures, region_start, argc);
+    }
+
+    /// Capture-leaf twin of `pushEmptyLeafCall`: authoritative fallible
+    /// entry for the zero-arg leaf whose frame borrows the closure's cell
+    /// array. Region layout stays the zero-arg `[callable]` /
+    /// `[receiver, callable]`.
+    pub inline fn pushCaptureLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
+        return self.pushCaptureLeafFrame(leaf_this, global, function, call_facts, captures, region_start);
+    }
+
+    /// Padded-args twin of `pushExactArgsLeafCall` (Q3): authoritative
+    /// fallible entry for a leaf call that supplies `argc < arg_count`
+    /// arguments in the caller region, with the missing tail padded in
+    /// place by the publication tail (capacity proved by the dispatch arm's
+    /// gate — asserted here).
+    pub inline fn pushPaddedArgsLeafCall(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
+        std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
+            @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
+        return self.pushPaddedArgsLeafFrame(leaf_this, global, function, call_facts, captures, region_start, argc);
     }
 
     /// Push a method inline call whose raw source is
-    /// `[receiver, callable, args...]`. Strict functions that need an unmapped
-    /// arguments snapshot and already have their complete argv use the deep
+    /// `[receiver, callable, args...]`. Sloppy simple methods with their
+    /// complete argv — the established `recv.m(x)` hot shape — and strict
+    /// functions that need an unmapped arguments snapshot both use the deep
     /// constructor; all other shapes retain the established generic selector.
-    /// The guard is deliberately limited to one precomputed eligibility byte
-    /// plus the arity comparison, so non-snapshot methods still branch directly
+    /// Each guard is deliberately limited to one precomputed eligibility byte
+    /// plus the arity comparison (the receiver/`this` identity is a caller
+    /// invariant: every method-layout producer binds `values[0]` as the
+    /// target's `this_value`), so unmatched methods still branch directly
     /// to their established `pushFrame` instantiation.
+    ///
+    /// The sloppy-exact arm collapses the retired three-deep chain (bl
+    /// `pushFrame` -> bl `setupFallbackInlineEntry` -> b
+    /// `setupSimpleInlineEntry`) into one bl: qjs OP_call_method enters the
+    /// same single JS_CallInternal prologue as OP_call (quickjs.c:18201);
+    /// there is no second/third setup hop to re-save callee-saved registers
+    /// or re-classify the shape `methodSimpleInlineMode` already proved. The
+    /// shell stays outline (`pushExactSimpleFrame` is noinline): the win is
+    /// the two deleted bl round-trips and their freight reloads, not an
+    /// in-place expansion of the constructor body in the handler.
     pub inline fn pushMethodCall(
         self: *Machine,
         global: *core.Object,
@@ -1513,9 +2478,18 @@ pub const Machine = struct {
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         const source = ArgsSource.initStack(region_start, argc, true);
-        const function = target.view;
-        if (function.strict_simple_snapshot_inline_eligible and argc >= function.arg_count) {
-            return self.pushExactSimpleFrame(false, true, true, global, target, source);
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        // Shared arity gate first: the padded (`argc < arg_count`) siblings
+        // fail one comparison and branch straight to the generic selector
+        // instead of walking every eligibility byte on their way out.
+        if (argc >= function.arg_count) {
+            if (execution.simple_inline_eligible) {
+                return self.pushExactSimpleFrame(false, false, true, global, target, source);
+            }
+            if (execution.strict_simple_snapshot_inline_eligible) {
+                return self.pushExactSimpleFrame(false, true, true, global, target, source);
+            }
         }
         return self.pushFrame(.generic, global, target, source);
     }
@@ -1532,7 +2506,7 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!*Entry {
         return switch (layout) {
-            .plain => self.pushPlainCall(global, caller_stack, target, region_start, argc),
+            .plain => self.pushPlainCall(false, global, caller_stack, target, region_start, argc),
             .method => self.pushMethodCall(global, caller_stack, target, region_start, argc),
         };
     }
@@ -1582,6 +2556,98 @@ pub const Machine = struct {
         entry.return_action = .for_of_next;
         entry.continuation_payload = depth;
         return entry;
+    }
+
+    /// Infallible publication tail for the forwarded empty leaf (O3) —
+    /// SEPARATE body from `finishEmptyLeafFrame` (sharing one parameterized
+    /// body measurably re-scheduled established arms; see
+    /// `pushExactArgsLeafFrame`). Region is `[target, call, thisArg?]` with
+    /// the caller top already retreated to `region_start`: the target
+    /// transfers into the frame callable exactly like the plain leaf, the
+    /// skipped native `call` function transfers into the entry's owned
+    /// `native_caller` (same slot `pushForwardedCall` publishes; the
+    /// backtrace resolver's `has_native_caller` arm reads it unchanged), and
+    /// the undefined `thisArg` slot needs no release. No resume record is
+    /// stored: its default-repr storage IS `native_caller`, so the return
+    /// arm re-derives the caller resume through `prev`. The sloppy `this`
+    /// arm borrows the realm global — identical to the plain sloppy leaf;
+    /// Function.prototype.call with an undefined thisArg reaches the same
+    /// deferred-coercion state as a plain call of the same target.
+    inline fn finishForwardedEmptyLeafFrame(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        entry: *Entry,
+        global: *core.Object,
+        function: *const bytecode.FunctionBytecode,
+        region_start: [*]core.JSValue,
+        stack_window: []core.JSValue,
+    ) *Entry {
+        comptime std.debug.assert(leaf_this == .sloppy_global);
+        const rt = self.ctx.runtime;
+        // No failable operation follows the ownership transfers.
+        entry.frame = .{
+            .function = function,
+            .this_value = global.value(),
+            .current_function = takeSourceSlot(&region_start[0]),
+            .storage_values = &.{},
+            .ownership = .{
+                .this_value = .borrowed,
+                .storage = .borrowed,
+            },
+        };
+        entry.native_caller = takeSourceSlot(&region_start[1]);
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{
+            .simple = true,
+            .has_native_caller = true,
+            .forwarded_leaf = true,
+        };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
+    /// Warm, allocation-free forwarded empty-leaf construction (O3) — the
+    /// Function.prototype.call twin of `tryPushEmptyLeafCallFast` (separate
+    /// body; see `pushExactArgsLeafFrame` for why the established zero-arg
+    /// source is not shared). A null result is the same pure miss contract:
+    /// call depth, arena watermark, source ownership (target, native `call`
+    /// function, and the optional undefined thisArg all still owned by their
+    /// region slots), and Machine links are unchanged, so the caller can
+    /// restore its operand top and take the authoritative generic forwarding
+    /// path (`pushForwardedCall`), which owns first-use Entry allocation,
+    /// chunk switching, heap fallback, OOM, and stack-overflow recovery.
+    pub inline fn tryPushForwardedEmptyLeafCallFast(
+        self: *Machine,
+        comptime leaf_this: LeafThis,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        region_start: [*]core.JSValue,
+    ) ?*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        assertLeafEligible(leaf_this, function, call_facts);
+        const ctx = self.ctx;
+        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+
+        ctx.runtime.call_depth += 1;
+        entry.return_action = .next;
+        entry.continuation_payload = 0;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishForwardedEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window);
     }
 
     /// Push a bytecode target reached through Function.prototype.call. Takes
@@ -1657,7 +2723,7 @@ pub const Machine = struct {
             dying.deinitReturned(self.ctx)
         else
             dying.deinit(self.ctx);
-        self.ctx.call_depth -= 1;
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
@@ -1685,8 +2751,42 @@ pub const Machine = struct {
         std.debug.assert(dying.isEmptyLeaf());
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        dying.deinitEmptyLeaf(self.ctx);
-        self.ctx.call_depth -= 1;
+        // Inline epilogue: the hot leg is an rc decrement plus the arena
+        // watermark restore; keeping it in the return handler removes the
+        // only bl/ret on the empty-leaf return path (destroyZeroRef stays
+        // outline behind the rc==0 branch).
+        dying.deinitEmptyLeafInline(self.ctx);
+        self.ctx.runtime.call_depth -= 1;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
+    /// Exact-args twin of `popReturnedEmptyLeaf`. Its inline epilogue adds
+    /// only the caller-region args release loop; abrupt completion still
+    /// inspects and releases the callee through general teardown.
+    pub inline fn popReturnedExactArgsLeaf(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isExactArgsLeaf());
+        std.debug.assert(dying.return_action == .next);
+        std.debug.assert(dying.continuation_payload == 0);
+        dying.deinitExactArgsLeafInline(self.ctx);
+        self.ctx.runtime.call_depth -= 1;
+        self.depth -= 1;
+        self.top = dying.prev;
+    }
+
+    /// Forwarded-leaf twin of `popReturnedEmptyLeaf` (O3). Its inline
+    /// epilogue adds only the owned native `call` frame release; abrupt
+    /// completion still inspects and releases the callee through general
+    /// teardown (whose cold `releaseNativeCaller` arm handles the same
+    /// ownership).
+    pub inline fn popReturnedForwardedLeaf(self: *Machine) void {
+        const dying = self.topEntry();
+        std.debug.assert(dying.isForwardedLeaf());
+        std.debug.assert(dying.return_action == .next);
+        std.debug.assert(dying.continuation_payload == 0);
+        dying.deinitForwardedLeafInline(self.ctx);
+        self.ctx.runtime.call_depth -= 1;
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -1713,23 +2813,22 @@ pub const Machine = struct {
     pub fn unwindForError(self: *Machine, global: *core.Object, err: anyerror) HostError!bool {
         const ctx = self.ctx;
         while (self.depth > 0) {
-            {
-                const failing = self.topEntry();
-                call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, self.output, global, &failing.stack, &failing.frame);
-            }
             var continuation = self.popFrame();
-            const iterator_next_abrupt = continuation.action == .for_of_next;
+            const iterator_next_depth: ?u8 = if (continuation.action == .for_of_next)
+                continuation.takeForOfDepth()
+            else
+                null;
             continuation.deinit(ctx.runtime);
 
             const level = self.currentLevel();
-            // A throw from IteratorNext propagates directly; IteratorClose is
-            // required for abrupt loop-body completion, not for a failing
-            // `next()` call itself. The continuation survives proper-tail-call
-            // replacement, so this remains exact even when next tail-calls.
-            if (!iterator_next_abrupt) {
-                try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            // The continuation survives proper-tail-call replacement, so an
+            // abrupt bytecode `next()` can retire exactly its own record before
+            // ordinary unwind closes any enclosing iterators.
+            if (iterator_next_depth) |depth| {
+                try forof_ops.abandonForOfIteratorAtDepth(ctx.runtime, level.stack, depth);
             }
-            if (try call_runtime.tryCatchInFrame(ctx, level.stack, level.frame, level.catch_target, global, err)) return true;
+            try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, level.stack);
+            if (try call_runtime.tryCatchInFrame(ctx, self.output, level.stack, level.frame, level.catch_target, global, err)) return true;
             if (self.depth == 0) return false;
         }
         return false;

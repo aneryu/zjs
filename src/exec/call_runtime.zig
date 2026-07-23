@@ -30,6 +30,7 @@ const op = bytecode.opcode.op;
 const eval_ret_atom: core.Atom = core.atom.ids.ret;
 const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
+const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
 
 const string_ops = @import("string_ops.zig");
@@ -79,7 +80,7 @@ pub const ExecCallResult = enum { done, continue_loop, inline_call };
 pub fn execCall(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     argc: u16,
@@ -100,12 +101,8 @@ pub fn execCall(
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
     // Fast path FIRST: a plain bytecode-to-bytecode call resolves to an inline
-    // target. resolveInlineTarget returns null for class constructors, so a super()
-    // call (whose callee is always a constructor) never resolves here — an inline
-    // result is provably NOT a super-constructor invocation, so the
-    // isCurrentSuperConstructor check below is unnecessary on this path. `this`
-    // binds undefined (arrow targets override with their lexical `this` inside
-    // resolveInlineTarget). A non-bytecode callee (host fn / ctor) falls through to
+    // target. `this` binds undefined (arrow targets override with their lexical
+    // `this` inside resolveInlineTarget). A non-bytecode callee falls through to
     // the general dispatch, which handles host-output (console.log) like any other
     // host function — qjs has no per-call host-output fast path.
     if (allow_inline) {
@@ -115,75 +112,18 @@ pub fn execCall(
         }
     }
 
-    const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
-    const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_super_this) |value| value.free(ctx.runtime);
-    const arrow_constructor_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        class_init_ops.currentArrowConstructorThis(ctx.runtime, frame)
-    else
-        null;
-    defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
-    const is_arrow_super_constructor = is_super_constructor and arrow_super_this != null;
-    const super_this = if (is_super_constructor and frame.function.flags.is_derived_class_constructor)
-        frame.constructorThisValue()
-    else if (arrow_constructor_this) |value|
-        value
-    else if (arrow_super_this) |value|
-        value
-    else
-        core.JSValue.undefinedValue();
-    const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, super_this, func, args, function, frame, is_super_constructor) catch |err| {
+    // OP_call is never a constructor call. Legal super() is emitted as
+    // call_constructor (or apply(1)); superclass identity alone cannot grant a
+    // normal call permission to invoke a class constructor.
+    const result = callValueOrBytecodePreRooted(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;
     };
     popOwnedStackRegion(ctx.runtime, stack, region_base);
-    if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
-        defer result.free(ctx.runtime);
-        if (slot_ops.adapterValueIsUninitialized(frame.this_value)) {
-            const next_this = if (result.isObject()) result else frame.constructorThisValue();
-            slot_ops.replaceAdapterOwned(ctx, &frame.this_value, next_this.dup());
-            class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-                    return .continue_loop;
-                }
-                return err;
-            };
-        } else {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
-                return .continue_loop;
-            }
-            return error.ReferenceError;
-        }
-        try array_ops.pushAdapterValue(stack, frame.this_value);
-        return .done;
-    }
-    if (is_arrow_super_constructor) {
-        defer result.free(ctx.runtime);
-        if (arrow_super_this) |this_value_for_arrow| {
-            if (!this_value_for_arrow.isUninitialized()) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
-                    return .continue_loop;
-                }
-                return error.ReferenceError;
-            }
-        }
-        const next_this = if (result.isObject())
-            result
-        else if (arrow_constructor_this) |value|
-            value
-        else
-            result;
-        try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
-        stack.pushAssumeCapacity(next_this);
-        return .done;
-    }
     stack.pushOwnedAssumeCapacity(result);
     return .done;
 }
@@ -234,13 +174,14 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
 // single `bl` on the cold edge and shrinks every wrapper's frame.
 pub noinline fn handleCatchableRuntimeError(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
     err: anytype,
 ) !bool {
-    return tryCatchInFrame(ctx, stack, frame, catch_target, global, err);
+    return tryCatchInFrame(ctx, output, stack, frame, catch_target, global, err);
 }
 
 /// Attempt to dispatch `err` to the current frame's catch handler. Returns
@@ -251,6 +192,7 @@ pub noinline fn handleCatchableRuntimeError(
 /// frames before the error escapes `runWithArgsState`.
 pub fn tryCatchInFrame(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -258,10 +200,15 @@ pub fn tryCatchInFrame(
     err: anytype,
 ) !bool {
     core.profile.recordSlowPath();
+    if (ctx.exceptionIsUncatchable()) return false;
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
+    // Run before testing the local catch target: an uncaught abrupt completion
+    // must close this frame's live pattern/loop iterators before the frame is
+    // unwound. IteratorNext marks only its failing record undefined before it
+    // reaches this seam, so enclosing pattern iterators still close normally.
+    try forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame(ctx, output, global, stack, frame);
     const target = catch_target.* orelse return false;
-    closeFrameDestructuringIteratorsForAbruptCompletion(ctx, null, global, stack, frame);
     try stack.reserveAdditional(1);
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
@@ -274,7 +221,7 @@ pub fn tryCatchInFrame(
             // preallocated error is dup()ed, never rebuilt, so no stack can
             // be captured here.
             if (create_err == error.OutOfMemory) {
-                if (ctx.runtime.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
+                if (ctx.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
             }
             return create_err;
         };
@@ -302,10 +249,21 @@ pub fn callValueOrBytecode(
     this_value: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    return callValueOrBytecodeClassMode(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
+    var inline_args: [8]core.JSValue = undefined;
+    var args_buffer: core.runtime.ValueRootBuffer = .{};
+    defer args_buffer.deinit(ctx.runtime);
+    var rooted_args: []core.JSValue = inline_args[0..0];
+    if (args.len <= inline_args.len) {
+        rooted_args = inline_args[0..args.len];
+        @memcpy(rooted_args, args);
+    } else {
+        args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, args);
+        rooted_args = args_buffer.values;
+    }
+    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, rooted_args, caller_function, caller_frame);
 }
 
 /// Eagerly coerce a receiver for suspended async/generator state, whose `this`
@@ -337,7 +295,7 @@ pub fn callNativeBuiltinRecordForVm(
     function_object: *core.Object,
     native_ref: core.function.NativeBuiltinRef,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     // `func` is the function value; the table dispatch only needs the function
@@ -346,17 +304,27 @@ pub fn callNativeBuiltinRecordForVm(
     // Route the VM hot path through the same exec-owned internal record
     // table the slow record dispatch uses (`call.zig:callNativeFunctionRecord`),
     // so this generic call Module carries zero compile-time knowledge of domains. The
-    // VM call site only has the realm `global` object (no `globals` slot array),
-    // so pass the non-null `global` with an empty `globals`. Every migrated
-    // builtin handler prefers `host_call.global` when it is set and only
-    // consults `host_call.globals` on the bare-runtime (`global == null`)
-    // fallback, so the empty slice is never read on this path.
-    if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| {
-        return value;
+    // VM call site only has the caller `global` object (no legacy slot array),
+    // so pass it with an empty slice. Observable handlers ignore both as realm
+    // authorities and consume the final callable view; only explicitly
+    // func-object-free synthetic record reuse can retain supplied legacy data.
+    if (ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)) |record| {
+        if (function_object.class_id == core.class.ids.c_function) {
+            const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+            return try builtin_dispatch.callInternalRecordDirectInRealm(view, output, function_object, this_value, record, args, caller_function, caller_frame);
+        }
+        return try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, this_value, record, args, caller_function, caller_frame);
     }
-    // Standard-native domains are table-dispatched. A null result identifies a
-    // host-domain callable or an invalid/stale native id for the caller to
-    // classify; this generic VM call Module does not know domain bodies.
+    // Host builtins are exec-owned integer records too, but unlike standard
+    // builtins they do not live in rt.internal_builtins. Dispatch them by id
+    // here instead of falling through to the legacy function-name cascade.
+    if (native_ref.domain == .host) {
+        const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+        return try call_mod.callHostGlobalNativeFunctionRecord(view.realm, view.global, this_value, function_object, native_ref.id, args);
+    }
+    // Standard-native domains are table-dispatched. A null result now only
+    // identifies an invalid or stale standard-native id for the caller to
+    // classify.
     return null;
 }
 
@@ -368,49 +336,36 @@ pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, er
     _ = ctx.throwValue(error_value);
 }
 
-pub fn callValueOrBytecodeClassMode(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    input_this_value: core.JSValue,
-    input_func: core.JSValue,
-    input_args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-    allow_class_constructor_call: bool,
-) HostError!core.JSValue {
-    const this_value = input_this_value;
-    const func = input_func;
-    var inline_args: [8]core.JSValue = undefined;
-    var args_buffer: core.runtime.ValueRootBuffer = .{};
-    defer args_buffer.deinit(ctx.runtime);
-    var args: []core.JSValue = inline_args[0..0];
-    if (input_args.len <= inline_args.len) {
-        args = inline_args[0..input_args.len];
-        @memcpy(args, input_args);
-    } else {
-        args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
-        args = args_buffer.values;
-    }
-    return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
-}
-
 /// Variant for callers whose `this_value`, `func`, and `args` are already
 /// rooted (e.g. borrowed directly from a frame-rooted operand stack).
 /// Skips the defensive copy and extra value-root frame of
-/// `callValueOrBytecodeClassMode`.
-pub fn callValueOrBytecodeClassModePreRooted(
+/// `callValueOrBytecode`.
+pub fn callValueOrBytecodePreRooted(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-    allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
-    return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
+    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame);
+}
+
+/// VM fast-call fallback after the opcode path has already performed the
+/// caller-Realm call-entry poll.
+pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame);
 }
 
 /// Slow-path collection prototype methods reached by name without a baked
@@ -430,7 +385,7 @@ fn collectionPrototypeMethodByName(
     function_object: *core.Object,
     name: []const u8,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     const owner_class = function_object.collectionMethodOwnerClass();
@@ -463,7 +418,7 @@ fn collectionPrototypeMethodByName(
 
 const VmNativeCallableDispatch = union(enum) {
     bound_function,
-    resolved_record: *const core.host_function.InternalRecord,
+    resolved_record: core.Object.NativeCallTarget,
     native_ref: core.function.NativeBuiltinRef,
     host_function,
     internal: core.host_function.InternalCallableTag,
@@ -473,9 +428,9 @@ const VmNativeCallableDispatch = union(enum) {
 fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispatch {
     return switch (function_object.class_id) {
         core.class.ids.bound_function => .bound_function,
-        else => blk: {
-            if (function_object.nativeRecord()) |record| {
-                break :blk .{ .resolved_record = record };
+        core.class.ids.c_function => blk: {
+            if (function_object.nativeCallTarget()) |target| {
+                break :blk .{ .resolved_record = target };
             }
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
@@ -485,24 +440,32 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
         },
+        core.class.ids.c_function_data => blk: {
+            if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
+                break :blk .{ .native_ref = native_ref };
+            }
+            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
+            const tag = function_object.internalCallableTag();
+            if (tag != .none) break :blk .{ .internal = tag };
+            break :blk .name_dispatch;
+        },
+        else => .name_dispatch,
     };
 }
 
-fn callInternalCallableByTag(
+pub fn callInternalCallableByTag(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function_object: *core.Object,
     tag: core.host_function.InternalCallableTag,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     return switch (tag) {
         .none => null,
         .promise_resolving => try promise_ops.qjsPromiseResolvingFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame),
-        .promise_thenable_job => try promise_ops.qjsPromiseThenableJobCall(ctx, output, global, function_object, caller_function, caller_frame),
-        .promise_reaction_job => try promise_ops.qjsPromiseReactionJobCall(ctx, output, global, function_object, caller_function, caller_frame),
         .promise_capability_executor => try promise_ops.qjsPromiseCapabilityExecutorCall(ctx, function_object, args),
         .promise_combinator_element => try promise_ops.qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame),
         .promise_finally_callback => try promise_ops.qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame),
@@ -516,506 +479,586 @@ fn callInternalCallableByTag(
     };
 }
 
-fn callValueOrBytecodeClassModeDispatch(
+noinline fn callRawFunctionBytecode(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-    allow_class_constructor_call: bool,
 ) HostError!core.JSValue {
-    if (func.isFunctionBytecode()) {
-        const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
-            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-            const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            if (result.isObject()) return result;
-            result.free(ctx.runtime);
-            return this_value.dup();
-        }
-        if (fb.flags.is_class_constructor) {
-            if (!allow_class_constructor_call) return error.TypeError;
-            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            if (!fb.flags.is_derived_class_constructor) {
-                try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
-            }
-            return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global);
-    }
-    if (object_ops.functionObjectFromValue(func)) |function_object| {
-        const function_value = function_object.functionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (allow_class_constructor_call and !fb.flags.is_class_constructor) {
-            if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
-            if (result.isObject()) return result;
-            result.free(ctx.runtime);
-            return this_value.dup();
-        }
-        if (fb.flags.is_class_constructor) {
-            if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
-            const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
-            const constructor_this = if (fb.flags.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            if (!fb.flags.is_derived_class_constructor) {
-                try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
-            }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
-        }
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        return callFunctionBytecodeModeState(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
-    }
-    if (object_ops.objectFromValue(func)) |object| {
-        if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
-            return object_ops.callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
-        }
-    }
-    if (object_ops.callableObjectFromValue(func)) |function_object| {
-        switch (vmNativeCallableDispatch(function_object)) {
-            .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
-            .resolved_record => |record| {
-                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-                const native_result = builtin_dispatch.callInternalRecordDirect(
-                    ctx,
-                    output,
-                    function_global,
-                    &.{},
-                    function_object,
-                    this_value,
-                    record,
-                    args,
-                    caller_function,
-                    caller_frame,
-                ) catch |err| {
-                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
-                    return err;
-                };
-                return native_result;
-            },
-            .native_ref => |native_ref| {
-                const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-                const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
-                    try throwRuntimeErrorForGlobal(ctx, function_global, err);
-                    return err;
-                };
-                if (native_result) |value| return value;
-            },
-            .host_function => {
-                if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
-            },
-            .internal => |tag| {
-                if (try callInternalCallableByTag(ctx, output, global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
-            },
-            .name_dispatch => {},
-        }
-        // Borrow the internal dispatch-name bytes instead of allocating a
-        // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
-        // times, and the previous round-trip alloc/free showed up clearly
-        // on the profile. Native dispatch names are atom-backed ASCII
-        // builtin names in practice; a `null` return here means there is
-        // no usable dispatch name.
-        const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
-            return core.JSValue.undefinedValue();
-        };
-        defer dispatch.name_value.free(ctx.runtime);
-        const name = dispatch.name;
-        if (name.len == 0) return core.JSValue.undefinedValue();
-        if (allow_class_constructor_call and isBuiltinConstructorName(name)) {
-            if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, null)) |constructed| {
-                return constructed;
-            }
-            return this_value.dup();
-        }
-        if (allow_class_constructor_call and !(try isConstructorLike(ctx, func))) return error.TypeError;
-        if (std.mem.eql(u8, name, "raw")) {
-            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
-            return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "sumPrecise")) {
-            return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "register")) {
-            return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
-        }
-        if (std.mem.eql(u8, name, "unregister")) {
-            return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
-        }
-        if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
-            return value;
-        }
-        // Hot-path dispatch: a small first-byte switch routes the common
-        // global builtins directly to their handlers, bypassing the long
-        // `std.mem.eql` chain below. The previous chain walked ~95 checks
-        // before reaching `qjsUriCallId` for `decodeURI` / `encodeURI`,
-        // which dominated tight-loop URI benchmarks.
-        if (name.len != 0) {
-            switch (name[0]) {
-                'A' => if (std.mem.eql(u8, name, "Array")) {
-                    return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
-                },
-                'B' => if (std.mem.eql(u8, name, "BigInt")) {
-                    return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
-                },
-                'N' => if (std.mem.eql(u8, name, "Number")) {
-                    return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
-                },
-                'O' => if (std.mem.eql(u8, name, "Object")) {
-                    return construct_mod.constructValue(ctx, func, args, &.{});
-                },
-                'S' => if (std.mem.eql(u8, name, "String")) {
-                    return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-                },
-                'd', 'e' => if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| {
-                    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = mode };
-                    return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
-                },
-                'f' => if (std.mem.eql(u8, name, "fromCharCode")) {
-                    // Skip the long `std.mem.eql` chain below for the
-                    // canonical `String.fromCharCode` shape; routes
-                    // straight to the same handler the slow path uses,
-                    // so coercion semantics (e.g. string args, BigInt
-                    // rejection) stay identical.
-                    return string_ops.qjsStringFromCharCode(ctx, output, global, args);
-                },
-                'r' => if (std.mem.eql(u8, name, "raw")) {
-                    return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-                },
-                else => {},
-            }
-        }
-        if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-        if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
-        if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
-        if (std.mem.eql(u8, name, "Array")) return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
-        if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
-        if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
-            return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "RegExp")) {
-            var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
-            native_scope.push();
-            defer native_scope.deinit();
-            return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame) catch |err| {
-                try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+    _ = ctx;
+    _ = global;
+    const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
+    const function_ctx = fb.realmContext() orelse return error.InvalidBuiltinRegistry;
+    const function_global = function_ctx.global orelse return error.InvalidBuiltinRegistry;
+    // Class direct-call rejection is the bytecode entry OP_check_ctor, matching
+    // qjs JS_CallInternal. Ordinary functions use this same undefined-new.target
+    // path; no class-syntax fact is carried in the FunctionBytecode.
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        function_ctx,
+        func,
+        func,
+        this_value,
+        args,
+        &.{},
+        output,
+        function_global,
+        true,
+        null,
+        null,
+        null,
+        core.JSValue.undefinedValue(),
+    );
+}
+
+noinline fn callFunctionObjectBytecode(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    _ = ctx;
+    _ = global;
+    const function_value = function_object.functionBytecode() orelse return error.TypeError;
+    _ = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    // Bound/Proxy dispatch has already recursed to this final bytecode arm.
+    // Select the FB's realm only here, matching JS_CallInternal's late
+    // `ctx = b->realm` switch after caller-side call preflight.
+    const function_ctx = function_object.bytecodeFunctionRealmContext() orelse return error.InvalidBuiltinRegistry;
+    const function_global = function_ctx.global orelse return error.InvalidBuiltinRegistry;
+    // OP_check_ctor owns class direct-call rejection in the function realm.
+    return callFunctionBytecodeModeStateAfterInterruptPoll(function_ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue());
+}
+
+noinline fn callNativeCallableObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    switch (vmNativeCallableDispatch(function_object)) {
+        .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
+        .resolved_record => |target| {
+            const view = try builtin_dispatch.CallRealmView.caller(target.realm);
+            const native_result = builtin_dispatch.callInternalRecordDirectInRealm(
+                view,
+                output,
+                function_object,
+                this_value,
+                target.record,
+                args,
+                caller_function,
+                caller_frame,
+            ) catch |err| {
+                try throwRuntimeErrorForGlobal(view.realm, view.global, err);
                 return err;
             };
-        }
-        if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
-        if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
-        if (std.mem.eql(u8, name, "AggregateError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "SuppressedError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
-        }
-        if (exception_ops.isErrorConstructorName(name)) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
-            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "isError")) return builtin_glue.qjsErrorIsError(args);
-        if (std.mem.eql(u8, name, "isView")) return array_ops.qjsArrayBufferIsView(args);
-        if (std.mem.eql(u8, name, "set")) {
-            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "next")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorWrapNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
-            {
-                // Array Iterator `next` is still marker/name-dispatched rather
-                // than table-dispatched. Give this legacy terminal the same
-                // native-frame/error-materialization boundary as a record call.
-                var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
-                native_scope.push();
-                defer native_scope.deinit();
-                const next_result = array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object) catch |err| {
-                    try builtin_dispatch.materializeRuntimeError(ctx, global, err);
-                    return err;
-                };
-                if (next_result) |value| return value;
-            }
-        }
-        if (std.mem.eql(u8, name, "throw")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-        }
-        if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-            if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
-            if (object_ops.objectFromValue(this_value)) |this_object| {
-                if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
-            }
-        }
-        if (std.mem.eql(u8, name, "[Symbol.asyncIterator]")) {
-            return this_value.dup();
-        }
-        if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
-            if (try promise_ops.qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "return")) {
-            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorHelperReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (try qjsIteratorWrapReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsGeneratorReturn(ctx, output, global, this_value, args)) |value| return value;
-            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
-        }
-        if (std.mem.eql(u8, name, "fromCharCode")) {
-            return string_ops.qjsStringFromCharCode(ctx, output, global, args);
-        }
-        if (std.mem.eql(u8, name, "fromCodePoint")) {
-            return string_ops.qjsStringFromCodePoint(ctx, output, global, args);
-        }
-        if (std.mem.eql(u8, name, "raw")) {
-            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
-        }
-        if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
-            if (object_ops.objectFromValue(this_value)) |receiver_object| {
-                if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
-                    if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
-                    // parse/now fall-through (utc was handled above with VM
-                    // coercion): route the static body through the record table.
-                    return date_vm.callDateStaticBody(ctx, method_id, args) catch |err| switch (err) {
-                        error.TypeError => error.TypeError,
-                        else => err,
-                    };
+            return native_result;
+        },
+        .native_ref => |native_ref| {
+            const native_result = callNativeBuiltinRecordForVm(ctx, output, global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
+                const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+                try throwRuntimeErrorForGlobal(view.realm, view.global, err);
+                return err;
+            };
+            if (native_result) |value| return value;
+        },
+        .host_function => {
+            if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
+        },
+        .internal => |tag| {
+            const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+            if (try callInternalCallableByTag(view.realm, output, view.global, function_object, tag, args, caller_function, caller_frame)) |value| return value;
+        },
+        .name_dispatch => {},
+    }
+    const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+    return callNativeCallableByName(
+        view.realm,
+        output,
+        view.global,
+        this_value,
+        func,
+        function_object,
+        args,
+        caller_function,
+        caller_frame,
+    );
+}
+
+fn callValueOrBytecodeDispatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame);
+}
+
+fn callValueOrBytecodeDispatchAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    if (func.isFunctionBytecode()) {
+        return callRawFunctionBytecode(ctx, output, global, this_value, func, args);
+    }
+    if (object_ops.objectFromValue(func)) |object| {
+        switch (object.class_id) {
+            core.class.ids.bytecode_function,
+            core.class.ids.generator_function,
+            core.class.ids.async_function,
+            core.class.ids.async_generator_function,
+            => {
+                return callFunctionObjectBytecode(ctx, output, global, this_value, func, object, args);
+            },
+            core.class.ids.proxy => {
+                if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
+                    return object_ops.callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
                 }
-            }
-        }
-        if (try array_ops.qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
-            return value;
-        }
-        if (std.mem.eql(u8, name, "apply")) {
-            return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "call")) {
-            return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "set __proto__")) {
-            const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return object_ops.qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "set")) {
-            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "deref")) {
-            return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
-        }
-        if (std.mem.eql(u8, name, "join")) {
-            if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "toString")) {
-            if (try string_ops.qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "toLocaleString")) {
-            if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-        }
-        if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
-        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
-        if (try string_ops.qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
-        if (try array_ops.qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try array_ops.qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
-            if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "eval")) {
-            const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
-                property_ops.expectObject(realm_value) catch global
-            else
-                global;
-            return indirectEval(ctx, output, eval_global, args);
-        }
-        if (std.mem.eql(u8, name, "throws")) return qjsAssertThrows(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "groupBy")) {
-            // `Map.groupBy` static: route through the collection record table's
-            // `group_by` handler instead of naming a JS-visible function body.
-            // The only native `groupBy` is `Map.groupBy`, so this slow-path
-            // fallback always carries the Map constructor as receiver. Exec keys
-            // the record by its stable value rather than importing the registry.
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = collection_group_by_static_id };
-            if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |grouped| return grouped;
-        }
-        if (std.mem.eql(u8, name, "getOrInsertComputed")) {
-            // `Map`/`WeakMap.prototype.getOrInsertComputed` reached by name
-            // without a baked id: gate on a Map/WeakMap receiver (the retired
-            // `qjsMapGetOrInsertComputed` returned null to continue the chain for
-            // any other receiver) and route the body through the record table.
-            if (object_ops.objectFromValue(this_value)) |receiver| {
-                if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.weakmap) {
-                    const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = @intFromEnum(method_ids.collection.PrototypeMethod.get_or_insert_computed) };
-                    if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
-                }
-            }
-        }
-        if (object_ops.getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return object_ops.qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "concat") and !array_ops.isArrayMethodReceiver(this_value)) {
-            return string_ops.qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "replace")) {
-            return string_ops.qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
-        }
-        if (std.mem.eql(u8, name, "exec")) {
-            if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "test")) {
-            if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "compile")) {
-            const compile_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            if (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.search]")) {
-            if (try string_ops.qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.match]")) {
-            if (try string_ops.qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.matchAll]")) {
-            if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.replace]")) {
-            if (try string_ops.qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (std.mem.eql(u8, name, "[Symbol.split]")) {
-            if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-        }
-        if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
-            if (native_ref.domain == .regexp and
-                core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
-            {
-                // The `.regexp` accessor record runs the same `qjsRegExpAccessor`
-                // fast path + primitive `accessor` fallback this site used to
-                // inline; route through the table by the function's own id.
-                return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
-            }
-        }
-        if (core.host_function.builtin_method_id_lookup.regexp.accessorIdFromGetterName(name)) |accessor_id| {
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = accessor_id };
-            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
-        }
-        if (core.host_function.builtin_method_id_lookup.buffer.dataViewGetMethodId(name)) |method_id| {
-            return builtin_glue.qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            };
-        }
-        if (core.host_function.builtin_method_id_lookup.buffer.dataViewSetMethodId(name)) |method_id| {
-            return builtin_glue.qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "charAt")) {
-            const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-            return string_ops.callStringCharAtBody(ctx, this_value, index) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-            return string_ops.qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
-        }
-        if (string_ops.getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (string_ops.isStringMethodReceiver(this_value)) {
-            if (string_ops.standardStringMethodId(name)) |method_id| {
-                return string_ops.callStringBody(ctx, this_value, method_id, args) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-        }
-        if (string_ops.annexBStringMethodId(name)) |method_id| {
-            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
+            },
+            core.class.ids.c_function,
+            core.class.ids.c_function_data,
+            core.class.ids.c_closure,
+            core.class.ids.bound_function,
+            => return callNativeCallableObject(ctx, output, global, this_value, func, object, args, caller_function, caller_frame),
+            else => {},
         }
     }
     if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
 }
 
-test "callValueOrBytecodeClassMode roots inline args before bytecode frame allocation" {
+/// Compatibility fallback for callable objects which do not carry a stable
+/// native record or internal-callable tag. Keep this legacy name dispatch out
+/// of the normal call frame: QuickJS classifies the callable in
+/// `JS_CallInternal` and enters a class-specific call function, so a C/native
+/// call does not share a frame with bytecode and compatibility dispatch.
+noinline fn callNativeCallableByName(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    // Borrow the internal dispatch-name bytes instead of allocating a
+    // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
+    // times, and the previous round-trip alloc/free showed up clearly
+    // on the profile. Native dispatch names are atom-backed ASCII
+    // builtin names in practice; a `null` return here means there is
+    // no usable dispatch name.
+    const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
+        return core.JSValue.undefinedValue();
+    };
+    defer dispatch.name_value.free(ctx.runtime);
+    const name = dispatch.name;
+    if (name.len == 0) return core.JSValue.undefinedValue();
+    if (std.mem.eql(u8, name, "raw")) {
+        return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
+        return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "sumPrecise")) {
+        return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "register")) {
+        return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
+    }
+    if (std.mem.eql(u8, name, "unregister")) {
+        return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
+    }
+    if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    if (try collectionPrototypeMethodByName(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
+        return value;
+    }
+    // Hot-path dispatch: a small first-byte switch routes the common
+    // global builtins directly to their handlers, bypassing the long
+    // `std.mem.eql` chain below. The previous chain walked ~95 checks
+    // before reaching `qjsUriCallId` for `decodeURI` / `encodeURI`,
+    // which dominated tight-loop URI benchmarks.
+    if (name.len != 0) {
+        switch (name[0]) {
+            'A' => if (std.mem.eql(u8, name, "Array") and function_object.arrayBuiltinMarker() == .constructor) {
+                return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+            },
+            'B' => if (std.mem.eql(u8, name, "BigInt")) {
+                return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
+            },
+            'N' => if (std.mem.eql(u8, name, "Number")) {
+                return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
+            },
+            'O' => if (std.mem.eql(u8, name, "Object")) {
+                return construct_mod.constructValue(ctx, func, args, &.{});
+            },
+            'S' => if (std.mem.eql(u8, name, "String")) {
+                return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+            },
+            'd', 'e' => if (core.host_function.builtin_method_id_lookup.uri.methodId(name)) |mode| {
+                const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+                const native_ref = core.function.NativeBuiltinRef{ .domain = .uri, .id = mode };
+                return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, this_value, native_ref, &.{input}, caller_function, caller_frame)) orelse error.TypeError;
+            },
+            'f' => if (std.mem.eql(u8, name, "fromCharCode")) {
+                // Skip the long `std.mem.eql` chain below for the
+                // canonical `String.fromCharCode` shape; routes
+                // straight to the same handler the slow path uses,
+                // so coercion semantics (e.g. string args, BigInt
+                // rejection) stay identical.
+                return string_ops.qjsStringFromCharCode(ctx, output, global, args);
+            },
+            'r' => if (std.mem.eql(u8, name, "raw")) {
+                return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+            },
+            else => {},
+        }
+    }
+    if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
+    if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
+    if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx, func, args, &.{});
+    if (std.mem.eql(u8, name, "Array") and function_object.arrayBuiltinMarker() == .constructor) {
+        return constructArrayNativeRecordVm(ctx, output, global, function_object, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global), args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
+    if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
+    if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
+    if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
+    if (core.host_function.builtin_method_id_lookup.bigint.staticUnsignedMode(name)) |unsigned| {
+        return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "RegExp")) {
+        var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+        native_scope.push();
+        defer native_scope.deinit();
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame) catch |err| {
+            try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+            return err;
+        };
+    }
+    if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
+    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
+    if (std.mem.eql(u8, name, "AggregateError")) {
+        var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        defer prototype.deinit(ctx.runtime);
+        return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "SuppressedError")) {
+        var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        defer prototype.deinit(ctx.runtime);
+        return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    }
+    if (exception_ops.isErrorConstructorName(name)) {
+        var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+        defer prototype.deinit(ctx.runtime);
+        return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "isError")) return builtin_glue.qjsErrorIsError(args);
+    if (std.mem.eql(u8, name, "isView")) return array_ops.qjsArrayBufferIsView(args);
+    if (std.mem.eql(u8, name, "set")) {
+        if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+    if (std.mem.eql(u8, name, "next")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorWrapNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
+        {
+            // Array Iterator `next` is still marker/name-dispatched rather
+            // than table-dispatched. Give this legacy terminal the same
+            // native-frame/error-materialization boundary as a record call.
+            var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
+            native_scope.push();
+            defer native_scope.deinit();
+            const next_result = array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object) catch |err| {
+                try builtin_dispatch.materializeRuntimeError(ctx, global, err);
+                return err;
+            };
+            if (next_result) |value| return value;
+        }
+    }
+    if (std.mem.eql(u8, name, "throw")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+    }
+    if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
+        if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
+        if (object_ops.objectFromValue(this_value)) |this_object| {
+            if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
+        }
+    }
+    if (std.mem.eql(u8, name, "[Symbol.asyncIterator]")) {
+        return this_value.dup();
+    }
+    if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
+        if (try promise_ops.qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "return")) {
+        if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorHelperReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (try qjsIteratorWrapReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+        if (try qjsGeneratorReturn(ctx, output, global, this_value, args)) |value| return value;
+        if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+    }
+    if (std.mem.eql(u8, name, "fromCharCode")) {
+        return string_ops.qjsStringFromCharCode(ctx, output, global, args);
+    }
+    if (std.mem.eql(u8, name, "fromCodePoint")) {
+        return string_ops.qjsStringFromCodePoint(ctx, output, global, args);
+    }
+    if (std.mem.eql(u8, name, "raw")) {
+        return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+    }
+    if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
+        if (object_ops.objectFromValue(this_value)) |receiver_object| {
+            if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
+                if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
+                // parse/now fall-through (utc was handled above with VM
+                // coercion): route the static body through the record table.
+                return date_vm.callDateStaticBody(ctx, method_id, args) catch |err| switch (err) {
+                    error.TypeError => error.TypeError,
+                    else => err,
+                };
+            }
+        }
+    }
+    if (try array_ops.qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
+        return value;
+    }
+    if (std.mem.eql(u8, name, "apply")) {
+        return qjsFunctionApplyCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "call")) {
+        return qjsFunctionCallCall(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "set __proto__")) {
+        const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        return object_ops.qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "set")) {
+        if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "deref")) {
+        return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
+    }
+    if (std.mem.eql(u8, name, "join")) {
+        if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "toString")) {
+        if (try string_ops.qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "toLocaleString")) {
+        if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+    }
+    if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayFromAsyncCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
+    if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
+    if (try string_ops.qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
+    if (try array_ops.qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+    if (try array_ops.qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+    if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
+        if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "eval")) {
+        const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
+            property_ops.expectObject(realm_value) catch global
+        else
+            global;
+        return indirectEval(ctx, output, eval_global, args);
+    }
+    if (std.mem.eql(u8, name, "throws")) return qjsAssertThrows(ctx, output, global, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "groupBy")) {
+        // `Map.groupBy` static: route through the collection record table's
+        // `group_by` handler instead of naming a JS-visible function body.
+        // The only native `groupBy` is `Map.groupBy`, so this slow-path
+        // fallback always carries the Map constructor as receiver. Exec keys
+        // the record by its stable value rather than importing the registry.
+        const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = collection_group_by_static_id };
+        if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |grouped| return grouped;
+    }
+    if (std.mem.eql(u8, name, "getOrInsertComputed")) {
+        // `Map`/`WeakMap.prototype.getOrInsertComputed` reached by name
+        // without a baked id: gate on a Map/WeakMap receiver (the retired
+        // `qjsMapGetOrInsertComputed` returned null to continue the chain for
+        // any other receiver) and route the body through the record table.
+        if (object_ops.objectFromValue(this_value)) |receiver| {
+            if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.weakmap) {
+                const native_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = @intFromEnum(method_ids.collection.PrototypeMethod.get_or_insert_computed) };
+                if (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
+            }
+        }
+    }
+    if (object_ops.getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+        return object_ops.qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "concat") and !array_ops.isArrayMethodReceiver(this_value)) {
+        return string_ops.qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "replace")) {
+        return string_ops.qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "exec")) {
+        return regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "test")) {
+        if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "compile")) {
+        if (try regexp_fastpath.qjsRegExpCompile(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.search]")) {
+        if (try string_ops.qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.match]")) {
+        if (try string_ops.qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.matchAll]")) {
+        if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.replace]")) {
+        if (try string_ops.qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (std.mem.eql(u8, name, "[Symbol.split]")) {
+        if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    }
+    if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
+        if (native_ref.domain == .regexp and
+            core.host_function.builtin_method_id_lookup.regexp.accessorNameFromId(native_ref.id) != null)
+        {
+            // The `.regexp` accessor record runs the same `qjsRegExpAccessor`
+            // fast path + primitive `accessor` fallback this site used to
+            // inline; route through the table by the function's own id.
+            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+        }
+    }
+    if (core.host_function.builtin_method_id_lookup.regexp.accessorIdFromGetterName(name)) |accessor_id| {
+        const native_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = accessor_id };
+        return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+    }
+    if (core.host_function.builtin_method_id_lookup.buffer.dataViewGetMethodId(name)) |method_id| {
+        return builtin_glue.qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        };
+    }
+    if (core.host_function.builtin_method_id_lookup.buffer.dataViewSetMethodId(name)) |method_id| {
+        return builtin_glue.qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        };
+    }
+    if (std.mem.eql(u8, name, "charAt")) {
+        const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+        return string_ops.callStringCharAtBody(ctx, this_value, index) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
+        return string_ops.qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
+    }
+    if (string_ops.getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+        return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    if (string_ops.isStringMethodReceiver(this_value)) {
+        if (string_ops.standardStringMethodId(name)) |method_id| {
+            return string_ops.callStringBody(ctx, this_value, method_id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        }
+    }
+    if (string_ops.annexBStringMethodId(name)) |method_id| {
+        return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
+}
+
+test "callValueOrBytecode roots inline args before bytecode frame allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-    {
-        const code = try rt.memory.alloc(u8, 1);
-        code[0] = op.return_undef;
-        fb.byte_code = code.ptr;
-        fb.byte_code_len = 1;
-    }
-    fb.var_count = 1;
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = ctx,
+        .var_count = 1,
+        .byte_code = &.{op.return_undef},
+    });
+    fb.allVarDefs()[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{
+        .var_name = core.atom.null_atom,
+    });
+    fb.publishFixtureNoFail(rt);
 
     var func_value = core.JSValue.functionBytecode(&fb.header);
     var func_alive = true;
@@ -1060,7 +1103,7 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const result = try callValueOrBytecodeClassMode(
+    const result = try callValueOrBytecode(
         ctx,
         null,
         global,
@@ -1069,7 +1112,6 @@ test "callValueOrBytecodeClassMode roots inline args before bytecode frame alloc
         &args,
         null,
         null,
-        false,
     );
     defer result.free(rt);
     rt.memory.trigger_gc_fn = saved_trigger_fn;
@@ -1109,7 +1151,7 @@ pub fn qjsFunctionHasInstanceCall(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -1122,7 +1164,7 @@ pub fn ordinaryHasInstance(
     global: *core.Object,
     constructor_value: core.JSValue,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (!isCallableValue(constructor_value)) return false;
@@ -1142,7 +1184,7 @@ pub fn ordinaryHasInstance(
     const proto_value = blk: {
         if (object_ops.objectFromValue(constructor_value)) |co| {
             if (!co.isProxy()) {
-                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v.dup();
+                if (co.getOwnDataPropertyValue(core.atom.ids.prototype)) |v| break :blk v;
             }
         }
         break :blk try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
@@ -1192,15 +1234,14 @@ pub fn qjsErrorStackSetter(
     this_value: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!value.isString()) return error.TypeError;
 
-    const home_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, home_global, "Error")) |error_proto| {
+    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Error")) |error_proto| {
         if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
     }
 
@@ -1275,7 +1316,7 @@ pub fn qjsFunctionCallCall(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -1284,7 +1325,7 @@ pub fn qjsFunctionCallCall(
     // outer native call keeps `this_value` and `args` rooted for this complete
     // synchronous invocation, so rebuilding the defensive eight-slot argument
     // copy/root frame here is redundant.
-    return callValueOrBytecodeClassModePreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame, false);
+    return callValueOrBytecodePreRooted(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
 }
 
 /// Function.prototype.apply body. `argsFromArrayLike` is the shared
@@ -1297,7 +1338,7 @@ pub fn qjsFunctionApplyCall(
     this_value: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     if (!isCallableValue(this_value)) return throwFunctionRealmTypeError(ctx, global, function_object);
@@ -1319,9 +1360,8 @@ pub fn qjsFunctionApplyCall(
     return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
 }
 
-pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object, message: []const u8) !core.JSValue {
-    const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", message);
+pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, _: *core.Object, message: []const u8) !core.JSValue {
+    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -1332,7 +1372,7 @@ pub fn constructValueOrBytecode(
     global: *core.Object,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructValueOrBytecodeWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, func);
@@ -1381,7 +1421,7 @@ fn constructArrayNativeRecordVm(
     function_object: ?*core.Object,
     prototype: ?*core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
     return (builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, function_object, array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
@@ -1404,7 +1444,7 @@ fn constructBuiltinNativeRecordVm(
     native_ref: core.function.NativeBuiltinRef,
     prototype: ?*core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, function_object, native_ref, prototype, args, caller_function, caller_frame);
@@ -1418,7 +1458,7 @@ fn constructStringBuiltinNativeVm(
     native_ref: core.function.NativeBuiltinRef,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
@@ -1439,16 +1479,17 @@ fn constructStringBuiltinNativeInScope(
     native_ref: core.function.NativeBuiltinRef,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+    var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+    defer prototype.deinit(ctx.runtime);
     const string_value = if (args.len == 0)
         try value_ops.createStringValue(ctx.runtime, "")
     else
         try string_ops.toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
     defer string_value.free(ctx.runtime);
-    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype, &.{string_value}, caller_function, caller_frame);
+    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype.object(), &.{string_value}, caller_function, caller_frame);
 }
 
 fn constructDateBuiltinNativeVm(
@@ -1459,7 +1500,7 @@ fn constructDateBuiltinNativeVm(
     native_ref: core.function.NativeBuiltinRef,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
@@ -1480,10 +1521,11 @@ fn constructDateBuiltinNativeInScope(
     native_ref: core.function.NativeBuiltinRef,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
+    var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
     var coerced_storage: [7]core.JSValue = undefined;
     var coerced: []core.JSValue = coerced_storage[0..0];
     var coerced_owned = false;
@@ -1524,7 +1566,7 @@ fn constructDateBuiltinNativeInScope(
         }
         date_args = coerced;
     }
-    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype, date_args, caller_function, caller_frame);
+    return builtin_dispatch.callConstructRecordInNativeScope(ctx, output, global, &.{}, function_object, native_ref, prototype.object(), date_args, caller_function, caller_frame);
 }
 
 pub fn constructValueOrBytecodeWithNewTarget(
@@ -1533,7 +1575,25 @@ pub fn constructValueOrBytecodeWithNewTarget(
     global: *core.Object,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) HostError!core.JSValue {
+    // QuickJS JS_CallConstructorInternal polls before proxy/bound dispatch and
+    // before testing constructibility. Recursive proxy/bound forwarding enters
+    // this wrapper again, so every semantic constructor entry charges the
+    // caller Realm exactly once.
+    try exception_ops.pollInterrupt(ctx, global);
+    return constructValueOrBytecodeWithNewTargetAfterInterruptPoll(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+}
+
+fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) HostError!core.JSValue {
@@ -1599,7 +1659,11 @@ pub fn constructValueOrBytecodeWithNewTarget(
             owned_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
             break :blk owned_name.?;
         };
-        if (isBuiltinConstructorName(name) and !new_target.sameValue(func)) {
+        const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
+        if (isBuiltinConstructorName(name) and
+            (!std.mem.eql(u8, name, "Array") or is_native_array_constructor) and
+            !new_target.sameValue(func))
+        {
             if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                 return constructed;
             }
@@ -1636,18 +1700,21 @@ pub fn constructValueOrBytecodeWithNewTarget(
             // argument through unchanged.
             return (try constructDateBuiltinNativeVm(ctx, output, global, function_object, native_ref, new_target, args, caller_function, caller_frame)) orelse error.TypeError;
         };
-        if (std.mem.eql(u8, name, "Array")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return constructArrayNativeRecordVm(ctx, output, global, function_object, prototype, args, caller_function, caller_frame);
+        if (function_object.arrayBuiltinMarker() == .constructor) {
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return constructArrayNativeRecordVm(ctx, output, global, function_object, prototype.object(), args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "Promise")) return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) {
-            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
-            return try object_ops.qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
+            var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
+            defer prototype.deinit(ctx.runtime);
+            return try object_ops.qjsDisposableStackConstructWithPrototype(ctx, global, prototype.object());
         }
         if (std.mem.eql(u8, name, "AsyncDisposableStack")) {
-            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "AsyncDisposableStack", new_target, caller_function, caller_frame);
-            return try promise_ops.qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
+            var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "AsyncDisposableStack", new_target, caller_function, caller_frame);
+            defer prototype.deinit(ctx.runtime);
+            return try promise_ops.qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
         }
         if (construct_native_ref) |native_ref| if (native_ref.domain == .regexp and native_ref.id == regexp_construct_id) {
             // `new RegExp(...)`: `qjsRegExpConstructCall` performs the
@@ -1659,13 +1726,15 @@ pub fn constructValueOrBytecodeWithNewTarget(
         };
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return builtin_glue.constructCollectionFromVm(ctx, output, global, func, kind, args);
         if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return array_ops.qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype, std.mem.eql(u8, name, "SharedArrayBuffer"));
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return array_ops.qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype.object(), std.mem.eql(u8, name, "SharedArrayBuffer"));
         }
         if (std.mem.eql(u8, name, "DataView")) {
             const coerced = try builtin_glue.qjsDataViewConstructorArgs(ctx, output, global, args);
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return try object_ops.qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return try object_ops.qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
         }
         if (std.mem.eql(u8, name, "Proxy")) {
             return construct_mod.constructValue(ctx, func, args, &.{}) catch |err| switch (err) {
@@ -1674,21 +1743,25 @@ pub fn constructValueOrBytecodeWithNewTarget(
             };
         }
         if (std.mem.eql(u8, name, "DOMException")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return try construct_mod.constructDOMExceptionObject(ctx.runtime, prototype, args);
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return try construct_mod.constructDOMExceptionObject(ctx.runtime, prototype.object(), args);
         }
         if (std.mem.eql(u8, name, "AggregateError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
             const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype.object(), args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "SuppressedError")) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
         }
         if (exception_ops.isErrorConstructorName(name)) {
-            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
-            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
+            var prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            defer prototype.deinit(ctx.runtime);
+            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
         }
         if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
@@ -1697,19 +1770,18 @@ pub fn constructValueOrBytecodeWithNewTarget(
     }
     if (func.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
+        if (!isConstructibleFunctionBytecode(fb)) return error.TypeError;
         // qjs JS_CallConstructorInternal (quickjs.c:20837): a DERIVED class ctor
         // allocates NO instance and does NO prototype lookup — `this` stays
         // uninitialized (TDZ) until super() builds the object via new.target and
         // binds it. Only base/ordinary ctors get the eager js_create_from_ctor
         // instance (quickjs.c:20842).
-        if (fb.flags.is_derived_class_constructor) {
-            return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target, core.JSValue.undefinedValue());
+        if (fb.isDerivedClassConstructor()) {
+            return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target);
         }
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
-        try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-        const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, new_target, core.JSValue.undefinedValue());
+        const result = try callFunctionBytecodeConstruct(ctx, func, func, instance, args, &.{}, output, global, new_target);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -1720,38 +1792,18 @@ pub fn constructValueOrBytecodeWithNewTarget(
     if (object_ops.functionObjectFromValue(func)) |function_object| {
         const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (fb.flags.is_class_constructor) {
-            // Special handling for class constructors (published via top-level script/module binding or direct define_class).
-            // This is the VM alignment fix for the "not a constructor" bug in top-level class decl in plain .js scripts
-            // (the functionObjectFromValue path was not recognizing is_class_constructor and taking the ordinary path,
-            // which rejected class ctors or used wrong initial_this for derived/fields init).
-            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-            // Derived class ctor: no eager instance / prototype lookup (qjs quickjs.c:20837); see above.
-            if (fb.flags.is_derived_class_constructor) {
-                return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
-            }
-            const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
-            errdefer instance.free(ctx.runtime);
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, core.JSValue.undefinedValue());
-            if (result.isObject()) {
-                instance.free(ctx.runtime);
-                return result;
-            }
-            result.free(ctx.runtime);
-            return instance;
+        if (!isConstructibleBytecodeFunctionObject(function_object, fb)) return error.TypeError;
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        // qjs JS_CallConstructorInternal distinguishes only derived bytecode
+        // constructors. Base classes and ordinary constructors both take the
+        // legacy eager-instance path below.
+        if (fb.isDerivedClassConstructor()) {
+            return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target);
         }
-        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) return error.TypeError;
-        if (try constructSimpleFieldConstructor(ctx, func, function_object, fb, args, new_target)) |constructed| return constructed;
+        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target)) |constructed| return constructed;
         const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
-        if (!fb.flags.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
-        }
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCaptures(), output, function_global, new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -1764,6 +1816,10 @@ pub fn constructValueOrBytecodeWithNewTarget(
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
         }
     }
+    // QuickJS JS_CallInternal rejects non-object call targets before the
+    // constructor-only object checks. This is the path used by a live
+    // `super()` after the derived constructor's [[Prototype]] becomes null.
+    if (!func.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     return construct_mod.constructValue(ctx, func, args, &.{});
 }
 
@@ -1773,7 +1829,7 @@ fn constructExternalHostFunction(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) !core.JSValue {
@@ -1827,21 +1883,19 @@ test "qjsConstructWeakRefWithPrototype roots direct symbol target while creating
 test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var cleanup_callback = core.JSValue.functionBytecode(&fb.header);
     var cleanup_callback_alive = true;
@@ -1851,7 +1905,7 @@ test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode clea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const registry_value = try object_ops.qjsConstructFinalizationRegistryWithPrototype(rt, cleanup_callback, null);
+    const registry_value = try object_ops.qjsConstructFinalizationRegistryWithPrototype(ctx, cleanup_callback, null);
     var registry_alive = true;
     defer if (registry_alive) registry_value.free(rt);
     const registry = object_ops.objectFromValue(registry_value) orelse return error.TypeError;
@@ -1953,11 +2007,12 @@ pub fn createConstructorInstance(
     output: ?*std.Io.Writer,
     global: *core.Object,
     new_target: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", new_target, caller_function, caller_frame);
-    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+    var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
     errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
     return instance.value();
 }
@@ -1969,7 +2024,7 @@ fn createBytecodeConstructorInstance(
     func: core.JSValue,
     function_object: *core.Object,
     new_target: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (new_target.sameValue(func)) {
@@ -1992,6 +2047,7 @@ const SimpleFieldConstructorPattern = struct {
 
 fn constructSimpleFieldConstructor(
     ctx: *core.JSContext,
+    caller_global: *core.Object,
     func: core.JSValue,
     function_object: *core.Object,
     fb: *const bytecode.FunctionBytecode,
@@ -2005,6 +2061,10 @@ fn constructSimpleFieldConstructor(
 
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+    // This fast path replaces the bytecode JS_CallInternal body, but not its
+    // caller-Realm entry poll. QuickJS creates the base instance first and then
+    // takes this second constructor poll before executing field stores.
+    try exception_ops.pollInterrupt(ctx, caller_global);
     for (pattern.atoms[0..pattern.len], pattern.arg_indices[0..pattern.len]) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
         try instance.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
@@ -2013,11 +2073,15 @@ fn constructSimpleFieldConstructor(
 }
 
 fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFieldConstructorPattern {
-    if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
-    if (fb.flags.is_arrow_function or fb.flags.func_kind != .normal or !fb.flags.has_prototype) return null;
-    if (fb.var_count > 1 or fb.var_refs_len != 0 or fb.cpool_count != 0) return null;
-    if (fb.classInstanceFields().len != 0 or fb.classPrivateNames().len != 0 or fb.privateBoundNames().len != 0) return null;
-    if (fb.flags.super_call_allowed or fb.flags.super_allowed or fb.flags.arguments_allowed or fb.flags.is_indirect_eval) return null;
+    if (fb.isDerivedClassConstructor()) return null;
+    if (fb.functionKind() != .normal or !fb.hasPrototype()) return null;
+    // Base class bytecode starts with OP_check_ctor, so it cannot match either
+    // ordinary push_this prefix accepted below. Keep the gate explicit so a
+    // future pattern broadening cannot accidentally bypass class call entry.
+    const code = fb.byteCode();
+    if (code.len == 0 or code[0] == op.check_ctor) return null;
+    if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
+    if (fb.superCallAllowed() or fb.superAllowed() or fb.argumentsAllowed() or fb.isDirectOrIndirectEval()) return null;
 
     return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
 }
@@ -2143,7 +2207,7 @@ pub fn constructFunctionFromSource(
     global: *core.Object,
     constructor: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .normal, caller_function, caller_frame);
@@ -2155,7 +2219,7 @@ pub fn constructGeneratorFunctionFromSource(
     global: *core.Object,
     constructor: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .generator, caller_function, caller_frame);
@@ -2184,7 +2248,7 @@ pub fn constructDynamicFunctionFromSource(
     new_target: core.JSValue,
     args: []const core.JSValue,
     kind: DynamicFunctionKind,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var params = std.ArrayList(u8).empty;
@@ -2203,11 +2267,8 @@ pub fn constructDynamicFunctionFromSource(
         defer body_value.free(ctx.runtime);
         try string_ops.appendSourceStringUtf8(ctx.runtime, &body, body_value);
     }
-    const function_global = dynamicFunctionRealmGlobal(constructor) orelse global;
-    if ((kind == .async_function or kind == .async_generator) and try promise_ops.parameterSourceContainsAwait(ctx.runtime, params.items)) {
-        return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
-    }
-
+    const compile_realm = try functionRealmContext(ctx, constructor);
+    const function_global = compile_realm.global orelse return error.InvalidBuiltinRegistry;
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
     const prefix = switch (kind) {
@@ -2219,13 +2280,7 @@ pub fn constructDynamicFunctionFromSource(
     try source.appendSlice(ctx.runtime.memory.allocator, prefix);
     try source.appendSlice(ctx.runtime.memory.allocator, params.items);
     try source.appendSlice(ctx.runtime.memory.allocator, "\n) {\n");
-    if (if (kind == .normal) array_ops.nativeTypedArraySubclassBase(body.items) else null) |base_name| {
-        try source.appendSlice(ctx.runtime.memory.allocator, "return ");
-        try source.appendSlice(ctx.runtime.memory.allocator, base_name);
-        try source.append(ctx.runtime.memory.allocator, ';');
-    } else {
-        try source.appendSlice(ctx.runtime.memory.allocator, body.items);
-    }
+    try source.appendSlice(ctx.runtime.memory.allocator, body.items);
     try source.appendSlice(ctx.runtime.memory.allocator, "\n})");
 
     const filename = switch (kind) {
@@ -2234,7 +2289,7 @@ pub fn constructDynamicFunctionFromSource(
         .generator => "GeneratorFunction",
         .async_generator => "AsyncGeneratorFunction",
     };
-    var compiled = try parser.compile(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
+    var compiled = try parser.compile(.{ .realm = compile_realm }, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
     defer compiled.deinit();
     if (compiled.syntax_error) |*parse_error| {
         // Compile-error surface: own fileName/lineNumber/columnNumber +
@@ -2243,6 +2298,27 @@ pub fn constructDynamicFunctionFromSource(
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
         return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }
+    _ = compiled.functionBytecode() orelse return error.InvalidBytecode;
+    const owned_root = compiled.takeFunctionBytecodeValue() orelse return error.InvalidBytecode;
+    var root_function_value = try object_ops.createRootBytecodeFunctionObject(
+        compile_realm,
+        function_global,
+        owned_root,
+        .root_global,
+    );
+    defer root_function_value.free(ctx.runtime);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &root_function_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+    const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
+    const root_bytecode_value = root_function_object.functionBytecode() orelse return error.InvalidBytecode;
+    const function = functionBytecodeFromValue(root_bytecode_value) orelse return error.InvalidBytecode;
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
@@ -2252,7 +2328,18 @@ pub fn constructDynamicFunctionFromSource(
     // runs GC on eval exit (only at allocation thresholds / explicit JS_RunGC), so
     // pass `false`; the function expression makes no var_ref cycle of its own and
     // any cycle in the result is reclaimed by the top-level collection.
-    const result = try runWithArgs(ctx, &nested_stack, &compiled.function, function_global.value(), &.{}, &.{}, output, function_global, false, false, false);
+    const result = try runWithCallEnv(.{
+        .ctx = compile_realm,
+        .stack = &nested_stack,
+        .function = function,
+        .initial_this_value = function_global.value(),
+        .var_refs = root_function_object.functionCaptures(),
+        .output = output,
+        .global = function_global,
+        .current_function_value = root_function_value,
+        .is_eval_code = true,
+        .global_declarations_prevalidated = true,
+    });
     errdefer result.free(ctx.runtime);
     // `runWithArgs` returns the completion value owned, but ALSO leaves an owned
     // copy on `nested_stack`. When that stack is a `vm_stack` arena window (the
@@ -2271,27 +2358,47 @@ pub fn constructDynamicFunctionFromSource(
     }
     nested_stack.setLen(0);
     if (object_ops.functionObjectFromValue(result)) |function_object| {
-        const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
-        try function_object.setPrototype(ctx.runtime, prototype);
-        try object_ops.copyRealmPrototypeKeys(ctx.runtime, constructor, function_object);
-        if (function_global != global) {
-            try function_object.setOptionalValueSlot(ctx.runtime, try function_object.functionRealmGlobalSlot(ctx.runtime), function_global.value().dup());
-        }
+        var prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        try function_object.setPrototype(ctx.runtime, prototype.object());
     }
     return result;
 }
 
-pub fn dynamicFunctionRealmGlobal(constructor: core.JSValue) ?*core.Object {
-    const constructor_object = property_ops.expectObject(constructor) catch return null;
-    return object_ops.objectRealmGlobal(constructor_object);
+/// Cold `JS_GetFunctionRealm` analogue. This query must not be used to switch
+/// actual call dispatch early: Bound and Proxy calls perform their wrapper
+/// work in the caller realm and only their final target arm changes context.
+pub fn functionRealmContext(caller: *core.JSContext, function_value: core.JSValue) HostError!*core.JSContext {
+    const object = object_ops.objectFromValue(function_value) orelse return caller;
+    return switch (object.class_id) {
+        core.class.ids.c_function => object.nativeFunctionRealm() orelse error.InvalidBuiltinRegistry,
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+        => object.bytecodeFunctionRealmContext() orelse error.InvalidBuiltinRegistry,
+        core.class.ids.proxy => blk: {
+            if (object_ops.isRevokedProxy(object)) {
+                const caller_global = caller.global orelse return error.InvalidBuiltinRegistry;
+                _ = try exception_ops.throwTypeErrorMessage(caller, caller_global, "revoked proxy");
+                unreachable;
+            }
+            const target = object.proxyTarget() orelse break :blk caller;
+            break :blk try functionRealmContext(caller, target);
+        },
+        core.class.ids.bound_function => blk: {
+            const target = object.boundTarget() orelse return error.InvalidBuiltinRegistry;
+            break :blk try functionRealmContext(caller, target);
+        },
+        // C_FUNCTION_DATA, C_CLOSURE, Promise/async special classes, and
+        // every other JSClassCall-style object all use the caller realm.
+        else => caller,
+    };
 }
 
-pub fn functionRealmGlobal(object: *core.Object) ?*core.Object {
-    if (object.proxyTarget()) |target_value| {
-        const target_object = object_ops.objectFromValue(target_value) orelse return null;
-        return functionRealmGlobal(target_object);
-    }
-    return object_ops.objectRealmGlobal(object);
+pub fn functionRealmGlobal(caller: *core.JSContext, function_value: core.JSValue) HostError!*core.Object {
+    const realm = try functionRealmContext(caller, function_value);
+    return realm.global orelse error.InvalidBuiltinRegistry;
 }
 
 pub fn qjsAssertThrows(
@@ -2299,7 +2406,7 @@ pub fn qjsAssertThrows(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len < 2) return error.TypeError;
@@ -2328,7 +2435,7 @@ pub fn callAssertThrowsCallback(
     output: ?*std.Io.Writer,
     global: *core.Object,
     callback: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
@@ -2339,7 +2446,7 @@ pub fn qjsCollectIteratorValues(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = object_ops.objectFromValue(iterator_value) orelse return error.TypeError;
@@ -2388,7 +2495,7 @@ pub fn qjsIteratorClose(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const return_key = try ctx.runtime.internAtom("return");
@@ -2399,283 +2506,6 @@ pub fn qjsIteratorClose(
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
     result.free(ctx.runtime);
-}
-
-pub const destructuring_iterator_state_kind: u8 = 0xf0;
-pub const destructuring_iterator_state_mask: u8 = 0xfc;
-pub const destructuring_iterator_done_bit: u8 = 0x01;
-pub const destructuring_iterator_closing_bit: u8 = 0x02;
-
-pub fn destructuringIteratorStateFromValue(value: core.JSValue) ?*core.Object {
-    const object = property_ops.expectObject(value) catch return null;
-    return if (isDestructuringIteratorState(object)) object else null;
-}
-
-pub fn isDestructuringIteratorState(object: *core.Object) bool {
-    return object.class_id == core.class.ids.iterator_wrap and
-        ((object.iteratorKindSlot().*) & destructuring_iterator_state_mask) == destructuring_iterator_state_kind;
-}
-
-pub fn createDestructuringIteratorState(rt: *core.JSRuntime, iterator_value: core.JSValue) !*core.Object {
-    var owned_iterator_value = iterator_value;
-    errdefer owned_iterator_value.free(rt);
-    const state = try core.Object.create(rt, core.class.ids.iterator_wrap, null);
-    errdefer core.Object.destroyFromHeader(rt, &state.header);
-    state.iteratorKindSlot().* = destructuring_iterator_state_kind;
-    state.iteratorIndexSlot().* = 0;
-    try state.setOptionalValueSlot(rt, state.iteratorTargetSlot(), owned_iterator_value);
-    owned_iterator_value = core.JSValue.undefinedValue();
-    return state;
-}
-
-pub fn destructuringIteratorStateDone(state: *core.Object) bool {
-    return ((state.iteratorKindSlot().*) & destructuring_iterator_done_bit) != 0;
-}
-
-pub fn setDestructuringIteratorStateDone(state: *core.Object) void {
-    state.iteratorKindSlot().* |= destructuring_iterator_done_bit;
-}
-
-pub fn destructuringIteratorStateClosing(state: *core.Object) bool {
-    return ((state.iteratorKindSlot().*) & destructuring_iterator_closing_bit) != 0;
-}
-
-pub fn setDestructuringIteratorStateClosing(state: *core.Object) void {
-    state.iteratorKindSlot().* |= destructuring_iterator_closing_bit;
-}
-
-pub fn qjsDestructuringGet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const target_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        const current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        var index = current_index;
-        var value = core.JSValue.undefinedValue();
-        var has_value = false;
-        while (index <= target_index) : (index += 1) {
-            if (has_value) value.free(ctx.runtime);
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            value = step.value;
-            has_value = true;
-            state.iteratorIndexSlot().* = index + 1;
-        }
-        return value;
-    }
-    if (args[0].isString()) {
-        const atom_id = core.atom.atomFromUInt32(target_index);
-        if (try string_ops.getStringIndexValue(ctx.runtime, args[0], atom_id)) |value| return value;
-        return core.JSValue.undefinedValue();
-    }
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
-        return object.getProperty(core.atom.atomFromUInt32(target_index));
-    }
-
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringElide(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const target_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        const current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        var index = current_index;
-        while (index <= target_index) : (index += 1) {
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            state.iteratorIndexSlot().* = index + 1;
-            step.value.free(ctx.runtime);
-            if (step.done) break;
-        }
-        return core.JSValue.undefinedValue();
-    }
-    if (args[0].isString()) return core.JSValue.undefinedValue();
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) return core.JSValue.undefinedValue();
-
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringRest(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const start_index: u32 = @intCast(args[1].asInt32() orelse return error.TypeError);
-    if (destructuringIteratorStateFromValue(args[0])) |state| {
-        var current_index: u32 = @intCast(state.iteratorIndexSlot().*);
-        while (current_index < start_index) : (current_index += 1) {
-            const skipped = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            state.iteratorIndexSlot().* = current_index + 1;
-            skipped.value.free(ctx.runtime);
-            if (skipped.done) break;
-        }
-
-        const out = try core.Object.createArray(ctx.runtime, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        var out_value = out.value();
-        var value = core.JSValue.undefinedValue();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &out_value },
-            .{ .value = &value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
-        defer value.free(ctx.runtime);
-
-        while (true) {
-            const step = destructuringIteratorStep(ctx, output, global, state) catch |err| {
-                try clearDestructuringIteratorState(ctx.runtime, state);
-                return err;
-            };
-            value = step.value;
-            if (step.done) {
-                value.free(ctx.runtime);
-                value = core.JSValue.undefinedValue();
-                break;
-            }
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
-            value.free(ctx.runtime);
-            value = core.JSValue.undefinedValue();
-            current_index += 1;
-            state.iteratorIndexSlot().* = current_index;
-        }
-        return out_value;
-    }
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
-        const out = try core.Object.createArray(ctx.runtime, null);
-        errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-        var out_value = out.value();
-        var value = core.JSValue.undefinedValue();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &out_value },
-            .{ .value = &value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
-        defer value.free(ctx.runtime);
-
-        var index = start_index;
-        while (index < object.arrayLength()) : (index += 1) {
-            value = object.getProperty(core.atom.atomFromUInt32(index));
-            try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.arrayLength()), core.Descriptor.data(value, true, true, true));
-            value.free(ctx.runtime);
-            value = core.JSValue.undefinedValue();
-        }
-        return out_value;
-    }
-    return error.TypeError;
-}
-
-pub fn qjsDestructuringClose(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return core.JSValue.undefinedValue();
-    const state = destructuringIteratorStateFromValue(args[0]) orelse return core.JSValue.undefinedValue();
-    const iterator_value = (state.iteratorTargetSlot().*) orelse return core.JSValue.undefinedValue();
-    if (destructuringIteratorStateDone(state)) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return core.JSValue.undefinedValue();
-    }
-    const iterator = try property_ops.expectObject(iterator_value);
-    errdefer clearDestructuringIteratorState(ctx.runtime, state) catch {};
-    setDestructuringIteratorStateClosing(state);
-    setDestructuringIteratorStateDone(state);
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), return_key, null, null);
-    defer return_method.free(ctx.runtime);
-    if (!isCallableValue(return_method)) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return core.JSValue.undefinedValue();
-    }
-    const result = try callValueOrBytecode(ctx, output, global, iterator.value(), return_method, &.{}, null, null);
-    defer result.free(ctx.runtime);
-    if (!result.isObject()) {
-        try clearDestructuringIteratorState(ctx.runtime, state);
-        return error.TypeError;
-    }
-    try clearDestructuringIteratorState(ctx.runtime, state);
-    return core.JSValue.undefinedValue();
-}
-
-pub fn qjsDestructuringRequireIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (destructuringIteratorStateFromValue(args[0])) |_| return args[0].dup();
-
-    var iterator_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iterator_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-    };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
-    defer iterator_value.free(ctx.runtime);
-
-    const source = property_ops.expectObject(args[0]) catch {
-        const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
-        defer iterator_method.free(ctx.runtime);
-        if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-        iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
-        _ = try property_ops.expectObject(iterator_value);
-        try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
-        const state = try createDestructuringIteratorState(ctx.runtime, iterator_value.dup());
-        return state.value();
-    };
-    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], source)) return args[0].dup();
-    if (source.class_id == core.class.ids.generator or source.class_id == core.class.ids.async_generator) {
-        try cacheDestructuringIteratorNextMethod(ctx, output, global, source.value());
-        const state = try createDestructuringIteratorState(ctx.runtime, source.value().dup());
-        return state.value();
-    }
-    const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
-    defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-    iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
-    _ = try property_ops.expectObject(iterator_value);
-    try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
-    const state = try createDestructuringIteratorState(ctx.runtime, iterator_value.dup());
-    return state.value();
 }
 
 pub fn getIteratorMethod(
@@ -2693,12 +2523,12 @@ pub fn iteratorForValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     source_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (source_value.isString()) return core.object.stringIterator(ctx.runtime, source_value);
+    if (source_value.isString()) return core.object.stringIterator(ctx, source_value);
     const source_object = property_ops.expectObject(source_value) catch null;
-    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx.runtime, source_value);
+    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, source_value);
     if (source_object != null and
         (source_object.?.class_id == core.class.ids.array_iterator or
             source_object.?.class_id == core.class.ids.string_iterator or
@@ -2723,90 +2553,21 @@ pub fn cacheIteratorNextMethod(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
-    try cacheIteratorNextMethodMode(ctx, output, global, iterator_value, true);
-}
-
-pub fn cacheDestructuringIteratorNextMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-) !void {
-    try cacheIteratorNextMethodMode(ctx, output, global, iterator_value, false);
-}
-
-pub fn cacheIteratorNextMethodMode(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-    require_callable: bool,
-) !void {
     const iterator = try property_ops.expectObject(iterator_value);
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
     const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     defer next_method.free(ctx.runtime);
-    if (require_callable and !isCallableValue(next_method)) return error.TypeError;
+    if (!isCallableValue(next_method)) return error.TypeError;
     const cached = try iterator.cachedIteratorNextSlot(ctx.runtime);
     try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
 }
-
-pub const DestructuringIteratorStep = struct {
-    value: core.JSValue,
-    done: bool,
-};
 
 pub const IteratorStepResult = struct {
     result: core.JSValue,
     value: core.JSValue,
     done: bool,
 };
-
-pub fn destructuringIteratorStep(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    state: *core.Object,
-) !DestructuringIteratorStep {
-    const iterator_value = (state.iteratorTargetSlot().*) orelse
-        return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
-        const next_key = try ctx.runtime.internAtom("next");
-        defer ctx.runtime.atoms.free(next_key);
-        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-    };
-    defer next_method.free(ctx.runtime);
-    if (!isCallableValue(next_method)) return error.TypeError;
-    var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
-    defer next_result_value.free(ctx.runtime);
-    if (object_ops.objectFromValue(next_result_value)) |promise| {
-        if (promise.class_id == core.class.ids.promise) {
-            if (promise.promiseIsRejected()) {
-                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-                _ = ctx.throwValue(reason);
-                return error.JSException;
-            }
-            const fulfilled = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-            next_result_value.free(ctx.runtime);
-            next_result_value = fulfilled;
-        }
-    }
-    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
-    if (next_result.class_id == core.class.ids.regexp) {
-        return .{ .value = core.JSValue.undefinedValue(), .done = false };
-    }
-    const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
-    defer done.free(ctx.runtime);
-    if (value_ops.isTruthy(done)) {
-        setDestructuringIteratorStateDone(state);
-        return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    }
-    const value_key = core.atom.predefinedId("value", .string).?;
-    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
-}
 
 pub fn appendIteratorValues(
     ctx: *core.JSContext,
@@ -2944,12 +2705,17 @@ pub fn appendSpreadValuesEnumerate(
     return index;
 }
 
+pub const IteratorValueDone = struct {
+    value: core.JSValue,
+    done: bool,
+};
+
 pub fn iteratorStepValue(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-) !DestructuringIteratorStep {
+) !IteratorValueDone {
     const iterator = try property_ops.expectObject(iterator_value);
     const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
@@ -3014,13 +2780,6 @@ pub fn iteratorStepResult(
     return .{ .result = next_result_value, .value = value, .done = is_done };
 }
 
-pub fn clearDestructuringIteratorState(rt: *core.JSRuntime, state: *core.Object) !void {
-    if (!isDestructuringIteratorState(state)) return;
-    state.clearIteratorTarget(rt);
-    state.iteratorIndexSlot().* = 0;
-    state.iteratorKindSlot().* = 0;
-}
-
 pub fn isCallableValue(value: core.JSValue) bool {
     return value.isFunctionBytecode() or object_ops.functionObjectFromValue(value) != null or object_ops.callableObjectFromValue(value) != null or object_ops.proxyTargetIsCallable(value);
 }
@@ -3031,7 +2790,7 @@ pub fn qjsReflectCallForNativeRecord(
     global: *core.Object,
     id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const reflect_mod = reflect_dispatch;
@@ -3069,13 +2828,24 @@ pub const AtomicsWaiterKey = struct {
     offset_or_ptr: usize,
 };
 
+pub const AtomicsWaiterCompletion = enum {
+    waiting,
+    notified,
+    timed_out,
+};
+
 pub const AtomicsWaiter = struct {
     key: AtomicsWaiterKey,
-    notified: bool = false,
+    /// Protected by atomics_waiter_mutex. Foreign threads may only move this
+    /// scalar out of `waiting` and signal the condition; the Runtime owner is
+    /// the sole consumer allowed to touch the Promise/RealmRef.
+    completion: AtomicsWaiterCompletion = .waiting,
     linked: bool = false,
     cond: std.Io.Condition = .init,
     promise: ?core.JSValue = null,
-    ctx: ?*core.JSContext = null,
+    /// Present only for heap-backed waitAsync nodes. The synchronous waiter is
+    /// stack-local and leaves this empty.
+    realm: core.RealmRef = .{},
     deadline: ?std.Io.Timestamp = null,
     next: ?*AtomicsWaiter = null,
 };
@@ -3089,7 +2859,7 @@ pub fn qjsAtomicsCallForNativeRecord(
     global: *core.Object,
     id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const atomics_mod = atomics_wait;
@@ -3117,7 +2887,7 @@ pub fn qjsAtomicsIsLockFree(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const size_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3130,7 +2900,7 @@ pub fn qjsAtomicsPause(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = ctx;
@@ -3152,7 +2922,7 @@ pub fn qjsAtomicsReadModifyWrite(
     global: *core.Object,
     args: []const core.JSValue,
     atomic_op: AtomicsReadModifyOp,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3191,7 +2961,7 @@ pub fn qjsAtomicsStore(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3225,7 +2995,7 @@ pub fn qjsAtomicsNotify(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3247,7 +3017,7 @@ pub fn qjsAtomicsWait(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3282,7 +3052,7 @@ pub fn atomicsNotifyCount(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     if (args.len < 3 or args[2].isUndefined()) return std.math.maxInt(usize);
@@ -3333,29 +3103,24 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
     defer atomics_waiter_mutex.unlock(io);
 
     var woken: usize = 0;
-    var previous: ?*AtomicsWaiter = null;
     var cursor = atomics_waiters;
     while (cursor) |waiter| {
         const next = waiter.next;
-        if (!atomicsWaiterKeysEqual(waiter.key, key) or waiter.notified) {
-            previous = waiter;
+        if (!atomicsWaiterKeysEqual(waiter.key, key) or waiter.completion != .waiting) {
             cursor = next;
             continue;
         }
-        waiter.notified = true;
-        if (waiter.promise) |promise| {
-            promise_ops.atomicsSettleAsyncWaiter(waiter, promise, "ok") catch {};
-            if (previous) |prev| {
-                prev.next = next;
-            } else {
-                atomics_waiters = next;
+        // This function may run on a foreign Runtime thread. Publish only a
+        // no-allocation scalar completion and wake the appropriate owner. A
+        // synchronous stack waiter uses its condition; a heap waitAsync node
+        // signals the owning Runtime's host-completion event. Neither path
+        // touches the JS heap or allocator.
+        waiter.completion = .notified;
+        waiter.cond.signal(io);
+        if (waiter.promise != null) {
+            if (waiter.realm.borrow()) |waiter_ctx| {
+                waiter_ctx.runtime.signalHostCompletion(io);
             }
-            waiter.linked = false;
-            waiter.next = null;
-            promise_ops.atomicsDestroyAsyncWaiter(waiter);
-        } else {
-            waiter.cond.signal(io);
-            previous = waiter;
         }
         woken += 1;
         if (woken == count) break;
@@ -3365,61 +3130,182 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
 }
 
 pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
+    ctx.runtime.assertOwnerThread();
     const io = atomicsWaiterIo();
-    const now = std.Io.Timestamp.now(io, .awake);
-    atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_waiter_mutex.unlock(io);
+    while (true) {
+        const now = std.Io.Timestamp.now(io, .awake);
+        atomics_waiter_mutex.lockUncancelable(io);
 
-    var previous: ?*AtomicsWaiter = null;
-    var cursor = atomics_waiters;
-    while (cursor) |waiter| {
-        const next = waiter.next;
-        const expired = waiter.ctx == ctx and waiter.promise != null and waiter.deadline != null and now.nanoseconds >= waiter.deadline.?.nanoseconds;
-        if (!expired) {
-            previous = waiter;
-            cursor = next;
-            continue;
+        var ready: ?*AtomicsWaiter = null;
+        var previous: ?*AtomicsWaiter = null;
+        var cursor = atomics_waiters;
+        while (cursor) |waiter| : (cursor = waiter.next) {
+            const waiter_ctx = waiter.realm.borrow() orelse {
+                previous = waiter;
+                continue;
+            };
+            if (waiter_ctx.runtime != ctx.runtime or waiter.promise == null) {
+                previous = waiter;
+                continue;
+            }
+            if (waiter.completion == .waiting) {
+                const deadline = waiter.deadline orelse {
+                    previous = waiter;
+                    continue;
+                };
+                if (now.nanoseconds < deadline.nanoseconds) {
+                    previous = waiter;
+                    continue;
+                }
+                // Freeze the timeout winner before detaching. If settlement
+                // runs out of memory, relinking this node preserves that winner
+                // and prevents a later notify from changing the result.
+                waiter.completion = .timed_out;
+            }
+            const next = waiter.next;
+            if (previous) |prev| {
+                prev.next = next;
+            } else {
+                atomics_waiters = next;
+            }
+            waiter.linked = false;
+            waiter.next = null;
+            ready = waiter;
+            break;
         }
-        try promise_ops.atomicsSettleAsyncWaiter(waiter, waiter.promise.?, "timed-out");
-        if (previous) |prev| {
-            prev.next = next;
-        } else {
-            atomics_waiters = next;
-        }
-        waiter.linked = false;
-        waiter.next = null;
-        promise_ops.atomicsDestroyAsyncWaiter(waiter);
-        cursor = next;
+        atomics_waiter_mutex.unlock(io);
+
+        const waiter = ready orelse return;
+        const waiter_ctx = waiter.realm.borrow() orelse unreachable;
+        waiter_ctx.runtime.job_queue.enqueueAtomicsWaiter(
+            waiter_ctx,
+            waiter,
+            waiter.promise.?,
+            promise_ops.atomicsRunAsyncWaiterCompletion,
+            promise_ops.atomicsDestroyAsyncWaiterOpaque,
+        ) catch |err| {
+            // Entry preparation may allocate or run GC. Retry the same frozen
+            // completion later, but never while the global waiter mutex is
+            // held and never after publishing Promise state.
+            atomics_waiter_mutex.lockUncancelable(io);
+            atomicsLinkWaiter(waiter);
+            atomics_waiter_mutex.unlock(io);
+            return err;
+        };
     }
 }
 
-pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
+fn atomicsAsyncWaiterRuntime(waiter: *const AtomicsWaiter) ?*core.JSRuntime {
+    if (waiter.promise == null) return null;
+    const waiter_ctx = waiter.realm.borrow() orelse return null;
+    return waiter_ctx.runtime;
+}
+
+/// Whether this Runtime owns a linked waitAsync node. This is host scheduling
+/// state only: callers use it to avoid blocking an OS poll that cannot observe
+/// the Runtime's allocation-free completion signal.
+pub fn atomicsRuntimeHasPendingAsyncWaiters(rt: *core.JSRuntime) bool {
     const io = atomicsWaiterIo();
     atomics_waiter_mutex.lockUncancelable(io);
     defer atomics_waiter_mutex.unlock(io);
-
-    var previous: ?*AtomicsWaiter = null;
     var cursor = atomics_waiters;
-    while (cursor) |waiter| {
-        const next = waiter.next;
-        if (waiter.ctx != ctx) {
-            previous = waiter;
-            cursor = next;
-            continue;
+    while (cursor) |waiter| : (cursor = waiter.next) {
+        if (atomicsAsyncWaiterRuntime(waiter) == rt) return true;
+    }
+    return false;
+}
+
+/// Wait for either a foreign waitAsync notification, the earliest finite
+/// waitAsync deadline, or an earlier host deadline supplied by the event loop.
+/// The event is reset while holding the same mutex used by every notifier, so
+/// a notification cannot be lost between the readiness scan and the wait.
+/// Returns false only when this Runtime has no linked async waiter, or when all
+/// of its waiters are infinite and `block_indefinite` is false.
+pub fn waitForAtomicsHostSignalUntil(
+    rt: *core.JSRuntime,
+    external_deadline: ?std.Io.Timestamp,
+    block_indefinite: bool,
+) bool {
+    rt.assertOwnerThread();
+    const io = atomicsWaiterIo();
+    atomics_waiter_mutex.lockUncancelable(io);
+
+    var found = false;
+    var deadline = external_deadline;
+    const now = std.Io.Timestamp.now(io, .awake);
+    var cursor = atomics_waiters;
+    while (cursor) |waiter| : (cursor = waiter.next) {
+        if (atomicsAsyncWaiterRuntime(waiter) != rt) continue;
+        found = true;
+        const candidate = if (waiter.completion != .waiting)
+            now
+        else
+            waiter.deadline orelse continue;
+        if (deadline == null or candidate.nanoseconds < deadline.?.nanoseconds) {
+            deadline = candidate;
         }
-        if (previous) |prev| {
-            prev.next = next;
-        } else {
-            atomics_waiters = next;
+    }
+    if (!found or (deadline == null and !block_indefinite)) {
+        atomics_waiter_mutex.unlock(io);
+        return false;
+    }
+
+    rt.resetHostCompletionSignal();
+    atomics_waiter_mutex.unlock(io);
+    if (deadline) |limit| {
+        _ = rt.waitForHostCompletionUntil(io, limit);
+    } else {
+        rt.waitForHostCompletion(io);
+    }
+    return true;
+}
+
+/// Advance the owner-runtime host clock/signal source once. Ready nodes are
+/// only converted into typed FIFO jobs here; Promise settlement still happens
+/// later in `drainOnePendingJob`.
+pub fn runNextAtomicsHostCompletion(ctx: *core.JSContext, block_indefinite: bool) !bool {
+    ctx.runtime.assertOwnerThread();
+    const jobs_before = ctx.runtime.job_queue.jobs.len;
+    try processExpiredAtomicsWaiters(ctx);
+    if (ctx.runtime.job_queue.jobs.len != jobs_before) return true;
+    if (!waitForAtomicsHostSignalUntil(ctx.runtime, null, block_indefinite)) return false;
+    try processExpiredAtomicsWaiters(ctx);
+    return true;
+}
+
+pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
+    ctx.runtime.assertOwnerThread();
+    const io = atomicsWaiterIo();
+    while (true) {
+        atomics_waiter_mutex.lockUncancelable(io);
+        var removed: ?*AtomicsWaiter = null;
+        var previous: ?*AtomicsWaiter = null;
+        var cursor = atomics_waiters;
+        while (cursor) |waiter| : (cursor = waiter.next) {
+            if (waiter.realm.borrow() != ctx) {
+                previous = waiter;
+                continue;
+            }
+            const next = waiter.next;
+            if (previous) |prev| {
+                prev.next = next;
+            } else {
+                atomics_waiters = next;
+            }
+            waiter.linked = false;
+            waiter.next = null;
+            removed = waiter;
+            break;
         }
-        waiter.linked = false;
-        waiter.next = null;
+        atomics_waiter_mutex.unlock(io);
+
+        const waiter = removed orelse return;
         promise_ops.atomicsDestroyAsyncWaiter(waiter);
-        cursor = next;
     }
 }
 
 pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, timeout_ms: ?i64) !core.JSValue {
+    rt.assertOwnerThread();
     atomicsRetainWaiterKey(key);
     var retained_key = key;
     defer atomicsReleaseWaiterKey(&retained_key);
@@ -3427,24 +3313,26 @@ pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, ti
     var waiter = AtomicsWaiter{ .key = retained_key };
     const io = atomicsWaiterIo();
     atomics_waiter_mutex.lockUncancelable(io);
-    defer atomics_waiter_mutex.unlock(io);
     atomicsLinkWaiter(&waiter);
-    defer atomicsUnlinkWaiter(&waiter);
 
     if (timeout_ms == null) {
-        while (!waiter.notified) waiter.cond.waitUncancelable(io, &atomics_waiter_mutex);
-        return value_ops.createStringValue(rt, "ok");
+        while (waiter.completion == .waiting) waiter.cond.waitUncancelable(io, &atomics_waiter_mutex);
+    } else {
+        const deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms.?));
+        while (waiter.completion == .waiting) {
+            const now = std.Io.Timestamp.now(io, .awake);
+            if (now.nanoseconds >= deadline.nanoseconds) break;
+            atomics_waiter_mutex.unlock(io);
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            atomics_waiter_mutex.lockUncancelable(io);
+        }
     }
-
-    const deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms.?));
-    while (!waiter.notified) {
-        const now = std.Io.Timestamp.now(io, .awake);
-        if (now.nanoseconds >= deadline.nanoseconds) break;
-        atomics_waiter_mutex.unlock(io);
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-        atomics_waiter_mutex.lockUncancelable(io);
-    }
-    return value_ops.createStringValue(rt, if (waiter.notified) "ok" else "timed-out");
+    const was_notified = waiter.completion == .notified;
+    atomicsUnlinkWaiter(&waiter);
+    atomics_waiter_mutex.unlock(io);
+    // String creation can allocate and collect; the waiter registry lock is
+    // deliberately released before entering the Runtime heap.
+    return value_ops.createStringValue(rt, if (was_notified) "ok" else "timed-out");
 }
 
 pub fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
@@ -3479,6 +3367,146 @@ pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
     }
 }
 
+test "foreign Atomics notify only publishes a no-allocation completion" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(ctx) };
+    const waiter = try rt.memory.create(AtomicsWaiter);
+    waiter.* = .{
+        .key = key,
+        .promise = core.JSValue.int32(73),
+        .realm = core.RealmRef.retain(ctx),
+    };
+    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    var waiter_live = true;
+    defer if (waiter_live) cleanupAtomicsWaitersForContext(ctx);
+
+    const Attempt = struct {
+        key: AtomicsWaiterKey,
+        woken: usize = 0,
+
+        fn run(self: *@This()) void {
+            self.woken = atomicsWakeWaiters(self.key, 1);
+        }
+    };
+    const memory_before = rt.memory.allocated_bytes;
+    var attempt = Attempt{ .key = key };
+    const thread = try std.Thread.spawn(.{}, Attempt.run, .{&attempt});
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), attempt.woken);
+    try std.testing.expectEqual(memory_before, rt.memory.allocated_bytes);
+    try std.testing.expect(waiter.linked);
+    try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
+    try std.testing.expectEqual(@as(?i32, 73), waiter.promise.?.asInt32());
+    try std.testing.expectEqual(ctx, waiter.realm.borrow().?);
+
+    cleanupAtomicsWaitersForContext(ctx);
+    waiter_live = false;
+}
+
+test "waitAsync finite deadline is driven by the owner host clock queue" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    defer promise.value().free(rt);
+
+    const io = atomicsWaiterIo();
+    const waiter = try rt.memory.create(AtomicsWaiter);
+    waiter.* = .{
+        .key = .{ .offset_or_ptr = @intFromPtr(promise) },
+        .promise = promise.value().dup(),
+        .realm = core.RealmRef.retain(ctx),
+        .deadline = std.Io.Timestamp.now(io, .awake).addDuration(std.Io.Duration.fromMilliseconds(1)),
+    };
+    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    var waiter_linked = true;
+    defer if (waiter_linked) cleanupAtomicsWaitersForContext(ctx);
+
+    try std.testing.expect(try runNextAtomicsHostCompletion(ctx, false));
+    waiter_linked = false;
+    try std.testing.expectEqual(AtomicsWaiterCompletion.timed_out, waiter.completion);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(rt.job_queue.jobs[0].payload) == .atomics_waiter);
+    try std.testing.expect(promise.promiseResult() == null);
+
+    // The host clock only publishes a typed job. Dropping that job owns and
+    // releases the detached waiter exactly once without touching the Promise.
+    var job = rt.job_queue.takeFirst().?;
+    job.deinit();
+}
+
+test "waitAsync owner settlement OOM relinks the frozen completion outside the waiter mutex" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(failing_allocator.allocator());
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    defer promise.value().free(rt);
+
+    const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(promise) };
+    const waiter = try rt.memory.create(AtomicsWaiter);
+    waiter.* = .{
+        .key = key,
+        .completion = .notified,
+        .promise = promise.value().dup(),
+        .realm = core.RealmRef.retain(ctx),
+    };
+    promise_ops.atomicsLinkAsyncWaiter(waiter);
+    var waiter_live = true;
+    defer if (waiter_live) cleanupAtomicsWaitersForContext(ctx);
+
+    const Probe = struct {
+        mutex_was_free: bool = false,
+
+        fn trigger(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (!atomics_waiter_mutex.tryLock()) return;
+            self.mutex_was_free = true;
+            atomics_waiter_mutex.unlock(atomicsWaiterIo());
+        }
+    };
+    var probe = Probe{};
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_trigger_context = rt.memory.trigger_gc_ctx;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_trigger_context;
+    }
+    rt.memory.trigger_gc_fn = Probe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    // Fail in the backing allocator, after MemoryAccount has invoked the GC
+    // trigger. A hard MemoryAccount limit is rejected before that trigger and
+    // therefore cannot prove that the allocation site is outside the mutex.
+    failing_allocator.fail_index = failing_allocator.alloc_index;
+
+    try std.testing.expectError(error.OutOfMemory, processExpiredAtomicsWaiters(ctx));
+    try std.testing.expect(probe.mutex_was_free);
+    try std.testing.expect(waiter.linked);
+    try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
+    try std.testing.expectEqual(ctx, waiter.realm.borrow().?);
+    try std.testing.expect(promise.promiseResult() == null);
+
+    failing_allocator.fail_index = std.math.maxInt(usize);
+    rt.memory.trigger_gc_fn = saved_trigger;
+    rt.memory.trigger_gc_ctx = saved_trigger_context;
+    try processExpiredAtomicsWaiters(ctx);
+    waiter_live = false;
+    try std.testing.expect(promise.promiseResult() == null);
+    try std.testing.expect((try promise_ops.drainOnePendingJob(ctx, null, global)) == .success);
+    try std.testing.expect(promise.promiseResult() != null);
+    try std.testing.expect(!promise.promiseIsRejected());
+}
+
 pub fn atomicsWaiterIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
@@ -3489,7 +3517,7 @@ pub fn atomicsValidateAccess(
     global: *core.Object,
     object: *core.Object,
     index_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     const length = try core.object.typedArrayLength(ctx.runtime, object);
@@ -3516,7 +3544,7 @@ pub fn atomicsGetBufIndex(
     global: *core.Object,
     view: *core.Object,
     index_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     const buffer = try object_ops.atomicsBufferObject(view);
@@ -3645,7 +3673,7 @@ pub fn toIndexForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3661,7 +3689,7 @@ pub fn toNumberForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !f64 {
     _ = caller_function;
@@ -3679,7 +3707,7 @@ pub fn toInt32ForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !i32 {
     const bits = try toUint32ForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3691,7 +3719,7 @@ pub fn toInt32BitsForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !u64 {
     const int_value = try toInt32ForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3703,7 +3731,7 @@ pub fn toUint32ForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !u64 {
     const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3719,7 +3747,7 @@ pub fn toIntegerValueForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const number = try toNumberForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3743,7 +3771,7 @@ pub fn toBigIntValueForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = caller_function;
@@ -3760,7 +3788,7 @@ pub fn toBigIntBitsForAtomics(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !u64 {
     const bigint_value = try toBigIntValueForAtomics(ctx, output, global, value, caller_function, caller_frame);
@@ -3796,7 +3824,7 @@ pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Ob
 pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
     if (ctx.lexicals) |env| return env;
     if (ctx.global) |global| {
-        if (global.globalLexicals()) |env| {
+        if (global.globalLexicals(ctx.runtime)) |env| {
             ctx.lexicals = env;
             return env;
         }
@@ -3808,15 +3836,15 @@ pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
 
 pub fn existingGlobalLexicalEnv(ctx: *core.JSContext) ?*core.Object {
     if (ctx.lexicals) |env| return env;
-    if (ctx.global) |global| return global.globalLexicals();
+    if (ctx.global) |global| return global.globalLexicals(ctx.runtime);
     return null;
 }
 
 pub fn existingGlobalLexicalEnvForGlobal(ctx: *core.JSContext, global: *core.Object) ?*core.Object {
     if (ctx.lexicals) |env| return env;
-    if (global.globalLexicals()) |env| return env;
+    if (global.globalLexicals(ctx.runtime)) |env| return env;
     if (ctx.global) |context_global| {
-        if (context_global != global) return context_global.globalLexicals();
+        if (context_global != global) return context_global.globalLexicals(ctx.runtime);
     }
     return null;
 }
@@ -3839,7 +3867,7 @@ pub fn globalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom) ?core.JSValu
     const env = existingGlobalLexicalEnv(ctx) orelse return null;
     if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
     if (!env.hasOwnProperty(atom_id)) return null;
-    return env.getProperty(atom_id);
+    return try env.getProperty(atom_id);
 }
 
 /// Return a fresh ref to the VarRef cell backing a top-level lexical binding
@@ -3861,6 +3889,46 @@ pub fn globalObjectVarRefCell(global: *core.Object, atom_id: core.Atom) ?core.JS
     const index = global.findProperty(atom_id) orelse return null;
     const cell = global.asVarRefAt(index) orelse return null;
     return cell.valueRef().dup();
+}
+
+/// QuickJS `js_closure_global_var` for one ordinary GLOBAL capture. This is
+/// the sole selector shared by root, nested, and direct-eval closure builders:
+/// lexical VARREF -> materialized global AUTOINIT/retry -> global VARREF ->
+/// shared parked uninitialized cell. Data/accessor properties are observed by
+/// descriptor kind only; their getter is never invoked here.
+///
+/// The returned JSValue is an owned reference to the selected VarRef cell.
+/// Consumer ClosureVar flags do not mutate that owner cell; declaration and
+/// local-slot producers remain the only authorities for const/lexical/name
+/// metadata.
+pub fn selectOrdinaryGlobalClosureCell(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    atom_id: core.Atom,
+) !core.JSValue {
+    if (existingGlobalLexicalEnvForGlobal(ctx, global)) |env| {
+        if (env.findProperty(atom_id)) |index| {
+            if (env.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+        }
+    }
+
+    while (global.findProperty(atom_id)) |index| {
+        const flags = global.propFlagsAt(index);
+        if (flags.isAutoInit()) {
+            const descriptor = (try global.getOwnProperty(ctx.runtime, atom_id)) orelse return error.InvalidBytecode;
+            descriptor.destroy(ctx.runtime);
+            // A failed builder must have returned its error and kept the
+            // placeholder retryable. A successful read cannot leave the same
+            // slot in AUTOINIT form.
+            if (global.findProperty(atom_id)) |materialized_index| {
+                if (global.propFlagsAt(materialized_index).isAutoInit()) return error.InvalidBytecode;
+            }
+            continue;
+        }
+        if (global.asVarRefAt(index)) |cell| return cell.valueRef().dup();
+        break;
+    }
+    return globalObjectGetUninitializedVar(ctx, global, atom_id);
 }
 
 /// qjs u.global_object.uninitialized_vars, create-on-demand: the side table
@@ -3913,36 +3981,52 @@ pub fn globalObjectFindUninitializedVar(ctx: *core.JSContext, global: *core.Obje
     return cell_value;
 }
 
-/// Create the JS_PROP_VARREF slot backing a FRESH top-level `var`/function global.
-/// An already-existing global property is left entirely untouched (see below): we
-/// only materialize a cell when the binding is new, so closures can alias it.
+/// Create or reuse the JS_PROP_VARREF slot backing a top-level `var`/function
+/// global. Existing data properties already use VARREF in QuickJS because the
+/// global object's ordinary define path creates them that way; zjs normalizes
+/// its plain-data representation here. A configurable accessor is converted
+/// only for a function declaration, matching `js_closure_define_global_var`.
 pub fn ensureGlobalObjectVarRefCell(
     ctx: *core.JSContext,
     global: *core.Object,
     atom_id: core.Atom,
     configurable: bool,
+    is_function: bool,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    if (global.findProperty(atom_id)) |initial_index| {
-        if (global.propFlagsAt(initial_index).isAccessor()) return null;
+    while (global.findProperty(atom_id)) |initial_index| {
+        const initial_flags = global.propFlagsAt(initial_index);
+        if (initial_flags.isAutoInit()) {
+            const desc = (try global.getOwnProperty(rt, atom_id)) orelse return error.OutOfMemory;
+            desc.destroy(rt);
+            if (global.propFlagsAt(initial_index).isAutoInit()) return error.OutOfMemory;
+            continue;
+        }
+
+        var next_flags = initial_flags.withKind(.var_ref);
+        if (is_function and initial_flags.configurable) {
+            next_flags = core.property.Flags.varRef(true, true, configurable);
+        }
         if (global.asVarRefAt(initial_index)) |cell| {
-            cell.varRefIsDeletableSlot().* = global.propFlagsAt(initial_index).configurable;
+            if (next_flags.bits() != initial_flags.bits()) {
+                try global.replaceOwnPropertyWithVarRefCell(rt, atom_id, initial_index, next_flags, cell);
+            }
+            cell.varRefIsConstSlot().* = !next_flags.writable;
+            cell.varRefIsDeletableSlot().* = next_flags.configurable;
             return cell.valueRef().dup();
         }
-        // qjs js_closure_define_global_var (quickjs.c:17171-17205): an EXISTING
-        // global property is never rebuilt into a fresh VARREF cell here. qjs
-        // hands back a detached uninitialized var_ref and leaves the property's
-        // slot AND its observable flags (writable/enumerable/configurable)
-        // untouched — a plain `var` redeclaration keeps its descriptor, and a
-        // function redeclaration's value+flags are applied afterwards by the
-        // ordinary global function-binding define path
-        // (slot_ops.defineGlobalFunctionBindingValue). Converting here would
-        // clobber the existing descriptor, because a var_ref slot derives its
-        // writable from is_const (masking the real flag). Returning null leaves
-        // the frame's closure-var slot as its initial detached uninitialized
-        // cell, matching qjs's detached-var_ref behaviour and routing access
-        // back through the ordinary global-object property path.
-        return null;
+        if (initial_flags.isAccessor() and (!is_function or !initial_flags.configurable)) return null;
+
+        // initialClosureVarRef parked this exact unresolved-global cell in the
+        // side table. Keep the table ref until the shape clone/slot replacement
+        // succeeds; this makes OOM rollback automatic.
+        const cell_value = try globalObjectGetUninitializedVar(ctx, global, atom_id);
+        errdefer cell_value.free(rt);
+        const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+        try global.replaceOwnPropertyWithVarRefCell(rt, atom_id, initial_index, next_flags, cell);
+        const parked = global.globalUninitializedVars() orelse return error.InvalidBytecode;
+        if (!parked.deleteProperty(rt, atom_id)) return error.InvalidBytecode;
+        return cell_value;
     }
 
     // qjs js_closure_define_global_var tail (quickjs.c:17186-17193): "if there
@@ -3965,36 +4049,36 @@ pub fn ensureGlobalObjectVarRefCell(
     return cell.valueRef().dup();
 }
 
-/// qjs js_closure_define_global_var for non-lexical script/eval globals: ensure
-/// the global object owns the VARREF property cell and bind every frame view of
-/// this declaration to that cell before any function object can capture it.
+/// qjs js_closure_define_global_var for one non-lexical GLOBAL_DECL slot: ensure
+/// the global object owns the VARREF property cell and bind this exact closure
+/// slot before the next declaration is constructed.
 pub fn defineGlobalDeclVarCell(
     ctx: *core.JSContext,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
+    ref_idx: u16,
     atom_id: core.Atom,
     configurable: bool,
+    is_function: bool,
 ) !bool {
-    const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable)) orelse return false;
+    if (ref_idx >= function.closureVar().len) return false;
+    const declaration = function.closureVar()[ref_idx];
+    if (declaration.closureType() != .global_decl or declaration.isLexical()) return false;
+    if (!atomIdOrNameEql(ctx.runtime, declaration.var_name, atom_id)) return false;
+    const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable, is_function)) orelse return false;
     defer cell_value.free(ctx.runtime);
-    var rebound = false;
-    var idx: usize = 0;
-    while (idx < function.varRefNamesLen()) : (idx += 1) {
-        const name = function.varRefName(idx);
-        if (!atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
-        if (!closureVarIsNonLexicalGlobalSentinel(function, idx)) continue;
-        if (idx >= frame.var_refs.len) {
-            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        }
-        const old_slot = slot_ops.varRefSlot(frame, idx);
-        slot_ops.storeVarRefSlot(frame, idx, cell_value.dup());
-        old_slot.free(ctx.runtime);
-        rebound = true;
+    if (ref_idx >= frame.var_refs.len) {
+        try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
     }
-    const local_count = @min(function.vardefs.len, frame.locals.len);
+    const old_slot = slot_ops.varRefSlot(frame, ref_idx);
+    slot_ops.storeVarRefSlot(frame, ref_idx, cell_value.dup());
+    old_slot.free(ctx.runtime);
+
+    var rebound = true;
+    const local_count = @min(function.varDefs().len, frame.locals.len);
     const global_cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
-    for (function.vardefs[0..local_count], 0..) |vd, local_idx| {
+    for (function.varDefs()[0..local_count], 0..) |vd, local_idx| {
         if (!atomIdOrNameEql(ctx.runtime, vd.var_name, atom_id)) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
         // This is a compatibility mirror used by direct eval lookup. Keep the
@@ -4077,8 +4161,9 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
 pub fn globalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) ?core.JSValue {
     const env = existingGlobalLexicalEnvForGlobal(ctx, global) orelse return null;
     if (env.getOwnDataPropertyValue(atom_id)) |value| return value;
-    if (!env.hasOwnProperty(atom_id)) return null;
-    return env.getProperty(atom_id);
+    const index = env.findProperty(atom_id) orelse return null;
+    const cell = env.asVarRefAt(index) orelse return null;
+    return cell.varRefValue().dup();
 }
 
 pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void {
@@ -4090,35 +4175,30 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value:
 }
 
 /// qjs js_closure_define_global_var PASS2 for a top-level script let/const:
-/// run by the define_var opcode AFTER check_define_var (PASS1) has passed.
-/// Creates the single ctx.lexicals VARREF cell and rebinds frame.var_refs[idx]
-/// to alias it (replacing the TDZ placeholder initFrameVarRefs reserved), so
-/// the frame and the global lexical share one cell. Returns true if the atom is
-/// a .global_decl var-ref in this frame (handled here); false otherwise (caller
-/// falls back to defineGlobalLexicalValue for module/eval data-property paths).
+/// run after PASS1 has succeeded. Creates the ctx.lexicals VARREF cell and
+/// rebinds this exact GLOBAL_DECL slot to it, preserving QuickJS pass-2 closure
+/// order. Returns false for a malformed/non-lexical slot so the caller can use
+/// its non-GLOBAL_DECL fallback.
 pub fn defineGlobalDeclLexicalCell(
     ctx: *core.JSContext,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
+    ref_idx: u16,
     atom_id: core.Atom,
     is_const: bool,
 ) !bool {
-    var idx: usize = 0;
-    while (idx < function.varRefNamesLen()) : (idx += 1) {
-        const name = function.varRefName(idx);
-        if (name != atom_id) continue;
-        if (!function.varRefIsGlobalDeclAt(idx)) return false;
-        const cell_value = try ensureGlobalLexicalCell(ctx, global, atom_id, is_const);
-        if (idx >= frame.var_refs.len) {
-            try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        }
-        const old_slot = slot_ops.varRefSlot(frame, idx);
-        slot_ops.storeVarRefSlot(frame, idx, cell_value);
-        old_slot.free(ctx.runtime);
-        return true;
+    if (ref_idx >= function.closureVar().len) return false;
+    const declaration = function.closureVar()[ref_idx];
+    if (declaration.closureType() != .global_decl or !declaration.isLexical() or declaration.var_name != atom_id) return false;
+    const cell_value = try ensureGlobalLexicalCell(ctx, global, atom_id, is_const);
+    if (ref_idx >= frame.var_refs.len) {
+        try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
     }
-    return false;
+    const old_slot = slot_ops.varRefSlot(frame, ref_idx);
+    slot_ops.storeVarRefSlot(frame, ref_idx, cell_value);
+    old_slot.free(ctx.runtime);
+    return true;
 }
 
 pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
@@ -4188,134 +4268,11 @@ pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom
     return false;
 }
 
-pub fn validateGlobalEvalFunctionDeclarationsFromBytecode(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.Bytecode,
-    ignore_global_lexical: bool,
-) !void {
-    for (function.closure_var) |cv| {
-        if (cv.var_kind != .function_decl and cv.var_kind != .new_function_decl) continue;
-        if (!canDeclareGlobalFunction(ctx, global, cv.var_name, ignore_global_lexical)) return error.TypeError;
-    }
-    for (function.global_vars) |gv| {
-        if (gv.cpool_idx < 0) continue;
-        if (!canDeclareGlobalFunction(ctx, global, gv.var_name, ignore_global_lexical)) return error.TypeError;
-    }
-}
-
-pub fn canDeclareGlobalFunction(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, ignore_global_lexical: bool) bool {
-    if (!ignore_global_lexical and globalLexicalHasForGlobal(ctx, global, atom_id)) return false;
-    const rt = ctx.runtime;
-    const desc = global.getOwnProperty(rt, atom_id) orelse return global.isExtensible();
-    defer desc.destroy(rt);
-    if (desc.configurable == true) return true;
-    if (desc.kind != .data) return false;
-    return desc.writable == true and desc.enumerable == true;
-}
-
-pub fn classStaticThisAtom(
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) ?core.Atom {
-    const function = caller_function orelse return null;
-    const frame = caller_frame orelse return null;
-    const count = @min(function.vardefs.len, frame.locals.len);
-    var idx = count;
-    while (idx > 0) {
-        idx -= 1;
-        const vd = function.vardefs[idx];
-        if (vd.var_kind != .class_static_this) continue;
-        if (frame.locals[idx].isUninitialized()) continue;
-        return vd.var_name;
-    }
-    return null;
-}
-
-pub fn classStaticThisValue(
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: *frame_mod.Frame,
-    atom_id: core.Atom,
-) ?core.JSValue {
-    const function = caller_function orelse return null;
-    const count = @min(function.vardefs.len, caller_frame.locals.len);
-    for (function.vardefs[0..count], 0..) |vd, idx| {
-        if (vd.var_name != atom_id) continue;
-        const value = caller_frame.locals[idx];
-        if (value.isUninitialized()) continue;
-        return value;
-    }
-    return null;
-}
-
-test "direct eval private bound names release preserves memory account" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const function_name = try rt.internAtom("privateBoundCaller");
-    defer rt.atoms.free(function_name);
-    const private_name = try rt.atoms.newSymbol("privateBoundName", .private);
-    defer rt.atoms.free(private_name);
-
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
-    function.private_bound_names = try rt.memory.alloc(core.Atom, 1);
-    function.private_bound_names[0] = rt.atoms.dup(private_name);
-
-    const before_bytes = rt.memory.allocated_bytes;
-    const before_allocations = rt.memory.allocation_count;
-    const names = try eval_ops.directEvalPrivateBoundNames(rt, &function);
-    if (names.len != 0) rt.memory.free(core.Atom, names);
-    try std.testing.expectEqual(before_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(before_allocations, rt.memory.allocation_count);
-}
-
-pub fn directEvalCallerAllowsNewTarget(caller_frame: ?*frame_mod.Frame, eval_in_class_field_initializer: bool) bool {
-    if (eval_in_class_field_initializer) return true;
-    const outer_frame = caller_frame orelse return false;
-    if (outer_frame.current_function.isUndefined()) return false;
-    if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.flags.new_target_allowed;
-    if (object_ops.objectFromValue(outer_frame.current_function)) |function_object| {
-        const stored = function_object.functionBytecode() orelse return false;
-        const fb = functionBytecodeFromValue(stored) orelse return false;
-        return fb.flags.new_target_allowed;
-    }
-    return false;
-}
-
-pub fn directEvalLocalVisibleAtScope(
-    function: *const bytecode.Bytecode,
-    vd: bytecode.function_bytecode.VarDef,
-    eval_scope_index: u16,
-) bool {
-    if (vd.var_name == core.atom.ids.with_object) {
-        return directEvalScopeChainContains(function, eval_scope_index, vd.scope_level);
-    }
-    if (!vd.is_lexical and vd.var_kind != .catch_) return true;
-    return directEvalScopeChainContains(function, eval_scope_index, vd.scope_level);
-}
-
-pub fn directEvalScopeChainContains(
-    function: *const bytecode.Bytecode,
-    eval_scope_index: u16,
-    target_scope: i32,
-) bool {
-    if (target_scope < 0) return false;
-    const scope_parents = function.scope_parents;
-    if (scope_parents.len == 0) return true;
-    var scope_idx: i32 = @intCast(eval_scope_index);
-    while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < scope_parents.len) {
-        if (scope_idx == target_scope) return true;
-        scope_idx = scope_parents[@intCast(scope_idx)];
-    }
-    return false;
-}
-
-fn varDefIsEvalHoistedVar(vd: bytecode.function_bytecode.VarDef) bool {
-    if (vd.scope_level != 0 or vd.is_lexical) return false;
-    return vd.var_kind == .normal or
-        vd.var_kind == .function_decl or
-        vd.var_kind == .new_function_decl;
+fn varDefIsEvalHoistedVar(vd: bytecode.function_bytecode.BytecodeVarDef) bool {
+    if (vd.hasScope() or vd.isLexical()) return false;
+    return vd.varKind() == .normal or
+        vd.varKind() == .function_decl or
+        vd.varKind() == .new_function_decl;
 }
 
 fn restoreEvalGlobalLexicals(
@@ -4345,13 +4302,12 @@ pub fn indirectEval(
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
     const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals();
+    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals(ctx.runtime);
 
     const EvalResult = @typeInfo(@TypeOf(indirectEval)).@"fn".return_type.?;
     const result: EvalResult = blk: {
-        const regexp_literal = simpleEvalRegExpLiteral(ctx, eval_global, source.items) catch |err| break :blk err;
-        if (regexp_literal) |value| break :blk value;
-        var compiled = parser.compile(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
+        const compile_realm = ctx.runtime.contextForGlobalIncludingConstructing(eval_global) orelse break :blk error.InvalidBuiltinRegistry;
+        var compiled = parser.compile(.{ .realm = compile_realm }, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false }) catch |err| break :blk err;
         defer compiled.deinit();
         if (compiled.syntax_error) |*parse_error| {
             // Compile-error surface: own fileName/lineNumber/columnNumber +
@@ -4361,21 +4317,44 @@ pub fn indirectEval(
             _ = error_stack_ops.throwParseSyntaxError(ctx, eval_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
             break :blk error.SyntaxError;
         }
-        if (!compiled.function.flags.is_strict) {
-            validateGlobalEvalFunctionDeclarationsFromBytecode(ctx, eval_global, &compiled.function, true) catch |err| break :blk err;
-        }
+        _ = compiled.functionBytecode() orelse break :blk error.InvalidBytecode;
+        const owned_root = compiled.takeFunctionBytecodeValue() orelse break :blk error.InvalidBytecode;
+        var root_function_value = object_ops.createRootBytecodeFunctionObject(
+            compile_realm,
+            eval_global,
+            owned_root,
+            .root_global,
+        ) catch |err| break :blk err;
+        defer root_function_value.free(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &root_function_value },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+        const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
+        const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
+        const function = functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
         var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk runWithCallEnv(.{
-            .ctx = ctx,
+            .ctx = compile_realm,
             .stack = &nested_stack,
-            .function = &compiled.function,
+            .function = function,
             .initial_this_value = eval_global.value(),
+            .var_refs = root_function_object.functionCaptures(),
             .output = output,
             .global = eval_global,
             .break_var_ref_cycles_on_exit = true,
-            .eval_global_var_bindings = !compiled.function.flags.is_strict,
+            .strict_unresolved_get_var = function.isStrictMode(),
+            .current_function_value = root_function_value,
+            .eval_global_var_bindings = !function.isStrictMode(),
+            .direct_eval_vars_reach_global = !function.isStrictMode(),
             .is_eval_code = true,
+            .global_declarations_prevalidated = true,
         }) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
@@ -4400,73 +4379,6 @@ pub fn indirectEval(
     return result;
 }
 
-pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, source: []const u8) !?core.JSValue {
-    const trimmed = std.mem.trim(u8, source, " \t\r\n");
-    if (trimmed.len == 0 or trimmed[0] != '/') return null;
-    if (trimmed.len >= 2 and (trimmed[1] == '*' or trimmed[1] == '/')) return null;
-    const literal = parser.lexer.scanRegExpLiteral(trimmed, 0) catch return null;
-    if (literal.end_offset != trimmed.len) return null;
-    if (containsUtf8LineSeparator(literal.pattern)) return null;
-    // Route the scanned pattern/flags through the RegExp construct record (the
-    // validating `.construct` branch) instead of naming `regexp_ops`: the
-    // lexer scan does not fully validate the regex grammar, so the construct
-    // record's validation is required, matching the retired `constructLiteral`.
-    const pattern_value = try value_ops.createStringValue(ctx.runtime, literal.pattern);
-    defer pattern_value.free(ctx.runtime);
-    const flags_value = try value_ops.createStringValue(ctx.runtime, literal.flags);
-    defer flags_value.free(ctx.runtime);
-    const regexp_args = [_]core.JSValue{ pattern_value, flags_value };
-    const regexp_construct_ref = core.function.NativeBuiltinRef{ .domain = .regexp, .id = regexp_construct_id };
-    return try constructBuiltinNativeRecordVm(ctx, null, global, null, regexp_construct_ref, object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"), &regexp_args, null, null);
-}
-
-pub fn containsUtf8LineSeparator(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index + 2 < bytes.len) : (index += 1) {
-        if (bytes[index] == 0xe2 and bytes[index + 1] == 0x80 and
-            (bytes[index + 2] == 0xa8 or bytes[index + 2] == 0xa9)) return true;
-    }
-    return false;
-}
-
-pub fn evalSimpleCallerExpression(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    source: []const u8,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const frame = caller_frame orelse return null;
-    const trimmed = std.mem.trim(u8, source, " \t\r\n");
-    if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
-    if (std.mem.eql(u8, trimmed, "this")) {
-        const this_value = try eval_ops.directEvalThisValue(ctx, global, caller_function, caller_frame);
-        // zjs-side adaptation: a derived constructor may keep its lexical
-        // `this` in an internal VarRef cell. Match the full eval `push_this`
-        // path (vm_value.pushThis) exactly: first honor the TDZ arm — a
-        // derived constructor that reads `this` before `super()` must throw
-        // ReferenceError, not leak the uninitialized sentinel — then return
-        // the cell's value, never the cell representation.
-        if (slot_ops.adapterValueIsUninitialized(this_value)) return error.ReferenceError;
-        return slot_ops.adapterValueDup(this_value);
-    }
-    if (std.mem.startsWith(u8, trimmed, "delete ")) {
-        _ = frame;
-        return null;
-    }
-    if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
-        const lhs = std.mem.trim(u8, trimmed[0..eq], " \t\r\n");
-        const rhs = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\r\n");
-        if (isSimpleIdentifierName(lhs) and isSimpleIntegerLiteral(rhs) and callerFunctionNameEql(ctx.runtime, caller_function, lhs)) {
-            if (caller_function) |function| {
-                if (function.flags.is_strict) return error.TypeError;
-            }
-            return core.JSValue.undefinedValue();
-        }
-    }
-    return null;
-}
-
 pub fn isSimpleIdentifierName(name: []const u8) bool {
     if (name.len == 0) return false;
     if (!unicode_lib.isAsciiIdentifierStartByte(name[0])) return false;
@@ -4476,26 +4388,15 @@ pub fn isSimpleIdentifierName(name: []const u8) bool {
     return true;
 }
 
-pub fn isSimpleIntegerLiteral(text: []const u8) bool {
-    _ = std.fmt.parseInt(i32, text, 10) catch return false;
-    return true;
-}
-
-pub fn callerFunctionNameEql(rt: *core.JSRuntime, caller_function: ?*const bytecode.Bytecode, name: []const u8) bool {
-    const function = caller_function orelse return false;
-    const function_name = rt.atoms.name(function.name) orelse return false;
-    return std.mem.eql(u8, function_name, name);
-}
-
 pub fn callerFunctionHasBinding(
     rt: *core.JSRuntime,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     name: []const u8,
 ) bool {
     const function = caller_function orelse return false;
-    const local_count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..local_count]) |vd| {
+    const local_count = @min(function.varDefs().len, frame.locals.len);
+    for (function.varDefs()[0..local_count]) |vd| {
         if (value_ops.atomNameEql(rt, vd.var_name, name)) return true;
     }
     const ref_count = @min(function.varRefNamesLen(), frame.var_refs.len);
@@ -4509,12 +4410,12 @@ pub fn callerFunctionHasBinding(
 
 pub fn functionHasFrameBinding(
     rt: *core.JSRuntime,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) bool {
-    const local_count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..local_count]) |vd| {
+    const local_count = @min(function.varDefs().len, frame.locals.len);
+    for (function.varDefs()[0..local_count]) |vd| {
         if (vd.var_name == atom_id or atomNamesEqual(rt, vd.var_name, atom_id)) return true;
     }
     const ref_count = @min(function.varRefNamesLen(), frame.var_refs.len);
@@ -4575,7 +4476,14 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
     try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(symbol_value, true, true, true));
     symbol_value.free(rt);
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
-    try source.defineAutoInitProperty(rt, core.atom.atomFromUInt32(1), "lazyArgsFromArrayLikeValue", 0, core.property.Flags.data(true, true, true));
+    try source.defineAutoInitPropertyWithRealm(
+        rt,
+        core.atom.atomFromUInt32(1),
+        "lazyArgsFromArrayLikeValue",
+        0,
+        core.property.Flags.data(true, true, true),
+        global,
+    );
 
     const Probe = struct {
         rt: *core.JSRuntime,
@@ -4651,9 +4559,23 @@ pub fn callFunctionBytecodeConstruct(
     output: ?*std.Io.Writer,
     global: *core.Object,
     new_target_value: core.JSValue,
-    constructor_this_value: core.JSValue,
 ) !core.JSValue {
-    return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, true, null, null, null, new_target_value, constructor_this_value);
+    // A bytecode constructor takes the JS_CallConstructorInternal poll above
+    // and then a second JS_CallInternal poll, both in the caller Realm. Only
+    // after this point does the bytecode body switch to its function Realm.
+    const interrupt_global = ctx.global orelse global;
+    try exception_ops.pollInterrupt(ctx, interrupt_global);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(ctx, func, current_function_value, this_value, args, var_refs, output, global, true, null, null, null, new_target_value) catch |err| {
+        if (err == error.DerivedThisUninitialized) {
+            // `global` is already the final bytecode callee's realm, while
+            // `ctx` is still JS_CallConstructorInternal's caller_ctx. QuickJS
+            // materializes OP_get_loc_checkthis in that caller context before
+            // returning through the construct boundary (quickjs.c:18717-18728).
+            const caller_global = ctx.global orelse return error.InvalidBuiltinRegistry;
+            try throwRuntimeErrorForGlobal(ctx, caller_global, err);
+        }
+        return err;
+    };
 }
 
 pub fn callFunctionBytecodeMode(
@@ -4667,7 +4589,7 @@ pub fn callFunctionBytecodeMode(
     global: *core.Object,
     defer_generators: bool,
 ) !core.JSValue {
-    return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, defer_generators, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
+    return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, defer_generators, null, null, null, core.JSValue.undefinedValue());
 }
 
 pub fn callFunctionBytecodeModeState(
@@ -4684,33 +4606,61 @@ pub fn callFunctionBytecodeModeState(
     resume_value: ?core.JSValue,
     stop_before_pc: ?usize,
     new_target_value: core.JSValue,
-    constructor_this_value: core.JSValue,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        ctx,
+        func,
+        current_function_value,
+        this_value,
+        args,
+        var_refs,
+        output,
+        global,
+        defer_generators,
+        generator_state,
+        resume_value,
+        stop_before_pc,
+        new_target_value,
+    );
+}
+
+fn callFunctionBytecodeModeStateAfterInterruptPoll(
+    ctx: *core.JSContext,
+    func: core.JSValue,
+    current_function_value: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const *core.VarRef,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    defer_generators: bool,
+    generator_state: ?*core.Object,
+    resume_value: ?core.JSValue,
+    stop_before_pc: ?usize,
+    new_target_value: core.JSValue,
 ) HostError!core.JSValue {
     const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-    if (defer_generators and (fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator)) {
-        return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, fb.flags.func_kind == .async_generator);
+    if (defer_generators and (fb.functionKind() == .generator or fb.functionKind() == .async_generator)) {
+        return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, fb.functionKind() == .async_generator);
     }
 
-    var nested_base: bytecode.Bytecode = undefined;
-    const nested: *const bytecode.Bytecode = bytecode.cachedBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms) orelse blk: {
-        nested_base = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
-        break :blk &nested_base;
-    };
+    const nested = fb;
 
-    const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
-    if (fb.flags.func_kind == .async and generator_state == null) {
+    const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
+    if (fb.functionKind() == .async and generator_state == null) {
         var boxed_this: ?core.JSValue = null;
         defer if (boxed_this) |value| value.free(ctx.runtime);
         const effective_this = try coerceCallThis(ctx, global, fb_runtime_strict, this_value, &boxed_this);
         return promise_ops.qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, var_refs, output, global);
     }
-    const stop_on_yield = fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator;
+    const stop_on_yield = fb.functionKind() == .generator or fb.functionKind() == .async_generator;
 
     // Mirror QuickJS JS_CallInternal: non-suspending bytecode frames carve
     // their operand stack from the contiguous per-runtime VM stack arena
     // instead of heap-allocating per call. Generator/async resumption swaps
     // heap buffers in and out of the stack, so those keep heap mode.
-    const arena_eligible = fb.flags.func_kind == .normal and generator_state == null;
+    const arena_eligible = fb.functionKind() == .normal and generator_state == null;
     const arena_mark = if (arena_eligible) ctx.runtime.vm_stack.mark() else null;
     defer if (arena_mark) |mark| ctx.runtime.vm_stack.restore(mark);
     const operand_window: ?[]core.JSValue = if (arena_eligible)
@@ -4727,7 +4677,7 @@ pub fn callFunctionBytecodeModeState(
     // the queue machine (exec/async_generator.zig execBody) — no promise
     // wrapping here (qjs async_func_resume returns the raw value/ret code,
     // quickjs.c:20951).
-    return runWithCallEnv(.{
+    return runWithCallEnvAfterInterruptPoll(.{
         .ctx = ctx,
         .stack = &nested_stack,
         .function = nested,
@@ -4743,14 +4693,13 @@ pub fn callFunctionBytecodeModeState(
         .stop_before_pc = stop_before_pc,
         .current_function_value = current_function_value,
         .new_target_value = new_target_value,
-        .constructor_this_value = constructor_this_value,
     });
 }
 
 pub fn runGeneratorParameterInit(
     ctx: *core.JSContext,
     fb: *const bytecode.FunctionBytecode,
-    nested: *const bytecode.Bytecode,
+    nested: *const bytecode.FunctionBytecode,
     prepared_entry_frame: ?*const zjs_vm.PreparedEntryFrame,
     object: *core.Object,
     current_function_value: core.JSValue,
@@ -4798,22 +4747,11 @@ pub fn qjsGeneratorNext(
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
-    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     if (payload.done) {
         const done_result = try createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
         return done_result.dup();
-    }
-    if (takeGeneratorPendingReturn(object)) |pending| {
-        // Suspended at a yield inside a finally block entered via .return(v): finish
-        // the finally range, then complete with the pending return value (qjs
-        // js_generator_next GEN_MAGIC_RETURN, quickjs.c:21077).
-        const step = try resumeGeneratorPendingReturnStep(ctx, output, generator_global, receiver, object, pending, args);
-        if (!step.done and (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object))) {
-            return step.value;
-        }
-        defer step.value.free(ctx.runtime);
-        return try createIteratorResult(ctx.runtime, generator_global, step.value, step.done);
     }
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
@@ -4834,7 +4772,6 @@ pub fn qjsGeneratorNext(
         object,
         resume_value,
         null,
-        core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
         object.completeGeneratorExecution(ctx.runtime);
@@ -4889,12 +4826,8 @@ pub fn qjsSyncGeneratorStep(
     if (object.class_id != core.class.ids.generator) return null; // sync generators only
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
-    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     if (payload.done) return .{ .value = core.JSValue.undefinedValue(), .done = true };
-    // Pending return completion stashed by .return(v) suspended in a finally block:
-    // fall back to the generic protocol, whose .next() call lands in qjsGeneratorNext
-    // and threads the completion through the finally.
-    if (payload.resume_completion_type == 1) return null;
     const execution = payload.execution orelse return error.TypeError;
     const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
     const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
@@ -4914,7 +4847,6 @@ pub fn qjsSyncGeneratorStep(
         object,
         resume_value,
         null,
-        core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |err| {
         object.completeGeneratorExecution(ctx.runtime);
@@ -4984,7 +4916,6 @@ pub fn resumeGeneratorYieldStarCompletion(
         resume_value,
         null,
         core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
     ) catch |err| {
         object.completeGeneratorExecution(ctx.runtime);
         return err;
@@ -4994,106 +4925,6 @@ pub fn resumeGeneratorYieldStarCompletion(
     if (done) object.completeGeneratorExecution(ctx.runtime);
     if (object.generatorJustYielded() and generatorYieldStarSuspended(ctx.runtime, object)) return result.dup();
     return try createIteratorResult(ctx.runtime, global, result, done);
-}
-
-/// Pending return completion stash. When `.return(v)` enters a finally block and the
-/// finally itself yields, the pending return completion must survive the suspension so
-/// the following `.next()` can complete `{value: v, done: true}`. Mirror qjs
-/// js_generator_next GEN_MAGIC_RETURN (quickjs.c:21109: `sf->cur_sp[-1] = ret;
-/// sf->cur_sp[0] = JS_NewInt32(ctx, magic)` — the completion value and its magic live
-/// on the generator's own saved stack): the value plus an int32 stop-pc marker are
-/// pushed onto the generator's saved operand stack (GC-traced and freed with the
-/// generator payload) and `resume_completion_type` is set to 1 = GEN_MAGIC_RETURN.
-/// Every resume entry point must consume the stash first (`takeGeneratorPendingReturn`)
-/// so the saved stack regains the exact shape the suspended bytecode expects.
-pub fn stashGeneratorPendingReturn(
-    rt: *core.JSRuntime,
-    generator: *core.Object,
-    pending_value: core.JSValue,
-    stop_pc: usize,
-) !void {
-    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
-    try saved_stack.ensureAdditionalWithResidentBacking(rt, rt.stackSize(), 2, generator.generatorStackUsesCombinedStorage());
-    const values = saved_stack.values;
-    values.ptr[values.len] = pending_value.dup();
-    values.ptr[values.len + 1] = core.JSValue.int32(@intCast(stop_pc));
-    saved_stack.values = values.ptr[0 .. values.len + 2];
-    generator.generatorResumeCompletionTypeSlot().* = 1; // GEN_MAGIC_RETURN
-}
-
-pub const GeneratorPendingReturn = struct {
-    /// Owned by the caller.
-    value: core.JSValue,
-    stop_pc: usize,
-};
-
-/// Pop the pending return completion stashed by `stashGeneratorPendingReturn`, if any.
-/// Outside an active resume, `resume_completion_type == 1` only ever means a stashed
-/// pending return (the transient yield-star magic is consumed within the same resume,
-/// guarded by the executing flag).
-pub fn takeGeneratorPendingReturn(generator: *core.Object) ?GeneratorPendingReturn {
-    if (generator.generatorResumeCompletionType() != 1) return null;
-    generator.generatorResumeCompletionTypeSlot().* = 0;
-    const saved_stack = &generator.generatorExecutionStateSlot().storage.stack;
-    const values = saved_stack.values;
-    std.debug.assert(values.len >= 2);
-    const marker = values[values.len - 1];
-    const value = values[values.len - 2];
-    saved_stack.values = values.ptr[0 .. values.len - 2];
-    return .{ .value = value, .stop_pc = @intCast(marker.asInt32() orelse 0) };
-}
-
-/// Resume a generator suspended at a yield INSIDE a finally block that was entered via
-/// `.return(v)`: run the rest of the finally range and complete with the pending return
-/// value once the range finishes (qjs threads this natively through OP_return / OP_ret
-/// with the completion on the generator stack, js_generator_next quickjs.c:21077).
-/// Takes ownership of `pending.value`; the returned value is owned by the caller.
-fn resumeGeneratorPendingReturnStep(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    generator_global: *core.Object,
-    receiver: core.JSValue,
-    object: *core.Object,
-    pending: GeneratorPendingReturn,
-    args: []const core.JSValue,
-) !GeneratorValueDone {
-    const pending_value = pending.value;
-    defer pending_value.free(ctx.runtime);
-    const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-    const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    const resume_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    object.generatorExecutingSlot().* = true;
-    defer object.generatorExecutingSlot().* = false;
-    const result = callFunctionBytecodeModeState(
-        ctx,
-        function_value,
-        current_function_value,
-        object.generatorThis() orelse core.JSValue.undefinedValue(),
-        object.generatorArgs(),
-        object.generatorCaptures(),
-        output,
-        generator_global,
-        false,
-        object,
-        resume_value,
-        pending.stop_pc,
-        core.JSValue.undefinedValue(),
-        core.JSValue.undefinedValue(),
-    ) catch |err| {
-        object.completeGeneratorExecution(ctx.runtime);
-        return err;
-    };
-    defer result.free(ctx.runtime);
-    if (object.generatorJustYielded()) {
-        // Suspended again inside the finally (plain yield or yield* delegation):
-        // keep the pending return completion stashed. This is safe because every
-        // resume entry point pops the stash before restoring the saved stack.
-        try stashGeneratorPendingReturn(ctx.runtime, object, pending_value, pending.stop_pc);
-        return .{ .value = result.dup(), .done = false };
-    }
-    object.completeGeneratorExecution(ctx.runtime);
-    const value = if (result.isUndefined()) pending_value.dup() else result.dup();
-    return .{ .value = value, .done = true };
 }
 
 pub fn qjsGeneratorReturn(
@@ -5108,18 +4939,13 @@ pub fn qjsGeneratorReturn(
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
         // Mirrors js_async_generator_next GEN_MAGIC_RETURN (quickjs.c:21706):
-        // enqueue and return the request promise; the argument is awaited by
-        // the queue machine before the finally range runs / the request settles.
+        // enqueue and return the request promise; the compiled return leg
+        // awaits the argument before finalizer cleanup and settlement.
         return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
-    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
-    // A fresh .return(v) replaces any pending return completion stashed by an earlier
-    // return that suspended inside a finally block (qjs: the new completion resumes at
-    // the yield and the old stack slots unwind with the frame).
-    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
-    try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
+    const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
@@ -5140,48 +4966,36 @@ pub fn qjsGeneratorReturn(
             },
         }
     }
-    if (object.generatorPc() != 0) {
-        const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (findGeneratorReturnFinallyTarget(fb, @intCast(object.generatorPc()))) |finally_range| {
-            const current_function_value = object.generatorCurrentFunction() orelse receiver;
-            object.generatorPcSlot().* = finally_range.start;
-            object.generatorJustYieldedSlot().* = false;
-            const result = callFunctionBytecodeModeState(
-                ctx,
-                function_value,
-                current_function_value,
-                object.generatorThis() orelse core.JSValue.undefinedValue(),
-                object.generatorArgs(),
-                object.generatorCaptures(),
-                output,
-                generator_global,
-                false,
-                object,
-                core.JSValue.undefinedValue(),
-                finally_range.stop,
-                core.JSValue.undefinedValue(),
-                core.JSValue.undefinedValue(),
-            ) catch |err| {
-                object.completeGeneratorExecution(ctx.runtime);
-                return err;
-            };
-            defer result.free(ctx.runtime);
-            const done = !object.generatorJustYielded();
-            if (done) object.completeGeneratorExecution(ctx.runtime);
-            if (!done) {
-                // The finally block itself yielded: preserve the pending return
-                // completion across the suspension (qjs js_generator_next
-                // GEN_MAGIC_RETURN, quickjs.c:21109).
-                try stashGeneratorPendingReturn(ctx.runtime, object, return_value, finally_range.stop);
-                if (object.generatorYieldStarIterator() != null or generatorYieldStarSuspended(ctx.runtime, object)) {
-                    // yield* passthrough: `result` is already an iterator-result object.
-                    return result.dup();
-                }
-            }
-            const iterator_value = if (done and result.isUndefined()) return_value else result;
-            return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
-        }
+    if (object.generatorPc() != 0 and payload.started) {
+        const execution = payload.execution orelse return error.TypeError;
+        const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
+        const current_function_value = if (execution.current_function.isUndefined()) receiver else execution.current_function;
+        payload.resume_completion_type = 1;
+        payload.executing = true;
+        defer payload.executing = false;
+        const result = callFunctionBytecodeModeState(
+            ctx,
+            function_value,
+            current_function_value,
+            execution.this_value,
+            execution.suspended.storage.frame.args,
+            execution.suspended.storage.frame.var_refs,
+            output,
+            generator_global,
+            false,
+            object,
+            return_value,
+            null,
+            core.JSValue.undefinedValue(),
+        ) catch |err| {
+            object.completeGeneratorExecution(ctx.runtime);
+            return err;
+        };
+        defer result.free(ctx.runtime);
+        const done = !payload.just_yielded;
+        if (done) object.completeGeneratorExecution(ctx.runtime);
+        if (!done and generatorHasYieldStarResult(payload)) return result.dup();
+        return try createIteratorResult(ctx.runtime, generator_global, result, done);
     }
     object.completeGeneratorExecution(ctx.runtime);
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
@@ -5197,13 +5011,13 @@ pub fn resumeGeneratorCatchForRuntimeError(
 ) !?core.JSValue {
     if (object.class_id == core.class.ids.async_generator) return null;
     if (object.generatorPc() == 0 or !object.generatorStarted()) return null;
+    const execution = object.generatorPayloadPtr().execution orelse return null;
+    if (execution.suspended.catchTarget() == null) return null;
     const function_value = object.generatorFunctionBytecode() orelse return null;
-    const fb = functionBytecodeFromValue(function_value) orelse return null;
-    const catch_target = findEnclosingCatchTarget(fb, @intCast(object.generatorPc())) orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
     defer thrown.free(ctx.runtime);
     const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    object.generatorPcSlot().* = catch_target;
+    object.generatorResumeCompletionTypeSlot().* = 2;
     object.generatorJustYieldedSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
@@ -5218,7 +5032,6 @@ pub fn resumeGeneratorCatchForRuntimeError(
         object,
         thrown,
         null,
-        core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     ) catch |resume_err| {
         object.completeGeneratorExecution(ctx.runtime);
@@ -5377,13 +5190,8 @@ pub fn qjsGeneratorThrow(
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
-    const generator_global = payload.realm_global_ptr orelse object_ops.objectRealmGlobal(object) orelse global;
+    const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
-    // A throw injected at a yield inside a finally block discards any pending return
-    // completion stashed there (qjs: the exception unwinds the frame and the stacked
-    // completion slots are freed with it).
-    if (takeGeneratorPendingReturn(object)) |pending| pending.value.free(ctx.runtime);
-
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
         return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);
     }
@@ -5417,7 +5225,6 @@ pub fn qjsGeneratorThrow(
                     value,
                     null,
                     core.JSValue.undefinedValue(),
-                    core.JSValue.undefinedValue(),
                 ) catch |err| {
                     object.completeGeneratorExecution(ctx.runtime);
                     return err;
@@ -5432,36 +5239,32 @@ pub fn qjsGeneratorThrow(
 
     if (object.generatorPc() != 0 and object.generatorStarted()) {
         const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (findEnclosingCatchTarget(fb, @intCast(object.generatorPc()))) |catch_target| {
-            const current_function_value = object.generatorCurrentFunction() orelse receiver;
-            object.generatorPcSlot().* = catch_target;
-            object.generatorJustYieldedSlot().* = false;
-            const result = callFunctionBytecodeModeState(
-                ctx,
-                function_value,
-                current_function_value,
-                object.generatorThis() orelse core.JSValue.undefinedValue(),
-                object.generatorArgs(),
-                object.generatorCaptures(),
-                output,
-                generator_global,
-                false,
-                object,
-                thrown,
-                null,
-                core.JSValue.undefinedValue(),
-                core.JSValue.undefinedValue(),
-            ) catch |err| {
-                object.completeGeneratorExecution(ctx.runtime);
-                return err;
-            };
-            defer result.free(ctx.runtime);
-            const done = !object.generatorJustYielded();
-            if (done) object.completeGeneratorExecution(ctx.runtime);
-            const result_value = generatorCatchResumeResultValue(result);
-            return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
-        }
+        const current_function_value = object.generatorCurrentFunction() orelse receiver;
+        object.generatorResumeCompletionTypeSlot().* = 2;
+        object.generatorJustYieldedSlot().* = false;
+        const result = callFunctionBytecodeModeState(
+            ctx,
+            function_value,
+            current_function_value,
+            object.generatorThis() orelse core.JSValue.undefinedValue(),
+            object.generatorArgs(),
+            object.generatorCaptures(),
+            output,
+            generator_global,
+            false,
+            object,
+            thrown,
+            null,
+            core.JSValue.undefinedValue(),
+        ) catch |err| {
+            object.completeGeneratorExecution(ctx.runtime);
+            return err;
+        };
+        defer result.free(ctx.runtime);
+        const done = !object.generatorJustYielded();
+        if (done) object.completeGeneratorExecution(ctx.runtime);
+        const result_value = generatorCatchResumeResultValue(result);
+        return try createIteratorResult(ctx.runtime, generator_global, result_value, done);
     }
 
     object.completeGeneratorExecution(ctx.runtime);
@@ -5482,215 +5285,6 @@ pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize
     return pc + size;
 }
 
-pub const GeneratorReturnFinallyRange = struct {
-    start: usize,
-    stop: usize,
-};
-
-pub fn findGeneratorReturnFinallyTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?GeneratorReturnFinallyRange {
-    var pc: usize = 0;
-    var found: ?GeneratorReturnFinallyRange = null;
-    while (pc < start_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byteCode().len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byteCode().len) {
-                if (findGeneratorReturnFinallyTargetFromCatch(fb, pc + 5, @intCast(target))) |candidate| {
-                    if (found == null or candidate.stop > found.?.stop) {
-                        found = candidate;
-                    }
-                }
-            }
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findGeneratorReturnFinallyTargetFromCatch(
-    fb: *const bytecode.FunctionBytecode,
-    protected_start: usize,
-    catch_target: usize,
-) ?GeneratorReturnFinallyRange {
-    // A compiled try/finally has a normal-completion jump at the end of the
-    // protected range. Its target is the duplicated normal finally body, and
-    // the instruction immediately before that target is the synthetic rethrow
-    // terminating the exceptional copy. Use that structural marker instead of
-    // the first throw in the exceptional copy: an explicit throw inside the
-    // finally body must execute and override a pending generator return.
-    if (findForwardGotoTargetInRange(fb, protected_start, catch_target)) |normal_finally_target| {
-        if (normal_finally_target > catch_target and
-            normal_finally_target <= fb.byteCode().len and
-            normal_finally_target > 0 and
-            normal_finally_target - 1 > catch_target and
-            fb.byteCode()[normal_finally_target - 1] == op.throw)
-        {
-            return .{ .start = catch_target, .stop = normal_finally_target - 1 };
-        }
-    }
-
-    const rethrow_pc = findThrowFrom(fb, catch_target) orelse return null;
-    if (rethrow_pc <= catch_target) return null;
-    if (findForwardGotoTargetInRange(fb, catch_target, rethrow_pc)) |normal_finally_target| {
-        if (normal_finally_target > rethrow_pc) {
-            return .{ .start = normal_finally_target, .stop = fb.byteCode().len };
-        }
-    }
-    return .{ .start = catch_target, .stop = rethrow_pc };
-}
-
-pub fn findForwardGotoTargetInRange(fb: *const bytecode.FunctionBytecode, start_pc: usize, end_pc: usize) ?usize {
-    var pc = start_pc;
-    var found: ?usize = null;
-    while (pc < end_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (forwardGotoTarget(fb, pc)) |target| {
-            if (target > pc and target <= fb.byteCode().len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return found;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findEnclosingCatchTarget(fb: *const bytecode.FunctionBytecode, start_pc: u32) ?usize {
-    var pc: usize = 0;
-    var found: ?usize = null;
-    while (pc < start_pc and pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.@"catch") {
-            if (pc + 5 > fb.byteCode().len) return found;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            if (target > start_pc and target <= fb.byteCode().len) found = @intCast(target);
-        }
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return null;
-        pc += size;
-    }
-    return found;
-}
-
-pub fn findThrowFrom(fb: *const bytecode.FunctionBytecode, start_pc: usize) ?usize {
-    var pc = start_pc;
-    while (pc < fb.byteCode().len) {
-        const op_id = fb.byteCode()[pc];
-        if (op_id == op.throw) return pc;
-        const size = bytecode.opcode.sizeOf(op_id);
-        if (size == 0) return null;
-        pc += size;
-    }
-    return null;
-}
-
-pub fn forwardGotoTarget(fb: *const bytecode.FunctionBytecode, pc: usize) ?u32 {
-    const op_id = fb.byteCode()[pc];
-    return switch (op_id) {
-        op.goto8 => blk: {
-            if (pc + 1 >= fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff: i8 = @bitCast(fb.byteCode()[operand_pc]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        op.goto16 => blk: {
-            if (pc + 3 > fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff = readInt(i16, fb.byteCode()[operand_pc..][0..2]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        op.goto => blk: {
-            if (pc + 5 > fb.byteCode().len) break :blk null;
-            const operand_pc = pc + 1;
-            const diff = readInt(i32, fb.byteCode()[operand_pc..][0..4]);
-            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
-            break :blk if (target > @as(i64, @intCast(pc)) and target <= @as(i64, @intCast(fb.byteCode().len))) @as(u32, @intCast(target)) else null;
-        },
-        else => null,
-    };
-}
-
-pub fn closeGeneratorDestructuringIterators(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    generator: *core.Object,
-) !void {
-    const suspended = generator.generatorExecutionState();
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.stack.values);
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.locals);
-    try closeDestructuringIteratorsInValues(ctx, output, global, suspended.storage.frame.args);
-    // frame_var_refs: every element is a VarRef cell (typed slots), never a
-    // destructuring-iterator-state Object — the pre-typed scan over the slots
-    // was a provable no-op (expectObject rejects the var_ref GC kind), so the
-    // typed slice is simply skipped.
-}
-
-pub fn closeDestructuringIteratorsInValues(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    values: []const core.JSValue,
-) !void {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        if (destructuringIteratorStateClosing(object)) continue;
-        const close_arg = value.dup();
-        defer close_arg.free(ctx.runtime);
-        const close_result = try qjsDestructuringClose(ctx, output, global, &.{close_arg});
-        close_result.free(ctx.runtime);
-    }
-}
-
-pub fn closeDestructuringIteratorsInValuesForAbruptCompletion(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    values: []const core.JSValue,
-) void {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        if (destructuringIteratorStateClosing(object)) continue;
-        const close_arg = value.dup();
-        defer close_arg.free(ctx.runtime);
-        const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-        defer if (pending_exception) |pending| pending.free(ctx.runtime);
-        const close_result = qjsDestructuringClose(ctx, output, global, &.{close_arg}) catch {
-            if (ctx.hasException()) ctx.clearException();
-            if (pending_exception) |pending| _ = ctx.throwValue(pending.dup());
-            clearDestructuringIteratorState(ctx.runtime, object) catch {};
-            continue;
-        };
-        close_result.free(ctx.runtime);
-        if (ctx.hasException()) ctx.clearException();
-        if (pending_exception) |pending| _ = ctx.throwValue(pending.dup());
-    }
-}
-
-pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-    frame: *const frame_mod.Frame,
-) void {
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.liveValues());
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
-    // frame.var_refs: typed cell slots are never iterator-state Objects (the
-    // pre-typed slot scan was a provable no-op) — skipped.
-}
-
 pub fn qjsIteratorCallForNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5698,7 +5292,7 @@ pub fn qjsIteratorCallForNativeRecord(
     receiver: core.JSValue,
     id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
@@ -5727,7 +5321,7 @@ pub fn qjsIteratorStaticCall(
     global: *core.Object,
     args: []const core.JSValue,
     method_id: u32,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (method_id) {
@@ -5744,7 +5338,7 @@ pub fn qjsIteratorFromCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return iter_vm.qjsIteratorFromCall(
@@ -5763,7 +5357,7 @@ pub fn qjsIteratorZipCall(
     global: *core.Object,
     args: []const core.JSValue,
     keyed: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return iter_vm.qjsIteratorZipCall(
@@ -5782,7 +5376,7 @@ pub fn qjsIteratorZipModeFromOptions(
     output: ?*std.Io.Writer,
     global: *core.Object,
     options: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !iter_vm.IteratorZipMode {
     return iter_vm.qjsIteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
@@ -5799,7 +5393,7 @@ pub fn qjsIteratorZipCollectIndexed(
     pads: *core.Object,
     padding: core.JSValue,
     mode: iter_vm.IteratorZipMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     return iter_vm.qjsIteratorZipCollectIndexed(
@@ -5829,7 +5423,7 @@ pub fn qjsIteratorZipCollectKeyed(
     keys: *core.Object,
     padding: core.JSValue,
     mode: iter_vm.IteratorZipMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     return iter_vm.qjsIteratorZipCollectKeyed(
@@ -5853,7 +5447,7 @@ pub fn qjsIteratorZipNextMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return iter_vm.qjsIteratorZipNextMethod(
@@ -5898,7 +5492,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     global: *core.Object,
     completion: *iter_vm.IteratorZipCompletion,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) void {
     iter_vm.qjsIteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
@@ -5911,7 +5505,7 @@ pub fn qjsIteratorZipCloseAllWithCompletion(
     completion: *iter_vm.IteratorZipCompletion,
     iters: *core.Object,
     count: usize,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try iter_vm.qjsIteratorZipCloseAllWithCompletion(ctx, output, global, completion, iters, count, caller_function, caller_frame);
@@ -5922,7 +5516,7 @@ pub fn qjsIteratorZipClose(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try iter_vm.qjsIteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame);
@@ -5934,7 +5528,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     global: *core.Object,
     iterator_value: core.JSValue,
     err: anytype,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
     var completion = iter_vm.IteratorZipCompletion.initThrow(ctx, err);
@@ -5952,7 +5546,7 @@ pub fn qjsIteratorZipCloseAllAndPropagate(
     count: usize,
     err: anytype,
     extra_iterator: ?core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
     return iter_vm.qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, extra_iterator, caller_function, caller_frame);
@@ -5963,7 +5557,7 @@ pub fn iteratorFromSourceForIteratorFrom(
     output: ?*std.Io.Writer,
     global: *core.Object,
     source: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !iter_vm.IteratorFromResult {
     if (source.isString()) {
@@ -6044,6 +5638,10 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
@@ -6051,20 +5649,16 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     defer prototype.value().free(rt);
     try builtin_glue.storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, prototype.value());
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var next_method = core.JSValue.functionBytecode(&fb.header);
     var next_method_alive = true;
@@ -6097,7 +5691,7 @@ pub fn qjsIteratorWrapNext(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.functionIteratorWrapMethod() != 1) return null;
@@ -6125,7 +5719,7 @@ pub fn qjsIteratorWrapReturn(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.functionIteratorWrapMethod() != 2) return null;
@@ -6152,7 +5746,7 @@ pub fn qjsIteratorHelperNext(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return iter_vm.qjsIteratorHelperNext(
@@ -6172,7 +5766,7 @@ pub fn qjsIteratorHelperReturn(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return iter_vm.qjsIteratorHelperReturn(
@@ -6222,35 +5816,6 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
     try promise_ops.enqueuePendingPromiseJob(ctx, callback);
 }
 
-noinline fn initIteratorResultPropertyTemplate(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    const cached = try global.cachedRealmValueSlot(rt, .iterator_result_template);
-    if (cached.*) |stored| return core.Object.expect(stored);
-
-    // qjs's realm keeps the final `{ value, done }` shape and
-    // js_create_iterator_result allocates its two-slot property array in one
-    // shot. Pin an equivalent template so every generator/iterator step skips
-    // the empty -> value -> done storage-growth sequence.
-    const template = try core.Object.createWithOwnPropertyCapacity(
-        rt,
-        core.class.ids.object,
-        object_ops.objectPrototypeFromGlobal(rt, global),
-        2,
-    );
-    defer template.value().free(rt);
-    try template.defineOwnPropertyAssumingNew(
-        rt,
-        core.atom.ids.value,
-        core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true),
-    );
-    try template.defineOwnPropertyAssumingNew(
-        rt,
-        core.atom.ids.done,
-        core.Descriptor.data(core.JSValue.boolean(false), true, true, true),
-    );
-    try global.setOptionalValueSlot(rt, cached, template.value().dup());
-    return core.Object.expect(cached.*.?);
-}
-
 pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -6263,37 +5828,49 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, 
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const template = if (global.cachedRealmValue(.iterator_result_template)) |stored|
-        try core.Object.expect(stored)
-    else
-        try initIteratorResultPropertyTemplate(rt, global);
-    const object = try core.Object.createFromPropertyTemplate(rt, template);
+    // QuickJS's js_create_iterator_result uses an ordinary object followed by
+    // the `value` and `done` transitions; iterator results are not one of the
+    // five initial Shapes owned by JSContext.
+    const object = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        object_ops.objectPrototypeFromGlobal(rt, global),
+        2,
+    );
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 0, rooted_value.dup());
-    object.replaceOwnDataPropertyValueAtAssumingShapeOwned(rt, 1, core.JSValue.boolean(done));
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.value,
+        core.Descriptor.data(rooted_value, true, true, true),
+    );
+    try object.defineOwnPropertyAssumingNew(
+        rt,
+        core.atom.ids.done,
+        core.Descriptor.data(core.JSValue.boolean(done), true, true, true),
+    );
     return object.value();
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
+    global.class_id = core.class.ids.global_object;
+    _ = try global.ensureGlobalPayload(rt);
+    core.gc.retain(&global.header);
+    ctx.global = global;
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -6312,7 +5889,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
     {
-        const stored = iterator_result.getProperty(value_atom);
+        const stored = try iterator_result.getProperty(value_atom);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
@@ -6326,9 +5903,9 @@ test "createIteratorResult roots direct function bytecode value while creating r
 }
 
 pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
-    if (global.cachedThrowTypeErrorIntrinsic()) |stored| return stored.dup();
+    if (global.cachedThrowTypeErrorIntrinsic(rt)) |stored| return stored.dup();
 
-    const thrower = try core.function.nativeFunction(rt, "", 0);
+    const thrower = try core.function.nativeFunctionForGlobal(rt, global, "", 0);
     errdefer thrower.free(rt);
     const thrower_object = try property_ops.expectObject(thrower);
     try thrower_object.setFunctionRealmGlobalPtr(rt, global);
@@ -6349,53 +5926,114 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
     return thrower;
 }
 
-pub fn qjsThrowTypeErrorIntrinsic(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
-    const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "invalid property access");
+pub fn qjsThrowTypeErrorIntrinsic(ctx: *core.JSContext, global: *core.Object, _: *core.Object) !core.JSValue {
+    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", "invalid property access");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
 
 pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
-    if (frame.function.flags.is_strict or frame.function.flags.runtime_strict) return true;
+    if (frame.function.isStrictMode() or frame.function.runtimeStrictMode()) return true;
     const fb = if (functionBytecodeFromValue(frame.current_function)) |bytecode_value|
         bytecode_value
     else if (object_ops.objectFromValue(frame.current_function)) |function_object|
         if (function_object.functionBytecode()) |stored| functionBytecodeFromValue(stored) else null
     else
         null;
-    if (fb) |function_bytecode| return function_bytecode.flags.is_strict_mode or function_bytecode.flags.runtime_strict_mode;
+    if (fb) |function_bytecode| return function_bytecode.isStrictMode() or function_bytecode.runtimeStrictMode();
     return false;
 }
 
 pub fn functionBytecodeFromValue(value: core.JSValue) ?*const bytecode.FunctionBytecode {
     const header = value.objectHeader() orelse return null;
-    const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
-    return @fieldParentPtr("header", aligned);
+    return @fieldParentPtr("header", header);
 }
 
 pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
     return class_id == core.class.ids.c_function or
+        class_id == core.class.ids.c_function_data or
         class_id == core.class.ids.c_closure or
-        class_id == core.class.ids.bytecode_function or
+        core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function;
+}
+
+fn isConstructibleFunctionBytecode(fb: *const bytecode.FunctionBytecode) bool {
+    return fb.hasPrototype() and
+        fb.functionKind() == .normal;
+}
+
+fn isConstructibleBytecodeFunctionObject(function_object: *const core.Object, fb: *const bytecode.FunctionBytecode) bool {
+    return switch (function_object.class_id) {
+        core.class.ids.bytecode_function => isConstructibleFunctionBytecode(fb),
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+        => false,
+        else => false,
+    };
+}
+
+test "four-class bytecode constructability follows class and function flags" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const Case = struct {
+        class_id: core.ClassId,
+        func_kind: bytecode.function_bytecode.FunctionKind,
+        has_prototype: bool,
+        expected_constructor: bool,
+    };
+    const Fixture = struct {
+        fn create(runtime: *core.JSRuntime, case: Case) !*core.Object {
+            const object = try core.Object.create(runtime, case.class_id, null);
+            errdefer object.value().free(runtime);
+
+            const fb = try bytecode.FunctionBytecode.createFixture(runtime, .{ .flags = .{
+                .func_kind = case.func_kind,
+                .has_prototype = case.has_prototype,
+            } });
+            fb.publishFixtureNoFail(runtime);
+            try object.setFunctionBytecodeValue(runtime, core.JSValue.functionBytecode(&fb.header));
+            return object;
+        }
+    };
+    const cases = [_]Case{
+        .{ .class_id = core.class.ids.bytecode_function, .func_kind = .normal, .has_prototype = true, .expected_constructor = true },
+        // Canonical arrows are ordinary-kind bytecode functions without a
+        // prototype. The parser invariant is covered by the F6 arrow tests;
+        // do not manufacture an impossible prototype-bearing arrow here.
+        .{ .class_id = core.class.ids.bytecode_function, .func_kind = .normal, .has_prototype = false, .expected_constructor = false },
+        .{ .class_id = core.class.ids.generator_function, .func_kind = .generator, .has_prototype = true, .expected_constructor = false },
+        .{ .class_id = core.class.ids.async_function, .func_kind = .async, .has_prototype = false, .expected_constructor = false },
+        .{ .class_id = core.class.ids.async_generator_function, .func_kind = .async_generator, .has_prototype = true, .expected_constructor = false },
+    };
+
+    for (cases) |case| {
+        const function_object = try Fixture.create(rt, case);
+        defer function_object.value().free(rt);
+        try std.testing.expect(isFunctionLikeClass(case.class_id));
+        try std.testing.expectEqual(case.expected_constructor, try isConstructorLike(ctx, function_object.value()));
+    }
 }
 
 pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
     if (value.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(value) orelse return false;
-        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
+        return isConstructibleFunctionBytecode(fb);
     }
     if (object_ops.functionObjectFromValue(value)) |function_object| {
         const function_value = function_object.functionBytecode() orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
-        return !fb.flags.is_arrow_function and fb.flags.has_prototype and fb.flags.func_kind != .generator and fb.flags.func_kind != .async_generator;
+        return isConstructibleBytecodeFunctionObject(function_object, fb);
     }
     if (object_ops.callableObjectFromValue(value)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
+        if (function_object.class_id == core.class.ids.c_function_data) return false;
         if (function_object.flags.is_html_dda) return false;
         if (function_object.hostFunctionKind() == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
@@ -6428,7 +6066,7 @@ pub fn callBoundFunction(
     global: *core.Object,
     object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const target = object.boundTarget() orelse return error.TypeError;
@@ -6504,13 +6142,13 @@ pub fn throwSetFailureTypeError(ctx: *core.JSContext, global: *core.Object, atom
     return exception_ops.throwTypeErrorMessage(ctx, global, "property is read-only");
 }
 
-pub fn setFailureShouldThrow(caller_function: ?*const bytecode.Bytecode) bool {
+pub fn setFailureShouldThrow(caller_function: ?*const bytecode.FunctionBytecode) bool {
     if (caller_function) |function| return functionRuntimeStrict(function);
     return false;
 }
 
-pub fn functionRuntimeStrict(function: *const bytecode.Bytecode) bool {
-    return function.flags.is_strict or function.flags.runtime_strict;
+pub fn functionRuntimeStrict(function: *const bytecode.FunctionBytecode) bool {
+    return function.isStrictMode() or function.runtimeStrictMode();
 }
 
 pub fn ordinarySetWithReceiver(
@@ -6522,7 +6160,7 @@ pub fn ordinarySetWithReceiver(
     receiver_value: core.JSValue,
     atom_id: core.Atom,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!bool {
     _ = target_value;
@@ -6535,7 +6173,7 @@ pub fn ordinarySetWithReceiver(
         _ = try object_ops.qjsObjectProtoSetterCall(ctx, output, global, receiver_value, value, caller_function, caller_frame);
         return true;
     }
-    if (target.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
+    if (try target.getOwnProperty(ctx.runtime, atom_id)) |own_desc| {
         defer own_desc.destroy(ctx.runtime);
         return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, own_desc, caller_function, caller_frame);
     }
@@ -6550,7 +6188,7 @@ pub fn qjsReflectSetCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
@@ -6616,7 +6254,7 @@ pub fn qjsDefinePropertiesCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
@@ -6637,7 +6275,7 @@ pub fn qjsReflectIsExtensibleCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
@@ -6650,7 +6288,7 @@ pub fn qjsReflectPreventExtensionsCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
@@ -6667,7 +6305,7 @@ pub fn qjsReflectConstructCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2 or !(try isConstructorLike(ctx, args[0]))) return error.TypeError;
@@ -6704,7 +6342,7 @@ pub fn qjsReflectConstructGenericCallable(
     target_value: core.JSValue,
     new_target_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     const resolved = try promise_ops.qjsReflectConstructResolveBound(ctx.runtime, target_value, new_target_value, args);
@@ -6715,37 +6353,34 @@ pub fn qjsReflectConstructGenericCallable(
     defer owned_args_root.deinit();
     const resolved_args: []const core.JSValue = if (rooted_owned_args.len != 0) rooted_owned_args else resolved.args;
 
-    if (object_ops.objectFromValue(resolved.target)) |target_object| {
-        const target_name = call_mod.nativeFunctionNameForVm(ctx.runtime, target_object) catch "";
-        defer if (target_name.len != 0) ctx.runtime.memory.allocator.free(target_name);
-        if (std.mem.eql(u8, target_name, "Array")) {
-            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Array", resolved.new_target, caller_function, caller_frame);
-            return try constructArrayNativeRecordVm(ctx, output, global, target_object, prototype, resolved_args, caller_function, caller_frame);
-        }
-    }
-
-    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", resolved.new_target, caller_function, caller_frame);
-
     if (object_ops.objectFromValue(resolved.target)) |proxy| {
         if (proxy.proxyTarget() != null) {
             return try object_ops.constructProxy(ctx, output, global, resolved.target, proxy, resolved_args, caller_function, caller_frame, resolved.new_target);
         }
     }
 
+    if (object_ops.objectFromValue(resolved.target)) |target_object| {
+        if (target_object.arrayBuiltinMarker() == .constructor) {
+            var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Array", resolved.new_target, caller_function, caller_frame);
+            defer prototype.deinit(ctx.runtime);
+            return try constructArrayNativeRecordVm(ctx, output, global, target_object, prototype.object(), resolved_args, caller_function, caller_frame);
+        }
+    }
+
     if (resolved.target.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(resolved.target) orelse return error.TypeError;
-        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) {
+        if (!isConstructibleFunctionBytecode(fb)) {
             return error.TypeError;
         }
-        const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+        if (fb.isDerivedClassConstructor()) {
+            return @as(?core.JSValue, try callFunctionBytecodeConstruct(ctx, resolved.target, resolved.target, core.JSValue.uninitialized(), resolved_args, &.{}, output, global, resolved.new_target));
+        }
+        var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", resolved.new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
-        if (!fb.flags.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
-        }
-        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, resolved.target, resolved.target, initial_this, resolved_args, &.{}, output, global, resolved.new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, resolved.target, resolved.target, instance, resolved_args, &.{}, output, global, resolved.new_target);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -6757,19 +6392,19 @@ pub fn qjsReflectConstructGenericCallable(
     if (object_ops.functionObjectFromValue(resolved.target)) |function_object| {
         const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-        if (fb.flags.is_arrow_function or !fb.flags.has_prototype or fb.flags.func_kind == .generator or fb.flags.func_kind == .async_generator) {
+        if (!isConstructibleBytecodeFunctionObject(function_object, fb)) {
             return error.TypeError;
         }
-        const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+        if (fb.isDerivedClassConstructor()) {
+            return @as(?core.JSValue, try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, core.JSValue.uninitialized(), resolved_args, function_object.functionCaptures(), output, function_global, resolved.new_target));
+        }
+        var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", resolved.new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        const instance_object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
-        if (!fb.flags.is_derived_class_constructor) {
-            try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
-        }
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        const initial_this = if (fb.flags.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
-        const constructor_this = if (fb.flags.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCaptures(), output, function_global, resolved.new_target, constructor_this);
+        const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, instance, resolved_args, function_object.functionCaptures(), output, function_global, resolved.new_target);
         if (result.isObject()) {
             instance.free(ctx.runtime);
             return result;
@@ -6786,7 +6421,7 @@ pub fn qjsReflectHasCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
@@ -6805,7 +6440,7 @@ pub fn qjsReflectApplyCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len < 1 or !isCallableValue(args[0])) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
@@ -6840,7 +6475,7 @@ pub fn qjsDefinePropertiesOnTarget(
     global: *core.Object,
     target: *core.Object,
     properties_arg: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (properties_arg.isNull() or properties_arg.isUndefined()) return error.TypeError;
@@ -6902,7 +6537,7 @@ pub fn qjsReflectGetCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
@@ -6941,7 +6576,7 @@ pub fn callAccessorSetter(
     object: *core.Object,
     atom_id: core.Atom,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (try object_ops.findPropertyDescriptor(ctx.runtime, object, atom_id)) |desc| {
@@ -6955,176 +6590,12 @@ pub fn callAccessorSetter(
     return false;
 }
 
-pub fn clearPrivateNameRemap(rt: *core.JSRuntime, object: *core.Object) void {
-    if (object.privateRemapFrom().len == 0 and object.privateRemapTo().len == 0) return;
-    const from_slot = object.privateRemapFromSlot();
-    const to_slot = object.privateRemapToSlot();
-    const old_from = from_slot.*;
-    const old_to = to_slot.*;
-    from_slot.* = &.{};
-    to_slot.* = &.{};
-    for (old_from) |atom_id| rt.atoms.free(atom_id);
-    if (old_from.len != 0) rt.memory.free(core.Atom, old_from);
-    for (old_to) |atom_id| rt.atoms.free(atom_id);
-    if (old_to.len != 0) rt.memory.free(core.Atom, old_to);
-}
-
-pub const PrivateNameRemapSnapshot = struct {
-    from: []core.Atom = &.{},
-    to: []core.Atom = &.{},
-
-    pub fn capture(rt: *core.JSRuntime, object: *const core.Object) !PrivateNameRemapSnapshot {
-        const old_from = object.privateRemapFrom();
-        const old_to = object.privateRemapTo();
-        std.debug.assert(old_from.len == old_to.len);
-        if (old_from.len == 0) return .{};
-
-        const from = try rt.memory.alloc(core.Atom, old_from.len);
-        errdefer rt.memory.free(core.Atom, from);
-        const to = try rt.memory.alloc(core.Atom, old_to.len);
-        errdefer rt.memory.free(core.Atom, to);
-
-        for (old_from, 0..) |atom_id, index| from[index] = rt.atoms.dup(atom_id);
-        for (old_to, 0..) |atom_id, index| to[index] = rt.atoms.dup(atom_id);
-        return .{ .from = from, .to = to };
-    }
-
-    pub fn restore(self: *PrivateNameRemapSnapshot, rt: *core.JSRuntime, object: *core.Object) void {
-        clearPrivateNameRemap(rt, object);
-        if (self.from.len != 0) {
-            object.privateRemapFromSlot().* = self.from;
-            object.privateRemapToSlot().* = self.to;
-            self.from = &.{};
-            self.to = &.{};
-        }
-    }
-
-    pub fn deinit(self: *PrivateNameRemapSnapshot, rt: *core.JSRuntime) void {
-        for (self.from) |atom_id| rt.atoms.free(atom_id);
-        if (self.from.len != 0) rt.memory.free(core.Atom, self.from);
-        for (self.to) |atom_id| rt.atoms.free(atom_id);
-        if (self.to.len != 0) rt.memory.free(core.Atom, self.to);
-        self.from = &.{};
-        self.to = &.{};
-    }
-};
-
-pub fn appendPrivateNameRemap(rt: *core.JSRuntime, object: *core.Object, from_atom: core.Atom, to_atom: core.Atom) !void {
-    const from_slot = try object.privateRemapFromSlotEnsured(rt);
-    const to_slot = try object.privateRemapToSlotEnsured(rt);
-    for (from_slot.*, 0..) |existing, idx| {
-        if (existing != from_atom) continue;
-        const retained = rt.atoms.dup(to_atom);
-        const old = to_slot.*[idx];
-        to_slot.*[idx] = retained;
-        rt.atoms.free(old);
-        return;
-    }
-
-    const new_len = from_slot.*.len + 1;
-    const from = try rt.memory.alloc(core.Atom, new_len);
-    errdefer rt.memory.free(core.Atom, from);
-    const to = try rt.memory.alloc(core.Atom, new_len);
-    errdefer rt.memory.free(core.Atom, to);
-    @memcpy(from[0..from_slot.*.len], from_slot.*);
-    @memcpy(to[0..to_slot.*.len], to_slot.*);
-    from[new_len - 1] = rt.atoms.dup(from_atom);
-    to[new_len - 1] = rt.atoms.dup(to_atom);
-    const old_from = from_slot.*;
-    const old_to = to_slot.*;
-    from_slot.* = from;
-    to_slot.* = to;
-    if (old_from.len != 0) rt.memory.free(core.Atom, old_from);
-    if (old_to.len != 0) rt.memory.free(core.Atom, old_to);
-}
-
-pub fn installLexicalPrivateNameRemap(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    caller_frame: ?*frame_mod.Frame,
-    bound_names: []const core.Atom,
-) !void {
-    if (bound_names.len == 0) return;
-    var snapshot = try PrivateNameRemapSnapshot.capture(rt, object);
-    defer snapshot.deinit(rt);
-    errdefer snapshot.restore(rt, object);
-
-    for (bound_names) |atom_id| {
-        const mapped = remapPrivateAtomFromFrame(rt, caller_frame, atom_id);
-        if (mapped != atom_id) try appendPrivateNameRemap(rt, object, atom_id, mapped);
-    }
-}
-
-pub fn installFreshPrivateNameRemap(rt: *core.JSRuntime, object: *core.Object, old_names: []const core.Atom) !void {
-    if (old_names.len == 0) return;
-    var snapshot = try PrivateNameRemapSnapshot.capture(rt, object);
-    defer snapshot.deinit(rt);
-    errdefer snapshot.restore(rt, object);
-
-    for (old_names) |old_atom| {
-        const name = rt.atoms.name(old_atom) orelse return error.TypeError;
-        const fresh_atom = try rt.atoms.newSymbol(name, .private);
-        defer rt.atoms.free(fresh_atom);
-        try appendPrivateNameRemap(rt, object, old_atom, fresh_atom);
-    }
-}
-
-pub fn copyPrivateNameRemap(rt: *core.JSRuntime, dst: *core.Object, src: *const core.Object) !void {
-    if (src.privateRemapFrom().len == 0) return;
-    const from = try rt.memory.alloc(core.Atom, src.privateRemapFrom().len);
-    errdefer rt.memory.free(core.Atom, from);
-    const to = try rt.memory.alloc(core.Atom, src.privateRemapTo().len);
-    errdefer rt.memory.free(core.Atom, to);
-    var initialized: usize = 0;
-    errdefer {
-        for (from[0..initialized]) |atom_id| rt.atoms.free(atom_id);
-        for (to[0..initialized]) |atom_id| rt.atoms.free(atom_id);
-    }
-    for (src.privateRemapFrom(), 0..) |atom_id, idx| {
-        from[idx] = rt.atoms.dup(atom_id);
-        to[idx] = rt.atoms.dup(src.privateRemapTo()[idx]);
-        initialized += 1;
-    }
-    const from_slot = try dst.privateRemapFromSlotEnsured(rt);
-    const to_slot = try dst.privateRemapToSlotEnsured(rt);
-    const old_from = from_slot.*;
-    const old_to = to_slot.*;
-    from_slot.* = from;
-    to_slot.* = to;
-    for (old_from) |atom_id| rt.atoms.free(atom_id);
-    if (old_from.len != 0) rt.memory.free(core.Atom, old_from);
-    for (old_to) |atom_id| rt.atoms.free(atom_id);
-    if (old_to.len != 0) rt.memory.free(core.Atom, old_to);
-}
-
-pub fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, caller_frame: ?*frame_mod.Frame, atom_id: core.Atom) core.Atom {
-    if (rt.atoms.kind(atom_id) != .private) return atom_id;
-    const frame = caller_frame orelse return atom_id;
-    const function_object = object_ops.objectFromValue(frame.current_function) orelse return atom_id;
-    const function_atom = object_ops.remapPrivateAtomFromObject(rt, function_object, atom_id);
-    if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObject() orelse return atom_id;
-    return object_ops.remapPrivateAtomFromObject(rt, home_object, atom_id);
-}
-
-pub fn remapPrivateAtomForOperation(
-    rt: *core.JSRuntime,
-    caller_frame: ?*frame_mod.Frame,
-    object: ?*const core.Object,
-    atom_id: core.Atom,
-) core.Atom {
-    const frame_atom = remapPrivateAtomFromFrame(rt, caller_frame, atom_id);
-    if (frame_atom != atom_id) return frame_atom;
-    if (object) |target| return object_ops.remapPrivateAtomFromObject(rt, target, atom_id);
-    return atom_id;
-}
-
 pub fn inOp(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const rhs = try stack.pop();
@@ -7149,7 +6620,7 @@ pub fn instanceofOp(
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const rhs = try stack.pop();
@@ -7211,7 +6682,7 @@ pub fn nativeFunctionNameValueLocal(rt: *core.JSRuntime, object: *core.Object) !
         if (dispatch_name.isString()) return dispatch_name;
         dispatch_name.free(rt);
     }
-    const name_value = object.getProperty(core.atom.ids.name);
+    const name_value = try object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) {
         name_value.free(rt);
         return error.TypeError;
@@ -7225,7 +6696,7 @@ pub fn isBlockedByUnscopables(
     global: *core.Object,
     object_value: core.JSValue,
     atom_id: core.Atom,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol) orelse return false;
@@ -7237,7 +6708,7 @@ pub fn isBlockedByUnscopables(
     return coercion_ops.valueTruthy(blocked);
 }
 
-pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
     const rt = ctx.runtime;
     const count = @min(function.varRefNamesLen(), frame.var_refs.len);
     var idx: usize = 0;
@@ -7264,21 +6735,21 @@ pub fn lookupFrameVarRef(ctx: *core.JSContext, global: *core.Object, function: *
     return null;
 }
 
-pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.Bytecode, idx: usize) bool {
-    if (idx >= function.closure_var.len) return false;
-    const cv = function.closure_var[idx];
-    if (cv.is_lexical) return false;
-    return switch (cv.closure_type) {
+pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.FunctionBytecode, idx: usize) bool {
+    if (idx >= function.closureVar().len) return false;
+    const cv = function.closureVar()[idx];
+    if (cv.isLexical()) return false;
+    return switch (cv.closureType()) {
         .global, .global_ref, .global_decl => true,
         else => false,
     };
 }
 
-pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
-    const count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..count], 0..) |vd, idx| {
+pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
+    const count = @min(function.varDefs().len, frame.locals.len);
+    for (function.varDefs()[0..count], 0..) |vd, idx| {
         if (!atomIdOrNameEql(rt, vd.var_name, atom_id)) continue;
-        if (vd.scope_level != 0) continue;
+        if (vd.hasScope()) continue;
         return value_slot.loadOwned(&frame.locals[idx]);
     }
     return null;
@@ -7293,13 +6764,13 @@ pub fn atomIdOrNameEql(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) b
 
 pub fn setFrameLocalValue(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    const count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..count], 0..) |vd, idx| {
+    const count = @min(function.varDefs().len, frame.locals.len);
+    for (function.varDefs()[0..count], 0..) |vd, idx| {
         if (vd.var_name != atom_id) continue;
         if (!varDefIsEvalHoistedVar(vd)) continue;
         value_slot.replaceOwned(ctx.runtime, &frame.locals[idx], value);
@@ -7310,7 +6781,7 @@ pub fn setFrameLocalValue(
 
 pub fn setFrameVarRefValue(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
     value: core.JSValue,

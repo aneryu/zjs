@@ -16,7 +16,7 @@ const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 fn stringFromValue(value: core.JSValue) ?*core.string.String {
     return value.asStringBody();
@@ -259,7 +259,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }
