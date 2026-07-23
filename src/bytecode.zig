@@ -8538,7 +8538,12 @@ pub const pipeline_resolve_labels = struct {
 
     fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
         if (pc + 2 > code.len) return null;
-        if (code[pc] == opcode.op.undefined and code[pc + 1] == opcode.op.drop) return 2;
+        if (code[pc] == opcode.op.undefined and
+            code[pc + 1] == opcode.op.drop and
+            !hasJumpTargetTo(code, pc + 1))
+        {
+            return 2;
+        }
         return null;
     }
 
