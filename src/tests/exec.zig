@@ -19,6 +19,17 @@ const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
+const InterruptTestState = struct {
+    hits: usize = 0,
+    stop: bool = false,
+
+    fn run(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        self.hits += 1;
+        return self.stop;
+    }
+};
+
 test "eval lazily materializes a bare core context global before root closure construction" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -32,6 +43,381 @@ test "eval lazily materializes a bare core context global before root closure co
     defer result.free(rt);
     try helpers.expectStringValueBytes(result, "lazy-global-ok");
     try std.testing.expect(ctx.global != null);
+}
+
+test "interrupt budget survives Machine replacement and bypasses catch markers" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // Machine A takes the fresh-context poll, then is destroyed.
+    const setup = try js.eval("globalThis.__w2_interrupt_state = 0;");
+    setup.free(js.runtime);
+
+    // Leave two polls: Machine B entry consumes one and its first conditional
+    // branch consumes the second while the try marker is active.
+    const priming_polls: usize = @intCast(core.JSContext.interrupt_counter_reset - 2);
+    for (0..priming_polls) |_| {
+        try std.testing.expect(!js.context.pollInterrupt());
+    }
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+
+    try std.testing.expectError(
+        error.Interrupted,
+        js.eval(
+            \\try {
+            \\    for (let i = 0; i < 1; i++) {}
+            \\    globalThis.__w2_interrupt_state = 1;
+            \\} catch (_) {
+            \\    globalThis.__w2_interrupt_state = 2;
+            \\} finally {
+            \\    globalThis.__w2_interrupt_state = 3;
+            \\}
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expect(js.context.hasException());
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const state_key = try js.runtime.internAtom("__w2_interrupt_state");
+    defer js.runtime.atoms.free(state_key);
+    const observed = try global.getProperty(state_key);
+    defer observed.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 0), observed.asInt32());
+
+    var exception = try js.takeExceptionInfo();
+    defer exception.deinit();
+    const message = try exception.getMessage(std.testing.allocator);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings("InternalError: interrupted", message);
+    try std.testing.expect(!js.context.hasException());
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "uncatchable interrupt skips outer inline for-of close and catch" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__w2_iterator_closed = false;
+        \\globalThis.__w2_outer_caught = false;
+        \\globalThis.__w2_spin = function () { while (true) {} };
+        \\globalThis.__w2_iterable = {
+        \\    [Symbol.iterator]() {
+        \\        return {
+        \\            next() { return { value: 1, done: false }; },
+        \\            return() {
+        \\                globalThis.__w2_iterator_closed = true;
+        \\                return {};
+        \\            }
+        \\        };
+        \\    }
+        \\};
+        \\globalThis.__w2_interrupt_outer = function () {
+        \\    try {
+        \\        for (const value of __w2_iterable) {
+        \\            __w2_spin(value);
+        \\        }
+        \\    } catch (error) {
+        \\        globalThis.__w2_outer_caught = true;
+        \\    }
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__w2_interrupt_outer");
+    defer js.runtime.atoms.free(outer_key);
+    const closed_key = try js.runtime.internAtom("__w2_iterator_closed");
+    defer js.runtime.atoms.free(closed_key);
+    const caught_key = try js.runtime.internAtom("__w2_outer_caught");
+    defer js.runtime.atoms.free(caught_key);
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 100;
+
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            outer,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+
+    const closed = try global.getProperty(closed_key);
+    defer closed.free(js.runtime);
+    const caught = try global.getProperty(caught_key);
+    defer caught.free(js.runtime);
+    try std.testing.expectEqual(false, closed.asBool().?);
+    try std.testing.expectEqual(false, caught.asBool().?);
+
+    const exception = js.context.takeException();
+    exception.free(js.runtime);
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "nested calls and generator resumes share one Realm interrupt cadence" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__w2_inner = function () { return 7; };
+        \\globalThis.__w2_outer = function () { return __w2_inner(); };
+        \\globalThis.__w2_numeric_branch = function (value) {
+        \\    if (value) return 11;
+        \\    return 12;
+        \\};
+        \\globalThis.__w2_constructor = function (value) {
+        \\    this.value = value;
+        \\};
+        \\globalThis.__w2_forwarded = function () { return 13; };
+        \\globalThis.__w2_forward_wrapper = function () {
+        \\    return __w2_forwarded.call();
+        \\};
+        \\globalThis.__w2_generator = (function* () { yield 1; yield 2; })();
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const outer_key = try js.runtime.internAtom("__w2_outer");
+    defer js.runtime.atoms.free(outer_key);
+    const numeric_branch_key = try js.runtime.internAtom("__w2_numeric_branch");
+    defer js.runtime.atoms.free(numeric_branch_key);
+    const constructor_key = try js.runtime.internAtom("__w2_constructor");
+    defer js.runtime.atoms.free(constructor_key);
+    const forward_wrapper_key = try js.runtime.internAtom("__w2_forward_wrapper");
+    defer js.runtime.atoms.free(forward_wrapper_key);
+    const generator_key = try js.runtime.internAtom("__w2_generator");
+    defer js.runtime.atoms.free(generator_key);
+    const next_key = try js.runtime.internAtom("next");
+    defer js.runtime.atoms.free(next_key);
+
+    const outer = try global.getProperty(outer_key);
+    defer outer.free(js.runtime);
+    const numeric_branch = try global.getProperty(numeric_branch_key);
+    defer numeric_branch.free(js.runtime);
+    const constructor = try global.getProperty(constructor_key);
+    defer constructor.free(js.runtime);
+    const forward_wrapper = try global.getProperty(forward_wrapper_key);
+    defer forward_wrapper.free(js.runtime);
+    const generator = try global.getProperty(generator_key);
+    defer generator.free(js.runtime);
+    const generator_object = try core.Object.expect(generator);
+    const next = try generator_object.getProperty(next_key);
+    defer next.free(js.runtime);
+
+    var state = InterruptTestState{};
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+
+    // The host-to-outer entry leaves one poll; the nested/tail call consumes it.
+    js.context.interrupt_counter = 2;
+    const nested_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        outer,
+        &.{},
+        null,
+        null,
+    );
+    defer nested_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 7), nested_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+
+    // A numeric condition takes the generic branch handler. It must not also
+    // pay the boolean/plain-object hot-handler poll.
+    js.context.interrupt_counter = 2;
+    const branch_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        numeric_branch,
+        &.{core.JSValue.int32(1)},
+        null,
+        null,
+    );
+    defer branch_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 11), branch_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 2), state.hits);
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+
+    // Bytecode construction has one JS_CallConstructorInternal poll and one
+    // JS_CallInternal poll, including the simple-field constructor fast path.
+    js.context.interrupt_counter = 2;
+    const constructed = try engine.exec.call_runtime.constructValueOrBytecode(
+        js.context,
+        null,
+        global,
+        constructor,
+        &.{core.JSValue.int32(23)},
+        null,
+        null,
+    );
+    defer constructed.free(js.runtime);
+    try std.testing.expectEqual(@as(usize, 3), state.hits);
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+
+    // The same-Machine Function.prototype.call fast path fuses an outer native
+    // call and an inner target call, but both entries still consume the budget.
+    js.context.interrupt_counter = 3;
+    const forwarded_result = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        forward_wrapper,
+        &.{},
+        null,
+        null,
+    );
+    defer forwarded_result.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 13), forwarded_result.asInt32());
+    try std.testing.expectEqual(@as(usize, 4), state.hits);
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+
+    // Generator.next has one native call entry and one bytecode-resume entry.
+    // The second next creates another Machine but continues the same counter.
+    js.context.interrupt_counter = 3;
+    const first = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        generator,
+        next,
+        &.{},
+        null,
+        null,
+    );
+    first.free(js.runtime);
+    try std.testing.expectEqual(@as(usize, 4), state.hits);
+    try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
+
+    const second = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        generator,
+        next,
+        &.{},
+        null,
+        null,
+    );
+    second.free(js.runtime);
+    try std.testing.expectEqual(@as(usize, 5), state.hits);
+    // The resumed body reaches its next yield through one additional jump poll.
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset - 2, js.context.interrupt_counter);
+}
+
+test "cross-Realm interrupt polls charge caller entry and callee body separately" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var parent_facade = zjs.JSContext.borrowCore(js.context);
+    const parent_global = try parent_facade.globalObject();
+    const child_holder = try engine.exec.call.createRealmObject(js.context);
+    defer child_holder.free(js.runtime);
+    const child_record = try core.Object.expect(child_holder);
+    const child = child_record.realmContext() orelse return error.TestUnexpectedResult;
+    const child_global = try engine.exec.zjs_vm.contextGlobal(child);
+
+    var child_facade = zjs.JSContext.borrowCore(child);
+    const setup = try child_facade.eval(
+        \\globalThis.__w2_body_ran = false;
+        \\globalThis.__w2_foreign = function () {
+        \\    globalThis.__w2_body_ran = true;
+        \\    while (true) {}
+        \\};
+    , .{});
+    setup.free(js.runtime);
+
+    const foreign_key = try js.runtime.internAtom("__w2_foreign");
+    defer js.runtime.atoms.free(foreign_key);
+    const body_key = try js.runtime.internAtom("__w2_body_ran");
+    defer js.runtime.atoms.free(body_key);
+    const foreign = try child_global.getProperty(foreign_key);
+    defer foreign.free(js.runtime);
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+
+    // Call-entry polling precedes the function-Realm switch.
+    js.context.interrupt_counter = 1;
+    child.interrupt_counter = 100;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            parent_global,
+            core.JSValue.undefinedValue(),
+            foreign,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
+    try std.testing.expectEqual(@as(i32, 100), child.interrupt_counter);
+    const before_body = try child_global.getProperty(body_key);
+    defer before_body.free(js.runtime);
+    try std.testing.expectEqual(false, before_body.asBool().?);
+
+    const caller_exception = js.context.takeException();
+    defer caller_exception.free(js.runtime);
+    const caller_error = try core.Object.expect(caller_exception);
+    const caller_internal_error = object_ops.constructorPrototypeFromGlobal(js.runtime, parent_global, "InternalError") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(caller_internal_error, caller_error.getPrototype().?);
+
+    // Once entered, the loop backedge polls the callee Realm and constructs its
+    // InternalError from that Realm's intrinsic.
+    js.context.interrupt_counter = 100;
+    child.interrupt_counter = 1;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            parent_global,
+            core.JSValue.undefinedValue(),
+            foreign,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(@as(i32, 99), js.context.interrupt_counter);
+    try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, child.interrupt_counter);
+    const after_body = try child_global.getProperty(body_key);
+    defer after_body.free(js.runtime);
+    try std.testing.expectEqual(true, after_body.asBool().?);
+
+    const callee_exception = child.takeException();
+    defer callee_exception.free(js.runtime);
+    const callee_error = try core.Object.expect(callee_exception);
+    const callee_internal_error = object_ops.constructorPrototypeFromGlobal(js.runtime, child_global, "InternalError") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(callee_internal_error, callee_error.getPrototype().?);
+    try std.testing.expectEqual(@as(usize, 2), state.hits);
 }
 
 const CrossRealmNativeProbe = struct {

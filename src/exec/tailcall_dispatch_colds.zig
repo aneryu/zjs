@@ -22,6 +22,7 @@ const arith_vm = @import("vm_arith.zig");
 const control_vm = @import("vm_control.zig");
 const call_vm = @import("vm_call.zig");
 const class_vm = @import("object_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const literal_vm = @import("vm_literal.zig");
 const iter_vm = @import("iterator_ops.zig");
 const regexp_vm = @import("vm_regexp.zig");
@@ -320,43 +321,43 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.goto] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump32(vm.function, vm.frame);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.goto16] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump16(vm.function, vm.frame);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.goto8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             control_vm.jump8(vm.function, vm.frame);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.if_false] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, false);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.if_true] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch32(vm.ctx, vm.stack, vm.function, vm.frame, true);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.if_false8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, false);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.if_true8] = h(struct {
         fn b(vm: *Vm) HostError!void {
             try control_vm.branch8(vm.ctx, vm.stack, vm.function, vm.frame, true);
-            if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+            try exception_ops.pollInterrupt(vm.ctx, vm.global);
         }
     }.b);
     t[op.gosub] = h(struct {

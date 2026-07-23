@@ -88,7 +88,7 @@ pub fn runWithOutput(
             .direct_eval_vars_reach_global = true,
             .global_declarations_prevalidated = true,
         }) catch |err| {
-            if (!realm.preserve_uncaught_exception and err != error.JSException and realm.hasException()) realm.clearException();
+            if (!realm.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and realm.hasException()) realm.clearException();
             return err;
         };
     }
@@ -272,7 +272,7 @@ pub fn runWithArgs(
             .stop_on_yield = stop_on_yield,
         });
     return result catch |err| {
-        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
+        if (!ctx.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and ctx.hasException()) ctx.clearException();
         return err;
     };
 }
@@ -407,6 +407,14 @@ pub const CallEnv = struct {
 };
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(env.ctx, env.global);
+    return runWithCallEnvAfterInterruptPoll(env);
+}
+
+/// Final bytecode entry after its caller-side `JS_CallInternal` poll has
+/// already completed. This named boundary prevents cross-Realm calls from
+/// charging both caller and callee before the body starts.
+pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
     var effective = env;
     if (env.function.realmContext()) |realm| {
         // Canonical FunctionBytecode carries its publication RealmRef. Switch
@@ -721,7 +729,6 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .output = m.output,
         .code_base = func.byteCode().ptr,
         .catch_target = level.catch_target,
-        .poller = .init(m.ctx.runtime),
     };
     return tailcall_dispatch.run(&vm);
 }

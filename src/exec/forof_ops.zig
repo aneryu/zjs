@@ -329,6 +329,11 @@ pub fn closeStackTopForOfIteratorForPendingErrorInternal(
     stack: *stack_mod.Stack,
     frame: ?*const frame_mod.Frame,
 ) !void {
+    // QuickJS uncatchable interruptions skip the catch-offset/iterator-close
+    // stack scan entirely. In particular, do not take/rethrow the pending
+    // InternalError here: that would clear its uncatchable execution flag and
+    // allow an outer catch/finally to consume it.
+    if (ctx.exceptionIsUncatchable()) return;
     _ = frame;
     const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
     defer if (pending_exception) |value| value.free(ctx.runtime);

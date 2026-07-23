@@ -28,6 +28,7 @@ const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const inline_calls = @import("inline_calls.zig");
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const HostError = @import("exceptions.zig").HostError;
 
 // Op-helper modules (same aliases as zjs_vm.zig's dispatchLoop).
@@ -151,12 +152,6 @@ pub const Vm = struct {
     /// it through `Machine.loadCurrentLevel` on every frame switch, so a catch
     /// handler set in one frame doesn't leak into another.
     catch_target: *?usize,
-
-    /// Interrupt poll state — qjs polls on every OP_goto (quickjs.c:18822,
-    /// `js_poll_interrupts`) and at JS_CallInternal entry (17787). Gated on an
-    /// installed handler (`poller.active`) like the old dispatchLoop leg: with
-    /// none installed the jump handlers stay poll-free.
-    poller: control_vm.InterruptPoller,
 
     /// Outcome payloads (ride here, not in the u32 return).
     return_value: JSValue = JSValue.undefinedValue(),
@@ -466,9 +461,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
@@ -488,9 +481,7 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -506,9 +497,7 @@ inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThi
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -538,9 +527,7 @@ inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -566,9 +553,7 @@ inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -582,9 +567,7 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -599,9 +582,7 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -615,9 +596,7 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -629,9 +608,7 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -645,9 +622,7 @@ inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb:
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, code_ptr);
 }
 
@@ -671,9 +646,7 @@ inline fn pushMovedAndEnter(
         if (!recovered) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
@@ -697,9 +670,7 @@ inline fn pushBorrowedIteratorAndEnter(
         defer for (moved) |value| value.free(vm.ctx.runtime);
         return pushMovedAndEnter(vb, vm, target, &moved, .for_of_next, depth);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
@@ -767,9 +738,10 @@ inline fn pushForwardedAndEnter(
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    if (vm.poller.active) {
-        vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-    }
+    // This fused frame represents two QuickJS calls: the native
+    // Function.prototype.call entry and its inner JS_Call target entry.
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
@@ -1434,9 +1406,9 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.stack.setTopPtr(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
-                        if (vm.poller.active) {
-                            vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
-                        }
+                        // Fused Function.prototype.call + target call entries.
+                        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+                        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
                         return enterEntry(vm, entry, target.fb.byteCode().ptr);
                     }
                     vm.stack.setTopPtr(sp);
@@ -2807,10 +2779,9 @@ pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) ca
 // byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Branch
 // targets never reach code_end: the jump-aware epilogues terminate every
 // branch-to-end path with a real return op, and finalize rejects reachable
-// falloff — so no bounds test is needed here. When an interrupt
-// handler is installed, the conditional fast paths route to their cold handlers;
-// those consume the condition, update the pc, and then poll in the same order as
-// QuickJS OP_if_{true,false}{,8}.
+// falloff — so no bounds test is needed here. Boolean/plain-object fast paths
+// poll locally; values needing the generic ToBoolean path route untouched to
+// the cold handler, which performs the one semantic poll after conversion.
 inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
     const operand_pc = @intFromPtr(pc + 1) - @intFromPtr(vm.code_base);
     const diff: i8 = @bitCast(pc[1]);
@@ -2822,11 +2793,8 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
     // qjs CASE(OP_goto) polls interrupts on every unconditional jump — the
     // loop back edge (quickjs.c:18822-18826). Without this, a pure loop never
     // reaches a poll point and an installed interrupt handler can't abort it.
-    if (vm.poller.active) {
-        @branchHint(.unlikely);
-        vm.publish(pc, sp);
-        vm.poller.poll(vm.ctx.runtime) catch |e| return vm.fail(e);
-    }
+    vm.publish(pc, sp);
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
 // The boolean fast path (a comparison result — the hot loop condition) inlines; a
@@ -2841,12 +2809,10 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 // I-cache pin (see op_return): keeps this hot handler's entry alignment
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
-    if (vm.poller.active) {
-        @branchHint(.unlikely);
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    }
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
+        vm.publish(pc, sp);
+        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2855,6 +2821,8 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // from the original pc/sp; branch8 consumes its operand, so shrink the GC
         // root window before the inline free just as stack.pop() does there.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        vm.publish(pc, sp);
+        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
@@ -2863,12 +2831,10 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.poller.active) {
-        @branchHint(.unlikely);
-        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    }
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
+        vm.publish(pc, sp);
+        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2876,6 +2842,8 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         // See op_if_false8: non-HTMLDDA objects are truthy, and the consumed
         // operand's root must be removed before its inline rc==1 destruction.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+        vm.publish(pc, sp);
+        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
@@ -3326,7 +3294,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 }
                 // qjs polls at call entry (js_poll_interrupts, quickjs.c:17787),
                 // so unbounded recursion is also abortable.
-                if (vm.poller.active) try vm.poller.poll(vm.ctx.runtime);
+                try exception_ops.pollInterrupt(vm.ctx, vm.global);
                 reloadTop(vm, &pc, &sp, &var_buf);
             },
             .suspended => return vm.return_value,

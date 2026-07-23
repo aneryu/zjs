@@ -8520,6 +8520,44 @@ test "runtime stack and interrupt state are stored" {
     try std.testing.expectEqual(@as(usize, 1), interrupt_count);
 }
 
+test "realm interrupt cadence advances without a handler and is realm-local" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const realm_a = try core.JSContext.create(rt);
+    defer realm_a.destroy();
+    const realm_b = try core.JSContext.create(rt);
+    defer realm_b.destroy();
+
+    const interval: usize = @intCast(core.JSContext.interrupt_counter_reset);
+
+    // A raw QuickJS context starts at zero. Its first semantic poll therefore
+    // resets the counter even when the Runtime has no handler installed.
+    try std.testing.expect(!realm_a.pollInterrupt());
+    for (0..(interval - 1)) |_| {
+        try std.testing.expect(!realm_a.pollInterrupt());
+    }
+
+    var interrupt_count: usize = 0;
+    rt.setInterruptHandler(interruptOnce, &interrupt_count);
+    defer rt.setInterruptHandler(null, null);
+
+    // Installing a handler does not reset the already-advanced Realm budget.
+    try std.testing.expect(realm_a.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 1), interrupt_count);
+
+    // Every Realm owns an independent counter with the same initial-zero rule.
+    try std.testing.expect(realm_b.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 2), interrupt_count);
+
+    // Callback-to-callback distance is exactly the QuickJS 10,000-poll reset.
+    for (0..(interval - 1)) |_| {
+        try std.testing.expect(!realm_a.pollInterrupt());
+    }
+    try std.testing.expect(realm_a.pollInterrupt());
+    try std.testing.expectEqual(@as(usize, 3), interrupt_count);
+}
+
 test "ordinary objects define own data properties and descriptors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

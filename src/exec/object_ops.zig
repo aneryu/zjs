@@ -96,7 +96,6 @@ const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrType
 const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
 const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
-const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
 const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
 const readUtf16CodePoint = string_ops.readUtf16CodePoint;
@@ -5184,11 +5183,11 @@ pub fn constructProxy(
     const trap = try getValueProperty(ctx, output, global, handler_value, construct_atom, caller_function, caller_frame);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) {
-        if (try qjsReflectConstructGenericCallable(ctx, output, global, target_value, new_target_value, args, caller_function, caller_frame)) |value| return value;
         // A proxy without a construct trap forwards the original new.target.
-        // Native constructors need it for the observable prototype lookup;
-        // replacing it with the target reorders that lookup after argument
-        // coercion and gives instances the wrong prototype.
+        // Re-enter the ordinary constructor boundary instead of flattening a
+        // bound target chain: QuickJS polls each forwarded Proxy/Bound
+        // constructor entry, and native constructors still need the original
+        // new.target for their observable prototype lookup.
         return call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, target_value, args, caller_function, caller_frame, new_target_value);
     }
     if (!isCallableValue(trap)) return error.TypeError;

@@ -481,6 +481,11 @@ pub const JSContext = struct {
     regexp_result_shape: ?*shape.Shape = null,
     regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
     random_state: u64 = 0x1234_5678_9abc_def0,
+    /// QuickJS `JSContext.interrupt_counter`. The raw context allocation is
+    /// zero-filled, so the first semantic poll takes the slow arm and resets
+    /// this to `interrupt_counter_reset`; later callbacks are exactly one reset
+    /// interval apart. Runtime handler installation never mutates this state.
+    interrupt_counter: i32 = 0,
     preallocated_oom_error: ?JSValue = null,
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
@@ -602,6 +607,22 @@ pub const JSContext = struct {
 
     pub fn stackLimit(self: JSContext) usize {
         return self.runtime.stackSize();
+    }
+
+    pub const interrupt_counter_reset: i32 = 10_000;
+
+    /// Advance this Realm's persistent interrupt cadence. Returns true only
+    /// when the Runtime handler requests termination. The counter advances and
+    /// resets even while no handler is installed.
+    pub inline fn pollInterrupt(self: *JSContext) bool {
+        self.interrupt_counter -= 1;
+        if (self.interrupt_counter > 0) return false;
+        return self.pollInterruptSlow();
+    }
+
+    noinline fn pollInterruptSlow(self: *JSContext) bool {
+        self.interrupt_counter = interrupt_counter_reset;
+        return self.runtime.runInterruptHandler();
     }
 
     pub fn setTrackUnhandledRejections(self: *JSContext, enabled: bool) void {
@@ -994,9 +1015,19 @@ pub const JSContext = struct {
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
         const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
         old.free(self.runtime);
         self.runtime.current_exception = value;
         return JSValue.exception();
+    }
+
+    pub fn setExceptionUncatchable(self: *JSContext, uncatchable: bool) void {
+        std.debug.assert(!uncatchable or self.hasException());
+        self.runtime.current_exception_uncatchable = uncatchable;
+    }
+
+    pub fn exceptionIsUncatchable(self: JSContext) bool {
+        return self.hasException() and self.runtime.current_exception_uncatchable;
     }
 
     pub fn hasException(self: JSContext) bool {
@@ -1007,12 +1038,14 @@ pub const JSContext = struct {
         if (!self.hasException()) return JSValue.undefinedValue();
         const result = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
         return result;
     }
 
     pub fn clearException(self: *JSContext) void {
         const old = self.runtime.current_exception;
         self.runtime.current_exception = JSValue.uninitialized();
+        self.runtime.current_exception_uncatchable = false;
         old.free(self.runtime);
     }
 

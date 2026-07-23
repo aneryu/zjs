@@ -30,6 +30,7 @@ const op = bytecode.opcode.op;
 const eval_ret_atom: core.Atom = core.atom.ids.ret;
 const runWithArgs = zjs_vm.runWithArgs;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
+const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
 const exceptions = @import("exceptions.zig");
 
 const string_ops = @import("string_ops.zig");
@@ -199,6 +200,7 @@ pub fn tryCatchInFrame(
     err: anytype,
 ) !bool {
     core.profile.recordSlowPath();
+    if (ctx.exceptionIsUncatchable()) return false;
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
     // Run before testing the local catch target: an uncaught abrupt completion
@@ -351,6 +353,21 @@ pub fn callValueOrBytecodePreRooted(
     return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame);
 }
 
+/// VM fast-call fallback after the opcode path has already performed the
+/// caller-Realm call-entry poll.
+pub fn callValueOrBytecodePreRootedAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame);
+}
+
 /// Slow-path collection prototype methods reached by name without a baked
 /// native id (the id-carrying path already routed through
 /// `call_mod.callNativeFunctionRecord` above). Replaces the retired
@@ -478,7 +495,21 @@ noinline fn callRawFunctionBytecode(
     // Class direct-call rejection is the bytecode entry OP_check_ctor, matching
     // qjs JS_CallInternal. Ordinary functions use this same undefined-new.target
     // path; no class-syntax fact is carried in the FunctionBytecode.
-    return callFunctionBytecode(function_ctx, func, func, this_value, args, &.{}, output, function_global);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        function_ctx,
+        func,
+        func,
+        this_value,
+        args,
+        &.{},
+        output,
+        function_global,
+        true,
+        null,
+        null,
+        null,
+        core.JSValue.undefinedValue(),
+    );
 }
 
 noinline fn callFunctionObjectBytecode(
@@ -500,7 +531,7 @@ noinline fn callFunctionObjectBytecode(
     const function_ctx = function_object.bytecodeFunctionRealmContext() orelse return error.InvalidBuiltinRegistry;
     const function_global = function_ctx.global orelse return error.InvalidBuiltinRegistry;
     // OP_check_ctor owns class direct-call rejection in the function realm.
-    return callFunctionBytecodeModeState(function_ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue());
+    return callFunctionBytecodeModeStateAfterInterruptPoll(function_ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, function_global, true, null, null, null, core.JSValue.undefinedValue());
 }
 
 noinline fn callNativeCallableObject(
@@ -565,6 +596,20 @@ noinline fn callNativeCallableObject(
 }
 
 fn callValueOrBytecodeDispatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+    return callValueOrBytecodeDispatchAfterInterruptPoll(ctx, output, global, this_value, func, args, caller_function, caller_frame);
+}
+
+fn callValueOrBytecodeDispatchAfterInterruptPoll(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -1534,6 +1579,24 @@ pub fn constructValueOrBytecodeWithNewTarget(
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) HostError!core.JSValue {
+    // QuickJS JS_CallConstructorInternal polls before proxy/bound dispatch and
+    // before testing constructibility. Recursive proxy/bound forwarding enters
+    // this wrapper again, so every semantic constructor entry charges the
+    // caller Realm exactly once.
+    try exception_ops.pollInterrupt(ctx, global);
+    return constructValueOrBytecodeWithNewTargetAfterInterruptPoll(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+}
+
+fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) HostError!core.JSValue {
     if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null) {
             return object_ops.constructProxy(ctx, output, global, func, object, args, caller_function, caller_frame, new_target);
@@ -1737,7 +1800,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         if (fb.isDerivedClassConstructor()) {
             return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target);
         }
-        if (try constructSimpleFieldConstructor(ctx, func, function_object, fb, args, new_target)) |constructed| return constructed;
+        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target)) |constructed| return constructed;
         const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
         const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target);
@@ -1984,6 +2047,7 @@ const SimpleFieldConstructorPattern = struct {
 
 fn constructSimpleFieldConstructor(
     ctx: *core.JSContext,
+    caller_global: *core.Object,
     func: core.JSValue,
     function_object: *core.Object,
     fb: *const bytecode.FunctionBytecode,
@@ -1997,6 +2061,10 @@ fn constructSimpleFieldConstructor(
 
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
+    // This fast path replaces the bytecode JS_CallInternal body, but not its
+    // caller-Realm entry poll. QuickJS creates the base instance first and then
+    // takes this second constructor poll before executing field stores.
+    try exception_ops.pollInterrupt(ctx, caller_global);
     for (pattern.atoms[0..pattern.len], pattern.arg_indices[0..pattern.len]) |atom_id, arg_index| {
         const value = if (arg_index < args.len) args[arg_index] else core.JSValue.undefinedValue();
         try instance.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
@@ -4492,7 +4560,12 @@ pub fn callFunctionBytecodeConstruct(
     global: *core.Object,
     new_target_value: core.JSValue,
 ) !core.JSValue {
-    return callFunctionBytecodeModeState(ctx, func, current_function_value, this_value, args, var_refs, output, global, true, null, null, null, new_target_value) catch |err| {
+    // A bytecode constructor takes the JS_CallConstructorInternal poll above
+    // and then a second JS_CallInternal poll, both in the caller Realm. Only
+    // after this point does the bytecode body switch to its function Realm.
+    const interrupt_global = ctx.global orelse global;
+    try exception_ops.pollInterrupt(ctx, interrupt_global);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(ctx, func, current_function_value, this_value, args, var_refs, output, global, true, null, null, null, new_target_value) catch |err| {
         if (err == error.DerivedThisUninitialized) {
             // `global` is already the final bytecode callee's realm, while
             // `ctx` is still JS_CallConstructorInternal's caller_ctx. QuickJS
@@ -4520,6 +4593,39 @@ pub fn callFunctionBytecodeMode(
 }
 
 pub fn callFunctionBytecodeModeState(
+    ctx: *core.JSContext,
+    func: core.JSValue,
+    current_function_value: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const *core.VarRef,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    defer_generators: bool,
+    generator_state: ?*core.Object,
+    resume_value: ?core.JSValue,
+    stop_before_pc: ?usize,
+    new_target_value: core.JSValue,
+) HostError!core.JSValue {
+    try exception_ops.pollInterrupt(ctx, global);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        ctx,
+        func,
+        current_function_value,
+        this_value,
+        args,
+        var_refs,
+        output,
+        global,
+        defer_generators,
+        generator_state,
+        resume_value,
+        stop_before_pc,
+        new_target_value,
+    );
+}
+
+fn callFunctionBytecodeModeStateAfterInterruptPoll(
     ctx: *core.JSContext,
     func: core.JSValue,
     current_function_value: core.JSValue,
@@ -4571,7 +4677,7 @@ pub fn callFunctionBytecodeModeState(
     // the queue machine (exec/async_generator.zig execBody) — no promise
     // wrapping here (qjs async_func_resume returns the raw value/ret code,
     // quickjs.c:20951).
-    return runWithCallEnv(.{
+    return runWithCallEnvAfterInterruptPoll(.{
         .ctx = ctx,
         .stack = &nested_stack,
         .function = nested,

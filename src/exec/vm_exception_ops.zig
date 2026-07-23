@@ -351,6 +351,23 @@ pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, mes
     return error.StackOverflow;
 }
 
+/// QuickJS `JS_ThrowInterrupted`: retain a real InternalError in the polled
+/// Realm while making it uncatchable by JavaScript catch markers.
+pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
+    const error_value = try createNamedError(ctx, global, "InternalError", "interrupted");
+    _ = ctx.throwValue(error_value);
+    ctx.setExceptionUncatchable(true);
+    return error.Interrupted;
+}
+
+/// One semantic call/jump poll. Counter ownership and cadence live in the
+/// RealmContext; error construction stays in exec because it needs that
+/// Realm's InternalError intrinsic.
+pub inline fn pollInterrupt(ctx: *core.JSContext, global: *core.Object) !void {
+    if (!ctx.pollInterrupt()) return;
+    return throwInterrupted(ctx, global);
+}
+
 /// Throw `InternalError "stack overflow"` and return the native-recursion
 /// sentinel. Mirrors QuickJS `JS_ThrowStackOverflow` (quickjs.c:7789-7791). The
 /// `error.StackOverflow` sentinel is mapped back to this InternalError by
@@ -539,6 +556,7 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         // Native C-stack recursion guard (QuickJS JS_ThrowStackOverflow ->
         // InternalError "stack overflow", quickjs.c:7789-7791).
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
+        error.Interrupted => .{ .name = "InternalError", .message = "interrupted" },
         // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c:4078/4368/4655/4898).
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
         // qjs OP_check_ctor_return deliberately creates this TypeError in the

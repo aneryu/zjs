@@ -809,6 +809,10 @@ pub const JSRuntime = struct {
     malloc_gc_threshold: usize = default_gc_threshold,
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
+    /// QuickJS `current_exception_is_uncatchable`. Interrupt termination owns
+    /// a real pending InternalError but bytecode catch markers must not consume
+    /// it. Every ordinary throw resets this flag.
+    current_exception_uncatchable: bool = false,
     /// QuickJS runtime execution state. These fields describe the currently
     /// executing stack, not a Realm, and are shared by every context belonging
     /// to this runtime.
@@ -991,6 +995,7 @@ pub const JSRuntime = struct {
         rt.malloc_gc_threshold = options.gc_threshold;
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
+        rt.current_exception_uncatchable = false;
         rt.call_depth = 0;
         rt.native_call_depth = 0;
         rt.formatting_error_stack = false;
@@ -1069,6 +1074,7 @@ pub const JSRuntime = struct {
         }
         const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
+        self.current_exception_uncatchable = false;
         current_exception.free(self);
         self.job_queue.deinit();
         self.drainDeferredWeakValueFrees();

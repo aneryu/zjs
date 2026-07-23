@@ -406,6 +406,11 @@ pub noinline fn callMethod(
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    exception_ops.pollInterrupt(ctx, global) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -425,7 +430,7 @@ pub noinline fn callMethod(
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecodePreRooted(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodePreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
@@ -493,6 +498,11 @@ pub noinline fn tailCallMethod(
     const obj = stack.values[region_base];
     const func = stack.values[region_base + 1];
     const args: []const core.JSValue = stack.values[region_base + 2 ..][0..argc];
+    exception_ops.pollInterrupt(ctx, global) catch |err| {
+        call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
+        return err;
+    };
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args, function, frame) catch |err| {
         call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
@@ -510,7 +520,7 @@ pub noinline fn tailCallMethod(
     const result = if (maybe_array_result) |array_result|
         array_result
     else
-        call_runtime.callValueOrBytecodePreRooted(ctx, output, global, obj, func, args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodePreRootedAfterInterruptPoll(ctx, output, global, obj, func, args, function, frame) catch |err| {
             call_runtime.popOwnedStackRegion(ctx.runtime, stack, region_base);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .handled;
             return err;

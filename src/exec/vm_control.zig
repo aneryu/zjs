@@ -22,23 +22,6 @@ pub const ThrowError = error{
     TypeError,
 };
 
-pub const InterruptPoller = struct {
-    active: bool,
-    budget: usize = 0,
-
-    pub fn init(rt: *const core.JSRuntime) InterruptPoller {
-        return .{ .active = rt.hasInterruptHandler() };
-    }
-
-    pub fn poll(self: *InterruptPoller, rt: *core.JSRuntime) !void {
-        if (!self.active) return;
-        self.budget +%= 1;
-        if ((self.budget & 0x3ff) == 0 and rt.runInterruptHandler()) {
-            return error.Interrupted;
-        }
-    }
-};
-
 pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
     // qjs OP_return is an ownership MOVE off the operand stack, never a dup:
