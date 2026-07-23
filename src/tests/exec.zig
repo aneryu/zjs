@@ -6760,7 +6760,9 @@ test "dynamic import loader mutates only the enqueue Realm registry after public
             const self: *@This() = @ptrCast(@alignCast(userdata orelse return error.ModuleNotFound));
             const name = ctx.runtime.internAtom("w1e-enqueue-realm-record") catch return error.OutOfMemory;
             defer ctx.runtime.atoms.free(name);
-            _ = ctx.modules.createFresh(ctx.runtime, name) catch return error.OutOfMemory;
+            var pending = core.module.PendingDefinition.init(&ctx.runtime.memory, &ctx.runtime.atoms);
+            defer pending.deinit(ctx.runtime);
+            _ = ctx.modules.prepareFreshTarget(name, &pending) catch return error.OutOfMemory;
             self.saw_expected_realm = ctx == self.expected;
             self.active_registry_has_record = ctx.modules.find(name) != null;
             self.facade_registry_has_record = self.facade.modules.find(name) != null;
@@ -14143,6 +14145,314 @@ test "module cycles do not hoist a body-leading named function expression" {
     try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
+test "W1e: module namespace exposes sorted immutable live export properties" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./namespace-source.mjs",
+            .path = "/fixture/namespace-source.mjs",
+            .source =
+            \\export function update(next) { omega = next; }
+            \\export let omega = 2;
+            \\export const alpha = 1;
+            ,
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import * as namespace from './namespace-source.mjs';
+        \\
+        \\assert.sameValue(Object.getPrototypeOf(namespace), null);
+        \\assert.sameValue(namespace.omega, 2);
+        \\namespace.update(7);
+        \\assert.sameValue(namespace.omega, 7);
+        \\
+        \\const descriptor = Object.getOwnPropertyDescriptor(namespace, "omega");
+        \\assert.sameValue(descriptor.value, 7);
+        \\assert.sameValue(descriptor.writable, true);
+        \\assert.sameValue(descriptor.enumerable, true);
+        \\assert.sameValue(descriptor.configurable, false);
+        \\
+        \\let assignmentRejected = false;
+        \\try { namespace.omega = 9; }
+        \\catch (error) { assignmentRejected = error instanceof TypeError; }
+        \\assert.sameValue(assignmentRejected, true);
+        \\assert.sameValue(Reflect.set(namespace, "omega", 9), false);
+        \\
+        \\let defineRejected = false;
+        \\try { Object.defineProperty(namespace, "omega", { value: 9 }); }
+        \\catch (error) { defineRejected = error instanceof TypeError; }
+        \\assert.sameValue(defineRejected, true);
+        \\
+        \\let deleteRejected = false;
+        \\try { delete namespace.omega; }
+        \\catch (error) { deleteRejected = error instanceof TypeError; }
+        \\assert.sameValue(deleteRejected, true);
+        \\assert.sameValue(namespace.omega, 7);
+        \\
+        \\const keys = Reflect.ownKeys(namespace);
+        \\assert.sameValue(keys.length, 4);
+        \\assert.sameValue(keys[0], "alpha");
+        \\assert.sameValue(keys[1], "omega");
+        \\assert.sameValue(keys[2], "update");
+        \\assert.sameValue(keys[3], Symbol.toStringTag);
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hostHooks(&host),
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("", output.buffered());
+}
+
+test "module namespace has and super set preserve uninitialized export semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./self.mjs",
+            .path = "/fixture/main.mjs",
+            .source = "",
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import * as namespace from './self.mjs';
+        \\
+        \\assert.sameValue('value' in namespace, true);
+        \\assert.sameValue(Reflect.has(namespace, 'value'), true);
+        \\
+        \\class Base { constructor() { return namespace; } }
+        \\class Derived extends Base {
+        \\  constructor() {
+        \\    super();
+        \\    super.value = 14;
+        \\  }
+        \\}
+        \\assert.throws(ReferenceError, function() { new Derived(); });
+        \\
+        \\class NonWritableBase { constructor() { return namespace; } }
+        \\Object.defineProperty(NonWritableBase.prototype, 'value', {
+        \\  value: 0,
+        \\  writable: false,
+        \\});
+        \\class NonWritableDerived extends NonWritableBase {
+        \\  constructor() {
+        \\    super();
+        \\    super.value = 14;
+        \\  }
+        \\}
+        \\assert.throws(TypeError, function() { new NonWritableDerived(); });
+        \\
+        \\export let value = 42;
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hostHooks(&host),
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("", output.buffered());
+}
+
+test "W1e: named aliases and namespace reexports share live canonical bindings" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./binding-source.mjs",
+            .path = "/fixture/binding-source.mjs",
+            .source =
+            \\export let value = 3;
+            \\export const token = {};
+            \\export function setValue(next) { value = next; }
+            ,
+            .kind = .esm,
+        },
+        .{
+            .specifier = "./binding-bridge.mjs",
+            .path = "/fixture/binding-bridge.mjs",
+            .source =
+            \\export * as namespace from './binding-source.mjs';
+            \\export { value as alias, token, setValue } from './binding-source.mjs';
+            ,
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import { alias, token, setValue, namespace as reexportedNamespace } from './binding-bridge.mjs';
+        \\import { value as directAlias, token as directToken } from './binding-source.mjs';
+        \\import * as directNamespace from './binding-source.mjs';
+        \\
+        \\assert.sameValue(alias, 3);
+        \\assert.sameValue(alias, directAlias);
+        \\assert.sameValue(token, directToken);
+        \\assert.sameValue(token, directNamespace.token);
+        \\assert.sameValue(reexportedNamespace, directNamespace);
+        \\
+        \\setValue(41);
+        \\assert.sameValue(alias, 41);
+        \\assert.sameValue(directAlias, 41);
+        \\assert.sameValue(directNamespace.value, 41);
+        \\assert.sameValue(reexportedNamespace.value, 41);
+        \\assert.sameValue(reexportedNamespace.token, token);
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hostHooks(&host),
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("", output.buffered());
+}
+
+test "W1e: missing indirect export precedes bad import wiring" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./empty.mjs",
+            .path = "/fixture/empty.mjs",
+            .source = "export const present = 1;",
+            .kind = .esm,
+        },
+        .{
+            .specifier = "./link-failures.mjs",
+            .path = "/fixture/link-failures.mjs",
+            .source =
+            \\export { missingIndirect as indirectFirst } from './empty.mjs';
+            \\import { badImport } from './empty.mjs';
+            \\export const marker = typeof badImport;
+            ,
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    // QuickJS js_inner_module_linking validates every indirect export before
+    // wiring import_entries. Its error call uses the re-exporting module and
+    // public export name, so this must not report badImport or empty.mjs.
+    try std.testing.expectError(
+        error.SyntaxError,
+        js.evalFileModuleGraphWithHostHooks(
+            "import './link-failures.mjs';",
+            &output,
+            "/fixture/main.mjs",
+            hostHooks(&host),
+            std.testing.allocator,
+        ),
+    );
+    try std.testing.expect(js.context.hasException());
+
+    var exception = try js.takeExceptionInfo();
+    defer exception.deinit();
+    const message = try exception.getMessage(std.testing.allocator);
+    defer std.testing.allocator.free(message);
+    try std.testing.expectEqualStrings(
+        "SyntaxError: Could not find export 'indirectFirst' in module '/fixture/link-failures.mjs'",
+        message,
+    );
+    try std.testing.expectEqualStrings("", output.buffered());
+}
+
+test "W1e: one host source load spans declaration body TLA resume and dynamic import" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./single-load.mjs",
+            .path = "/fixture/single-load.mjs",
+            .source =
+            \\globalThis.__w1eSingleLoadRuns = (globalThis.__w1eSingleLoadRuns || 0) + 1;
+            \\globalThis.__w1eSingleLoadPhases = ["body"];
+            \\export function read() { return value; }
+            \\export let value = 1;
+            \\await 0;
+            \\value = 2;
+            \\globalThis.__w1eSingleLoadPhases.push("resume");
+            ,
+            .kind = .esm,
+        },
+    };
+    var resolve_calls: usize = 0;
+    var load_calls: usize = 0;
+    const host = HostFixture{
+        .modules = &modules,
+        .resolve_calls = &resolve_calls,
+        .load_calls = &load_calls,
+    };
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import * as staticNamespace from './single-load.mjs';
+        \\
+        \\assert.sameValue(staticNamespace.value, 2);
+        \\assert.sameValue(staticNamespace.read(), 2);
+        \\assert.sameValue(globalThis.__w1eSingleLoadRuns, 1);
+        \\assert.sameValue(globalThis.__w1eSingleLoadPhases.join(","), "body,resume");
+        \\
+        \\const dynamicNamespace = await import('./single-load.mjs');
+        \\assert.sameValue(dynamicNamespace, staticNamespace);
+        \\assert.sameValue(dynamicNamespace.value, 2);
+        \\assert.sameValue(dynamicNamespace.read(), 2);
+        \\assert.sameValue(globalThis.__w1eSingleLoadRuns, 1);
+        \\assert.sameValue(globalThis.__w1eSingleLoadPhases.join(","), "body,resume");
+    ,
+        &output,
+        "/fixture/main.mjs",
+        hostHooks(&host),
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expect(resolve_calls > 0);
+    // Resolution may be repeated for normalization, but handing source to the
+    // compiler is a one-shot host operation for one canonical module record.
+    try std.testing.expectEqual(@as(usize, 1), load_calls);
+    try std.testing.expectEqualStrings("", output.buffered());
+}
+
+fn retainedModuleExportCell(
+    record: *const core.module.ModuleRecord,
+    export_name: core.Atom,
+) ?*core.VarRef {
+    for (record.exports, 0..) |entry, index| {
+        if (entry.export_name != export_name) continue;
+        const value = record.retainedExportCellValue(@intCast(index)) orelse return null;
+        return core.VarRef.fromValue(value);
+    }
+    return null;
+}
+
 test "same module specifier keeps record cells namespace import meta and error state per Realm" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -14192,16 +14502,14 @@ test "same module specifier keeps record cells namespace import meta and error s
 
     const value_name = try js.runtime.internAtom("value");
     defer js.runtime.atoms.free(value_name);
-    const value_a_index = record_a.findLocalBindingIndex(value_name) orelse return error.TestUnexpectedResult;
-    const value_b_index = record_b.findLocalBindingIndex(value_name) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(!record_a.local_bindings[value_a_index].cell.same(record_b.local_bindings[value_b_index].cell));
+    const value_a_cell = retainedModuleExportCell(record_a, value_name) orelse return error.TestUnexpectedResult;
+    const value_b_cell = retainedModuleExportCell(record_b, value_name) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(value_a_cell != value_b_cell);
 
     const function_name = try js.runtime.internAtom("realmFunction");
     defer js.runtime.atoms.free(function_name);
-    const function_a_index = record_a.findLocalBindingIndex(function_name) orelse return error.TestUnexpectedResult;
-    const function_b_index = record_b.findLocalBindingIndex(function_name) orelse return error.TestUnexpectedResult;
-    const function_a_cell = core.VarRef.fromValue(record_a.local_bindings[function_a_index].cell) orelse return error.TestUnexpectedResult;
-    const function_b_cell = core.VarRef.fromValue(record_b.local_bindings[function_b_index].cell) orelse return error.TestUnexpectedResult;
+    const function_a_cell = retainedModuleExportCell(record_a, function_name) orelse return error.TestUnexpectedResult;
+    const function_b_cell = retainedModuleExportCell(record_b, function_name) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!function_a_cell.varRefValue().same(function_b_cell.varRefValue()));
 
     const namespace_a = try engine.exec.module.moduleNamespaceValue(js.context, module_name);
@@ -14220,6 +14528,107 @@ test "same module specifier keeps record cells namespace import meta and error s
     defer runs_b.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 1), runs_a.asInt32());
     try std.testing.expectEqual(@as(?i32, 1), runs_b.asInt32());
+}
+
+test "context module eval does not rerun evaluated or errored records" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const evaluated_filename = "context-eval-evaluated-once.mjs";
+    const first = try js.evalWithOptions(
+        \\globalThis.__contextEvaluatedRuns =
+        \\  (globalThis.__contextEvaluatedRuns || 0) + 1;
+        \\export const value = 1;
+    , .{ .mode = .module, .filename = evaluated_filename });
+    defer first.free(js.runtime);
+    try std.testing.expect(first.isUndefined());
+
+    const second = try js.evalWithOptions(
+        \\globalThis.__contextEvaluatedRuns += 100;
+        \\export const value = 2;
+    , .{ .mode = .module, .filename = evaluated_filename });
+    defer second.free(js.runtime);
+    try std.testing.expect(second.isUndefined());
+
+    const evaluated_name = try js.runtime.internAtom("__contextEvaluatedRuns");
+    defer js.runtime.atoms.free(evaluated_name);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const evaluated_runs = try global.getProperty(evaluated_name);
+    defer evaluated_runs.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), evaluated_runs.asInt32());
+
+    const errored_filename = "context-eval-errored-once.mjs";
+    try std.testing.expectError(
+        error.JSException,
+        js.evalWithOptions(
+            \\globalThis.__contextErroredRuns =
+            \\  (globalThis.__contextErroredRuns || 0) + 1;
+            \\throw new Error("cached context module failure");
+        , .{ .mode = .module, .filename = errored_filename }),
+    );
+    const errored_name = try js.runtime.internAtom(errored_filename);
+    defer js.runtime.atoms.free(errored_name);
+    const errored_record = js.context.modules.find(errored_name) orelse
+        return error.TestUnexpectedResult;
+    const cached_exception = errored_record.eval_exception orelse
+        return error.TestUnexpectedResult;
+    const first_exception = js.context.takeException();
+    defer first_exception.free(js.runtime);
+    try std.testing.expect(first_exception.same(cached_exception));
+
+    try std.testing.expectError(
+        error.JSException,
+        js.evalWithOptions(
+            \\globalThis.__contextErroredRuns += 100;
+            \\export const value = 2;
+        , .{ .mode = .module, .filename = errored_filename }),
+    );
+    const second_exception = js.context.takeException();
+    defer second_exception.free(js.runtime);
+    try std.testing.expect(second_exception.same(cached_exception));
+
+    const errored_runs_name = try js.runtime.internAtom("__contextErroredRuns");
+    defer js.runtime.atoms.free(errored_runs_name);
+    const errored_runs = try global.getProperty(errored_runs_name);
+    defer errored_runs.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), errored_runs.asInt32());
+}
+
+test "context module eval resumes TLA from its reaction FIFO position" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\const actual = [];
+        \\let resolveAwaited;
+        \\const awaited = new Promise(resolve => resolveAwaited = resolve);
+        \\awaited.then(() => actual.push("before"));
+        \\Promise.resolve().then(() => {
+        \\  awaited.then(() => actual.push("after"));
+        \\  resolveAwaited(42);
+        \\});
+        \\const value = await awaited;
+        \\actual.push("module:" + value);
+        \\let rejection = "not caught";
+        \\try {
+        \\  await Promise.reject(new Error("tla rejection"));
+        \\} catch (error) {
+        \\  rejection = error.message;
+        \\}
+        \\Promise.resolve().then(() => {
+        \\  globalThis.__contextTlaResult =
+        \\    actual.join(",") + "|" + rejection;
+        \\});
+    , .{ .mode = .module, .filename = "context-eval-tla-fifo.mjs" });
+    defer result.free(js.runtime);
+
+    const checked = try js.eval(
+        \\assert.sameValue(
+        \\  globalThis.__contextTlaResult,
+        \\  "before,module:42,after|tla rejection"
+        \\);
+    );
+    defer checked.free(js.runtime);
 }
 
 test "Runtime loader keeps same-path TLA continuations and waiters in parent and child Realms" {
@@ -14640,6 +15049,8 @@ const HostFixtureModule = struct {
 
 const HostFixture = struct {
     modules: []const HostFixtureModule,
+    resolve_calls: ?*usize = null,
+    load_calls: ?*usize = null,
 
     fn findBySpecifierOrPath(self: HostFixture, specifier: []const u8) ?HostFixtureModule {
         for (self.modules) |module| {
@@ -14672,6 +15083,7 @@ fn resolveFixtureModule(
 ) anyerror!helpers.TestEngine.HostHooks.ResolvedModule {
     _ = referrer;
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
+    if (host.resolve_calls) |calls| calls.* += 1;
     const module = host.findBySpecifierOrPath(specifier) orelse return error.ModuleNotFound;
     return .{
         .specifier = try allocator.dupe(u8, specifier),
@@ -14686,6 +15098,7 @@ fn loadFixtureModule(
     allocator: std.mem.Allocator,
 ) anyerror!helpers.TestEngine.HostHooks.LoadedModule {
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
+    if (host.load_calls) |calls| calls.* += 1;
     const module = host.findByPath(resolved.path) orelse return error.ModuleNotFound;
     return .{
         .source = module.source,

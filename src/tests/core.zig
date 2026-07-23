@@ -10,6 +10,7 @@ extern "c" fn tmpfile() ?*std.c.FILE;
 const ModuleAutoInitFixture = struct {
     owner: core.property.AutoInitModuleOwner = .{ .resolve = resolve },
     expected_realm: *core.gc.Header,
+    expected_atom: ?core.Atom = null,
     calls: usize = 0,
     failed_once: bool = false,
     result: Result,
@@ -30,9 +31,13 @@ const ModuleAutoInitFixture = struct {
     fn resolve(
         owner: *const core.property.AutoInitModuleOwner,
         realm_header: *core.gc.Header,
+        atom_id: core.Atom,
     ) anyerror!core.property.AutoInitMaterialization {
         const self: *ModuleAutoInitFixture = @constCast(@fieldParentPtr("owner", owner));
         if (realm_header != self.expected_realm) return error.InvalidBuiltinRegistry;
+        if (self.expected_atom) |expected| {
+            if (atom_id != expected) return error.InvalidBuiltinRegistry;
+        }
         self.calls += 1;
         return switch (self.result) {
             .value => |value| .{ .value = value.dup() },
@@ -51,6 +56,26 @@ const ModuleAutoInitFixture = struct {
         };
     }
 };
+
+fn publishFreshModule(
+    registry: *core.module.Registry,
+    module_name: core.Atom,
+    pending: *core.module.PendingDefinition,
+) !*core.ModuleRecord {
+    const prepared = try registry.prepareFreshTarget(module_name, pending);
+    if (!prepared.isFresh()) return error.TestUnexpectedResult;
+    return prepared.record();
+}
+
+fn publishEmptyModule(
+    rt: *core.JSRuntime,
+    registry: *core.module.Registry,
+    module_name: core.Atom,
+) !*core.ModuleRecord {
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    return publishFreshModule(registry, module_name, &pending);
+}
 
 test "QuickJS value tag constants are locked" {
     try std.testing.expectEqual(@as(i32, -9), core.Tag.first);
@@ -1332,13 +1357,14 @@ test "GC keeps module registry unique symbol atoms until release" {
     const binding_name = try rt.internAtom("localSymbol");
     defer rt.atoms.free(binding_name);
 
-    const record = try ctx.modules.create(module_name);
-    try record.ensureLocalBinding(binding_name);
-    const binding_index = record.findLocalBindingIndex(binding_name).?;
-
     const binding_symbol = try rt.atoms.newValueSymbol("gc-module-binding-symbol");
-    record.local_bindings[binding_index].initialized = true;
-    record.local_bindings[binding_index].cell = try rt.symbolValue(binding_symbol);
+    const binding_cell = try core.VarRef.createClosed(rt, try rt.symbolValue(binding_symbol));
+
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    try pending.addExport(binding_name, binding_name, 0);
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    record.publishRetainedExportCellNoFail(0, binding_cell.valueRef());
 
     const import_meta_symbol = try rt.atoms.newValueSymbol("gc-module-import-meta-symbol");
     record.import_meta = try rt.symbolValue(import_meta_symbol);
@@ -1347,9 +1373,7 @@ test "GC keeps module registry unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(binding_symbol) != null);
     try std.testing.expect(rt.atoms.name(import_meta_symbol) != null);
 
-    const old_binding_cell = record.local_bindings[binding_index].cell;
-    record.local_bindings[binding_index].cell = core.JSValue.undefinedValue();
-    old_binding_cell.free(rt);
+    record.clearRetainedExportCellNoFail(rt, 0);
     if (record.import_meta) |old_import_meta| old_import_meta.free(rt);
     record.import_meta = null;
 
@@ -1779,7 +1803,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqual(core.class.PayloadKind.generator, rt.classes.record(core.class.ids.generator).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.c_function).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.function, rt.classes.record(core.class.ids.bytecode_function).?.payload_kind);
-    try std.testing.expectEqual(core.class.PayloadKind.module_namespace, rt.classes.record(core.class.ids.module_ns).?.payload_kind);
+    try std.testing.expectEqual(core.class.PayloadKind.none, rt.classes.record(core.class.ids.module_ns).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.weak_ref, core.class.standardPayloadKind(core.class.ids.weak_ref));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.disposable_stack));
     try std.testing.expectEqual(core.class.PayloadKind.disposable_stack, core.class.standardPayloadKind(core.class.ids.async_disposable_stack));
@@ -3476,7 +3500,7 @@ test "leaf noncarrier payloads carry no borrowed realm compensation" {
     try std.testing.expect(!@hasField(core.object.ArgumentsPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(core.object.VarRefPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(core.object.StdFilePayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(core.object.ModuleNamespacePayload, "realm_global_ptr"));
+    try std.testing.expectEqual(core.class.PayloadKind.none, core.class.standardPayloadKind(core.class.ids.module_ns));
     try std.testing.expect(!@hasField(core.object.PromisePayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(core.object.WeakRefPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(core.object.RegExpPayload, "realm_global_ptr"));
@@ -3735,15 +3759,40 @@ test "bytecode function state uses the inline qjs function arm" {
     try std.testing.expectEqual(home, function.functionHomeObject().?);
 }
 
-test "module namespace uses payload storage" {
+test "module namespace uses shape-only live-binding storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
     defer namespace.value().free(rt);
+    const export_name = try rt.internAtom("value");
+    defer rt.atoms.free(export_name);
 
-    try std.testing.expect(namespace.u.payload != null);
-    try std.testing.expectEqual(core.class.PayloadKind.module_namespace, namespace.flags.class_payload_kind);
+    const cell = try core.VarRef.createClosed(rt, core.JSValue.int32(17));
+    cell.is_const = true;
+    try namespace.defineModuleVarRefProperty(rt, export_name, cell);
+    namespace.preventExtensions();
+
+    try std.testing.expect(namespace.u.payload == null);
+    try std.testing.expectEqual(core.class.PayloadKind.none, namespace.flags.class_payload_kind);
+    try std.testing.expectEqual(@as(usize, 1), namespace.shape_ref.prop_count);
+    try std.testing.expectEqual(core.property.Kind.var_ref, namespace.propKindAt(0));
+    try std.testing.expectEqual(cell, namespace.prop_values[0].slot.var_ref);
+
+    const desc = (try namespace.getOwnProperty(rt, export_name)).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(@as(?bool, true), desc.writable);
+    try std.testing.expectEqual(@as(?bool, true), desc.enumerable);
+    try std.testing.expectEqual(@as(?bool, false), desc.configurable);
+    try std.testing.expectEqual(@as(?i32, 17), desc.value.asInt32());
+
+    try std.testing.expectError(error.ReadOnly, namespace.setProperty(rt, export_name, core.JSValue.int32(18)));
+    try namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(17), true, true, false));
+    try std.testing.expectError(
+        error.ReadOnly,
+        namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(18), true, true, false)),
+    );
+    try std.testing.expect(!namespace.deleteProperty(rt, export_name));
 }
 
 test "shapes retain property atoms and compare transitions" {
@@ -7446,29 +7495,22 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     try expectNoLiveGc(rt);
 }
 
-test "module namespace payload cell cycle is released by runtime cycle removal" {
+test "module namespace shape VarRef cycle is released by runtime cycle removal" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
-    const cell = try core.Object.create(rt, core.class.ids.object, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("namespace");
     defer rt.atoms.free(key);
     const export_name = try rt.internAtom("value");
+    defer rt.atoms.free(export_name);
 
-    try cell.initVarRefPayload(rt, target.value().dup());
     try target.defineOwnProperty(rt, key, core.Descriptor.data(namespace.value(), true, true, true));
-
-    const payload = namespace.moduleNamespacePayload().?;
-    payload.names = try rt.memory.alloc(core.Atom, 1);
-    payload.names[0] = export_name;
-    const cells = try rt.memory.alloc(core.JSValue, 1);
-    cells[0] = cell.value().dup();
-    try namespace.setModuleNamespaceCells(rt, cells);
+    const cell = try core.VarRef.createClosed(rt, target.value().dup());
+    try namespace.defineModuleVarRefProperty(rt, export_name, cell);
 
     namespace.value().free(rt);
-    cell.value().free(rt);
     target.value().free(rt);
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -7692,7 +7734,7 @@ test "realm module registry keeps published record addresses stable" {
 
     const first_name = try rt.internAtom("stable-first.mjs");
     defer rt.atoms.free(first_name);
-    const first = try ctx.modules.create(first_name);
+    const first = try publishEmptyModule(rt, &ctx.modules, first_name);
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.ModuleRecord, "header"));
     try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().kind);
 
@@ -7700,7 +7742,7 @@ test "realm module registry keeps published record addresses stable" {
     for (0..48) |index| {
         const text = try std.fmt.bufPrint(&buffer, "stable-{d}.mjs", .{index});
         const name = try rt.internAtom(text);
-        _ = try ctx.modules.create(name);
+        _ = try publishEmptyModule(rt, &ctx.modules, name);
         rt.atoms.free(name);
         try std.testing.expectEqual(first, ctx.modules.find(first_name).?);
     }
@@ -7719,13 +7761,15 @@ test "module registries isolate records between realms" {
     const binding_name = try rt.internAtom("only-in-first");
     defer rt.atoms.free(binding_name);
 
-    const first = try first_ctx.modules.create(module_name);
-    const second = try second_ctx.modules.create(module_name);
+    var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer first_pending.deinit(rt);
+    try first_pending.addExport(binding_name, binding_name, 0);
+    const first = try publishFreshModule(&first_ctx.modules, module_name, &first_pending);
+    const second = try publishEmptyModule(rt, &second_ctx.modules, module_name);
     try std.testing.expect(first != second);
     try std.testing.expectEqual(first, first_ctx.modules.find(module_name).?);
     try std.testing.expectEqual(second, second_ctx.modules.find(module_name).?);
 
-    try first.addExport(binding_name, binding_name);
     first.setStatus(.linked);
     try std.testing.expectEqual(@as(usize, 1), first.exports.len);
     try std.testing.expectEqual(core.module.Status.linked, first.status);
@@ -7742,7 +7786,7 @@ test "module registry ownership is one-way and does not retain its realm" {
     const module_name = try rt.internAtom("no-module-realm-backref.mjs");
     defer rt.atoms.free(module_name);
     const realm_refs = ctx.header.meta().rc;
-    const record = try ctx.modules.create(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     try std.testing.expectEqual(realm_refs, ctx.header.meta().rc);
 
     record.retain();
@@ -7760,7 +7804,7 @@ test "module finalizer self-unlinks a still-linked realm registry node" {
     const module_name = try rt.internAtom("finalizer-self-unlink.mjs");
     defer rt.atoms.free(module_name);
     const owner_atom_refs = rt.atoms.refCount(module_name).?;
-    const record = try ctx.modules.create(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     try std.testing.expectEqual(owner_atom_refs + 1, rt.atoms.refCount(module_name).?);
     try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
 
@@ -7787,7 +7831,7 @@ test "externally retained module outlives realm registry teardown" {
     const module_name = try rt.internAtom("retained-after-realm.mjs");
     defer rt.atoms.free(module_name);
     const owner_atom_refs = rt.atoms.refCount(module_name).?;
-    const record = try ctx.modules.create(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     var record_retained = false;
     defer if (record_retained) record.release(rt);
     record.retain();
@@ -7808,7 +7852,7 @@ test "externally retained module outlives realm registry teardown" {
     try std.testing.expectEqual(owner_atom_refs, rt.atoms.refCount(module_name).?);
 }
 
-test "module record participates in realm object cycle collection" {
+test "module namespace strong edge participates in realm object cycle collection" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7817,11 +7861,7 @@ test "module record participates in realm object cycle collection" {
 
     const module_name = try rt.internAtom("realm-module-cycle.mjs");
     defer rt.atoms.free(module_name);
-    const binding_name = try rt.internAtom("realmOwner");
-    defer rt.atoms.free(binding_name);
-    const record = try ctx.modules.create(module_name);
-    try record.ensureLocalBinding(binding_name);
-    const binding_index = record.findLocalBindingIndex(binding_name).?;
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
 
     const realm_record = try core.Object.create(rt, core.class.ids.object, null);
     var object_transferred = false;
@@ -7829,8 +7869,7 @@ test "module record participates in realm object cycle collection" {
     var realm_owner = core.RealmRef.retain(ctx);
     defer realm_owner.deinit();
     try realm_record.installOwnedRealmRef(rt, &realm_owner);
-    record.local_bindings[binding_index].cell = realm_record.value();
-    record.local_bindings[binding_index].initialized = true;
+    record.publishModuleNamespaceNoFail(realm_record.value());
     object_transferred = true;
 
     ctx.destroy();
@@ -7862,13 +7901,13 @@ test "Nth module allocation OOM leaves registry and Atom ownership recoverable" 
 
     // Seed one record, then fail a later backing allocation so several
     // publications commit before the selected Nth create is rejected.
-    _ = try ctx.modules.create(names[0]);
+    _ = try publishEmptyModule(rt, &ctx.modules, names[0]);
     const successful_creates_before_failure = 7;
     failing_allocator.fail_index = failing_allocator.alloc_index + successful_creates_before_failure;
 
     var failed_index: ?usize = null;
     create_until_failure: for (1..names.len) |index| {
-        _ = ctx.modules.create(names[index]) catch |err| {
+        _ = publishEmptyModule(rt, &ctx.modules, names[index]) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             failed_index = index;
             break :create_until_failure;
@@ -7882,7 +7921,7 @@ test "Nth module allocation OOM leaves registry and Atom ownership recoverable" 
     try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed - 1]).?);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    const recovered = try ctx.modules.create(names[failed]);
+    const recovered = try publishEmptyModule(rt, &ctx.modules, names[failed]);
     try std.testing.expectEqual(recovered, ctx.modules.find(names[failed]).?);
     try std.testing.expectEqual(failed + 1, ctx.modules.count);
     try std.testing.expectEqual(@as(usize, 2), rt.atoms.refCount(names[failed]).?);
@@ -7901,7 +7940,7 @@ test "runtime memory usage counts linked and realm-unlinked retained modules" {
 
     const module_name = try rt.internAtom("memory-usage-module.mjs");
     defer rt.atoms.free(module_name);
-    const record = try ctx.modules.create(module_name);
+    const record = try publishEmptyModule(rt, &ctx.modules, module_name);
     const linked = rt.memoryUsage();
     try std.testing.expectEqual(@as(usize, 1), linked.module_count);
     try std.testing.expectEqual(@sizeOf(core.ModuleRecord), linked.module_bytes);
@@ -7926,7 +7965,7 @@ test "runtime memory usage counts linked and realm-unlinked retained modules" {
     try rt.gc.verifyHeapAccounting(rt);
 }
 
-test "module records retain import export metadata and status" {
+test "module publication retains indexed metadata and all strong value edges" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7939,40 +7978,69 @@ test "module records retain import export metadata and status" {
     const export_name = try rt.internAtom("default");
     const attr_key = try rt.internAtom("type");
     const attr_value = try rt.internAtom("json");
+    defer {
+        rt.atoms.free(module_name);
+        rt.atoms.free(dep_name);
+        rt.atoms.free(import_name);
+        rt.atoms.free(local_name);
+        rt.atoms.free(export_name);
+        rt.atoms.free(attr_key);
+        rt.atoms.free(attr_value);
+    }
 
-    const record = try ctx.modules.create(module_name);
-    try record.addRequestedModule(dep_name);
-    try record.addImport(dep_name, import_name, local_name);
-    try record.addExport(export_name, local_name);
-    try record.addIndirectExport(dep_name, export_name, import_name);
-    try record.addStarExport(dep_name, core.atom.predefinedId("*", .string).?);
-    try record.addImportAttribute(dep_name, attr_key, attr_value);
-    record.has_top_level_await = true;
+    const dependency = try publishEmptyModule(rt, &ctx.modules, dep_name);
+
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    const request_index = try pending.addRequest(dep_name);
+    try pending.addImport(request_index, import_name, local_name, 3, false);
+    try pending.addExport(export_name, local_name, 4);
+    try pending.addIndirectExport(request_index, import_name, export_name, false);
+    try pending.addStarExport(request_index);
+    try pending.addImportAttribute(request_index, attr_key, attr_value);
+    pending.synthetic_kind = .json;
+    pending.has_top_level_await = true;
+
+    const function_owner = try core.Object.create(rt, core.class.ids.object, null);
+    pending.adoptFuncObjectValueNoFail(function_owner.value());
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    record.setRequestModuleNoFail(request_index, dependency);
+
+    const namespace_owner = try core.Object.create(rt, core.class.ids.module_ns, null);
+    record.publishModuleNamespaceNoFail(namespace_owner.value());
+    const retained_cell = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
+    record.publishRetainedExportCellNoFail(0, retained_cell.valueRef());
+    const import_meta_owner = try core.Object.create(rt, core.class.ids.object, null);
+    record.import_meta = import_meta_owner.value();
+    const exception_owner = try core.Object.create(rt, core.class.ids.object, null);
+    record.setEvalException(rt, exception_owner.value());
     record.setStatus(.linked);
 
-    rt.atoms.free(module_name);
-    rt.atoms.free(dep_name);
-    rt.atoms.free(import_name);
-    rt.atoms.free(local_name);
-    rt.atoms.free(export_name);
-    rt.atoms.free(attr_key);
-    rt.atoms.free(attr_value);
-
     try std.testing.expectEqual(core.module.Status.linked, record.status);
-    try std.testing.expectEqual(@as(usize, 1), record.requested_modules.len);
+    try std.testing.expectEqual(@as(usize, 1), record.requests.len);
+    try std.testing.expectEqual(dep_name, record.requests[0].module_name);
+    try std.testing.expectEqual(dependency, record.requests[0].module.?);
     try std.testing.expectEqual(@as(usize, 1), record.imports.len);
+    try std.testing.expectEqual(request_index, record.imports[0].request_index);
+    try std.testing.expectEqual(@as(u16, 3), record.imports[0].var_idx);
     try std.testing.expectEqual(@as(usize, 1), record.exports.len);
+    try std.testing.expectEqual(@as(u16, 4), record.exports[0].var_idx);
     try std.testing.expectEqual(@as(usize, 1), record.indirect_exports.len);
     try std.testing.expectEqual(@as(usize, 1), record.star_exports.len);
     try std.testing.expectEqual(@as(usize, 1), record.import_attributes.len);
-    try std.testing.expectEqual(@as(usize, 0), record.resolved_imports.len);
-    try std.testing.expectEqual(@as(usize, 0), record.local_bindings.len);
+    try std.testing.expectEqual(request_index, record.import_attributes[0].request_index);
+    try std.testing.expectEqual(core.module.SyntheticKind.json, record.synthetic_kind);
     try std.testing.expect(record.has_top_level_await);
     try std.testing.expect(rt.atoms.name(record.module_name) != null);
     try std.testing.expect(rt.atoms.name(record.imports[0].local_name) != null);
+    try std.testing.expectEqual(&function_owner.header, record.funcObjectValue().refHeader().?);
+    try std.testing.expectEqual(&namespace_owner.header, record.moduleNamespaceValue().refHeader().?);
+    try std.testing.expectEqual(retained_cell, core.VarRef.fromValue(record.retainedExportCellValue(0).?).?);
+    try std.testing.expectEqual(&import_meta_owner.header, record.import_meta.?.refHeader().?);
+    try std.testing.expectEqual(&exception_owner.header, record.eval_exception.?.refHeader().?);
 }
 
-test "module record add failure releases duplicated atom references" {
+test "pending module metadata and publication OOM are atomic" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -7982,24 +8050,36 @@ test "module record add failure releases duplicated atom references" {
     defer rt.atoms.free(module_name);
 
     const dep_name = try rt.internAtom("oom-dep.mjs");
+    defer rt.atoms.free(dep_name);
     const import_name = try rt.internAtom("oom-import");
+    defer rt.atoms.free(import_name);
     const local_name = try rt.internAtom("oom-local");
+    defer rt.atoms.free(local_name);
 
-    const record = try ctx.modules.create(module_name);
+    var pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer pending.deinit(rt);
+    const request_index = try pending.addRequest(dep_name);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, record.addImport(dep_name, import_name, local_name));
+    try std.testing.expectError(error.OutOfMemory, pending.addImport(request_index, import_name, local_name, 0, false));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(@as(usize, 0), record.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 0), pending.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(import_name).?);
+    try std.testing.expectEqual(@as(usize, 1), rt.atoms.refCount(local_name).?);
+    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
 
-    rt.atoms.free(dep_name);
-    rt.atoms.free(import_name);
-    rt.atoms.free(local_name);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.OutOfMemory, ctx.modules.prepareFreshTarget(module_name, &pending));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(@as(usize, 1), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 0), ctx.modules.count);
+    try std.testing.expect(ctx.modules.find(module_name) == null);
 
-    try std.testing.expect(rt.atoms.name(dep_name) == null);
-    try std.testing.expect(rt.atoms.name(import_name) == null);
-    try std.testing.expect(rt.atoms.name(local_name) == null);
+    const record = try publishFreshModule(&ctx.modules, module_name, &pending);
+    try std.testing.expectEqual(@as(usize, 0), pending.requests.len);
+    try std.testing.expectEqual(@as(usize, 1), record.requests.len);
 }
 
 test "module registry resolves local indirect star and ambiguous exports" {
@@ -8012,6 +8092,7 @@ test "module registry resolves local indirect star and ambiguous exports" {
     const dep_a_name = try rt.internAtom("dep-a.mjs");
     const dep_b_name = try rt.internAtom("dep-b.mjs");
     const dep_c_name = try rt.internAtom("dep-c.mjs");
+    const unique_name = try rt.internAtom("unique.mjs");
     const value_name = try rt.internAtom("value");
     const other_name = try rt.internAtom("other");
     const local_a_name = try rt.internAtom("localA");
@@ -8021,151 +8102,274 @@ test "module registry resolves local indirect star and ambiguous exports" {
         rt.atoms.free(dep_a_name);
         rt.atoms.free(dep_b_name);
         rt.atoms.free(dep_c_name);
+        rt.atoms.free(unique_name);
         rt.atoms.free(value_name);
         rt.atoms.free(other_name);
         rt.atoms.free(local_a_name);
         rt.atoms.free(local_b_name);
     }
 
-    _ = try ctx.modules.create(main_name);
-    _ = try ctx.modules.create(dep_a_name);
-    _ = try ctx.modules.create(dep_b_name);
-    _ = try ctx.modules.create(dep_c_name);
+    var dep_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_a_pending.deinit(rt);
+    try dep_a_pending.addExport(value_name, local_a_name, 0);
+    const dep_a = try publishFreshModule(&ctx.modules, dep_a_name, &dep_a_pending);
 
-    const main = ctx.modules.find(main_name).?;
-    const dep_a = ctx.modules.find(dep_a_name).?;
-    const dep_b = ctx.modules.find(dep_b_name).?;
-    const dep_c = ctx.modules.find(dep_c_name).?;
+    var dep_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_b_pending.deinit(rt);
+    try dep_b_pending.addExport(value_name, local_b_name, 0);
+    const dep_b = try publishFreshModule(&ctx.modules, dep_b_name, &dep_b_pending);
 
-    try dep_a.addExport(value_name, local_a_name);
-    try dep_b.addExport(value_name, local_b_name);
-    try dep_c.addIndirectExport(dep_a_name, other_name, value_name);
+    var dep_c_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_c_pending.deinit(rt);
+    const dep_c_to_a = try dep_c_pending.addRequest(dep_a_name);
+    try dep_c_pending.addIndirectExport(dep_c_to_a, other_name, value_name, false);
+    const dep_c = try publishFreshModule(&ctx.modules, dep_c_name, &dep_c_pending);
+    dep_c.setRequestModuleNoFail(dep_c_to_a, dep_a);
 
-    try main.addIndirectExport(dep_c_name, other_name, other_name);
-    try main.addStarExport(dep_a_name, core.atom.predefinedId("*", .string).?);
+    var unique_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer unique_pending.deinit(rt);
+    const unique_to_a = try unique_pending.addRequest(dep_a_name);
+    try unique_pending.addStarExport(unique_to_a);
+    const unique = try publishFreshModule(&ctx.modules, unique_name, &unique_pending);
+    unique.setRequestModuleNoFail(unique_to_a, dep_a);
 
-    const indirect = try ctx.modules.resolveExport(main_name, other_name);
+    var main_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer main_pending.deinit(rt);
+    const main_to_c = try main_pending.addRequest(dep_c_name);
+    const main_to_a = try main_pending.addRequest(dep_a_name);
+    const main_to_b = try main_pending.addRequest(dep_b_name);
+    try main_pending.addIndirectExport(main_to_c, other_name, other_name, false);
+    try main_pending.addStarExport(main_to_a);
+    try main_pending.addStarExport(main_to_b);
+    const main = try publishFreshModule(&ctx.modules, main_name, &main_pending);
+    main.setRequestModuleNoFail(main_to_c, dep_c);
+    main.setRequestModuleNoFail(main_to_a, dep_a);
+    main.setRequestModuleNoFail(main_to_b, dep_b);
+
+    const indirect = try ctx.modules.resolveExport(main, other_name);
     try std.testing.expectEqual(core.module.ResolvedExport.resolved, std.meta.activeTag(indirect));
-    try std.testing.expectEqual(local_a_name, indirect.resolved.local_name);
+    try std.testing.expectEqual(dep_a, indirect.resolved.module);
+    try std.testing.expectEqual(local_a_name, indirect.resolved.bindingName());
 
-    const star = try ctx.modules.resolveExport(main_name, value_name);
+    const star = try ctx.modules.resolveExport(unique, value_name);
     try std.testing.expectEqual(core.module.ResolvedExport.resolved, std.meta.activeTag(star));
-    try std.testing.expectEqual(local_a_name, star.resolved.local_name);
+    try std.testing.expectEqual(dep_a, star.resolved.module);
+    try std.testing.expectEqual(local_a_name, star.resolved.bindingName());
 
-    try main.addStarExport(dep_b_name, core.atom.predefinedId("*", .string).?);
-    const ambiguous = try ctx.modules.resolveExport(main_name, value_name);
+    const ambiguous = try ctx.modules.resolveExport(main, value_name);
     try std.testing.expectEqual(core.module.ResolvedExport.ambiguous, std.meta.activeTag(ambiguous));
 }
 
-test "module registry createFresh replaces stale records by name" {
+test "existing published module generation is not overwritten by pending definition" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("fresh.mjs");
-    const export_name = try rt.internAtom("old");
+    const old_export_name = try rt.internAtom("old");
+    const replacement_export_name = try rt.internAtom("replacement");
     defer {
         rt.atoms.free(module_name);
-        rt.atoms.free(export_name);
+        rt.atoms.free(old_export_name);
+        rt.atoms.free(replacement_export_name);
     }
 
-    const first = try ctx.modules.createFresh(rt, module_name);
-    try first.addExport(export_name, export_name);
+    var first_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer first_pending.deinit(rt);
+    try first_pending.addExport(old_export_name, old_export_name, 0);
+    const first = try publishFreshModule(&ctx.modules, module_name, &first_pending);
     first.setStatus(.linked);
 
-    const second = try ctx.modules.createFresh(rt, module_name);
-    try std.testing.expectEqual(first, second);
+    var replacement = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer replacement.deinit(rt);
+    try replacement.addExport(replacement_export_name, replacement_export_name, 1);
+    const prepared = try ctx.modules.prepareFreshTarget(module_name, &replacement);
+
+    try std.testing.expect(!prepared.isFresh());
+    try std.testing.expectEqual(first, prepared.record());
     try std.testing.expectEqual(@as(usize, 1), ctx.modules.count);
-    try std.testing.expectEqual(core.module.Status.unlinked, second.status);
-    try std.testing.expectEqual(@as(usize, 0), second.exports.len);
+    try std.testing.expectEqual(core.module.Status.linked, first.status);
+    try std.testing.expectEqual(@as(usize, 1), first.exports.len);
+    try std.testing.expectEqual(old_export_name, first.exports[0].export_name);
+    // Existing lookup must leave the complete candidate untouched for the
+    // caller to deinit or reuse.
+    try std.testing.expectEqual(@as(usize, 1), replacement.exports.len);
+    try std.testing.expectEqual(replacement_export_name, replacement.exports[0].export_name);
 }
 
-test "module registry link validates dependencies imports and ambiguous exports" {
+test "indexed module resolution is pure across not-found ambiguous and cyclic graphs" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const main_name = try rt.internAtom("link-main.mjs");
-    const dep_name = try rt.internAtom("link-dep.mjs");
-    const cycle_name = try rt.internAtom("link-cycle.mjs");
-    const missing_main_name = try rt.internAtom("missing-main.mjs");
-    const ambiguous_main_name = try rt.internAtom("ambiguous-main.mjs");
-    const ambiguous_consumer_name = try rt.internAtom("ambiguous-consumer.mjs");
+    const dep_name = try rt.internAtom("resolve-dep.mjs");
+    const missing_name = try rt.internAtom("resolve-missing.mjs");
+    const unresolved_name = try rt.internAtom("resolve-unresolved-request.mjs");
+    const cycle_a_name = try rt.internAtom("resolve-cycle-a.mjs");
+    const cycle_b_name = try rt.internAtom("resolve-cycle-b.mjs");
+    const ambiguous_name = try rt.internAtom("resolve-ambiguous.mjs");
     const amb_a_name = try rt.internAtom("amb-a.mjs");
     const amb_b_name = try rt.internAtom("amb-b.mjs");
     const value_name = try rt.internAtom("value");
-    const local_name = try rt.internAtom("local");
+    const local_a_name = try rt.internAtom("local-a");
+    const local_b_name = try rt.internAtom("local-b");
     defer {
-        rt.atoms.free(main_name);
         rt.atoms.free(dep_name);
-        rt.atoms.free(cycle_name);
-        rt.atoms.free(missing_main_name);
-        rt.atoms.free(ambiguous_main_name);
-        rt.atoms.free(ambiguous_consumer_name);
+        rt.atoms.free(missing_name);
+        rt.atoms.free(unresolved_name);
+        rt.atoms.free(cycle_a_name);
+        rt.atoms.free(cycle_b_name);
+        rt.atoms.free(ambiguous_name);
         rt.atoms.free(amb_a_name);
         rt.atoms.free(amb_b_name);
         rt.atoms.free(value_name);
-        rt.atoms.free(local_name);
+        rt.atoms.free(local_a_name);
+        rt.atoms.free(local_b_name);
     }
 
-    _ = try ctx.modules.create(main_name);
-    _ = try ctx.modules.create(dep_name);
-    _ = try ctx.modules.create(cycle_name);
-    _ = try ctx.modules.create(missing_main_name);
-    _ = try ctx.modules.create(ambiguous_main_name);
-    _ = try ctx.modules.create(ambiguous_consumer_name);
-    _ = try ctx.modules.create(amb_a_name);
-    _ = try ctx.modules.create(amb_b_name);
+    var dep_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer dep_pending.deinit(rt);
+    try dep_pending.addExport(value_name, local_a_name, 0);
+    const dep = try publishFreshModule(&ctx.modules, dep_name, &dep_pending);
+    const missing = try publishEmptyModule(rt, &ctx.modules, missing_name);
 
-    const main = ctx.modules.find(main_name).?;
-    const dep = ctx.modules.find(dep_name).?;
-    const cycle = ctx.modules.find(cycle_name).?;
-    const missing_main = ctx.modules.find(missing_main_name).?;
-    const ambiguous_main = ctx.modules.find(ambiguous_main_name).?;
-    const ambiguous_consumer = ctx.modules.find(ambiguous_consumer_name).?;
-    const amb_a = ctx.modules.find(amb_a_name).?;
-    const amb_b = ctx.modules.find(amb_b_name).?;
+    var unresolved_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer unresolved_pending.deinit(rt);
+    const unresolved_request = try unresolved_pending.addRequest(dep_name);
+    try unresolved_pending.addStarExport(unresolved_request);
+    const unresolved = try publishFreshModule(&ctx.modules, unresolved_name, &unresolved_pending);
 
-    try dep.addExport(value_name, local_name);
-    try dep.addRequestedModule(cycle_name);
-    try cycle.addRequestedModule(dep_name);
-    try main.addRequestedModule(dep_name);
-    try main.addImport(dep_name, value_name, local_name);
-    try ctx.modules.linkModule(rt, main_name);
-    try std.testing.expectEqual(core.module.Status.linked, main.status);
+    var cycle_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer cycle_a_pending.deinit(rt);
+    const cycle_a_to_b = try cycle_a_pending.addRequest(cycle_b_name);
+    try cycle_a_pending.addStarExport(cycle_a_to_b);
+    const cycle_a = try publishFreshModule(&ctx.modules, cycle_a_name, &cycle_a_pending);
+
+    var cycle_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer cycle_b_pending.deinit(rt);
+    const cycle_b_to_a = try cycle_b_pending.addRequest(cycle_a_name);
+    try cycle_b_pending.addStarExport(cycle_b_to_a);
+    const cycle_b = try publishFreshModule(&ctx.modules, cycle_b_name, &cycle_b_pending);
+    cycle_a.setRequestModuleNoFail(cycle_a_to_b, cycle_b);
+    cycle_b.setRequestModuleNoFail(cycle_b_to_a, cycle_a);
+
+    var amb_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer amb_a_pending.deinit(rt);
+    try amb_a_pending.addExport(value_name, local_a_name, 0);
+    const amb_a = try publishFreshModule(&ctx.modules, amb_a_name, &amb_a_pending);
+
+    var amb_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer amb_b_pending.deinit(rt);
+    try amb_b_pending.addExport(value_name, local_b_name, 0);
+    const amb_b = try publishFreshModule(&ctx.modules, amb_b_name, &amb_b_pending);
+
+    var ambiguous_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer ambiguous_pending.deinit(rt);
+    const ambiguous_to_a = try ambiguous_pending.addRequest(amb_a_name);
+    const ambiguous_to_b = try ambiguous_pending.addRequest(amb_b_name);
+    try ambiguous_pending.addStarExport(ambiguous_to_a);
+    try ambiguous_pending.addStarExport(ambiguous_to_b);
+    const ambiguous = try publishFreshModule(&ctx.modules, ambiguous_name, &ambiguous_pending);
+    ambiguous.setRequestModuleNoFail(ambiguous_to_a, amb_a);
+    ambiguous.setRequestModuleNoFail(ambiguous_to_b, amb_b);
+
+    dep.setStatus(.linked);
+    missing.setStatus(.evaluating);
+    unresolved.setStatus(.evaluated);
+    cycle_a.setStatus(.linking);
+    cycle_b.setStatus(.errored);
+    ambiguous.setStatus(.evaluating);
+
+    const local_resolution = try ctx.modules.resolveExport(dep, value_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(local_resolution));
+    try std.testing.expectEqual(dep, local_resolution.resolved.module);
+    try std.testing.expectEqual(local_a_name, local_resolution.resolved.bindingName());
+
+    const not_found = try ctx.modules.resolveExport(missing, value_name);
+    try std.testing.expectEqual(.not_found, std.meta.activeTag(not_found));
+    try std.testing.expectError(error.ModuleNotFound, ctx.modules.resolveExport(unresolved, value_name));
+
+    const cycle = try ctx.modules.resolveExport(cycle_a, value_name);
+    try std.testing.expectEqual(.not_found, std.meta.activeTag(cycle));
+    const ambiguous_resolution = try ctx.modules.resolveExport(ambiguous, value_name);
+    try std.testing.expectEqual(.ambiguous, std.meta.activeTag(ambiguous_resolution));
+
     try std.testing.expectEqual(core.module.Status.linked, dep.status);
-    try std.testing.expectEqual(core.module.Status.linked, cycle.status);
-    try std.testing.expectEqual(@as(usize, 0), main.local_bindings.len);
-    try std.testing.expectEqual(@as(usize, 1), dep.local_bindings.len);
-    try std.testing.expectEqual(local_name, dep.local_bindings[0].name);
-    try std.testing.expect(!dep.local_bindings[0].initialized);
-    try dep.markLocalBindingInitialized(local_name);
-    try std.testing.expect(dep.local_bindings[0].initialized);
-    try std.testing.expectEqual(@as(usize, 1), main.resolved_imports.len);
-    try std.testing.expectEqual(local_name, main.resolved_imports[0].local_name);
-    try std.testing.expectEqual(dep_name, main.resolved_imports[0].module_name);
-    try std.testing.expectEqual(local_name, main.resolved_imports[0].binding_name);
+    try std.testing.expectEqual(core.module.Status.evaluating, missing.status);
+    try std.testing.expectEqual(core.module.Status.evaluated, unresolved.status);
+    try std.testing.expectEqual(core.module.Status.linking, cycle_a.status);
+    try std.testing.expectEqual(core.module.Status.errored, cycle_b.status);
+    try std.testing.expectEqual(core.module.Status.evaluating, ambiguous.status);
+}
 
-    try missing_main.addRequestedModule(amb_a_name);
-    try missing_main.addImport(amb_a_name, value_name, local_name);
-    try std.testing.expectError(error.MissingExport, ctx.modules.linkModule(rt, missing_main_name));
-    try std.testing.expectEqual(core.module.Status.errored, missing_main.status);
-    try std.testing.expectEqual(@as(usize, 0), missing_main.resolved_imports.len);
+test "module resolution follows local exports of ordinary imports" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    try amb_a.addExport(value_name, local_name);
-    try amb_b.addExport(value_name, value_name);
-    try ambiguous_main.addRequestedModule(amb_a_name);
-    try ambiguous_main.addRequestedModule(amb_b_name);
-    try ambiguous_main.addStarExport(amb_a_name, core.atom.predefinedId("*", .string).?);
-    try ambiguous_main.addStarExport(amb_b_name, core.atom.predefinedId("*", .string).?);
-    try ambiguous_consumer.addRequestedModule(ambiguous_main_name);
-    try ambiguous_consumer.addImport(ambiguous_main_name, value_name, local_name);
-    try std.testing.expectError(error.AmbiguousExport, ctx.modules.linkModule(rt, ambiguous_consumer_name));
-    try std.testing.expectEqual(core.module.Status.linked, ambiguous_main.status);
-    try std.testing.expectEqual(core.module.Status.errored, ambiguous_consumer.status);
-    try std.testing.expectEqual(@as(usize, 0), ambiguous_consumer.resolved_imports.len);
+    const source_name = try rt.internAtom("source");
+    const direct_name = try rt.internAtom("direct");
+    const imported_name = try rt.internAtom("imported");
+    const root_name = try rt.internAtom("root");
+    const foo_name = try rt.internAtom("foo");
+    const source_local_name = try rt.internAtom("source-local");
+    defer {
+        rt.atoms.free(source_name);
+        rt.atoms.free(direct_name);
+        rt.atoms.free(imported_name);
+        rt.atoms.free(root_name);
+        rt.atoms.free(foo_name);
+        rt.atoms.free(source_local_name);
+    }
+
+    var source_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer source_pending.deinit(rt);
+    try source_pending.addExport(foo_name, source_local_name, 0);
+    const source = try publishFreshModule(&ctx.modules, source_name, &source_pending);
+
+    var direct_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer direct_pending.deinit(rt);
+    const direct_to_source = try direct_pending.addRequest(source_name);
+    try direct_pending.addIndirectExport(direct_to_source, foo_name, foo_name, false);
+    const direct = try publishFreshModule(&ctx.modules, direct_name, &direct_pending);
+    direct.setRequestModuleNoFail(direct_to_source, source);
+
+    var imported_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer imported_pending.deinit(rt);
+    const imported_to_source = try imported_pending.addRequest(source_name);
+    try imported_pending.addImport(imported_to_source, foo_name, foo_name, 0, false);
+    try imported_pending.addExport(foo_name, foo_name, 0);
+    const imported = try publishFreshModule(&ctx.modules, imported_name, &imported_pending);
+    imported.setRequestModuleNoFail(imported_to_source, source);
+
+    var root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer root_pending.deinit(rt);
+    const root_to_direct = try root_pending.addRequest(direct_name);
+    const root_to_imported = try root_pending.addRequest(imported_name);
+    try root_pending.addStarExport(root_to_direct);
+    try root_pending.addStarExport(root_to_imported);
+    const root = try publishFreshModule(&ctx.modules, root_name, &root_pending);
+    root.setRequestModuleNoFail(root_to_direct, direct);
+    root.setRequestModuleNoFail(root_to_imported, imported);
+
+    const direct_resolution = try ctx.modules.resolveExport(direct, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(direct_resolution));
+    try std.testing.expectEqual(source, direct_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, direct_resolution.resolved.bindingName());
+
+    const imported_resolution = try ctx.modules.resolveExport(imported, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(imported_resolution));
+    try std.testing.expectEqual(source, imported_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, imported_resolution.resolved.bindingName());
+    try std.testing.expect(direct_resolution.resolved.sameIdentity(imported_resolution.resolved));
+
+    const root_resolution = try ctx.modules.resolveExport(root, foo_name);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(root_resolution));
+    try std.testing.expectEqual(source, root_resolution.resolved.module);
+    try std.testing.expectEqual(source_local_name, root_resolution.resolved.bindingName());
 }
 
 test "module resolution normalizes namespace re-export bindings" {
@@ -8198,71 +8402,95 @@ test "module resolution normalizes namespace re-export bindings" {
         rt.atoms.free(default_name);
     }
 
-    _ = try ctx.modules.create(target_name);
-    _ = try ctx.modules.create(star_a_name);
-    _ = try ctx.modules.create(star_b_name);
-    _ = try ctx.modules.create(import_a_name);
-    _ = try ctx.modules.create(import_b_name);
-    _ = try ctx.modules.create(star_root_name);
-    _ = try ctx.modules.create(import_root_name);
-    _ = try ctx.modules.create(mixed_root_name);
+    const target = try publishEmptyModule(rt, &ctx.modules, target_name);
 
-    const star_a = ctx.modules.find(star_a_name).?;
-    const star_b = ctx.modules.find(star_b_name).?;
-    const import_a = ctx.modules.find(import_a_name).?;
-    const import_b = ctx.modules.find(import_b_name).?;
-    const star_root = ctx.modules.find(star_root_name).?;
-    const import_root = ctx.modules.find(import_root_name).?;
-    const mixed_root = ctx.modules.find(mixed_root_name).?;
+    var star_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_a_pending.deinit(rt);
+    const star_a_to_target = try star_a_pending.addRequest(target_name);
+    try star_a_pending.addIndirectExport(star_a_to_target, foo_name, star_atom, true);
+    try star_a_pending.addIndirectExport(star_a_to_target, default_name, star_atom, true);
+    const star_a = try publishFreshModule(&ctx.modules, star_a_name, &star_a_pending);
+    star_a.setRequestModuleNoFail(star_a_to_target, target);
 
-    try star_a.addRequestedModule(target_name);
-    try star_a.addStarExport(target_name, foo_name);
-    try star_a.addStarExport(target_name, default_name);
-    try star_b.addRequestedModule(target_name);
-    try star_b.addStarExport(target_name, foo_name);
-    try import_a.addRequestedModule(target_name);
-    try import_a.addImport(target_name, star_atom, foo_name);
-    try import_a.addExport(foo_name, foo_name);
-    try import_b.addRequestedModule(target_name);
-    try import_b.addImport(target_name, star_atom, foo_name);
-    try import_b.addExport(foo_name, foo_name);
+    var star_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_b_pending.deinit(rt);
+    const star_b_to_target = try star_b_pending.addRequest(target_name);
+    try star_b_pending.addIndirectExport(star_b_to_target, foo_name, star_atom, true);
+    const star_b = try publishFreshModule(&ctx.modules, star_b_name, &star_b_pending);
+    star_b.setRequestModuleNoFail(star_b_to_target, target);
 
-    try star_root.addRequestedModule(star_a_name);
-    try star_root.addRequestedModule(star_b_name);
-    try star_root.addStarExport(star_a_name, star_atom);
-    try star_root.addStarExport(star_b_name, star_atom);
-    try import_root.addRequestedModule(import_a_name);
-    try import_root.addRequestedModule(import_b_name);
-    try import_root.addStarExport(import_a_name, star_atom);
-    try import_root.addStarExport(import_b_name, star_atom);
-    try mixed_root.addRequestedModule(star_a_name);
-    try mixed_root.addRequestedModule(import_a_name);
-    try mixed_root.addStarExport(star_a_name, star_atom);
-    try mixed_root.addStarExport(import_a_name, star_atom);
+    var import_a_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_a_pending.deinit(rt);
+    const import_a_to_target = try import_a_pending.addRequest(target_name);
+    try import_a_pending.addImport(import_a_to_target, star_atom, foo_name, 0, true);
+    try import_a_pending.addExport(foo_name, foo_name, 0);
+    const import_a = try publishFreshModule(&ctx.modules, import_a_name, &import_a_pending);
+    import_a.setRequestModuleNoFail(import_a_to_target, target);
 
-    try ctx.modules.linkModule(rt, star_root_name);
-    try ctx.modules.linkModule(rt, import_root_name);
-    try ctx.modules.linkModule(rt, mixed_root_name);
+    var import_b_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_b_pending.deinit(rt);
+    const import_b_to_target = try import_b_pending.addRequest(target_name);
+    try import_b_pending.addImport(import_b_to_target, star_atom, foo_name, 0, true);
+    try import_b_pending.addExport(foo_name, foo_name, 0);
+    const import_b = try publishFreshModule(&ctx.modules, import_b_name, &import_b_pending);
+    import_b.setRequestModuleNoFail(import_b_to_target, target);
 
-    const star_resolution = try ctx.modules.resolveExport(star_root_name, foo_name);
+    var star_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer star_root_pending.deinit(rt);
+    const star_root_to_a = try star_root_pending.addRequest(star_a_name);
+    const star_root_to_b = try star_root_pending.addRequest(star_b_name);
+    try star_root_pending.addStarExport(star_root_to_a);
+    try star_root_pending.addStarExport(star_root_to_b);
+    const star_root = try publishFreshModule(&ctx.modules, star_root_name, &star_root_pending);
+    star_root.setRequestModuleNoFail(star_root_to_a, star_a);
+    star_root.setRequestModuleNoFail(star_root_to_b, star_b);
+
+    var import_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer import_root_pending.deinit(rt);
+    const import_root_to_a = try import_root_pending.addRequest(import_a_name);
+    const import_root_to_b = try import_root_pending.addRequest(import_b_name);
+    try import_root_pending.addStarExport(import_root_to_a);
+    try import_root_pending.addStarExport(import_root_to_b);
+    const import_root = try publishFreshModule(&ctx.modules, import_root_name, &import_root_pending);
+    import_root.setRequestModuleNoFail(import_root_to_a, import_a);
+    import_root.setRequestModuleNoFail(import_root_to_b, import_b);
+
+    var mixed_root_pending = core.module.PendingDefinition.init(&rt.memory, &rt.atoms);
+    defer mixed_root_pending.deinit(rt);
+    const mixed_root_to_star = try mixed_root_pending.addRequest(star_a_name);
+    const mixed_root_to_import = try mixed_root_pending.addRequest(import_a_name);
+    try mixed_root_pending.addStarExport(mixed_root_to_star);
+    try mixed_root_pending.addStarExport(mixed_root_to_import);
+    const mixed_root = try publishFreshModule(&ctx.modules, mixed_root_name, &mixed_root_pending);
+    mixed_root.setRequestModuleNoFail(mixed_root_to_star, star_a);
+    mixed_root.setRequestModuleNoFail(mixed_root_to_import, import_a);
+
+    const star_resolution = try ctx.modules.resolveExport(star_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(star_resolution));
-    try std.testing.expectEqual(target_name, star_resolution.resolved.module_name);
-    try std.testing.expectEqual(star_atom, star_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, star_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(star_resolution.resolved.entry));
 
-    const explicit_default_resolution = try ctx.modules.resolveExport(star_a_name, default_name);
+    const explicit_default_resolution = try ctx.modules.resolveExport(star_a, default_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(explicit_default_resolution));
-    try std.testing.expectEqual(target_name, explicit_default_resolution.resolved.module_name);
-    try std.testing.expectEqual(star_atom, explicit_default_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, explicit_default_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(explicit_default_resolution.resolved.entry));
 
-    const import_resolution = try ctx.modules.resolveExport(import_root_name, foo_name);
+    const import_resolution = try ctx.modules.resolveExport(import_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(import_resolution));
-    try std.testing.expectEqual(target_name, import_resolution.resolved.module_name);
-    try std.testing.expectEqual(star_atom, import_resolution.resolved.local_name);
+    try std.testing.expectEqual(import_a, import_resolution.resolved.module);
+    try std.testing.expectEqual(.local_export, std.meta.activeTag(import_resolution.resolved.entry));
 
-    const mixed_resolution = try ctx.modules.resolveExport(mixed_root_name, foo_name);
+    const mixed_resolution = try ctx.modules.resolveExport(mixed_root, foo_name);
     try std.testing.expectEqual(.resolved, std.meta.activeTag(mixed_resolution));
-    try std.testing.expectEqual(target_name, mixed_resolution.resolved.module_name);
-    try std.testing.expectEqual(star_atom, mixed_resolution.resolved.local_name);
+    try std.testing.expectEqual(star_a, mixed_resolution.resolved.module);
+    try std.testing.expectEqual(.namespace_export, std.meta.activeTag(mixed_resolution.resolved.entry));
+
+    // Locators remain indexed into their originating records, while identity
+    // comparison normalizes both explicit namespace re-exports and local
+    // exports of namespace imports to the same target namespace.
+    try std.testing.expect(star_resolution.resolved.sameIdentity(explicit_default_resolution.resolved));
+    try std.testing.expect(star_resolution.resolved.sameIdentity(import_resolution.resolved));
+    try std.testing.expect(star_resolution.resolved.sameIdentity(mixed_resolution.resolved));
 }
 
 fn interruptOnce(_: *core.JSRuntime, userdata: ?*anyopaque) bool {

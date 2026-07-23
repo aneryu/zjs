@@ -111,7 +111,8 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_data = function_object.bytecodeFunctionStoragePtr();
     const fb = function_data.function_bytecode orelse return null;
-    std.debug.assert(function_data.captureSlice().len == fb.closureVarCount());
+    const captures = function_data.captureSlice();
+    std.debug.assert(captures.len == fb.closureVarCount());
     if (fb.functionKind() != .normal) return null;
     // Production callable publication proves the exact non-empty FAM layout;
     // take the three-load code+len hot-tail path instead of rechecking the
@@ -127,7 +128,7 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     const function_global = function_realm.global orelse return null;
     if (function_global != global) return null;
     return .{
-        .var_refs = function_data.var_refs,
+        .var_refs = captures.ptr,
         .fb = fb,
         .call_facts = call_facts,
     };

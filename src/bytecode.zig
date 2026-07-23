@@ -1034,17 +1034,24 @@ pub const module = struct {
         request_index: u32,
         import_name: atom.Atom,
         local_name: atom.Atom,
+        /// Final index into the module root FunctionBytecode closure table.
+        var_idx: u16,
+        is_namespace: bool,
     };
 
     pub const Export = struct {
         export_name: atom.Atom,
         local_name: atom.Atom,
+        /// Filled by the module root finalizer after addGlobalVariables has
+        /// established the complete closure topology.
+        var_idx: u16 = 0,
     };
 
     pub const IndirectExport = struct {
         request_index: u32,
         export_name: atom.Atom,
         import_name: atom.Atom,
+        is_namespace: bool,
     };
 
     pub const StarExport = struct {
@@ -1122,7 +1129,14 @@ pub const module = struct {
             return @intCast(index);
         }
 
-        pub fn addImport(self: *Record, request_index: u32, import_name: atom.Atom, local_name: atom.Atom) !void {
+        pub fn addImport(
+            self: *Record,
+            request_index: u32,
+            import_name: atom.Atom,
+            local_name: atom.Atom,
+            var_idx: u16,
+            is_namespace: bool,
+        ) !void {
             const owned_import_name = self.atoms.dup(import_name);
             errdefer self.atoms.free(owned_import_name);
             const owned_local_name = self.atoms.dup(local_name);
@@ -1131,6 +1145,8 @@ pub const module = struct {
                 .request_index = request_index,
                 .import_name = owned_import_name,
                 .local_name = owned_local_name,
+                .var_idx = var_idx,
+                .is_namespace = is_namespace,
             });
         }
 
@@ -1145,7 +1161,13 @@ pub const module = struct {
             });
         }
 
-        pub fn addIndirectExport(self: *Record, request_index: u32, export_name: atom.Atom, import_name: atom.Atom) !void {
+        pub fn addIndirectExport(
+            self: *Record,
+            request_index: u32,
+            export_name: atom.Atom,
+            import_name: atom.Atom,
+            is_namespace: bool,
+        ) !void {
             const owned_export_name = self.atoms.dup(export_name);
             errdefer self.atoms.free(owned_export_name);
             const owned_import_name = self.atoms.dup(import_name);
@@ -1154,6 +1176,7 @@ pub const module = struct {
                 .request_index = request_index,
                 .export_name = owned_export_name,
                 .import_name = owned_import_name,
+                .is_namespace = is_namespace,
             });
         }
 
@@ -1525,9 +1548,8 @@ pub const function_bytecode = struct {
         raw_this_inline_exact_args_leaf: bool = false,
         exact_args_leaf_kind: ExactArgsLeafKind = .none,
         capture_leaf_kind: ExactArgsLeafKind = .none,
-        /// Only non-escaping adapters for the legacy mutable module root set
-        /// this bit. Canonical script/eval/child FBs are never modules.
-        is_legacy_module: bool = false,
+        /// The finalized root is an ECMAScript module body.
+        is_module: bool = false,
         _reserved: u3 = 0,
     };
 
@@ -1888,8 +1910,9 @@ pub const function_bytecode = struct {
             // two fixed header loads: the Debug tail-dispatch bound assertion
             // calls this accessor for every opcode, so probing the optional
             // legacy extension first would put tail-layout branches in the
-            // ordinary interpreter loop. Only the non-escaping mutable module
-            // adapter deliberately leaves the core pointer null.
+            // ordinary interpreter loop. Only the non-escaping mutable-
+            // bytecode fixture adapter deliberately leaves the core pointer
+            // null.
             if (self.byte_code) |ptr| {
                 std.debug.assert(self.byte_code_len > 0);
                 return ptr[0..@intCast(self.byte_code_len)];
@@ -2017,13 +2040,13 @@ pub const function_bytecode = struct {
         }
         pub inline fn isGlobalVar(self: *const FunctionBytecodeImpl) bool {
             // `is_global_var` is a compile-time FunctionDef fact in QuickJS.
-            // Canonical roots complete closure2 before VM entry; only the
-            // explicitly legacy mutable module/fixture adapter still asks the
-            // runtime to instantiate declarations.
+            // Canonical roots complete closure2 before VM entry; only focused
+            // mutable-bytecode fixture adapters still ask the runtime to
+            // instantiate declarations.
             return if (self.legacyBytecodeAdapter()) |legacy| legacy.flags.is_global_var else false;
         }
         pub inline fn isModule(self: *const FunctionBytecodeImpl) bool {
-            return self.callFacts().execution.is_legacy_module;
+            return self.callFacts().execution.is_module;
         }
         pub inline fn isAsync(self: *const FunctionBytecodeImpl) bool {
             return self.functionKind() == .async or self.functionKind() == .async_generator;
@@ -2113,7 +2136,7 @@ pub const function_bytecode = struct {
             if (bytes.len != 0) {
                 if (pipeline_pc2line.decodeHeader(bytes)) |header| return header.line_num else |_| return 0;
             }
-            // W1e's explicit legacy module adapter is the sole remaining
+            // A focused mutable-bytecode fixture adapter is the sole remaining
             // parallel-coordinate exception. A present but malformed encoded
             // buffer never falls through to it.
             if (self.legacyBytecodeAdapter()) |legacy| return legacy.line_num;
@@ -2125,8 +2148,8 @@ pub const function_bytecode = struct {
             if (bytes.len != 0) {
                 if (pipeline_pc2line.decodeHeader(bytes)) |header| return header.col_num else |_| return 0;
             }
-            // See lineNum(): only an empty W1e legacy module buffer may use
-            // the adapter's temporary parallel start coordinate.
+            // See lineNum(): only an empty mutable fixture buffer may use the
+            // adapter's temporary parallel start coordinate.
             if (self.legacyBytecodeAdapter()) |legacy| return legacy.col_num;
             return 0;
         }
@@ -9991,6 +10014,7 @@ pub const pipeline_finalize = struct {
     fn prepareCurrentBeforeChildren(
         fd: *function_def_mod.FunctionDef,
         phase1_view: Phase1View,
+        root_module_record: ?*module.Record,
     ) FinalizeError!void {
         if (fd.finalization_state != .unprepared) return error.InvalidBytecode;
         if (fd.parent) |parent| {
@@ -10010,6 +10034,31 @@ pub const pipeline_finalize = struct {
         fd.rebuildFinalScopeLinks() catch return error.InvalidBytecode;
         try addEvalVariables(fd);
         try addGlobalVariables(fd);
+        if (root_module_record) |record| {
+            if (!fd.is_module) return error.InvalidBytecode;
+            const max_closure_count = @as(usize, std.math.maxInt(u16)) + 1;
+            if (fd.closure_var.len > max_closure_count) return error.BytecodeOverflow;
+            for (record.imports) |entry| {
+                if (entry.var_idx >= fd.closure_var.len) return error.InvalidBytecode;
+                const closure = fd.closure_var[entry.var_idx];
+                if (closure.var_name != entry.local_name) return error.InvalidBytecode;
+                const expected_type: function_def_mod.ClosureType = if (entry.is_namespace)
+                    .module_decl
+                else
+                    .module_import;
+                if (closure.closureType() != expected_type) return error.InvalidBytecode;
+            }
+            for (record.exports) |*entry| {
+                var var_idx: ?u16 = null;
+                for (fd.closure_var, 0..) |closure, index| {
+                    if (closure.var_name != entry.local_name) continue;
+                    if (index > std.math.maxInt(u16)) return error.BytecodeOverflow;
+                    var_idx = @intCast(index);
+                    break;
+                }
+                entry.var_idx = var_idx orelse return error.ClosureVarNotFound;
+            }
+        }
         fd.finalization_state = .prepared;
     }
 
@@ -10055,7 +10104,23 @@ pub const pipeline_finalize = struct {
     ///
     pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, compile_context: CompileContext) FinalizeError![]fb_mod.FunctionBytecode {
         try validateRuntimeIdentity(fd, compile_context.realm.runtime);
-        try installChildFunctionBytecodes(fd, Phase1View.fromFunctionDef(fd), compile_context);
+        try installChildFunctionBytecodes(fd, Phase1View.fromFunctionDef(fd), null, compile_context);
+        return createFunctionBytecodeAfterChildren(fd, compile_context);
+    }
+
+    /// Finalize an ECMAScript module root through the same canonical
+    /// FunctionBytecode topology as script and eval roots. The record is
+    /// borrowed during finalization; its local export indices are fixed before
+    /// any child FunctionDef is traversed.
+    pub fn createModuleFunctionBytecode(
+        fd: *function_def_mod.FunctionDef,
+        record: *module.Record,
+        compile_context: CompileContext,
+    ) FinalizeError![]fb_mod.FunctionBytecode {
+        if (!fd.is_module) return error.InvalidBytecode;
+        try validateRuntimeIdentity(fd, compile_context.realm.runtime);
+        if (record.memory != fd.memory or record.atoms != fd.atoms) return error.InvalidBytecode;
+        try installChildFunctionBytecodes(fd, Phase1View.fromFunctionDef(fd), record, compile_context);
         return createFunctionBytecodeAfterChildren(fd, compile_context);
     }
 
@@ -10294,6 +10359,7 @@ pub const pipeline_finalize = struct {
             fd.is_derived_class_constructor or
                 fd.func_type == .class_constructor or
                 fd.func_type == .derived_class_constructor,
+            fd.is_module,
         );
 
         shell_owned = false;
@@ -10337,7 +10403,7 @@ pub const pipeline_finalize = struct {
     ) !void {
         if (fd) |def| {
             if (def.child_list.len != 0) return error.InvalidBytecode;
-            try prepareCurrentBeforeChildren(def, Phase1View.fromBytecode(function));
+            try prepareCurrentBeforeChildren(def, Phase1View.fromBytecode(function), null);
         }
         try runPhases(function, fd, fd, true);
         if (fd) |def| try syncFunctionDefCpool(function, def);
@@ -10359,7 +10425,7 @@ pub const pipeline_finalize = struct {
             {
                 return error.InvalidBytecode;
             }
-            try installChildFunctionBytecodes(def, Phase1View.fromBytecode(function), compile_context);
+            try installChildFunctionBytecodes(def, Phase1View.fromBytecode(function), null, compile_context);
             try syncFunctionDefCpool(function, def);
         }
         try runPhases(function, fd, fd, true);
@@ -10843,6 +10909,7 @@ pub const pipeline_finalize = struct {
     fn installChildFunctionBytecodes(
         fd: *function_def_mod.FunctionDef,
         root_phase1_view: Phase1View,
+        root_module_record: ?*module.Record,
         compile_context: CompileContext,
     ) FinalizeError!void {
         const rt = compile_context.realm.runtime;
@@ -10854,7 +10921,7 @@ pub const pipeline_finalize = struct {
 
         var frames: std.ArrayList(Frame) = .empty;
         defer frames.deinit(fd.memory.allocator);
-        try prepareCurrentBeforeChildren(fd, root_phase1_view);
+        try prepareCurrentBeforeChildren(fd, root_phase1_view, root_module_record);
         try frames.append(fd.memory.allocator, .{ .function_def = fd });
 
         while (frames.items.len != 0) {
@@ -10868,7 +10935,7 @@ pub const pipeline_finalize = struct {
                 if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= current.cpool.len) {
                     return error.InvalidBytecode;
                 }
-                try prepareCurrentBeforeChildren(child, Phase1View.fromFunctionDef(child));
+                try prepareCurrentBeforeChildren(child, Phase1View.fromFunctionDef(child), null);
                 try frames.append(fd.memory.allocator, .{ .function_def = child });
                 continue;
             }
@@ -11519,13 +11586,12 @@ const function_mod = struct {
         }
     };
 
-    /// Caller-stack-only bridge for the one mutable artifact that survives
-    /// canonical root finalization: the legacy module root (plus focused
-    /// mutable-bytecode fixtures). The wrapper owns nothing, must not escape
-    /// the source Bytecode lifetime, and must never be deinitialized as a GC
-    /// FunctionBytecode. Runtime execution still receives exactly one
-    /// `*const FunctionBytecode`; its accessors borrow the mutable tables/code
-    /// through `legacy_bytecode_adapter`.
+    /// Caller-stack-only bridge for focused mutable-bytecode fixtures and
+    /// low-level compatibility helpers. Production script, eval, child, and
+    /// module compilation all publish canonical GC-owned FunctionBytecodes.
+    /// The wrapper owns nothing, must not escape the source Bytecode lifetime,
+    /// and must never be deinitialized as a GC FunctionBytecode. Its accessors
+    /// borrow the mutable tables/code through `legacy_bytecode_adapter`.
     pub const LegacyExecutionAdapter = extern struct {
         function: FunctionBytecode,
         hot_extension: function_bytecode_mod.FunctionBytecodeHotExtension,
@@ -11580,7 +11646,7 @@ const function_mod = struct {
                 .raw_this_inline_exact_args_leaf = source.raw_this_inline_exact_args_leaf,
                 .exact_args_leaf_kind = source.exact_args_leaf_kind,
                 .capture_leaf_kind = source.capture_leaf_kind,
-                .is_legacy_module = source.flags.is_module,
+                .is_module = source.flags.is_module,
             });
             self.function.func_name = source.name;
             self.function.arg_count = source.arg_count;
@@ -11622,6 +11688,7 @@ const function_mod = struct {
         leaf_returns_balanced: bool,
         contains_direct_eval: bool,
         class_syntax_excludes_inline: bool,
+        is_module: bool,
     ) void {
         // Class syntax is a finalizer-only exclusion fact. Runtime rejection is
         // encoded by OP_check_ctor and derived construction keeps its canonical
@@ -11667,6 +11734,7 @@ const function_mod = struct {
             .raw_this_inline_exact_args_leaf = raw_exact,
             .exact_args_leaf_kind = if (sloppy_exact) .sloppy else if (raw_exact) .raw_this else .none,
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
+            .is_module = is_module,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
     }

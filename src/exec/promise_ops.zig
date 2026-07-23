@@ -4799,10 +4799,13 @@ pub fn qjsReflectConstructResolveBound(
 pub fn rejectModuleNamespaceSuperSet(ctx: *core.JSContext, receiver: core.JSValue, atom_id: core.Atom) !bool {
     const receiver_object = objectFromValue(receiver) orelse return false;
     if (receiver_object.class_id != core.class.ids.module_ns) return false;
-    if (receiver_object.moduleNamespaceOwnBindingValue(atom_id)) |binding_value| {
-        defer binding_value.free(ctx.runtime);
-        if (binding_value.isUninitialized()) return error.ReferenceError;
-        return error.TypeError;
+    // OrdinarySetWithOwnDescriptor probes Receiver.[[GetOwnProperty]] before
+    // attempting to define on it. For a namespace Receiver that operation
+    // reads the live export and must propagate ReferenceError while it is TDZ.
+    // Only a successful/absent descriptor reaches the namespace write
+    // rejection and becomes TypeError.
+    if (try receiver_object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+        desc.destroy(ctx.runtime);
     }
     return error.TypeError;
 }

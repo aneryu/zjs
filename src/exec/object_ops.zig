@@ -315,6 +315,30 @@ fn bytecodeFunctionClassId(fb: *const bytecode.FunctionBytecode) core.ClassId {
     };
 }
 
+/// Allocate the unpublished object shell for a canonical module root.
+/// The caller still owns `fb`; attaching that exact owner and constructing the
+/// nullable MODULE_DECL/MODULE_IMPORT capture table are module-linker steps.
+pub fn createModuleBytecodeFunctionShell(
+    ctx: *core.JSContext,
+    fb: *const bytecode.FunctionBytecode,
+) !*core.Object {
+    if (!fb.isModule()) return error.InvalidBytecode;
+    const realm = fb.realmContext() orelse return error.InvalidBytecode;
+    if (realm != ctx) return error.InvalidBytecode;
+    // A bare Realm may reach module linking before any script/global lookup.
+    // Materialize its standard global before resolving the root function's
+    // intrinsic prototype, just as ordinary root closure construction does.
+    _ = try zjs_vm.contextGlobal(ctx);
+    const class_id = bytecodeFunctionClassId(fb);
+    const prototype = try bytecodeFunctionPrototypeForRealm(
+        ctx,
+        realm,
+        class_id,
+        fb.functionKind(),
+    );
+    return core.Object.create(ctx.runtime, class_id, prototype);
+}
+
 /// Resolve the immutable intrinsic prototype from the FunctionBytecode's own
 /// realm before allocating the closure object. The three non-ordinary
 /// function prototypes are lazily built by zjs; once built, publish them in
@@ -2733,13 +2757,6 @@ pub fn getValueProperty(
                 return function_value;
             }
         }
-        if (object.moduleNamespaceOwnBindingValue(atom_id)) |binding_value| {
-            if (binding_value.isUninitialized()) {
-                binding_value.free(rt);
-                return error.ReferenceError;
-            }
-            return binding_value;
-        }
         // QuickJS resolves an ordinary property with one shape/prototype walk:
         // find_own_property comes before every class/exotic check at every
         // prototype depth (quickjs.c:8268-8330). Class-specific numeric,
@@ -3934,6 +3951,7 @@ pub fn setSuperPropertyValue(
                 return;
             },
             .data => {
+                if (desc.writable == false) return error.TypeError;
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
                 const result = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
                 result.free(ctx.runtime);
@@ -4044,6 +4062,12 @@ pub fn ordinaryHasValueProperty(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
+    // Module namespace [[HasProperty]] tests only the exported-key set. It
+    // must not route through [[GetOwnProperty]], whose descriptor construction
+    // reads the live binding and would throw for a still-uninitialized export.
+    if (object.class_id == core.class.ids.module_ns) {
+        return object.hasOwnProperty(atom_id);
+    }
     if (typedArrayCanonicalHas(ctx.runtime, object, atom_id)) |has| return has;
     if (indexedExoticHasProperty(ctx.runtime, object, atom_id)) return true;
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
@@ -4055,6 +4079,9 @@ pub fn ordinaryHasValueProperty(
     while (current) |proto| : (current = proto.getPrototype()) {
         if (proto.proxyTarget() != null) {
             return try hasValueProperty(ctx, output, global, proto.value(), proto, atom_id, caller_function, caller_frame);
+        }
+        if (proto.class_id == core.class.ids.module_ns) {
+            return proto.hasOwnProperty(atom_id);
         }
         if (typedArrayCanonicalHas(ctx.runtime, proto, atom_id)) |has| return has;
         if (indexedExoticHasProperty(ctx.runtime, proto, atom_id)) return true;
@@ -4896,10 +4923,6 @@ pub fn proxyAwareOwnPropertyDescriptor(
 ) !?core.Descriptor {
     if (source.proxyTarget() == null) {
         if (try typedArrayCanonicalOwnDescriptor(ctx.runtime, source, key)) |desc| return desc;
-        if (source.moduleNamespaceOwnBindingValue(key)) |binding_value| {
-            defer binding_value.free(ctx.runtime);
-            if (binding_value.isUninitialized()) return error.ReferenceError;
-        }
         return source.getOwnProperty(ctx.runtime, key);
     }
     const target_value = source.proxyTarget() orelse return error.TypeError;

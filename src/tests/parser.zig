@@ -4373,13 +4373,13 @@ test "anonymous default function uses a star-default global function carrier" {
     );
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
-    const fn_bc = parsed.legacyModule() orelse return error.TestExpectedEqual;
+    const fn_bc = parsed.functionBytecode() orelse return error.TestExpectedEqual;
 
-    const record = try moduleRecord(fn_bc);
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
     try expectModuleRecordCounts(record, 0, 0, 1, 0, 0);
     try expectModuleExport(&env, record, 0, "default", "*default*");
     var found_function_constant = false;
-    for (fn_bc.constants.values) |value| {
+    for (fn_bc.cpoolSlice()) |value| {
         if (functionBytecodeFromValue(value) != null) {
             found_function_constant = true;
             break;
@@ -4388,9 +4388,10 @@ test "anonymous default function uses a star-default global function carrier" {
     try std.testing.expect(found_function_constant);
 
     const carrier = carrier: {
-        for (fn_bc.closure_var, 0..) |cv, idx| {
+        const closure_vars = fn_bc.closureVar();
+        for (closure_vars, 0..) |cv, idx| {
             if (std.mem.eql(u8, env.rt.atoms.name(cv.var_name) orelse "", "*default*")) {
-                break :carrier &fn_bc.closure_var[idx];
+                break :carrier &closure_vars[idx];
             }
         }
         return error.TestExpectedEqual;
@@ -4447,9 +4448,10 @@ test "F8: export star as namespace" {
     defer fn_bc.deinit(env.rt);
 
     const record = try moduleRecord(&fn_bc);
-    try expectModuleRecordCounts(record, 1, 0, 0, 0, 1);
+    try expectModuleRecordCounts(record, 1, 0, 0, 1, 0);
     try expectModuleRequest(&env, record, 0, "module");
-    try expectModuleStarExport(&env, record, 0, 0, "ns");
+    try expectModuleIndirectExport(&env, record, 0, 0, "ns", "*");
+    try std.testing.expect(record.indirect_exports[0].is_namespace);
 }
 
 test "F8: export from" {
@@ -7625,7 +7627,7 @@ test "ordinary script compile publishes one canonical function bytecode root" {
     try std.testing.expect(parsed.syntax_error == null);
 
     const root = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    try std.testing.expect(parsed.legacyModuleConst() == null);
+    try std.testing.expect(parsed.moduleArtifact() == null);
     try std.testing.expectEqual(op.return_undef, root.byteCode()[root.byteCode().len - 1]);
     try std.testing.expect(root.cpoolSlice().len > 0);
     try std.testing.expect(root.cpoolSlice()[0].isFunctionBytecode());
@@ -7656,6 +7658,36 @@ test "canonical root ownership moves out of parser Result exactly once" {
     try std.testing.expectEqual(op.return_undef, borrowed.byteCode()[borrowed.byteCode().len - 1]);
     owned.free(rt);
     owned_alive = false;
+}
+
+test "canonical module artifact ownership moves out of parser Result exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt, "import { value } from './dep.js'; export { value };", .{
+        .mode = .module,
+        .filename = "take-canonical-module.mjs",
+    });
+    var parsed_alive = true;
+    defer if (parsed_alive) parsed.deinit();
+    const borrowed_root = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+
+    var artifact = parsed.takeModuleArtifact() orelse return error.TestExpectedEqual;
+    var artifact_alive = true;
+    defer if (artifact_alive) artifact.deinit(rt);
+    try std.testing.expect(artifact.function_bytecode == borrowed_root);
+    try std.testing.expect(artifact.function_bytecode.isModule());
+    try std.testing.expectEqual(@as(usize, 1), artifact.record.requests.len);
+    try std.testing.expectEqual(@as(usize, 1), artifact.record.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), artifact.record.exports.len);
+    try std.testing.expect(parsed.functionBytecode() == null);
+    try std.testing.expect(parsed.moduleRecord() == null);
+
+    parsed.deinit();
+    parsed_alive = false;
+    try std.testing.expect(artifact.function_bytecode.isModule());
+    artifact.deinit(rt);
+    artifact_alive = false;
 }
 
 test "implicit arguments always resolves before final global var opcodes" {
@@ -7774,20 +7806,20 @@ test "runtime strict compile policy is published by root and child finalizers" {
     try std.testing.expect(!root.isStrictMode());
 }
 
-test "module compile keeps its explicit legacy root variant" {
+test "module compile publishes one canonical function bytecode plus metadata artifact" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "export const value = 1;", .{
         .mode = .module,
-        .filename = "legacy-root.mjs",
+        .filename = "canonical-module-root.mjs",
     });
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expect(parsed.functionBytecode() == null);
-    const module = parsed.legacyModuleConst() orelse return error.TestExpectedEqual;
-    try std.testing.expect(module.flags.is_module);
-    try std.testing.expect(module.module_record != null);
+    const artifact = parsed.moduleArtifact() orelse return error.TestExpectedEqual;
+    try std.testing.expect(parsed.functionBytecode() == artifact.function_bytecode);
+    try std.testing.expect(artifact.function_bytecode.isModule());
+    try std.testing.expect(parsed.moduleRecord() == &artifact.record);
 }
 
 test "module nested function independently keeps its compile realm alive" {
@@ -7806,13 +7838,12 @@ test "module nested function independently keeps its compile realm alive" {
     defer if (parsed_alive) parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
 
-    const module = parsed.legacyModuleConst() orelse return error.TestExpectedEqual;
+    const module = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     const nested = findFunctionConstantNamed(module, rt, "nested") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(realm, nested.realmContext());
 
-    // The mutable module root is still the explicit legacy variant, but each
-    // FunctionBytecode nested beneath it owns the compile realm just like a
-    // child beneath a canonical script root.
+    // The canonical module root and every nested FunctionBytecode independently
+    // own the compile realm.
     realm.destroy();
     realm_alive = false;
     try std.testing.expectEqual(realm, nested.realmContext());
@@ -9098,14 +9129,37 @@ test "module parse mode records import export metadata and strict flag" {
     try expectOpcodeRecursive(&parsed, qop.await);
     try expectOpcodeRecursive(&parsed, qop.define_class);
     try std.testing.expect(countFunctionClosures(parsed.byteCode()) > 0);
-    const record = parsed.legacyModule().?.module_record.?;
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 6), record.requests.len);
     try std.testing.expectEqual(@as(usize, 6), record.imports.len);
     try std.testing.expectEqual(@as(usize, 9), record.exports.len);
-    try std.testing.expectEqual(@as(usize, 1), record.indirect_exports.len);
-    try std.testing.expectEqual(@as(usize, 2), record.star_exports.len);
+    try std.testing.expectEqual(@as(usize, 2), record.indirect_exports.len);
+    try std.testing.expectEqual(@as(usize, 1), record.star_exports.len);
     try std.testing.expectEqual(@as(usize, 1), record.import_attributes.len);
     try std.testing.expect(record.has_top_level_await);
+
+    const closure_vars = parsed.closureVars();
+    for (record.imports) |entry| {
+        try std.testing.expect(entry.var_idx < closure_vars.len);
+        const carrier = closure_vars[entry.var_idx];
+        try std.testing.expectEqual(entry.local_name, carrier.var_name);
+        try std.testing.expectEqual(
+            if (entry.is_namespace) function_def.ClosureType.module_decl else function_def.ClosureType.module_import,
+            carrier.closureType(),
+        );
+    }
+    for (record.exports) |entry| {
+        try std.testing.expect(entry.var_idx < closure_vars.len);
+        try std.testing.expectEqual(entry.local_name, closure_vars[entry.var_idx].var_name);
+    }
+    var found_namespace_reexport = false;
+    for (record.indirect_exports) |entry| {
+        if (entry.is_namespace) {
+            found_namespace_reexport = true;
+            try std.testing.expectEqual(core.atom.predefinedId("*", .string).?, entry.import_name);
+        }
+    }
+    try std.testing.expect(found_namespace_reexport);
 }
 
 test "module parser preserves regex literals across zod-like lookahead scans" {
@@ -9200,8 +9254,8 @@ test "module import local names are compiled as module var refs" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    const fn_bc = parsed.legacyModule() orelse return error.TestExpectedEqual;
-    try std.testing.expect(fn_bc.var_ref_names.len >= 3);
+    const fn_bc = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    try std.testing.expect(fn_bc.closureVar().len >= 3);
 
     const x = try rt.internAtom("x");
     defer rt.atoms.free(x);
@@ -9210,9 +9264,17 @@ test "module import local names are compiled as module var refs" {
     const ns = try rt.internAtom("ns");
     defer rt.atoms.free(ns);
 
-    try std.testing.expect(std.mem.indexOfScalar(core.Atom, fn_bc.var_ref_names, x) != null);
-    try std.testing.expect(std.mem.indexOfScalar(core.Atom, fn_bc.var_ref_names, renamed) != null);
-    try std.testing.expect(std.mem.indexOfScalar(core.Atom, fn_bc.var_ref_names, ns) != null);
+    var found_x = false;
+    var found_renamed = false;
+    var found_ns = false;
+    for (fn_bc.closureVar()) |cv| {
+        found_x = found_x or cv.var_name == x;
+        found_renamed = found_renamed or cv.var_name == renamed;
+        found_ns = found_ns or cv.var_name == ns;
+    }
+    try std.testing.expect(found_x);
+    try std.testing.expect(found_renamed);
+    try std.testing.expect(found_ns);
 }
 
 test "module parser rejects duplicate exported names across export forms" {
@@ -9290,7 +9352,8 @@ test "module parser accepts empty side-effect import attributes" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(@as(usize, 1), parsed.legacyModule().?.module_record.?.requests.len);
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), record.requests.len);
 }
 
 test "module parser validates string module export names" {
@@ -9312,6 +9375,31 @@ test "module parser validates string module export names" {
     var parsed = try compileForTest(rt, "export { \"ok\" as \"also-ok\" } from './dep.js';", .{ .mode = .module, .filename = "valid-string-export-name.js" });
     defer parsed.deinit();
     try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "module namespace metadata is syntax-driven when the imported name is star" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\import { "*" as stringStar } from "./named.js";
+        \\import * as namespaceStar from "./namespace.js";
+        \\export { "*" as stringOut } from "./named-export.js";
+        \\export * as namespaceOut from "./namespace-export.js";
+    ,
+        .{ .mode = .module, .filename = "star-metadata.mjs" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), record.imports.len);
+    try std.testing.expect(!record.imports[0].is_namespace);
+    try std.testing.expect(record.imports[1].is_namespace);
+    try std.testing.expectEqual(@as(usize, 2), record.indirect_exports.len);
+    try std.testing.expect(!record.indirect_exports[0].is_namespace);
+    try std.testing.expect(record.indirect_exports[1].is_namespace);
 }
 
 test "module parser rejects comma expression as default export expression" {
@@ -9339,8 +9427,9 @@ test "module parser accepts keyword module export and import names" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(@as(usize, 3), parsed.legacyModule().?.module_record.?.exports.len);
-    try std.testing.expectEqual(@as(usize, 3), parsed.legacyModule().?.module_record.?.imports.len);
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 3), record.exports.len);
+    try std.testing.expectEqual(@as(usize, 3), record.imports.len);
 }
 
 test "module parser allows duplicate top-level var declarations" {
@@ -9687,7 +9776,10 @@ test "module parser accepts default as explicit namespace export name" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(@as(usize, 1), parsed.legacyModule().?.module_record.?.star_exports.len);
+    const record = parsed.moduleRecord() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), record.star_exports.len);
+    try std.testing.expectEqual(@as(usize, 1), record.indirect_exports.len);
+    try std.testing.expect(record.indirect_exports[0].is_namespace);
 }
 
 test "eval function class private destructuring spread async generator features are recorded" {

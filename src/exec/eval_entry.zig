@@ -4,11 +4,13 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
 const call = @import("call.zig");
+const call_runtime = @import("call_runtime.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const module_graph = @import("module_graph.zig");
 const object_ops = @import("object_ops.zig");
+const promise_ops = @import("promise_ops.zig");
 const property_ops = @import("property_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -69,47 +71,56 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
         return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
     }
-    const legacy_module = compiled.legacyModuleConst();
-    var module_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const function: *const bytecode.FunctionBytecode = compiled.functionBytecode() orelse if (legacy_module) |module_function|
-        module_adapter.init(module_function)
-    else
-        return error.InvalidBytecode;
-
-    var has_module_record = false;
-    if (options.mode == .module and legacy_module != null and legacy_module.?.module_record != null) {
-        const module_function = legacy_module.?;
-        has_module_record = true;
+    var module_record: ?*core.module.ModuleRecord = null;
+    var should_evaluate_module = false;
+    var function: ?*const bytecode.FunctionBytecode = null;
+    if (options.mode == .module) {
+        const artifact = compiled.takeModuleArtifact() orelse return error.InvalidBytecode;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
-        try module_exec.instantiateParsedRecordWithReferrer(ctx, module_name, module_function, referrer_path);
-        if (ctx.modules.find(module_name)) |record| record.import_meta_main = true;
-        ctx.modules.linkModule(rt, module_name) catch |err| {
-            try module_graph.throwModuleLinkError(rt, ctx, options.filename, err);
-            return moduleResolutionError(err);
-        };
-        // js_inner_module_linking invokes the module function once with
-        // `this === true` after import/export cells are linked. The compiler's
-        // entry guard performs declaration instantiation and returns before
-        // the body. Keep the in-memory eval entry on the same mechanism as the
-        // file-module graph instead of relying on evaluation-time fallbacks.
-        try module_graph.initializeModuleFunctionDeclarations(rt, ctx, module_name, module_function);
+        const record = try module_exec.installParsedModuleArtifact(
+            ctx,
+            module_name,
+            artifact,
+            referrer_path,
+        );
+        record.import_meta_main = true;
+        module_record = record;
+        switch (record.status) {
+            .unlinked => {
+                var diagnostic: module_exec.LinkDiagnostic = .{};
+                module_exec.linkModule(ctx, record, &diagnostic) catch |err| {
+                    try module_graph.throwModuleLinkError(rt, ctx, options.filename, err, &diagnostic);
+                    return moduleResolutionError(err);
+                };
+                if (record.status != .linked) return error.InvalidBytecode;
+                should_evaluate_module = true;
+            },
+            .linked => should_evaluate_module = true,
+            .evaluating, .evaluated => {},
+            .errored => {
+                const exception = record.eval_exception orelse return error.InvalidBytecode;
+                _ = ctx.throwValue(exception.dup());
+                return error.JSException;
+            },
+            .linking => return error.ModuleLinkFailed,
+        }
+        if (should_evaluate_module) {
+            function = try module_exec.moduleFunctionBytecode(record);
+        }
+    } else {
+        function = compiled.functionBytecode() orelse return error.InvalidBytecode;
     }
-
-    var module_var_refs: []*core.VarRef = &.{};
-    if (has_module_record) {
-        module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, legacy_module.?);
-    }
-    defer module_exec.freeModuleVarRefs(rt, module_var_refs);
 
     // Ordinary script/direct/indirect roots are real function objects, just as
     // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
-    // owner into that object; the explicitly legacy module path remains on its
-    // W1e state machine.
+    // owner into that object. Module roots were moved as one artifact into their
+    // record above and linkModule published the persistent function/captures.
     var root_function_value = core.JSValue.undefinedValue();
     defer root_function_value.free(rt);
     var root_function_object: ?*core.Object = null;
-    if (compiled.functionBytecode() != null) {
-        const root_realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
+    if (module_record == null) {
+        const root_function = function orelse return error.InvalidBytecode;
+        const root_realm = root_function.realmContext() orelse return error.InvalidBuiltinRegistry;
         if (root_realm != ctx) return error.InvalidBytecode;
         const root_global = try zjs_vm.contextGlobal(root_realm);
         const owned_function = compiled.takeFunctionBytecodeValue() orelse return error.InvalidBytecode;
@@ -131,52 +142,48 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const result = if (has_module_record) blk: {
+    const result = if (module_record) |record| blk: {
+        if (!should_evaluate_module) break :blk core.JSValue.undefinedValue();
         // Track the record through the evaluation status machine (mirrors
         // js_evaluate_module quickjs.c: EVALUATING → EVALUATED, with the
         // thrown value cached as eval_exception on failure) so a later
         // dynamic import of the same module never re-runs its body.
-        if (ctx.modules.find(module_name)) |record| record.status = .evaluating;
-        errdefer if (ctx.modules.find(module_name)) |record| {
-            if (record.status == .evaluating) {
-                record.status = .errored;
-                if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception.dup());
-            }
+        std.debug.assert(record.status == .linked);
+        record.status = .evaluating;
+        errdefer if (record.status == .evaluating) {
+            record.status = .errored;
+            if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception.dup());
         };
-        const value = try runEvalModuleWithVarRefs(ctx, function, options.output, module_var_refs, options.timing);
-        if (ctx.modules.find(module_name)) |record| {
-            if (record.status == .evaluating) record.status = .evaluated;
-        }
+        const value = try runEvalModule(ctx, record, options.output, options.timing);
+        if (record.status == .evaluating) record.status = .evaluated;
         break :blk value;
     } else blk: {
+        const root_function = function orelse return error.InvalidBytecode;
         const vm_start = monotonicNanos();
         var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
         defer stack.deinit(rt);
-        try stack.reserveAdditional(function.stack_size);
+        try stack.reserveAdditional(root_function.stack_size);
         const value = if (root_function_object) |root_object| v: {
             const is_eval_code = options.mode == .eval_direct or options.mode == .eval_indirect;
-            const initial_this = if (function.runtimeStrictMode()) core.JSValue.undefinedValue() else root_object.bytecodeFunctionRealmGlobalPtr().?.value();
+            const initial_this = if (root_function.runtimeStrictMode()) core.JSValue.undefinedValue() else root_object.bytecodeFunctionRealmGlobalPtr().?.value();
             break :v try zjs_vm.runWithCallEnv(.{
                 .ctx = ctx,
                 .stack = &stack,
-                .function = function,
+                .function = root_function,
                 .initial_this_value = initial_this,
                 .var_refs = root_object.functionCaptures(),
                 .output = options.output,
                 .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry,
                 .break_var_ref_cycles_on_exit = true,
-                .strict_unresolved_get_var = function.isStrictMode(),
+                .strict_unresolved_get_var = root_function.isStrictMode(),
                 .current_function_value = root_function_value,
                 .eval_global_var_bindings = options.mode == .eval_indirect,
                 .direct_eval_vars_reach_global = options.mode == .script or
-                    (options.mode == .eval_indirect and !function.isStrictMode()),
+                    (options.mode == .eval_indirect and !root_function.isStrictMode()),
                 .is_eval_code = is_eval_code,
                 .global_declarations_prevalidated = true,
             });
-        } else switch (options.mode) {
-            .module => try zjs_vm.runWithOutput(ctx, &stack, function, options.output),
-            .script, .eval_direct, .eval_indirect => return error.InvalidBytecode,
-        };
+        } else return error.InvalidBytecode;
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
     };
@@ -197,17 +204,16 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     return result;
 }
 
-fn runEvalModuleWithVarRefs(
+fn runEvalModule(
     ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
+    record: *core.module.ModuleRecord,
     output: ?*std.Io.Writer,
-    module_var_refs: []const *core.VarRef,
     timing: ?*core.context.ContextEvalTiming,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    var continuation_value = (try core.Object.create(rt, core.class.ids.generator, null)).value();
-    defer continuation_value.free(rt);
-    const continuation = try property_ops.expectObject(continuation_value);
+    var module_state_value = (try core.Object.create(rt, core.class.ids.generator, null)).value();
+    defer module_state_value.free(rt);
+    const module_state = try property_ops.expectObject(module_state_value);
     var resume_value: ?core.JSValue = null;
     var resume_value_symbol_rooted = false;
     defer if (resume_value) |value| {
@@ -216,16 +222,12 @@ fn runEvalModuleWithVarRefs(
     };
 
     while (true) {
-        var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
-        defer stack.deinit(rt);
         const vm_start = monotonicNanos();
-        const result = zjs_vm.runModuleWithOutputAndVarRefsState(
+        const result = module_exec.runModuleEvaluationStep(
             ctx,
-            &stack,
-            function,
+            record,
             output,
-            module_var_refs,
-            continuation,
+            module_state,
             resume_value,
         ) catch |err| return moduleResolutionError(err);
         if (timing) |item| item.vm_run_ns += elapsedNanosSince(vm_start);
@@ -238,18 +240,94 @@ fn runEvalModuleWithVarRefs(
             resume_value = null;
         }
 
-        if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
-            resume_value = result;
-            resume_value_symbol_rooted = try rt.registerExternalValueSymbolRoot(result);
-            const global_object = try zjs_vm.contextGlobal(ctx);
-            const jobs_start = monotonicNanos();
-            try zjs_vm.drainPendingPromiseJobs(ctx, output, global_object);
-            if (timing) |item| item.promise_jobs_ns += elapsedNanosSince(jobs_start);
+        if (module_state.generatorJustYielded() and !module_state.generatorDone()) {
+            const await_resume = try waitForModuleAwaitReaction(
+                ctx,
+                output,
+                result,
+                timing,
+            );
+            resume_value = await_resume.value;
+            resume_value_symbol_rooted = try rt.registerExternalValueSymbolRoot(
+                await_resume.value,
+            );
+            try call_runtime.setGeneratorResumeCompletionType(
+                rt,
+                module_state,
+                if (await_resume.rejected) 2 else 0,
+            );
             continue;
         }
 
         return result;
     }
+}
+
+const ModuleAwaitResume = struct {
+    value: core.JSValue,
+    rejected: bool,
+};
+
+/// Consume one raw OP_await result and resume only when this await's reaction
+/// has reached its FIFO position. Jobs after that reaction stay queued until
+/// the module has run to its next suspension or completion.
+fn waitForModuleAwaitReaction(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    awaited: core.JSValue,
+    timing: ?*core.context.ContextEvalTiming,
+) !ModuleAwaitResume {
+    const rt = ctx.runtime;
+    defer awaited.free(rt);
+    const global = try zjs_vm.contextGlobal(ctx);
+    const reaction_value = try module_graph.createModuleAwaitReactionPromise(
+        rt,
+        ctx,
+        output,
+        global,
+        awaited,
+    );
+    defer reaction_value.free(rt);
+    const reaction = try property_ops.expectObject(reaction_value);
+    if (reaction.class_id != core.class.ids.promise) return error.TypeError;
+
+    while (reaction.promiseResult() == null) {
+        const progressed = progress: {
+            const jobs_start = monotonicNanos();
+            defer if (timing) |item| {
+                item.promise_jobs_ns += elapsedNanosSince(jobs_start);
+            };
+            switch (try promise_ops.drainOnePendingJob(ctx, output, global)) {
+                .success => break :progress true,
+                .exception => return error.JSException,
+                .empty => break :progress try runOneModuleAwaitHostEvent(
+                    ctx,
+                    output,
+                    global,
+                ),
+            }
+        };
+        if (!progressed) return error.OperationUnsupported;
+    }
+
+    const rejected = reaction.promiseIsRejected();
+    if (rejected) core.promise.markHandled(ctx, reaction);
+    const settled = reaction.promiseResult() orelse return error.OperationUnsupported;
+    return .{
+        .value = settled.dup(),
+        .rejected = rejected,
+    };
+}
+
+fn runOneModuleAwaitHostEvent(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+) !bool {
+    if (try call.runNextOsSignalHandler(ctx, output, global)) return true;
+    if (try call_runtime.runNextOsRwHandler(ctx, output, global)) return true;
+    if (try call_runtime.runNextOsTimer(ctx, output, global)) return true;
+    return call_runtime.runNextAtomicsHostCompletion(ctx, false);
 }
 
 fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {

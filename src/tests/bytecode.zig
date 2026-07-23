@@ -107,9 +107,9 @@ test "function bytecode owns code constants module and debug metadata" {
     const mod_record = function_bc.ensureModule();
     const req_index = try mod_record.addRequest(dep);
     const default_atom = core.atom.predefinedId("*default*", .string).?;
-    try mod_record.addImport(req_index, default_atom, local);
+    try mod_record.addImport(req_index, default_atom, local, 0, false);
     try mod_record.addExport(default_atom, local);
-    try mod_record.addIndirectExport(req_index, local, default_atom);
+    try mod_record.addIndirectExport(req_index, local, default_atom, false);
     try mod_record.addStarExport(req_index, default_atom);
     try mod_record.addImportAttribute(req_index, local, default_atom);
     mod_record.has_top_level_await = true;
@@ -222,7 +222,7 @@ test "bytecode module record add failure releases duplicated atom references" {
     const local_name = try rt.internAtom("oom-bytecode-local");
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, record.addImport(0, import_name, local_name));
+    try std.testing.expectError(error.OutOfMemory, record.addImport(0, import_name, local_name, 0, false));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(@as(usize, 0), record.imports.len);

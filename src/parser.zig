@@ -3517,6 +3517,7 @@ pub const parser_core = struct {
         YieldOutsideGenerator,
         AwaitOutsideAsyncFunction,
         SyntaxError,
+        BytecodeOverflow,
         // Native recursion-descent guard (QuickJS next_token
         // `js_check_stack_overflow` -> js_parse_error "stack overflow",
         // quickjs.c:22836). Surfaced by `compile` as a catchable SyntaxError.
@@ -7406,7 +7407,8 @@ pub const parser_core = struct {
 
     /// Emit the `[this, home_object]` pair consumed by a super property
     /// reference. FunctionDef-backed methods use ordinary pseudo-variable
-    /// resolution; legacy root fragments use the frame special-object opcode.
+    /// resolution; low-level mutable root fixtures use the frame
+    /// special-object opcode.
     fn emitSuperThisAndHomeObject(s: *State) Error!void {
         try emitSuperThis(s);
         if (s.emit_to_function_def) {
@@ -16693,8 +16695,7 @@ pub const parser_core = struct {
 
             if (s.peekKind() != ',') {
                 const request_index = try parseFromClause(s);
-                try addModuleImport(s, request_index, atom_default, local_name);
-                try addModuleImportBinding(s, local_name, false);
+                try addModuleImportBinding(s, request_index, atom_default, local_name, false);
                 // parseFromClause handles with clause, so expect semicolon after
                 _ = try s.expectSemicolon();
                 return;
@@ -16718,10 +16719,10 @@ pub const parser_core = struct {
             try validateModuleImportBindingName(s, local_name);
             try s.advance();
             const request_index = try parseFromClause(s);
-            if (default_local_name) |default_name| try addModuleImport(s, request_index, atom_default, default_name);
-            try addModuleImport(s, request_index, atom_star, local_name);
-            if (default_local_name) |default_name| try addModuleImportBinding(s, default_name, false);
-            try addModuleImportBinding(s, local_name, true);
+            if (default_local_name) |default_name| {
+                try addModuleImportBinding(s, request_index, atom_default, default_name, false);
+            }
+            try addModuleImportBinding(s, request_index, atom_star, local_name, true);
             _ = try s.expectSemicolon();
             return;
         }
@@ -16774,13 +16775,11 @@ pub const parser_core = struct {
             }
             try s.expectToken('}');
             const request_index = try parseFromClause(s);
-            if (default_local_name) |default_name| try addModuleImport(s, request_index, atom_default, default_name);
-            for (imports.items) |entry| {
-                try addModuleImport(s, request_index, entry.import_name, entry.local_name);
+            if (default_local_name) |default_name| {
+                try addModuleImportBinding(s, request_index, atom_default, default_name, false);
             }
-            if (default_local_name) |default_name| try addModuleImportBinding(s, default_name, false);
             for (imports.items) |entry| {
-                try addModuleImportBinding(s, entry.local_name, false);
+                try addModuleImportBinding(s, request_index, entry.import_name, entry.local_name, false);
             }
             _ = try s.expectSemicolon();
             return;
@@ -16821,11 +16820,6 @@ pub const parser_core = struct {
         }
     }
 
-    fn addModuleImport(s: *State, request_index: u32, import_name: Atom, local_name: Atom) Error!void {
-        const record = s.function.ensureModule();
-        record.addImport(request_index, import_name, local_name) catch return error.OutOfMemory;
-    }
-
     fn addModuleImportAttribute(s: *State, request_index: u32, key: Atom, value: Atom) Error!void {
         const record = s.function.ensureModule();
         for (record.import_attributes) |entry| {
@@ -16834,9 +16828,16 @@ pub const parser_core = struct {
         record.addImportAttribute(request_index, key, value) catch return error.OutOfMemory;
     }
 
-    fn addModuleImportBinding(s: *State, local_name: Atom, is_namespace: bool) Error!void {
+    fn addModuleImportBinding(
+        s: *State,
+        request_index: u32,
+        import_name: Atom,
+        local_name: Atom,
+        is_namespace: bool,
+    ) Error!void {
         if (hasKnownBinding(s, local_name)) return Error.UnexpectedToken;
-        _ = try s.cur_func().addClosureVar(.{
+        if (s.cur_func().closure_var.len > std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const raw_var_idx = try s.cur_func().addClosureVar(.{
             // qjs add_import: namespace imports own a MODULE_DECL slot that
             // linking fills with the namespace cell; named/default imports are
             // MODULE_IMPORT aliases of an exported binding.
@@ -16847,6 +16848,15 @@ pub const parser_core = struct {
             .var_idx = @intCast(s.cur_func().closure_var.len),
             .var_name = local_name,
         });
+        if (raw_var_idx < 0 or raw_var_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const record = s.function.ensureModule();
+        record.addImport(
+            request_index,
+            import_name,
+            local_name,
+            @intCast(raw_var_idx),
+            is_namespace,
+        ) catch return error.OutOfMemory;
     }
 
     fn ensureModuleDefaultExportBinding(s: *State) Error!void {
@@ -16856,10 +16866,16 @@ pub const parser_core = struct {
         }
     }
 
-    fn addModuleIndirectExport(s: *State, request_index: u32, export_name: Atom, import_name: Atom) Error!void {
+    fn addModuleIndirectExport(
+        s: *State,
+        request_index: u32,
+        export_name: Atom,
+        import_name: Atom,
+        is_namespace: bool,
+    ) Error!void {
         const record = s.function.ensureModule();
         if (moduleHasExportName(record, export_name)) return Error.UnexpectedToken;
-        record.addIndirectExport(request_index, export_name, import_name) catch return error.OutOfMemory;
+        record.addIndirectExport(request_index, export_name, import_name, is_namespace) catch return error.OutOfMemory;
     }
 
     fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
@@ -17044,7 +17060,7 @@ pub const parser_core = struct {
             if (s.isIdent("from")) {
                 const request_index = try parseFromClause(s);
                 for (export_specs.items) |entry| {
-                    try addModuleIndirectExport(s, request_index, entry.export_name, entry.import_name);
+                    try addModuleIndirectExport(s, request_index, entry.export_name, entry.import_name, false);
                 }
             } else {
                 for (export_specs.items) |entry| {
@@ -17062,7 +17078,9 @@ pub const parser_core = struct {
             // Optional 'as' for namespace re-export
             var export_name = atom_star;
             var export_name_was_string = false;
+            var is_namespace = false;
             if (s.isIdent("as")) {
+                is_namespace = true;
                 try s.advance();
                 if (!isModuleNameToken(s.peekKind())) {
                     return Error.UnexpectedToken;
@@ -17074,7 +17092,11 @@ pub const parser_core = struct {
             }
             defer if (export_name_was_string) s.function.atoms.free(export_name);
             const request_index = try parseFromClause(s);
-            try addModuleStarExport(s, request_index, export_name);
+            if (is_namespace) {
+                try addModuleIndirectExport(s, request_index, export_name, atom_star, true);
+            } else {
+                try addModuleStarExport(s, request_index, export_name);
+            }
             _ = try s.expectSemicolon();
             return;
         }
@@ -17274,13 +17296,26 @@ pub const compile_entry = struct {
         syntax_error_guard,
     };
 
-    /// Exactly one successful root artifact. Ordinary script/direct/indirect
-    /// eval use the canonical GC-owned FunctionBytecode; modules retain their
-    /// explicitly named legacy mutable root until module linking moves in W1e.
+    /// Move-only module compilation product. The FunctionBytecode and module
+    /// record are the two independently owned halves of one canonical module
+    /// root; no parser Bytecode or arena storage escapes compilation.
+    const ModuleArtifactImpl = struct {
+        function_bytecode: *bytecode.FunctionBytecode,
+        record: bytecode.module.Record,
+
+        pub fn deinit(self: *ModuleArtifactImpl, runtime: *JSRuntime) void {
+            self.record.deinit();
+            JSValue.functionBytecode(&self.function_bytecode.header).free(runtime);
+        }
+    };
+
+    /// Exactly one successful root artifact. Script/direct/indirect eval own a
+    /// canonical FunctionBytecode directly; modules own the same canonical
+    /// root together with their linking metadata.
     const RootArtifactImpl = union(enum) {
         none,
         function_bytecode: *bytecode.FunctionBytecode,
-        legacy_module: bytecode.Bytecode,
+        module: ModuleArtifactImpl,
     };
 
     const ResultImpl = struct {
@@ -17291,30 +17326,25 @@ pub const compile_entry = struct {
         features: std.EnumSet(FeatureImpl) = .initEmpty(),
         syntax_error: ?diagnostics_mod.SyntaxError = null,
         direct_eval: bool = false,
-        /// Only the legacy module root may retain parser-arena storage. A
-        /// canonical FunctionBytecode has copied/moved every live artifact and
-        /// releases the parse arena before compile returns.
-        arena: ?std.heap.ArenaAllocator = null,
 
         pub fn deinit(self: *ResultImpl) void {
             if (self.syntax_error) |*err| err.deinit();
             switch (self.artifact) {
                 .none => {},
                 .function_bytecode => |fb| JSValue.functionBytecode(&fb.header).free(self.runtime),
-                .legacy_module => |owned| {
-                    var function = owned;
-                    function.deinit(self.runtime);
+                .module => |owned| {
+                    var artifact = owned;
+                    artifact.deinit(self.runtime);
                 },
             }
             self.artifact = .none;
-            if (self.arena) |*arena| arena.deinit();
-            self.arena = null;
         }
 
         pub fn functionBytecode(self: *const ResultImpl) ?*const bytecode.FunctionBytecode {
             return switch (self.artifact) {
                 .function_bytecode => |fb| fb,
-                else => null,
+                .module => |artifact| artifact.function_bytecode,
+                .none => null,
             };
         }
 
@@ -17334,82 +17364,53 @@ pub const compile_entry = struct {
         }
 
         pub fn byteCode(self: *const ResultImpl) []const u8 {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.byteCode(),
-                .legacy_module => |function| function.code,
-                .none => &.{},
-            };
+            const fb = self.functionBytecode() orelse return &.{};
+            return fb.byteCode();
         }
 
         pub fn constants(self: *const ResultImpl) []const JSValue {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.cpoolSlice(),
-                .legacy_module => |function| function.constants.values,
-                .none => &.{},
-            };
+            const fb = self.functionBytecode() orelse return &.{};
+            return fb.cpoolSlice();
         }
 
         pub fn closureVars(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeClosureVar {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.closureVar(),
-                .legacy_module => |function| function.closure_var,
-                .none => &.{},
-            };
+            const fb = self.functionBytecode() orelse return &.{};
+            return fb.closureVar();
         }
 
         pub fn varDefs(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeVarDef {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.varDefs(),
-                .legacy_module => |function| function.vardefs,
-                .none => &.{},
-            };
+            const fb = self.functionBytecode() orelse return &.{};
+            return fb.varDefs();
         }
 
         pub fn openVarRefCount(self: *const ResultImpl) u16 {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.openVarRefCount(),
-                .legacy_module => |function| function.open_var_ref_count,
-                .none => 0,
-            };
+            const fb = self.functionBytecode() orelse return 0;
+            return fb.openVarRefCount();
         }
 
         pub fn filenameAtom(self: *const ResultImpl) atom.Atom {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.filenameAtom(),
-                .legacy_module => |function| function.filename,
-                .none => atom.null_atom,
-            };
+            const fb = self.functionBytecode() orelse return atom.null_atom;
+            return fb.filenameAtom();
         }
 
         pub fn scriptOrModuleAtom(self: *const ResultImpl) atom.Atom {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.scriptOrModule(),
-                .legacy_module => |function| function.script_or_module,
-                .none => atom.null_atom,
-            };
+            const fb = self.functionBytecode() orelse return atom.null_atom;
+            return fb.scriptOrModule();
         }
 
         pub fn entryContract(self: *const ResultImpl) bytecode.EntryContract {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| blk: {
-                    break :blk .{
-                        .new_target_allowed = fb.newTargetAllowed(),
-                        .super_call_allowed = fb.superCallAllowed(),
-                        .super_allowed = fb.superAllowed(),
-                        .arguments_allowed = fb.argumentsAllowed(),
-                    };
-                },
-                .legacy_module => |function| function.entry_contract,
-                .none => .{},
+            const fb = self.functionBytecode() orelse return .{};
+            return .{
+                .new_target_allowed = fb.newTargetAllowed(),
+                .super_call_allowed = fb.superCallAllowed(),
+                .super_allowed = fb.superAllowed(),
+                .arguments_allowed = fb.argumentsAllowed(),
             };
         }
 
         pub fn isStrict(self: *const ResultImpl) bool {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.isStrictMode(),
-                .legacy_module => |function| function.flags.is_strict,
-                .none => false,
-            };
+            const fb = self.functionBytecode() orelse return false;
+            return fb.isStrictMode();
         }
 
         pub fn isGlobalVar(self: *const ResultImpl) bool {
@@ -17423,35 +17424,36 @@ pub const compile_entry = struct {
         }
 
         pub fn isDirectOrIndirectEval(self: *const ResultImpl) bool {
-            return switch (self.artifact) {
-                .function_bytecode => |fb| fb.isDirectOrIndirectEval(),
-                .legacy_module => |function| function.isDirectOrIndirectEval(),
-                .none => false,
-            };
+            const fb = self.functionBytecode() orelse return false;
+            return fb.isDirectOrIndirectEval();
         }
 
         pub fn isModule(self: *const ResultImpl) bool {
             return self.mode == .module;
         }
 
-        pub fn moduleRecord(self: *ResultImpl) ?*bytecode.module.Record {
-            const function = self.legacyModule() orelse return null;
-            if (function.module_record) |*record| return record;
-            return null;
-        }
-
-        pub fn legacyModule(self: *ResultImpl) ?*bytecode.Bytecode {
+        pub fn moduleArtifact(self: *const ResultImpl) ?*const ModuleArtifactImpl {
             return switch (self.artifact) {
-                .legacy_module => &self.artifact.legacy_module,
+                .module => &self.artifact.module,
                 else => null,
             };
         }
 
-        pub fn legacyModuleConst(self: *const ResultImpl) ?*const bytecode.Bytecode {
-            return switch (self.artifact) {
-                .legacy_module => &self.artifact.legacy_module,
-                else => null,
+        pub fn moduleRecord(self: *const ResultImpl) ?*const bytecode.module.Record {
+            const artifact = self.moduleArtifact() orelse return null;
+            return &artifact.record;
+        }
+
+        /// Move the canonical module root and its record out together. The
+        /// Result becomes empty before returning, preventing either owner from
+        /// being released twice.
+        pub fn takeModuleArtifact(self: *ResultImpl) ?ModuleArtifactImpl {
+            const artifact = switch (self.artifact) {
+                .module => |owned| owned,
+                else => return null,
             };
+            self.artifact = .none;
+            return artifact;
         }
 
         pub fn hasFeature(self: ResultImpl, feature: FeatureImpl) bool {
@@ -17617,6 +17619,8 @@ pub const compile_entry = struct {
                 return result;
             },
         };
+        var canonical_root_owned = true;
+        errdefer if (canonical_root_owned) JSValue.functionBytecode(&canonical_root.header).free(rt);
 
         var result = ResultImpl{
             .runtime = rt,
@@ -17625,19 +17629,20 @@ pub const compile_entry = struct {
             .features = features,
         };
         if (options.mode == .module) {
-            if (canonical_root != null) return error.InvalidBytecode;
-            result.artifact = .{ .legacy_module = function };
-            result.arena = arena;
-            function_owned = false;
-            arena_owned = false;
+            const record = function.module_record orelse return error.InvalidBytecode;
+            function.module_record = null;
+            result.artifact = .{ .module = .{
+                .function_bytecode = canonical_root,
+                .record = record,
+            } };
         } else {
-            const root = canonical_root orelse return error.InvalidBytecode;
-            result.artifact = .{ .function_bytecode = root };
-            function.deinit(rt);
-            function_owned = false;
-            arena.deinit();
-            arena_owned = false;
+            result.artifact = .{ .function_bytecode = canonical_root };
         }
+        canonical_root_owned = false;
+        function.deinit(rt);
+        function_owned = false;
+        arena.deinit();
+        arena_owned = false;
         result.parse_path = .normal;
         return result;
     }
@@ -17650,7 +17655,7 @@ pub const compile_entry = struct {
         compile_context: bytecode.CompileContext,
         function: *bytecode.Bytecode,
         features: *std.EnumSet(FeatureImpl),
-    ) !?*bytecode.FunctionBytecode {
+    ) !*bytecode.FunctionBytecode {
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
         defer lex.deinit();
@@ -17659,10 +17664,7 @@ pub const compile_entry = struct {
         if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
             try lex.enableTypeScript();
         }
-        var state = if (options.mode == .module)
-            try parser_core.ParseState.initWithRuntime(rt, &lex, function)
-        else
-            try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
+        var state = try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
         state.is_strict = options.mode == .module or effective_strict;
         // QuickJS creates the root program FunctionDef as eval bytecode for all
@@ -17764,33 +17766,28 @@ pub const compile_entry = struct {
             if (needs_return) try state.emitReturnUndefined();
         }
 
-        const canonical_root: ?*bytecode.FunctionBytecode = if (options.mode == .module) blk: {
-            try bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, compile_context);
-            break :blk null;
-        } else blk: {
-            // Parsing intentionally redirects the operation allocator to the
-            // short-lived arena. Finalization may use that facade for scratch
-            // lists, but the published FB must be built under the runtime's
-            // stable allocation policy. FunctionDef buffers and FB storage use
-            // MemoryAccount ownership directly; this scoped switch additionally
-            // prevents a future finalizer helper from accidentally retaining an
-            // arena-backed allocation. Restore it before State.deinit so parser
-            // scratch still unwinds under the allocator that created it.
-            const parse_allocator = rt.memory.allocator;
-            rt.memory.allocator = compile_context.artifactAllocator();
-            defer rt.memory.allocator = parse_allocator;
-            const root_slice = try bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context);
-            break :blk &root_slice[0];
-        };
+        // Parsing intentionally redirects the operation allocator to the
+        // short-lived arena. Finalization may use that facade for scratch
+        // lists, but the published FB must be built under the runtime's stable
+        // allocation policy. FunctionDef buffers, module metadata, and FB
+        // storage use MemoryAccount ownership directly; this scoped switch
+        // additionally prevents a future finalizer helper from accidentally
+        // retaining an arena-backed allocation. Restore it before State.deinit
+        // so parser scratch still unwinds under the allocator that created it.
+        const parse_allocator = rt.memory.allocator;
+        rt.memory.allocator = compile_context.artifactAllocator();
+        defer rt.memory.allocator = parse_allocator;
+        const root_slice = if (options.mode == .module) blk: {
+            const record = if (function.module_record) |*owned| owned else return error.InvalidBytecode;
+            break :blk try bytecode.pipeline.finalize.createModuleFunctionBytecode(
+                &state.function_def,
+                record,
+                compile_context,
+            );
+        } else try bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context);
         features.* = state.features;
-        if (options.mode == .module) {
-            function.flags.is_strict = function.flags.is_strict or state.function_def.is_strict_mode;
-            function.flags.is_global_var = state.function_def.is_global_var;
-            function.flags.is_module = true;
-            function.flags.is_direct_or_indirect_eval = false;
-        }
         _ = filename_atom;
-        return canonical_root;
+        return &root_slice[0];
     }
 
     fn setFallbackSyntaxError(
@@ -17915,6 +17912,7 @@ pub const compile_entry = struct {
     pub const Mode = ModeImpl;
     pub const CompilePath = CompilePathImpl;
     pub const Result = ResultImpl;
+    pub const ModuleArtifact = ModuleArtifactImpl;
     pub const RootArtifact = RootArtifactImpl;
     pub const Options = OptionsImpl;
     pub const EvalClosureSeed = EvalClosureSeedImpl;
@@ -17931,6 +17929,7 @@ pub const SourceKind = compile_entry.SourceKind;
 pub const Feature = parser_core.Feature;
 pub const CompilePath = compile_entry.CompilePath;
 pub const Result = compile_entry.Result;
+pub const ModuleArtifact = compile_entry.ModuleArtifact;
 pub const RootArtifact = compile_entry.RootArtifact;
 pub const Options = compile_entry.Options;
 pub const EvalClosureSeed = compile_entry.EvalClosureSeed;

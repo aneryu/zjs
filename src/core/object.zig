@@ -150,13 +150,16 @@ fn destroyValueSliceValuesOnly(rt: *JSRuntime, slot: *[]JSValue) void {
     for (values) |stored| stored.free(rt);
 }
 
-/// `destroyValueSlice` for a slot-typed var-ref cell slice (`[]*VarRef`):
-/// release each cell (qjs free_var_ref, quickjs.c:16199) and the slice memory.
-fn destroyVarRefCellSlice(rt: *JSRuntime, slot: *[]*var_ref_mod.VarRef) void {
+/// Release the nullable module/ordinary closure slots and their single backing
+/// allocation.  Module creation deliberately leaves MODULE_IMPORT entries
+/// null until indexed linking; ordinary published functions are sealed.
+fn destroyOptionalVarRefCellSlice(rt: *JSRuntime, slot: *[]?*var_ref_mod.VarRef) void {
     const cells = slot.*;
     slot.* = &.{};
-    for (cells) |cell| cell.freeCell(rt);
-    if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
+    for (cells) |maybe_cell| {
+        if (maybe_cell) |cell| cell.freeCell(rt);
+    }
+    if (cells.len != 0) rt.memory.free(?*var_ref_mod.VarRef, cells);
 }
 
 /// Cell releases only — for a var-ref window whose backing memory belongs to
@@ -1404,11 +1407,11 @@ pub const BytecodeFunctionStorage = extern struct {
     // pointer is never dereferenced while the FB count is zero. This keeps the
     // hot call prologue branch-free without changing qjs's one-word var_refs
     // storage or allocating an empty array.
-    var_refs: [*]*var_ref_mod.VarRef = emptyVarRefs(),
+    var_refs: [*]?*var_ref_mod.VarRef = emptyVarRefs(),
     /// null/direct `Object*`, or a low-bit-tagged `BytecodeFunctionAux*`.
     home_or_aux: ?*anyopaque = null,
 
-    pub inline fn captureSlice(self: *const BytecodeFunctionStorage) []*var_ref_mod.VarRef {
+    inline fn captureSlots(self: *const BytecodeFunctionStorage) []?*var_ref_mod.VarRef {
         // FB is installed before closure capture construction. Treat the
         // sentinel as an empty/uninstalled array even when the eventual FB
         // count is non-zero, so construction rollback and replacement never
@@ -1419,23 +1422,24 @@ pub const BytecodeFunctionStorage = extern struct {
         return self.var_refs[0..fb.closureVarCount()];
     }
 
-    pub inline fn emptyVarRefs() [*]*var_ref_mod.VarRef {
-        return @ptrFromInt(@alignOf(*var_ref_mod.VarRef));
+    pub inline fn captureSlice(self: *const BytecodeFunctionStorage) []*var_ref_mod.VarRef {
+        const fb = self.function_bytecode orelse return &.{};
+        const slots = self.captureSlots();
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            std.debug.assert(slots.len == fb.closureVarCount());
+            for (slots) |slot| std.debug.assert(slot != null);
+        }
+        if (slots.len == 0) return &.{};
+        const sealed: [*]*var_ref_mod.VarRef = @ptrCast(slots.ptr);
+        return sealed[0..slots.len];
+    }
+
+    pub inline fn emptyVarRefs() [*]?*var_ref_mod.VarRef {
+        return @ptrFromInt(@alignOf(?*var_ref_mod.VarRef));
     }
 
     comptime {
         std.debug.assert(@sizeOf(@This()) == 24);
-    }
-};
-
-pub const ModuleNamespacePayload = struct {
-    names: []atom.Atom = &.{},
-    cells: []JSValue = &.{},
-
-    pub fn destroy(self: *ModuleNamespacePayload, rt: *JSRuntime) void {
-        destroyAtomSlice(rt, &self.names);
-        destroyValueSlice(rt, &self.cells);
-        self.* = .{};
     }
 };
 
@@ -1544,11 +1548,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             typed.destroyNative(rt);
             rt.memory.destroy(FunctionPayload, typed);
         },
-        .module_namespace => {
-            const typed: *ModuleNamespacePayload = @ptrCast(@alignCast(ptr));
-            typed.destroy(rt);
-            rt.memory.destroy(ModuleNamespacePayload, typed);
-        },
         .none => {},
     }
 }
@@ -1613,11 +1612,6 @@ fn exoticMethodsForClassId(class_id: class.ClassId) ?*const ExoticMethods {
         else => null,
     };
 }
-
-/// Three-state result of an existence-only binding probe (no value `dup`).
-/// `uninitialized` mirrors qjs's TDZ VARREF case where the existence path
-/// (quickjs.c:8856-8860) still raises `ReferenceErrorUninitialized`.
-pub const BindingExistence = enum { absent, present, uninitialized };
 
 /// Dense-array arm of QuickJS's 24-byte `JSObject.u`. ZJS retains an explicit
 /// capacity in addition to the visible length/count, so the final scalar is
@@ -2289,11 +2283,6 @@ pub const Object = extern struct {
                 return @ptrCast(payload);
             },
             .function => unreachable,
-            .module_namespace => {
-                const payload = try rt.createRuntime(ModuleNamespacePayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
             .finalization_registry => {
                 const payload = try rt.createRuntime(FinalizationRegistryPayload);
                 payload.* = .{};
@@ -2343,7 +2332,6 @@ pub const Object = extern struct {
                 rt.memory.destroy(GeneratorPayload, typed);
             },
             .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
-            .module_namespace => rt.memory.destroy(ModuleNamespacePayload, @ptrCast(@alignCast(ptr))),
             .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
             .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
             .disposable_stack => rt.memory.destroy(DisposableStackPayload, @ptrCast(@alignCast(ptr))),
@@ -2802,7 +2790,6 @@ pub const Object = extern struct {
             .collection => self.destroyCollectionPayload(rt),
             .buffer => self.destroyBufferPayload(rt),
             .typed_array => self.destroyTypedArrayPayload(rt),
-            .module_namespace => self.destroyModuleNamespacePayload(rt),
             .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
             .std_file => self.destroyStdFilePayload(rt),
             .disposable_stack => self.destroyDisposableStackPayload(rt),
@@ -5748,6 +5735,73 @@ pub const Object = extern struct {
         return self.u.bytecode_function.captureSlice();
     }
 
+    /// Borrow the nullable module closure table during construction/linking.
+    /// Callers must mutate it only through the owned replace/clear helpers below;
+    /// ordinary execution uses `functionCaptures` after `sealModuleCaptures`.
+    pub fn moduleCaptureSlots(self: *const Object) []const ?*var_ref_mod.VarRef {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return &.{};
+        return self.u.bytecode_function.captureSlots();
+    }
+
+    /// Allocate the one and only module capture array with every slot null.
+    /// The attached FB fixes its exact length; a mismatch or second allocation
+    /// is invalid bytecode and leaves the function untouched.
+    pub fn allocateNullModuleCaptureSlots(self: *Object, rt: *JSRuntime, count: usize) !void {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
+        const storage = &self.u.bytecode_function;
+        const fb = storage.function_bytecode orelse return error.InvalidBytecode;
+        if (count != fb.closureVarCount()) return error.InvalidBytecode;
+        if (storage.var_refs != BytecodeFunctionStorage.emptyVarRefs()) return error.InvalidBytecode;
+        if (count == 0) return;
+
+        const slots = try rt.memory.alloc(?*var_ref_mod.VarRef, count);
+        @memset(slots, null);
+        storage.var_refs = slots.ptr;
+    }
+
+    /// Replace one module capture slot, transferring the caller's owned cell
+    /// reference on success.  An out-of-range index does not consume `cell`.
+    pub fn replaceModuleCaptureSlotOwned(
+        self: *Object,
+        rt: *JSRuntime,
+        index: usize,
+        cell: *var_ref_mod.VarRef,
+    ) !void {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
+        const slots = self.u.bytecode_function.captureSlots();
+        if (index >= slots.len) return error.InvalidBytecode;
+
+        const old = slots[index];
+        slots[index] = cell;
+        if (old) |old_cell| old_cell.freeCell(rt);
+    }
+
+    /// Roll one indexed module-import slot back to its pre-link null state.
+    /// The previously installed cell is consumed on success; an invalid index
+    /// changes nothing.
+    pub fn clearModuleImportCaptureSlot(self: *Object, rt: *JSRuntime, index: usize) !void {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
+        const slots = self.u.bytecode_function.captureSlots();
+        if (index >= slots.len) return error.InvalidBytecode;
+
+        const old = slots[index];
+        slots[index] = null;
+        if (old) |old_cell| old_cell.freeCell(rt);
+    }
+
+    /// Validate the module capture table before ordinary execution.  Sealing is
+    /// allocation-free and records no parallel state: rollback may clear an
+    /// import slot and a later successful link may validate the same array again.
+    pub fn sealModuleCaptures(self: *const Object) !void {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return error.InvalidBytecode;
+        const fb = self.u.bytecode_function.function_bytecode orelse return error.InvalidBytecode;
+        const slots = self.u.bytecode_function.captureSlots();
+        if (slots.len != fb.closureVarCount()) return error.InvalidBytecode;
+        for (slots) |slot| {
+            if (slot == null) return error.InvalidBytecode;
+        }
+    }
+
     /// Find one closure cell by its immutable FB metadata. Used for the
     /// language's hidden arrow captures (`this` / `new.target`) on cold semantic
     /// paths such as direct eval and super; ordinary opcodes index cells
@@ -5755,7 +5809,7 @@ pub const Object = extern struct {
     pub fn functionCaptureCell(self: *const Object, name: atom.Atom) ?*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return null;
         const fb = self.u.bytecode_function.function_bytecode orelse return null;
-        const captures = self.u.bytecode_function.captureSlice();
+        const captures = self.u.bytecode_function.captureSlots();
         for (fb.closureVar(), 0..) |capture, index| {
             if (capture.var_name == name and index < captures.len) return captures[index];
         }
@@ -5766,12 +5820,15 @@ pub const Object = extern struct {
     /// the cell-typed `setValueSlice` (ownership of `next_cells` transfers).
     pub fn setFunctionCaptures(self: *Object, rt: *JSRuntime, next_cells: []*var_ref_mod.VarRef) void {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        var old_cells = self.u.bytecode_function.captureSlice();
+        var old_cells = self.u.bytecode_function.captureSlots();
         if (self.u.bytecode_function.function_bytecode) |fb| {
             std.debug.assert(next_cells.len == fb.closureVarCount());
         }
-        self.u.bytecode_function.var_refs = if (next_cells.len == 0) BytecodeFunctionStorage.emptyVarRefs() else next_cells.ptr;
-        destroyVarRefCellSlice(rt, &old_cells);
+        self.u.bytecode_function.var_refs = if (next_cells.len == 0)
+            BytecodeFunctionStorage.emptyVarRefs()
+        else
+            @ptrCast(next_cells.ptr);
+        destroyOptionalVarRefCellSlice(rt, &old_cells);
     }
 
     pub fn functionHomeObject(self: *const Object) ?*Object {
@@ -6612,9 +6669,9 @@ pub const Object = extern struct {
 
     fn destroyFunctionPayload(self: *Object, rt: *JSRuntime) void {
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            var captures = self.u.bytecode_function.captureSlice();
+            var captures = self.u.bytecode_function.captureSlots();
             self.u.bytecode_function.var_refs = BytecodeFunctionStorage.emptyVarRefs();
-            destroyVarRefCellSlice(rt, &captures);
+            destroyOptionalVarRefCellSlice(rt, &captures);
 
             if (self.bytecodeFunctionAux()) |aux| {
                 self.u.bytecode_function.home_or_aux = null;
@@ -6637,68 +6694,6 @@ pub const Object = extern struct {
         self.flags.class_payload_kind = .none;
         payload.destroyNative(rt);
         rt.memory.destroy(FunctionPayload, payload);
-    }
-
-    pub fn moduleNamespacePayload(self: *Object) ?*ModuleNamespacePayload {
-        if (self.flags.class_payload_kind != .module_namespace) return null;
-        const ptr = self.u.payload orelse return null;
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    pub fn setModuleNamespaceCells(self: *Object, rt: *JSRuntime, next_cells: []JSValue) !void {
-        const payload = self.moduleNamespacePayload() orelse {
-            std.debug.assert(self.flags.class_payload_kind == .module_namespace);
-            unreachable;
-        };
-        try self.setValueSlice(rt, &payload.cells, next_cells);
-    }
-
-    fn moduleNamespacePayloadConst(self: *const Object) ?*const ModuleNamespacePayload {
-        if (self.flags.class_payload_kind != .module_namespace) return null;
-        const ptr = self.u.payload orelse return null;
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    inline fn moduleNamespaceBindingValue(self: Object, atom_id: atom.Atom) ?JSValue {
-        if (self.class_id != class.ids.module_ns) return null;
-        const payload = @constCast(&self).moduleNamespacePayload() orelse return null;
-        for (payload.names, 0..) |name, idx| {
-            if (name != atom_id or idx >= payload.cells.len) continue;
-            const cell = varRefCellFromValue(payload.cells[idx]) orelse return JSValue.undefinedValue();
-            return cell.varRefValue().dup();
-        }
-        return null;
-    }
-
-    pub inline fn moduleNamespaceOwnBindingValue(self: Object, atom_id: atom.Atom) ?JSValue {
-        return self.moduleNamespaceBindingValue(atom_id);
-    }
-
-    /// Existence-only probe for a module-namespace binding. Mirrors
-    /// `moduleNamespaceBindingValue` but performs NO `dup` -- it reports
-    /// presence and, separately, whether the cell is still uninitialized
-    /// (qjs `JS_GetOwnPropertyInternal` desc==NULL VARREF branch,
-    /// quickjs.c:8856-8860). Module-namespace bindings are stored as
-    /// VARREF cells in qjs's namespace property table, so the existence
-    /// path throws `ReferenceErrorUninitialized` when the cell is in TDZ.
-    pub fn moduleNamespaceBindingExists(self: Object, atom_id: atom.Atom) BindingExistence {
-        if (self.class_id != class.ids.module_ns) return .absent;
-        const payload = @constCast(&self).moduleNamespacePayload() orelse return .absent;
-        for (payload.names, 0..) |name, idx| {
-            if (name != atom_id or idx >= payload.cells.len) continue;
-            const cell = varRefCellFromValue(payload.cells[idx]) orelse return .present;
-            if (cell.varRefValue().isUninitialized()) return .uninitialized;
-            return .present;
-        }
-        return .absent;
-    }
-
-    fn destroyModuleNamespacePayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.moduleNamespacePayload() orelse return;
-        self.u.payload = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy(rt);
-        rt.memory.destroy(ModuleNamespacePayload, payload);
     }
 
     pub fn destroyRuntimeCycles(rt: *JSRuntime) usize {
@@ -7601,8 +7596,9 @@ pub const Object = extern struct {
         if (class.isBytecodeFunctionClass(self.class_id)) {
             // Save the slice before a clearing visitor can rewrite the FB edge;
             // the capture count is immutable FB metadata.
-            const captures = self.u.bytecode_function.captureSlice();
-            for (captures) |cell| {
+            const captures = self.u.bytecode_function.captureSlots();
+            for (captures) |maybe_cell| {
+                const cell = maybe_cell orelse continue;
                 var cell_value = cell.valueRef();
                 try Helper.callVisitValue(visitor, &cell_value);
             }
@@ -7727,9 +7723,6 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.reaction_callback);
             try Helper.traceOptValue(visitor, &payload.reaction_arg);
             for (payload.reactions) |*stored| try Helper.callVisitValue(visitor, stored);
-        }
-        if (self.moduleNamespacePayload()) |payload| {
-            for (payload.cells) |*stored| try Helper.callVisitValue(visitor, stored);
         }
         const Adaptor = ClassPayloadTraceAdaptor(@TypeOf(visitor));
         var adaptor = Adaptor{ .visitor = visitor };
@@ -8231,7 +8224,12 @@ pub const Object = extern struct {
         if (class.isBytecodeFunctionClass(self.class_id)) {
             if (self.u.bytecode_function.function_bytecode == function_bytecode) count += 1;
         }
-        for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+        if (class.isBytecodeFunctionClass(self.class_id)) {
+            for (self.u.bytecode_function.captureSlots()) |maybe_cell| {
+                const cell = maybe_cell orelse continue;
+                count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
+            }
+        }
         count += countOptionalFunctionBytecodeRef(self.functionRealmGlobal(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionProxyRevokeTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseCapabilitySlot(), function_bytecode);
@@ -8273,9 +8271,6 @@ pub const Object = extern struct {
         count += countOptionalFunctionBytecodeRef(self.promiseReactionCallback(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.promiseReactionArg(), function_bytecode);
         for (self.promiseReactions()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
-        if (self.moduleNamespacePayloadConst()) |payload| {
-            for (payload.cells) |cell| count += countFunctionBytecodeValueRef(cell, function_bytecode);
-        }
         count += self.countClassPayloadFunctionBytecodeRefs(rt, function_bytecode);
         return count;
     }
@@ -8375,9 +8370,6 @@ pub const Object = extern struct {
                 if (hook(@constCast(self), atom_id)) |desc| return desc;
             }
         }
-        if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
-            return descriptor.Descriptor.data(stored, true, true, false);
-        }
         if (self.isArray() and atom_id == atom.ids.length) {
             return descriptor.Descriptor.data(arrayLengthValue(self.arrayLength()), self.flags.length_writable, false, false);
         }
@@ -8392,7 +8384,6 @@ pub const Object = extern struct {
             return descriptor.Descriptor.data(mapped_value, true, true, true);
         }
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.prop_values[index];
             const entry_flags = self.propFlagsAt(index);
             if (entry_flags.deleted) return null;
             // Auto-init placeholders need to be materialized before
@@ -8408,14 +8399,38 @@ pub const Object = extern struct {
                 // containing `undefined`.
                 const transient = try materializeAutoInit(@constCast(self), index);
                 transient.free(rt);
-                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.prop_values[index].slot);
+                return try self.descriptorFromOwnPropertySlot(index);
             }
-            return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
+            return try self.descriptorFromOwnPropertySlot(index);
         }
         if (self.denseArrayElement(atom_id)) |stored| {
             return descriptor.Descriptor.data(stored.dup(), true, true, true);
         }
         return null;
+    }
+
+    fn descriptorFromOwnPropertySlot(self: *const Object, index: usize) !descriptor.Descriptor {
+        const flags = self.propFlagsAt(index);
+        const slot = self.prop_values[index].slot;
+        if (flags.kind == .var_ref and slot.var_ref.varRefValue().isUninitialized()) {
+            return error.ReferenceError;
+        }
+        var desc = descriptor.Descriptor.fromSlot(flags, slot);
+        // A module namespace exposes a writable=true data descriptor while its
+        // exotic Set/Define behavior protects the underlying live binding.
+        // Exporter const-ness belongs to the binding cell and must not leak into
+        // the namespace property's descriptor.
+        if (self.isModuleNamespaceExportProperty(flags)) desc.writable = true;
+        return desc;
+    }
+
+    inline fn isModuleNamespaceExportProperty(self: *const Object, flags: property.Flags) bool {
+        return self.class_id == class.ids.module_ns and
+            !flags.deleted and
+            flags.writable and
+            flags.enumerable and
+            !flags.configurable and
+            flags.kind != .accessor;
     }
 
     /// Snapshot of an own key's enumerable bit, read straight off the shape
@@ -8439,11 +8454,11 @@ pub const Object = extern struct {
         if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property != null) return .descriptor;
         }
-        // Typed arrays (canonical numeric index) and module-namespace bindings
-        // need detached/range/TDZ checks that the descriptor path performs and
-        // that can observably throw; never snapshot those off the shape.
+        // Typed arrays (canonical numeric index) need detached/range checks
+        // that the descriptor path performs and that can observably throw.
+        // Module namespace enumerability is carried by its ordinary shape
+        // flags; reading that bit does not materialize an AUTOINIT binding.
         if (isTypedArrayObject(self)) return .descriptor;
-        if (self.moduleNamespacePayloadConst() != null) return .descriptor;
 
         if (self.isArray() and atom_id == atom.ids.length) return .not_enumerable;
         if (self.findProperty(atom_id)) |index| {
@@ -8488,13 +8503,6 @@ pub const Object = extern struct {
                     return true;
                 }
             }
-        }
-        // Module-namespace binding (quickjs.c:8856-8860 VARREF existence
-        // path). Presence with NO dup; TDZ raises ReferenceError.
-        switch (self.moduleNamespaceBindingExists(atom_id)) {
-            .present => return true,
-            .uninitialized => return error.ReferenceError,
-            .absent => {},
         }
         if (self.isArray() and atom_id == atom.ids.length) return true;
         if (self.findProperty(atom_id)) |index| {
@@ -8550,7 +8558,6 @@ pub const Object = extern struct {
     /// path converts them to `undefined`.
     pub fn getProperty(self: *const Object, atom_id: atom.Atom) context_mod.DynamicImportError!JSValue {
         profile.recordPropLookup(self.isGlobal());
-        if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
         if (self.isArray() and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
         if (self.mappedArgumentsTaggedBindingIndex(atom_id)) |mapped_index| {
             if (self.mappedArgumentsBindingValue(mapped_index)) |mapped| return mapped;
@@ -8561,7 +8568,10 @@ pub const Object = extern struct {
                 .data => entry.slot.data.dup(),
                 .accessor => entry.slot.accessor.getterValue().dup(),
                 .auto_init => try materializeAutoInit(@constCast(self), index),
-                .var_ref => entry.slot.var_ref.varRefValue().dup(),
+                .var_ref => if (entry.slot.var_ref.varRefValue().isUninitialized())
+                    error.ReferenceError
+                else
+                    entry.slot.var_ref.varRefValue().dup(),
             };
         }
         if (self.denseArrayElement(atom_id)) |stored| return stored.dup();
@@ -8591,7 +8601,11 @@ pub const Object = extern struct {
 
         const result: property.AutoInitMaterialization = switch (expected_slot.realm_and_id.id()) {
             .prototype => .{ .value = try self.materializeFunctionPrototypeAutoInit(realm) },
-            .module_ns => try materializeModuleAutoInit(realm, expected_slot.moduleOwner() orelse return error.InvalidBuiltinRegistry),
+            .module_ns => try materializeModuleAutoInit(
+                realm,
+                expected_slot.moduleOwner() orelse return error.InvalidBuiltinRegistry,
+                expected_atom,
+            ),
             .prop => .{ .value = try materializePropAutoInit(realm, expected_slot.descriptor() orelse return error.InvalidBuiltinRegistry) },
         };
 
@@ -8612,8 +8626,9 @@ pub const Object = extern struct {
     fn materializeModuleAutoInit(
         realm: *context_mod.RealmContext,
         owner: *const property.AutoInitModuleOwner,
+        atom_id: atom.Atom,
     ) context_mod.DynamicImportError!property.AutoInitMaterialization {
-        return owner.resolve(owner, &realm.header) catch |err| return @errorCast(err);
+        return owner.resolve(owner, &realm.header, atom_id) catch |err| return @errorCast(err);
     }
 
     fn autoInitSlotStillMatches(self: *const Object, index: usize, expected_atom: atom.Atom, expected: property.AutoInitSlot) bool {
@@ -9233,10 +9248,52 @@ pub const Object = extern struct {
         });
     }
 
-    /// W1b3d1 fixture seam for the typed MODULE_NS slot/result protocol. The
-    /// production delayed-export producer remains owned by W1e; callers must
-    /// keep `owner` alive until this property is replaced or destroyed.
-    pub fn defineModuleAutoInitPropertyForFixture(
+    /// Install a normal module-namespace export as the exporter-owned VarRef
+    /// itself.  The supplied cell reference is consumed on every return path;
+    /// the property owns that transferred reference on success.
+    pub fn defineModuleVarRefProperty(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        owned_cell: *var_ref_mod.VarRef,
+    ) !void {
+        const flags = property.Flags.varRef(true, true, false);
+        if (self.class_id != class.ids.module_ns or
+            !self.flags.extensible or
+            self.findProperty(atom_id) != null)
+        {
+            owned_cell.freeCell(rt);
+            return error.IncompatibleDescriptor;
+        }
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .var_ref = owned_cell });
+    }
+
+    /// Install a delayed module-namespace export.  The stable owner Interface
+    /// is embedded in the originating module record; this slot owns only the
+    /// Realm edge that keeps the record and Interface alive.
+    pub fn defineModuleAutoInitProperty(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        realm: *context_mod.RealmContext,
+        owner: *const property.AutoInitModuleOwner,
+    ) !void {
+        if (self.class_id != class.ids.module_ns or
+            !self.flags.extensible or
+            self.findProperty(atom_id) != null)
+        {
+            return error.IncompatibleDescriptor;
+        }
+        try self.appendModuleAutoInitProperty(
+            rt,
+            atom_id,
+            property.Flags.data(true, true, false),
+            realm,
+            owner,
+        );
+    }
+
+    fn appendModuleAutoInitProperty(
         self: *Object,
         rt: *JSRuntime,
         atom_id: atom.Atom,
@@ -9245,13 +9302,25 @@ pub const Object = extern struct {
         owner: *const property.AutoInitModuleOwner,
     ) !void {
         std.debug.assert(realm.runtime == rt);
-        std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
             .auto_init = property.AutoInitSlot.retainModule(&realm.header, owner),
         });
+    }
+
+    /// W1b3d1 fixture seam.  It delegates to the same slot producer as real
+    /// module namespace properties and therefore cannot create a parallel
+    /// ownership or publication protocol.
+    pub fn defineModuleAutoInitPropertyForFixture(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        realm: *context_mod.RealmContext,
+        owner: *const property.AutoInitModuleOwner,
+    ) !void {
+        try self.appendModuleAutoInitProperty(rt, atom_id, flags, realm, owner);
     }
 
     pub fn defineAutoInitProperty(
@@ -9912,12 +9981,7 @@ pub const Object = extern struct {
     }
 
     pub fn setProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
-        if (self.class_id == class.ids.module_ns) {
-            if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
-                stored.free(rt);
-                return error.ReadOnly;
-            }
-        }
+        if (self.class_id == class.ids.module_ns) return error.ReadOnly;
         if (self.isArray() and atom_id == atom.ids.length) {
             if (!self.flags.length_writable) return error.ReadOnly;
             try self.defineArrayLength(rt, descriptor.Descriptor.data(new_value, true, false, false));
@@ -9981,12 +10045,7 @@ pub const Object = extern struct {
     }
 
     pub fn setOwnWritableDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.class_id == class.ids.module_ns) {
-            if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
-                stored.free(rt);
-                return false;
-            }
-        }
+        if (self.class_id == class.ids.module_ns) return false;
         // QJS's JS_SetPropertyInternal consumes the shape flags and matching
         // value cell returned by one `find_own_property` probe. Keep that pair
         // together here as well; the old path re-ran defensive/indexed shape
@@ -10047,12 +10106,7 @@ pub const Object = extern struct {
     }
 
     pub fn setOrDefineOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.class_id == class.ids.module_ns) {
-            if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
-                stored.free(rt);
-                return false;
-            }
-        }
+        if (self.class_id == class.ids.module_ns) return false;
         if (self.findProperty(atom_id)) |index| {
             const entry_flags = self.propFlagsAt(index);
             if (self.isAccessorOrAccessorPlaceholderAt(index)) return false;
@@ -10151,8 +10205,22 @@ pub const Object = extern struct {
 
     fn defineModuleNamespaceProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !bool {
         if (self.class_id != class.ids.module_ns) return false;
-        const current = self.moduleNamespaceBindingValue(atom_id) orelse return false;
-        defer current.free(rt);
+        const index = self.findProperty(atom_id) orelse return false;
+        var flags = self.propFlagsAt(index);
+        if (!self.isModuleNamespaceExportProperty(flags)) return false;
+
+        // Namespace [[DefineOwnProperty]] first obtains the current descriptor.
+        // QuickJS therefore instantiates an AUTOINIT export before validating
+        // `desc`; a materialization failure remains the observable result.
+        if (flags.kind == .auto_init) {
+            const transient = try self.materializeAutoInit(index);
+            transient.free(rt);
+            flags = self.propFlagsAt(index);
+            if (!self.isModuleNamespaceExportProperty(flags)) return error.IncompatibleDescriptor;
+        }
+
+        const current = try self.descriptorFromOwnPropertySlot(index);
+        defer current.destroy(rt);
 
         if (desc.kind == .accessor) return error.IncompatibleDescriptor;
         if (desc.configurable orelse false) return error.IncompatibleDescriptor;
@@ -10162,9 +10230,7 @@ pub const Object = extern struct {
         if (desc.writable) |writable| {
             if (!writable) return error.IncompatibleDescriptor;
         }
-        if (desc.kind == .data and desc.value_present and !current.sameValue(desc.value)) {
-            return error.ReadOnly;
-        }
+        if (desc.value_present and !current.value.sameValue(desc.value)) return error.ReadOnly;
         return true;
     }
 
@@ -10243,17 +10309,6 @@ pub const Object = extern struct {
     pub fn ownKeys(self: Object, rt: *JSRuntime) OwnKeysError![]atom.Atom {
         if (self.exoticMethods(rt)) |methods| {
             if (methods.own_keys) |hook| return try hook(@constCast(&self), rt);
-        }
-        if (self.class_id == class.ids.module_ns) {
-            if (@constCast(&self).moduleNamespacePayload()) |payload| {
-                var keys: []atom.Atom = &.{};
-                errdefer freeKeys(rt, keys);
-                for (payload.names) |name| try appendAtom(rt, &keys, name);
-                if (atom.predefinedId("Symbol.toStringTag", .symbol)) |tag_atom| {
-                    if (self.findProperty(tag_atom) != null) try appendAtom(rt, &keys, tag_atom);
-                }
-                return keys;
-            }
         }
 
         var keys: []atom.Atom = &.{};
@@ -10351,6 +10406,15 @@ pub const Object = extern struct {
 
     pub fn freeze(self: *Object, rt: *JSRuntime) !void {
         try self.seal(rt);
+        if (self.class_id == class.ids.module_ns) {
+            for (0..self.shape_ref.prop_count) |index| {
+                if (self.isModuleNamespaceExportProperty(self.propFlagsAt(index))) {
+                    // Module namespace descriptors report writable=true, but
+                    // their exotic DefineOwnProperty rejects making it false.
+                    return error.IncompatibleDescriptor;
+                }
+            }
+        }
         self.detachAllMappedArgumentsBindings(rt);
         for (0..self.shape_ref.prop_count) |index| {
             var entry_flags = self.propFlagsAt(index);

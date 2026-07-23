@@ -421,7 +421,7 @@ pub noinline fn copyDataProperties(
     // ordering for a proxy: gopd:k, get:k, ...).
     const source_is_ordinary = source.proxyTarget() == null and
         !core.object.isTypedArrayObject(source) and
-        @constCast(source).moduleNamespacePayload() == null;
+        source.class_id != core.class.ids.module_ns;
     if (source_is_ordinary) {
         // Up-front enumerable snapshot. getOwnProperty for an ordinary source
         // never invokes a user getter (it surfaces the getter function, not

@@ -3,6 +3,7 @@ const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const VarRef = @import("var_ref.zig").VarRef;
+const module_auto_init = @import("module_auto_init.zig");
 const std = @import("std");
 
 /// Property kind (qjs `JS_PROP_TMASK`, quickjs.h:303-307). The kind is NOT
@@ -334,17 +335,12 @@ pub const AutoInit = struct {
     prepare_native_function: ?*const fn (*JSRuntime, *const AutoInit, JSValue) anyerror!void = null,
 };
 
-/// Typed MODULE_NS materialization contract. A resolver returns either a
-/// newly-owned namespace value or the existing export cell that the property
-/// must retain directly; it never snapshots a VarRef's current value.
-pub const AutoInitMaterialization = union(enum) {
-    value: JSValue,
-    var_ref: *VarRef,
-};
-
-pub const AutoInitModuleOwner = struct {
-    resolve: *const fn (owner: *const AutoInitModuleOwner, realm_header: *gc.Header) anyerror!AutoInitMaterialization,
-};
+/// Compatibility aliases for callers that historically imported these
+/// contracts through `property.zig`.  The definitions live in the Runtime-free
+/// leaf so an address-stable module record can embed the owner Interface
+/// without depending on the property/runtime Module.
+pub const AutoInitMaterialization = module_auto_init.AutoInitMaterialization;
+pub const AutoInitModuleOwner = module_auto_init.AutoInitModuleOwner;
 
 /// qjs `JSProperty` (quickjs.c:947-963): a 16B untagged union. The active arm
 /// is NOT discriminated by an in-cell tag; the owning shape's `Flags.kind`
