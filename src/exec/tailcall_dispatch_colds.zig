@@ -913,6 +913,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.get_var_ref3, .h = td.opGetVarRef(.c3) },
         .{ .o = op.get_var_ref, .h = td.opGetVarRef(.half) },
         .{ .o = op.get_var_ref_check, .h = td.opGetVarRef(.half) },
+        .{ .o = op.put_var_ref0, .h = td.opPutVarRef(.c0) },
+        .{ .o = op.put_var_ref1, .h = td.opPutVarRef(.c1) },
+        .{ .o = op.put_var_ref2, .h = td.opPutVarRef(.c2) },
+        .{ .o = op.put_var_ref3, .h = td.opPutVarRef(.c3) },
+        .{ .o = op.put_var_ref, .h = td.opPutVarRef(.half) },
     }) |e| t[e.o] = e.h;
     return t;
 }

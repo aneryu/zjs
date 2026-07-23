@@ -859,6 +859,7 @@ fn moduleRecord(function: *const engine.bytecode.Bytecode) !*const engine.byteco
 fn rootCode(function: anytype) []const u8 {
     const T = @TypeOf(function);
     if (comptime T == *const parser.Result or T == *parser.Result) return function.byteCode();
+    if (comptime T == *const engine.bytecode.FunctionBytecode or T == *engine.bytecode.FunctionBytecode) return function.byteCode();
     return function.code;
 }
 
@@ -1023,6 +1024,27 @@ fn countOpcodeRecursive(function: anytype, opcode: u8) usize {
         if (functionBytecodeFromValue(value)) |fb| {
             count += countOpcodeInFunctionBytecode(fb, opcode);
         }
+    }
+    return count;
+}
+
+fn countVarRefStoresRecursive(function: anytype) usize {
+    var count: usize = 0;
+    inline for ([_]u8{
+        op.put_var_ref,
+        op.put_var_ref_check,
+        op.put_var_ref_check_init,
+        op.put_var_ref0,
+        op.put_var_ref1,
+        op.put_var_ref2,
+        op.put_var_ref3,
+        op.set_var_ref,
+        op.set_var_ref0,
+        op.set_var_ref1,
+        op.set_var_ref2,
+        op.set_var_ref3,
+    }) |opcode_id| {
+        count += countOpcodeRecursive(function, opcode_id);
     }
     return count;
 }
@@ -9399,6 +9421,138 @@ test "named function self-binding writes do not reach var-ref stores" {
         countOpcodeRecursive(&parameter_default, qop.get_loc2) +
         countOpcodeRecursive(&parameter_default, qop.get_loc3);
     try std.testing.expect(local_reads >= 1);
+}
+
+test "final bytecode authorizes plain var-ref stores before execution" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    // Owning-frame mutable arguments and locals remain arg/local writes.
+    var owned = try compileForTest(
+        rt,
+        "function owner(arg) { var local = 0; arg = 1; local = 2; return arg + local; }",
+        .{ .mode = .script, .filename = "owned-write-authorization.js" },
+    );
+    defer owned.deinit();
+    try std.testing.expect(owned.syntax_error == null);
+    const owner = findFunctionConstantNamed(&owned, rt, "owner") orelse
+        return error.TestExpectedEqual;
+    const arg_writes =
+        countOpcode(owner.byteCode(), op.put_arg) +
+        countOpcode(owner.byteCode(), op.put_arg0) +
+        countOpcode(owner.byteCode(), op.put_arg1) +
+        countOpcode(owner.byteCode(), op.put_arg2) +
+        countOpcode(owner.byteCode(), op.put_arg3);
+    const local_writes =
+        countOpcode(owner.byteCode(), op.put_loc) +
+        countOpcode(owner.byteCode(), op.put_loc8) +
+        countOpcode(owner.byteCode(), op.put_loc0) +
+        countOpcode(owner.byteCode(), op.put_loc1) +
+        countOpcode(owner.byteCode(), op.put_loc2) +
+        countOpcode(owner.byteCode(), op.put_loc3);
+    try std.testing.expect(arg_writes >= 1);
+    try std.testing.expect(local_writes >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(owner));
+
+    // A mutable captured var is the production authorization for plain put:
+    // its final inner bytecode contains no const/function-name decision.
+    var captured = try compileForTest(
+        rt,
+        "function outer(arg) { var local = 0; return function inner() { arg = 1; local = 2; }; }",
+        .{ .mode = .script, .filename = "captured-write-authorization.js" },
+    );
+    defer captured.deinit();
+    try std.testing.expect(captured.syntax_error == null);
+    const outer = findFunctionConstantNamed(&captured, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const inner = findFunctionConstantNamed(outer, rt, "inner") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), countPutVarRefStores(inner.byteCode()));
+    try std.testing.expectEqual(@as(usize, 2), countVarRefStoresRecursive(inner));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(inner.byteCode(), op.throw_error));
+
+    // Ordinary script globals stay in the global opcode family.
+    var global = try compileForTest(
+        rt,
+        "var globalValue = 0; globalValue = 1;",
+        .{ .mode = .script, .filename = "global-write-authorization.js" },
+    );
+    defer global.deinit();
+    try std.testing.expect(global.syntax_error == null);
+    try std.testing.expect(countOpcode(global.byteCode(), op.put_var) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&global));
+
+    // Read-only captured locals and module imports are rejected in final
+    // bytecode, before any executor var-ref handler can observe them.
+    var captured_const = try compileForTest(
+        rt,
+        "function outer() { const fixed = 0; return function inner() { fixed = 1; }; }",
+        .{ .mode = .script, .filename = "captured-const-authorization.js" },
+    );
+    defer captured_const.deinit();
+    try std.testing.expect(captured_const.syntax_error == null);
+    const const_outer = findFunctionConstantNamed(&captured_const, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const const_inner = findFunctionConstantNamed(const_outer, rt, "inner") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(countOpcode(const_inner.byteCode(), op.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(const_inner));
+
+    var imported = try compileForTest(
+        rt,
+        "import { importedName } from 'dep'; importedName = 1;",
+        .{ .mode = .module, .filename = "import-write-authorization.mjs" },
+    );
+    defer imported.deinit();
+    try std.testing.expect(imported.syntax_error == null);
+    try std.testing.expect(countOpcode(imported.byteCode(), op.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&imported));
+
+    // Direct eval receives the same final authorization from its seeded
+    // closure table: mutable ref -> value-preserving store, const ref ->
+    // throw_error.
+    const mutable_atom = try rt.internAtom("mutableEval");
+    defer rt.atoms.free(mutable_atom);
+    const mutable_seed = [_]parser.EvalClosureSeed{.{
+        .var_name = mutable_atom,
+        .closure_type = .ref,
+        .var_idx = 0,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    }};
+    var mutable_eval = try compileForTest(rt, "mutableEval = 1; 0;", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &mutable_seed,
+    });
+    defer mutable_eval.deinit();
+    try std.testing.expect(mutable_eval.syntax_error == null);
+    // Direct eval preserves statement completion, so this assignment uses the
+    // value-preserving set family. It is authorized, but deliberately remains
+    // outside this plain-put execution candidate.
+    try std.testing.expectEqual(@as(usize, 0), countPutVarRefStores(mutable_eval.byteCode()));
+    try std.testing.expectEqual(@as(usize, 1), countVarRefStoresRecursive(&mutable_eval));
+
+    const fixed_atom = try rt.internAtom("fixedEval");
+    defer rt.atoms.free(fixed_atom);
+    const fixed_seed = [_]parser.EvalClosureSeed{.{
+        .var_name = fixed_atom,
+        .closure_type = .ref,
+        .var_idx = 1,
+        .is_lexical = true,
+        .is_const = true,
+        .var_kind = .normal,
+    }};
+    var fixed_eval = try compileForTest(rt, "fixedEval = 1;", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &fixed_seed,
+    });
+    defer fixed_eval.deinit();
+    try std.testing.expect(fixed_eval.syntax_error == null);
+    try std.testing.expect(countOpcode(fixed_eval.byteCode(), op.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&fixed_eval));
 }
 
 test "assignment target scan ignores atom operand bytes" {

@@ -2025,6 +2025,37 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     }.h;
 }
 
+/// Plain closure/global var-ref write (qjs OP_put_var_ref0..3 / OP_put_var_ref,
+/// quickjs.c:18617-18624,18638-18645). Final bytecode never sends a read-only
+/// binding here: const/import writes become throw_error and sloppy function-name
+/// writes become drop during resolve_variables. The resident success path is
+/// therefore qjs set_value exactly: publish the owned TOS value, release the old
+/// cell value, consume TOS, and continue. TDZ/init forms remain cold and separate.
+pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const idx: u16 = switch (idx_src) {
+                .c0 => 0,
+                .c1 => 1,
+                .c2 => 2,
+                .c3 => 3,
+                .half => readInt(u16, pc + 1),
+            };
+            const advance: usize = switch (idx_src) {
+                .c0, .c1, .c2, .c3 => 1,
+                .half => 3,
+            };
+            // Parser-produced bytecode has construction-fixed var-ref bounds.
+            // Retain the cold checked adapter for synthetic/legacy bytecode.
+            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            return cont(pc + advance, sp - 1, var_buf, vm);
+        }
+    }.h;
+}
+
 // I-cache pin (see op_return): keeps this hot handler's entry alignment
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_push_i32(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
