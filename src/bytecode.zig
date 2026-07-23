@@ -9005,6 +9005,24 @@ pub const pipeline_resolve_labels = struct {
                         positions[pc + 8] = out_pc;
                     }
                 }
+                if (matchAddLocPeephole(code, pc)) |p| {
+                    // code_match retains the last source marker visited before
+                    // any consumed RHS/add/dup/put/drop opcode, then QJS emits
+                    // that marker once at the replacement RHS start. There is
+                    // no separate source update at add_loc; the input end keeps
+                    // the default mapping to the output end.
+                    const rhs_pc = pc + 3;
+                    const add_pc = rhs_pc + p.rhs_size;
+                    const dup_pc = add_pc + 1;
+                    const put_pc = dup_pc + 1;
+                    const drop_pc = put_pc + 3;
+                    positions[pc] = out_pc;
+                    positions[rhs_pc] = out_pc;
+                    positions[add_pc] = out_pc;
+                    positions[dup_pc] = out_pc;
+                    positions[put_pc] = out_pc;
+                    positions[drop_pc] = out_pc;
+                }
                 if (matchDupPutPeephole(code, pc)) |p| {
                     // QJS attributes the replacement to the consumed put, or
                     // to the following drop when that later source marker is

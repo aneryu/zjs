@@ -8979,6 +8979,45 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
     try std.testing.expect(saw_tagged_rhs);
 }
 
+test "add_loc finalization attributes a multiline local RHS to the operator" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt,
+        \\function addLocal() {
+        \\  var value = 0;
+        \\  side();
+        \\  value +=
+        \\    1;
+        \\  side();
+        \\  return value;
+        \\}
+    , .{ .mode = .script, .filename = "add-loc-source.js" });
+    defer parsed.deinit();
+
+    const child = findFunctionConstantNamed(&parsed, rt, "addLocal") orelse return error.TestExpectedEqual;
+    const code = child.byteCode();
+    var rhs_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = engine.bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.TestExpectedEqual;
+        if (op_id == op.push_1 and pc + size < code.len and code[pc + size] == op.add_loc) {
+            rhs_pc = pc;
+            break;
+        }
+        pc += size;
+    }
+
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        child.pc2lineBuf(),
+        @intCast(rhs_pc orelse return error.TestExpectedEqual),
+    );
+    try std.testing.expectEqual(@as(i32, 4), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 9), source_loc.col_num);
+}
+
 test "quick parser emits arithmetic compound assignment operators" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

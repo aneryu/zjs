@@ -4598,6 +4598,57 @@ test "resolve_labels folds the QuickJS add_loc RHS family" {
     try std.testing.expectEqualSlices(core.Atom, &.{rhs_atom}, bc.atom_operands);
 }
 
+test "resolve_labels add_loc fold preserves QuickJS source mapping" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("add-loc-source");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.push_i32;
+    std.mem.writeInt(i32, input[4..8], 1, .little);
+    input[8] = op.add;
+    input[9] = op.dup;
+    input[10] = op.put_loc;
+    std.mem.writeInt(u16, input[11..13], 4, .little);
+    input[13] = op.drop;
+    input[14] = op.return_undef;
+    try bc.setCode(&input);
+
+    try bc.appendSourceLoc(0, 10, 2);
+    try bc.appendSourceLoc(3, 11, 3);
+    try bc.appendSourceLoc(8, 12, 4);
+    try bc.appendSourceLoc(9, 13, 5);
+    try bc.appendSourceLoc(10, 14, 6);
+    try bc.appendSourceLoc(13, 15, 7);
+    try bc.appendSourceLoc(14, 16, 8);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.push_1,
+        op.add_loc,
+        4,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqual(@as(usize, 7), bc.source_loc_slots.len);
+    for (bc.source_loc_slots[0..6]) |slot| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+    }
+    try std.testing.expectEqual(@as(u32, 3), bc.source_loc_slots[6].pc);
+}
+
 test "resolve_labels rejects non-QuickJS add_loc RHS and slot boundaries" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
