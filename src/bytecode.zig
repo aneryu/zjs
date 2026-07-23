@@ -8923,6 +8923,13 @@ pub const pipeline_resolve_labels = struct {
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
                 }
+                if (matchPutGetPeephole(code, pc) != null) {
+                    // QJS applies the source marker before the consumed get to
+                    // the replacement set. The matcher rejects control-flow
+                    // entry into the get, so remapping that opcode boundary
+                    // back to the replacement start is source-only.
+                    positions[pc + 3] = out_pc;
+                }
                 if (matchPushI32NegPeephole(code, pc) != null) {
                     // QuickJS attributes the folded push to the unary minus.
                     // A discarded push/neg/drop has size zero, so the same
