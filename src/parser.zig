@@ -8379,13 +8379,7 @@ pub const parser_core = struct {
     }
 
     fn emitStringLiteralBytes(s: *State, bytes: []const u8) Error!void {
-        if (bytes.len == 0) {
-            try s.emitOp(opcode.op.push_empty_string);
-        } else {
-            const atom_id = try s.function.atoms.internString(bytes);
-            defer s.function.atoms.free(atom_id);
-            try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
-        }
+        try emitStringLiteralValue(s, bytes);
     }
 
     fn parseRegExpLiteral(s: *State) Error!void {
@@ -8433,9 +8427,9 @@ pub const parser_core = struct {
                 try s.advance();
             },
             tok.TOK_STRING => {
-                // QuickJS emits `OP_push_atom_value <atom>` for short string
-                // literals (`quickjs.c:25510`). We always intern; the empty
-                // string is special-cased to `push_empty_string`.
+                // QuickJS emits `OP_push_atom_value <atom>` here, including
+                // for the empty string. resolve_labels selects the short
+                // push_empty_string form only when the value stays live.
                 try emitStringLiteralValue(s, s.token.payload.str.bytes);
                 try s.advance();
             },
@@ -8676,13 +8670,7 @@ pub const parser_core = struct {
             if (part_payload.cooked_invalid) return Error.InvalidEscape;
 
             if (bytes.len != 0 or depth == 0) {
-                if (bytes.len == 0) {
-                    try s.emitOp(opcode.op.push_empty_string);
-                } else {
-                    const atom_id = try s.function.atoms.internString(bytes);
-                    defer s.function.atoms.free(atom_id);
-                    try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
-                }
+                try emitStringLiteralValue(s, bytes);
                 if (depth == 0) {
                     if (part == .no_substitution) {
                         // Whole template is a single string constant; skip
@@ -10579,13 +10567,9 @@ pub const parser_core = struct {
     }
 
     fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
-        if (bytes.len == 0) {
-            try s.emitOp(opcode.op.push_empty_string);
-        } else {
-            const atom_id = try s.function.atoms.internString(bytes);
-            defer s.function.atoms.free(atom_id);
-            try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
-        }
+        const atom_id = try s.function.atoms.internString(bytes);
+        defer s.function.atoms.free(atom_id);
+        try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
     }
 
     fn parseEnumDeclaration(s: *State) Error!void {

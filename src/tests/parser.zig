@@ -3036,6 +3036,117 @@ test "W5: numeric discarded immediates respect statement and completion boundari
     try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
 
+test "W5: string discard follows QuickJS atom and completion boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var raw_empty = try parseRawStatement(&env, "\"\";");
+    defer raw_empty.deinit(env.rt);
+    const raw_empty_pc = (try findPhase1Opcode(raw_empty.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty.code, raw_empty_pc + 1));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty.atom_operands);
+
+    var raw_tagged = try parseRawStatement(&env, "\"123\";");
+    defer raw_tagged.deinit(env.rt);
+    const raw_tagged_pc = (try findPhase1Opcode(raw_tagged.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expect(core.atom.isTaggedInt(readU32(raw_tagged.code, raw_tagged_pc + 1)));
+
+    var raw_empty_template = try parseRawStatement(&env, "``;");
+    defer raw_empty_template.deinit(env.rt);
+    const raw_template_pc = (try findPhase1Opcode(raw_empty_template.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty_template.code, raw_template_pc + 1));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty_template.atom_operands);
+
+    var ordinary = try parseStatement(&env, "\"hello\";");
+    defer ordinary.deinit(env.rt);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.code.len);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.atom_operands.len);
+
+    var empty = try parseStatement(&env, "\"\";");
+    defer empty.deinit(env.rt);
+    try std.testing.expectEqual(@as(usize, 0), empty.code.len);
+    try std.testing.expectEqual(@as(usize, 0), empty.atom_operands.len);
+
+    var live_empty_template = try parseExpr(&env, "``");
+    defer live_empty_template.deinit(env.rt);
+    try std.testing.expectEqualSlices(u8, &.{op.push_empty_string}, live_empty_template.code);
+    try std.testing.expectEqual(@as(usize, 0), live_empty_template.atom_operands.len);
+
+    var empty_matching_regexp = try compileForTest(env.rt, "/(?:)/;", .{
+        .mode = .script,
+        .filename = "empty-regexp.js",
+    });
+    defer empty_matching_regexp.deinit();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.regexp));
+
+    var tagged = try parseStatement(&env, "\"123\";");
+    defer tagged.deinit(env.rt);
+    try expectOpcodeSequence(tagged.code, &.{op.push_atom_value});
+    try std.testing.expect(core.atom.isTaggedInt(readU32(tagged.code, 1)));
+
+    var discarded_root = try parseStatementWithTopLevelChildren(
+        &env,
+        "function stringDiscard(value){ 0; \"hello\"; \"\"; return value; }",
+    );
+    defer discarded_root.deinit(env.rt);
+    const discarded = findFunctionConstantNamed(&discarded_root, env.rt, "stringDiscard") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.drop));
+
+    var boundary_root = try compileForTest(
+        env.rt,
+        \\function stringTemplate(value){ 0; `${value}`; return value; }
+        \\function stringConcat(value){ 0; "a" + "b"; return value; }
+        \\function stringSymbol(makeSymbol, value){ makeSymbol("hello"); return value; }
+        \\function stringEval(){ return eval("\"hello\""); }
+    ,
+        .{ .mode = .script, .filename = "string-boundaries.js" },
+    );
+    defer boundary_root.deinit();
+
+    const template = findFunctionConstantNamed(&boundary_root, env.rt, "stringTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.drop));
+
+    const concat = findFunctionConstantNamed(&boundary_root, env.rt, "stringConcat") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(concat.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.add));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.drop));
+
+    const symbol = findFunctionConstantNamed(&boundary_root, env.rt, "stringSymbol") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.call1));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.drop));
+
+    const eval_fn = findFunctionConstantNamed(&boundary_root, env.rt, "stringEval") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.eval));
+
+    var completion = try compileForTest(env.rt, "\"hello\"", .{
+        .mode = .script,
+        .filename = "<repl>",
+        .return_completion = true,
+    });
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
+    try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
+
+    var module = try compileForTest(env.rt, "0; \"hello\"; \"\";", .{
+        .mode = .module,
+        .filename = "string-discard.mjs",
+    });
+    defer module.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
+    try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
+}
+
 test "F5: labelled break crossing switch drops discriminant" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

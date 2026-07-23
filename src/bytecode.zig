@@ -694,12 +694,9 @@ pub const opcode = struct {
     /// in phase 1 (`get_length`, `if_false8`, `is_undefined`, ...), so
     /// ids outside the overlap fall through to the final view (the two
     /// views agree everywhere but the overlap).
-    ///
-    /// Caveat: id 192 is genuinely ambiguous in phase-1 streams — the
-    /// parser emits both `push_empty_string` (short form, 1 byte) and
-    /// `scope_in_private_field` (temp, 7 bytes). This view reports the
-    /// temp entry; scanners that may encounter both must disambiguate
-    /// from context or bail out.
+    /// The parser keeps empty strings in the wide `push_atom_value` form;
+    /// `resolve_labels` alone introduces `push_empty_string`. Consequently,
+    /// overlap id 192 is only the temp `scope_in_private_field` in phase 1.
     fn phase1Info(op_id: u8) ?*const Info {
         if (op_id >= op.op_temp_start and op_id < op.op_temp_end)
             return &opcode_info[op_id];
@@ -8101,6 +8098,38 @@ pub const pipeline_resolve_labels = struct {
         return .{ .value = -value, .total_size = 6 };
     }
 
+    const PushAtomValuePeephole = struct {
+        kind: enum {
+            discarded,
+            empty_string,
+        },
+        total_size: usize,
+    };
+
+    fn matchPushAtomValuePeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?PushAtomValuePeephole {
+        if (pc + 5 > code.len or code[pc] != opcode.op.push_atom_value) return null;
+        const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+
+        // QuickJS never emits tagged integer atoms for string literals: they
+        // fall back to push_const. Keep that producer boundary explicit until
+        // zjs's cpool allocation order can be aligned independently.
+        if (!atom.isTaggedInt(atom_id) and
+            pc + 6 <= code.len and
+            code[pc + 5] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 6))
+        {
+            return .{ .kind = .discarded, .total_size = 6 };
+        }
+
+        if (use_short_opcodes and
+            atom_id == atom.ids.empty_string and
+            !hasJumpTargetInRange(code, pc + 1, pc + 5))
+        {
+            return .{ .kind = .empty_string, .total_size = 5 };
+        }
+        return null;
+    }
+
     fn discardedPushI32DropPairSize(code: []const u8, pc: usize) ?usize {
         if (pc + 6 > code.len or
             code[pc] != opcode.op.push_i32 or
@@ -8782,6 +8811,7 @@ pub const pipeline_resolve_labels = struct {
         if (matchConstantTestPeephole(code, pc)) |p| return p.total_size;
         if (matchPushI32NegPeephole(code, pc)) |p| return p.total_size;
         if (matchPushBigIntI32NegPeephole(code, pc)) |p| return p.total_size;
+        if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
         if (discardedPushI32DropPairSize(code, pc)) |size| return size;
         if (dropReturnUndefPairSize(code, pc)) |size| return size;
         return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
@@ -8868,6 +8898,11 @@ pub const pipeline_resolve_labels = struct {
                     if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
                 else if (matchPushBigIntI32NegPeephole(code, pc) != null)
                     instrSize(opcode.op.push_bigint_i32)
+                else if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p|
+                    switch (p.kind) {
+                        .discarded => 0,
+                        .empty_string => instrSize(opcode.op.push_empty_string),
+                    }
                 else if (discardedPushI32DropPairSize(code, pc) != null)
                     0
                 else if (dropReturnUndefPairSize(code, pc) != null)
@@ -9178,6 +9213,12 @@ pub const pipeline_resolve_labels = struct {
                 output[out_idx] = opcode.op.push_bigint_i32;
                 std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
                 out_idx += instrSize(opcode.op.push_bigint_i32);
+                i += p.total_size;
+            } else if (matchPushAtomValuePeephole(func.code, i, use_short_opcodes)) |p| {
+                if (p.kind == .empty_string) {
+                    output[out_idx] = opcode.op.push_empty_string;
+                    out_idx += instrSize(opcode.op.push_empty_string);
+                }
                 i += p.total_size;
             } else if (discardedPushI32DropPairSize(func.code, i)) |pair_size| {
                 i += pair_size;
