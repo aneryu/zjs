@@ -4105,6 +4105,50 @@ test "resolve_labels folds gotos to terminal opcodes" {
     }
 }
 
+test "resolve_labels preserves goto across source-marked drop return" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("goto-source-boundary");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    // push_i32 1 ; goto L ; nop ; L: drop ; <source> return_undef
+    //
+    // QuickJS find_jump_target scans the raw phase-2 stream bytewise after
+    // seeing drop. The source marker before return_undef therefore prevents
+    // goto-to-terminal folding, even though the later drop peephole removes
+    // the drop itself.
+    var input = [_]u8{0} ** 18;
+    input[0] = op.push_i32;
+    std.mem.writeInt(i32, input[1..5], 1, .little);
+    input[5] = op.goto;
+    std.mem.writeInt(u32, input[6..10], 11, .little);
+    input[10] = op.nop;
+    input[11] = op.label;
+    input[16] = op.drop;
+    input[17] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.appendSourceLoc(17, 20, 3);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.push_1, op.goto8, 1, op.return_undef },
+        bc.code,
+    );
+    try std.testing.expectEqual(@as(usize, 1), bc.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 3), bc.source_loc_slots[0].pc);
+}
+
 test "F10.2: resolve_labels selects goto8 for near relative target" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

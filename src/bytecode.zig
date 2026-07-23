@@ -8279,14 +8279,31 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
-    fn terminalOpAtTarget(code: []const u8, raw_target: usize) ?u8 {
+    fn hasSourceMarkerAt(source_locs: []const pipeline_pc2line.SourceLocSlot, pc: usize) bool {
+        for (source_locs) |slot| {
+            if (slot.pc == pc) return true;
+        }
+        return false;
+    }
+
+    fn terminalOpAtTarget(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        raw_target: usize,
+    ) ?u8 {
         var target = skipLabels(code, raw_target) catch return null;
         if (target >= code.len) return null;
         switch (code[target]) {
             opcode.op.@"return", opcode.op.return_undef, opcode.op.throw => return code[target],
             else => {},
         }
-        while (target < code.len and code[target] == opcode.op.drop) : (target += 1) {}
+        while (target < code.len and code[target] == opcode.op.drop) {
+            target += 1;
+            // QuickJS examines the raw phase-2 stream here. A source marker
+            // after the first drop interrupts its bytewise drop* scan even
+            // though resolve_labels later moves that marker to pc2line data.
+            if (hasSourceMarkerAt(source_locs, target)) return null;
+        }
         if (target < code.len and code[target] == opcode.op.return_undef) {
             return opcode.op.return_undef;
         }
@@ -8297,9 +8314,17 @@ pub const pipeline_resolve_labels = struct {
     /// return/return_undef/throw. It also treats one or more drops immediately
     /// before return_undef as the same terminal target because the whole frame
     /// is discarded on return.
-    fn gotoTerminalOp(code: []const u8, pc: usize) ?u8 {
+    fn gotoTerminalOp(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        pc: usize,
+    ) ?u8 {
         if (pc >= code.len or code[pc] != opcode.op.goto) return null;
-        return terminalOpAtTarget(code, resolvedJumpTarget(code, pc) catch return null);
+        return terminalOpAtTarget(
+            code,
+            source_locs,
+            resolvedJumpTarget(code, pc) catch return null,
+        );
     }
 
     fn relOffset(from_pc: usize, target_pc: usize) i64 {
@@ -8471,7 +8496,11 @@ pub const pipeline_resolve_labels = struct {
         jump: usize,
     };
 
-    fn constantTestAction(code: []const u8, peephole: ConstantTestPeephole) !ConstantTestAction {
+    fn constantTestAction(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        peephole: ConstantTestPeephole,
+    ) !ConstantTestAction {
         if (!peephole.taken) return .fallthrough;
         const target = try resolvedJumpTarget(code, peephole.jump_pc);
         // QuickJS tests raw adjacency before terminal folding. Preserve that
@@ -8480,7 +8509,7 @@ pub const pipeline_resolve_labels = struct {
         if (try targetAppearsAtFollowingBoundary(code, peephole.jump_pc + 5, target)) {
             return .fallthrough;
         }
-        if (terminalOpAtTarget(code, target)) |terminal_op| {
+        if (terminalOpAtTarget(code, source_locs, target)) |terminal_op| {
             return .{ .terminal = terminal_op };
         }
         return .{ .jump = target };
@@ -9093,7 +9122,7 @@ pub const pipeline_resolve_labels = struct {
             const next = current + size;
 
             if (matchConstantTestPeephole(code, current)) |peephole| {
-                switch (try constantTestAction(code, peephole)) {
+                switch (try constantTestAction(code, ctx.function.source_loc_slots, peephole)) {
                     .fallthrough => try enqueueReachable(
                         states,
                         worklist,
@@ -9106,7 +9135,7 @@ pub const pipeline_resolve_labels = struct {
             } else if (op_id == opcode.op.goto) {
                 if (try jumpTargetsNextInstruction(code, current)) {
                     try enqueueReachable(states, worklist, &worklist_len, next);
-                } else if (gotoTerminalOp(code, current) == null) {
+                } else if (gotoTerminalOp(code, ctx.function.source_loc_slots, current) == null) {
                     try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
                 }
             } else if (op_id == opcode.op.if_false or op_id == opcode.op.if_true) {
@@ -9374,7 +9403,7 @@ pub const pipeline_resolve_labels = struct {
                 else if (matchPostUpdatePeephole(code, pc)) |p|
                     postUpdateOutputSize(p, use_short_opcodes)
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
-                    break :blk switch (try constantTestAction(code, p)) {
+                    break :blk switch (try constantTestAction(code, ctx.function.source_loc_slots, p)) {
                         .fallthrough => 0,
                         .terminal => 1,
                         .jump => |target| jumpSizeForOffset(
@@ -9396,7 +9425,7 @@ pub const pipeline_resolve_labels = struct {
                     0
                 else if (dropReturnUndefPairSize(code, pc) != null)
                     instrSize(opcode.op.return_undef)
-                else if (gotoTerminalOp(code, pc) != null)
+                else if (gotoTerminalOp(code, ctx.function.source_loc_slots, pc) != null)
                     1
                 else if (isAtomLabelU8Op(op))
                     instrSize(op)
@@ -9798,7 +9827,7 @@ pub const pipeline_resolve_labels = struct {
                 }
                 i += p.total_size;
             } else if (matchConstantTestPeephole(func.code, i)) |p| {
-                switch (try constantTestAction(func.code, p)) {
+                switch (try constantTestAction(func.code, func.source_loc_slots, p)) {
                     .fallthrough => {},
                     .terminal => |terminal_op| {
                         output[out_idx] = terminal_op;
@@ -9832,7 +9861,7 @@ pub const pipeline_resolve_labels = struct {
                 output[out_idx] = opcode.op.return_undef;
                 out_idx += instrSize(opcode.op.return_undef);
                 i += return_size;
-            } else if (gotoTerminalOp(func.code, i)) |terminal_op| {
+            } else if (gotoTerminalOp(func.code, func.source_loc_slots, i)) |terminal_op| {
                 output[out_idx] = terminal_op;
                 out_idx += 1;
                 i += instrSize(op);
