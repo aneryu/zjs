@@ -8770,7 +8770,7 @@ pub const pipeline_resolve_labels = struct {
 
     const AddLocPeephole = struct {
         idx: u16,
-        rhs_op: u8,
+        rhs_is_empty_string: bool,
         rhs_size: usize,
         total_size: usize,
     };
@@ -8831,7 +8831,8 @@ pub const pipeline_resolve_labels = struct {
 
         return .{
             .idx = idx,
-            .rhs_op = rhs_op,
+            .rhs_is_empty_string = rhs_op == opcode.op.push_atom_value and
+                std.mem.readInt(u32, code[rhs_pc + 1 ..][0..4], .little) == atom.ids.empty_string,
             .rhs_size = rhs_size,
             .total_size = total_len,
         };
@@ -9328,8 +9329,11 @@ pub const pipeline_resolve_labels = struct {
                     loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
                 else if (matchIncLocPeephole(code, pc) != null)
                     2
-                else if (matchAddLocPeephole(code, pc)) |_|
-                    loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
+                else if (matchAddLocPeephole(code, pc)) |p|
+                    (if (use_short_opcodes and p.rhs_is_empty_string)
+                        instrSize(opcode.op.push_empty_string)
+                    else
+                        loweredInstrSize(code, pc + 3, use_short_opcodes)) + 2
                 else if (matchPostUpdatePeephole(code, pc)) |p|
                     postUpdateOutputSize(p, use_short_opcodes)
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
@@ -9729,7 +9733,15 @@ pub const pipeline_resolve_labels = struct {
                 out_idx += 2;
                 i += p.total_size;
             } else if (matchAddLocPeephole(func.code, i)) |p| {
-                try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
+                // This combined matcher precedes the standalone
+                // push_atom_value shortener, so mirror QuickJS's get_loc case
+                // and shorten an empty RHS before emitting add_loc.
+                if (use_short_opcodes and p.rhs_is_empty_string) {
+                    output[out_idx] = opcode.op.push_empty_string;
+                    out_idx += instrSize(opcode.op.push_empty_string);
+                } else {
+                    try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
+                }
                 output[out_idx] = opcode.op.add_loc;
                 output[out_idx + 1] = @intCast(p.idx);
                 out_idx += 2;

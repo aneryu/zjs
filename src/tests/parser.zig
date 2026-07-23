@@ -9338,6 +9338,13 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
+        \\function emptyRhs() {
+        \\  var value = "seed";
+        \\  side();
+        \\  value += "";
+        \\  side();
+        \\  return value;
+        \\}
         \\function atomRhs() {
         \\  var value = "";
         \\  side();
@@ -9368,6 +9375,31 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
         \\}
     , .{ .mode = .script, .filename = "add-loc-rhs.js" });
     defer parsed.deinit();
+
+    const empty_rhs = findFunctionConstantNamed(&parsed, rt, "emptyRhs") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(empty_rhs.byteCode(), &.{
+        op.push_atom_value,
+        op.put_loc0,
+        op.get_var,
+        op.call0,
+        op.drop,
+        op.push_empty_string,
+        op.add_loc,
+        op.get_var,
+        op.call0,
+        op.drop,
+        op.get_loc0,
+        op.@"return",
+    });
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_atom_value));
+    var empty_rhs_atom_count: usize = 0;
+    var empty_rhs_atom_it = empty_rhs.atomOperandIterator();
+    while (empty_rhs_atom_it.next()) |atom_id| {
+        try std.testing.expect(atom_id != core.atom.ids.empty_string);
+        empty_rhs_atom_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), empty_rhs_atom_count);
 
     const atom_rhs = findFunctionConstantNamed(&parsed, rt, "atomRhs") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), countOpcode(atom_rhs.byteCode(), op.add_loc));

@@ -5159,6 +5159,223 @@ test "resolve_labels folds the QuickJS add_loc RHS family" {
     try std.testing.expectEqualSlices(core.Atom, &.{rhs_atom}, bc.atom_operands);
 }
 
+test "resolve_labels add_loc gives an empty atom RHS its short form" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("add-loc-empty");
+    const nonempty_atom = try rt.internAtom("nonempty");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(nonempty_atom);
+    const nonempty_base = rt.atoms.refCount(nonempty_atom).?;
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 29;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.push_atom_value;
+    std.mem.writeInt(u32, input[4..8], core.atom.ids.empty_string, .little);
+    input[8] = op.add;
+    input[9] = op.dup;
+    input[10] = op.put_loc;
+    std.mem.writeInt(u16, input[11..13], 4, .little);
+    input[13] = op.drop;
+
+    input[14] = op.get_loc;
+    std.mem.writeInt(u16, input[15..17], 5, .little);
+    input[17] = op.push_atom_value;
+    std.mem.writeInt(u32, input[18..22], nonempty_atom, .little);
+    input[22] = op.add;
+    input[23] = op.dup;
+    input[24] = op.put_loc;
+    std.mem.writeInt(u16, input[25..27], 5, .little);
+    input[27] = op.drop;
+    input[28] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(core.atom.ids.empty_string);
+    try bc.retainAtomOperand(nonempty_atom);
+
+    for ([_]u32{ 0, 3, 8, 9, 10, 13, 14, 17, 22, 23, 24, 27, 28 }, 0..) |pc, source_idx| {
+        try bc.appendSourceLoc(pc, @intCast(10 + source_idx), 2);
+    }
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    var expected = [_]u8{0} ** 11;
+    expected[0] = op.push_empty_string;
+    expected[1] = op.add_loc;
+    expected[2] = 4;
+    expected[3] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[4..8], nonempty_atom, .little);
+    expected[8] = op.add_loc;
+    expected[9] = 5;
+    expected[10] = op.return_undef;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{nonempty_atom}, bc.atom_operands);
+    try std.testing.expectEqual(nonempty_base + 1, rt.atoms.refCount(nonempty_atom).?);
+    try std.testing.expectEqual(@as(usize, 13), bc.source_loc_slots.len);
+    for (bc.source_loc_slots[0..6]) |slot| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+    }
+    for (bc.source_loc_slots[6..12]) |slot| {
+        try std.testing.expectEqual(@as(u32, 3), slot.pc);
+    }
+    try std.testing.expectEqual(@as(u32, 10), bc.source_loc_slots[12].pc);
+}
+
+test "resolve_labels add_loc does not consume a targeted empty RHS" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("add-loc-empty-target");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 21;
+    input[0] = op.get_arg0;
+    input[1] = op.if_false;
+    std.mem.writeInt(u32, input[2..6], 9, .little);
+    input[6] = op.get_loc;
+    std.mem.writeInt(u16, input[7..9], 0, .little);
+    input[9] = op.push_atom_value;
+    std.mem.writeInt(u32, input[10..14], core.atom.ids.empty_string, .little);
+    input[14] = op.add;
+    input[15] = op.dup;
+    input[16] = op.put_loc;
+    std.mem.writeInt(u16, input[17..19], 0, .little);
+    input[19] = op.drop;
+    input[20] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(core.atom.ids.empty_string);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.get_arg0,
+        op.if_false8,
+        2,
+        op.get_loc0,
+        op.push_empty_string,
+        op.add,
+        op.put_loc0,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
+fn runEmptyAddLocResolveLabelsAllocationFailure(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+    const name = try atoms.internString("add-loc-empty-oom");
+    defer atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&account, &atoms, name);
+    defer fd.deinit(cleanup_rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&account, &atoms, name);
+    defer bc.deinit(cleanup_rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 4, .little);
+    input[3] = op.push_atom_value;
+    std.mem.writeInt(u32, input[4..8], core.atom.ids.empty_string, .little);
+    input[8] = op.add;
+    input[9] = op.dup;
+    input[10] = op.put_loc;
+    std.mem.writeInt(u16, input[11..13], 4, .little);
+    input[13] = op.drop;
+    input[14] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(core.atom.ids.empty_string);
+    for ([_]u32{ 0, 3, 8, 9, 10, 13, 14 }, 0..) |pc, source_idx| {
+        try bc.appendSourceLoc(pc, @intCast(10 + source_idx), 2);
+    }
+
+    const original_code_ptr = bc.code.ptr;
+    const original_code_capacity = bc.code_capacity;
+    const original_atom_ptr = bc.atom_operands.ptr;
+    const original_atom_capacity = bc.atom_operands_capacity;
+    const original_source_ptr = bc.source_loc_slots.ptr;
+    const original_source_capacity = bc.source_loc_capacity;
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    const first_result = pipeline.resolve_labels.run(&ctx);
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@intFromPtr(original_code_ptr), @intFromPtr(bc.code.ptr));
+        try std.testing.expectEqual(original_code_capacity, bc.code_capacity);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+        try std.testing.expectEqual(@intFromPtr(original_atom_ptr), @intFromPtr(bc.atom_operands.ptr));
+        try std.testing.expectEqual(original_atom_capacity, bc.atom_operands_capacity);
+        try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, bc.atom_operands);
+        try std.testing.expectEqual(@intFromPtr(original_source_ptr), @intFromPtr(bc.source_loc_slots.ptr));
+        try std.testing.expectEqual(original_source_capacity, bc.source_loc_capacity);
+        try std.testing.expectEqual(@as(usize, 7), bc.source_loc_slots.len);
+        for (bc.source_loc_slots, [_]u32{ 0, 3, 8, 9, 10, 13, 14 }) |slot, pc| {
+            try std.testing.expectEqual(pc, slot.pc);
+        }
+
+        try pipeline.resolve_labels.run(&ctx);
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.push_empty_string,
+        op.add_loc,
+        4,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    for (bc.source_loc_slots[0..6]) |slot| {
+        try std.testing.expectEqual(@as(u32, 0), slot.pc);
+    }
+    try std.testing.expectEqual(@as(u32, 3), bc.source_loc_slots[6].pc);
+    return failed;
+}
+
+test "resolve_labels add_loc empty RHS is transactional at every allocation failure" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runEmptyAddLocResolveLabelsAllocationFailure(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    // positions, sizes, reachability state/worklist, and exact final code.
+    // Removing the only atom operand needs no replacement-ledger allocation.
+    try std.testing.expectEqual(@as(usize, 5), fail_offset);
+}
+
 test "resolve_labels add_loc fold preserves QuickJS source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
