@@ -4893,6 +4893,55 @@ test "resolve_labels null comparison respects the minimal jump-entry boundary" {
     }
 }
 
+test "resolve_labels typeof equality source follows the consumed compare" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        atom_name: []const u8,
+        compare_op: u8,
+        test_op: u8,
+    }{
+        .{ .atom_name = "undefined", .compare_op = op.strict_eq, .test_op = op.typeof_is_undefined },
+        .{ .atom_name = "function", .compare_op = op.eq, .test_op = op.typeof_is_function },
+    };
+    for (cases) |case| {
+        const type_atom = try rt.internAtom(case.atom_name);
+        defer rt.atoms.free(type_atom);
+
+        var input = [_]u8{0} ** 8;
+        input[0] = op.typeof;
+        input[1] = op.push_atom_value;
+        std.mem.writeInt(u32, input[2..6], type_atom, .little);
+        input[6] = case.compare_op;
+        input[7] = op.@"return";
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(type_atom);
+        try bc.appendSourceLoc(0, 10, 1);
+        try bc.appendSourceLoc(6, 11, 2);
+        try bc.appendSourceLoc(7, 12, 3);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{ case.test_op, op.@"return" }, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[2].pc);
+    }
+}
+
 test "resolve_labels folds typeof tests and remaps retained atom operands" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4978,7 +5027,67 @@ test "resolve_labels removes atom-bearing dead code after a terminal opcode" {
     try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(dead_atom).?);
 }
 
-test "resolve_labels folds typeof function inequality branches" {
+test "resolve_labels folds typeof inequality branches with branch source and target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        atom_name: []const u8,
+        compare_op: u8,
+        test_op: u8,
+    }{
+        .{ .atom_name = "function", .compare_op = op.neq, .test_op = op.typeof_is_function },
+        .{ .atom_name = "undefined", .compare_op = op.strict_neq, .test_op = op.typeof_is_undefined },
+    };
+    for (cases) |case| {
+        const type_atom = try rt.internAtom(case.atom_name);
+        defer rt.atoms.free(type_atom);
+
+        var input = [_]u8{0} ** 14;
+        input[0] = op.get_loc0;
+        input[1] = op.typeof;
+        input[2] = op.push_atom_value;
+        std.mem.writeInt(u32, input[3..7], type_atom, .little);
+        input[7] = case.compare_op;
+        input[8] = op.if_false;
+        std.mem.writeInt(u32, input[9..13], 13, .little);
+        input[13] = op.return_undef;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(type_atom);
+        try bc.appendSourceLoc(1, 10, 1);
+        try bc.appendSourceLoc(7, 11, 2);
+        try bc.appendSourceLoc(8, 12, 3);
+        try bc.appendSourceLoc(13, 13, 4);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{
+            op.get_loc0,
+            case.test_op,
+            op.if_true8,
+            1,
+            op.return_undef,
+        }, bc.code);
+        try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[2].pc);
+        try std.testing.expectEqual(@as(u32, 4), bc.source_loc_slots[3].pc);
+    }
+}
+
+test "resolve_labels keeps typeof neq followed by if_true unfused" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -4991,15 +5100,14 @@ test "resolve_labels folds typeof function inequality branches" {
     fd.use_short_opcodes = true;
 
     const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 14;
-    input[0] = op.get_loc0;
-    input[1] = op.typeof;
-    input[2] = op.push_atom_value;
-    std.mem.writeInt(u32, input[3..7], function_atom, .little);
-    input[7] = op.neq;
-    input[8] = op.if_false;
-    std.mem.writeInt(u32, input[9..13], 13, .little);
-    input[13] = op.return_undef;
+    var input = [_]u8{0} ** 13;
+    input[0] = op.typeof;
+    input[1] = op.push_atom_value;
+    std.mem.writeInt(u32, input[2..6], function_atom, .little);
+    input[6] = op.neq;
+    input[7] = op.if_true;
+    std.mem.writeInt(u32, input[8..12], 12, .little);
+    input[12] = op.return_undef;
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
@@ -5009,14 +5117,16 @@ test "resolve_labels folds typeof function inequality branches" {
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqualSlices(u8, &.{
-        op.get_loc0,
-        op.typeof_is_function,
-        op.if_true8,
-        1,
-        op.return_undef,
-    }, bc.code);
-    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    var expected = [_]u8{0} ** 10;
+    expected[0] = op.typeof;
+    expected[1] = op.push_atom_value;
+    std.mem.writeInt(u32, expected[2..6], function_atom, .little);
+    expected[6] = op.neq;
+    expected[7] = op.if_true8;
+    expected[8] = 1;
+    expected[9] = op.return_undef;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{function_atom}, bc.atom_operands);
 }
 
 test "resolve_labels keeps short-only comparison folds disabled" {

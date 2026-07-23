@@ -8964,6 +8964,16 @@ pub const pipeline_resolve_labels = struct {
                     positions[pc + 1] = out_pc;
                     if (p.branch_op != null) positions[pc + 2] = out_pc;
                 }
+                if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| {
+                    // QJS attributes an equality fold to the consumed compare.
+                    // For an inequality branch fold it first observes that
+                    // compare source, then lets the consumed if_false source
+                    // supersede it at the same replacement pc. Mapping both
+                    // boundaries preserves that order. The matcher rejects
+                    // control-flow entry into the consumed range.
+                    positions[pc + 6] = out_pc;
+                    if (p.branch_op != null) positions[pc + 7] = out_pc;
+                }
                 if (matchPutGetPeephole(code, pc) != null) {
                     // QJS applies the source marker before the consumed get to
                     // the replacement set. The matcher rejects control-flow

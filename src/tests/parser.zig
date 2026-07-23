@@ -1577,6 +1577,29 @@ test "F4: typeof optional chain parses full chain" {
     try std.testing.expectEqual(op.typeof, fn_bc.code[fn_bc.code.len - 1]);
 }
 
+test "F4: typeof comparisons select final short tests at the condition boundary" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var equality = try parseExpr(&env, "typeof x === \"undefined\"");
+    defer equality.deinit(env.rt);
+    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.typeof_is_undefined });
+
+    var inequality_condition = try parseStatement(&env, "if (typeof x !== \"function\") result;");
+    defer inequality_condition.deinit(env.rt);
+    try expectOpcodeSequence(inequality_condition.code, &.{
+        op.get_var_undef,
+        op.typeof_is_function,
+        op.if_true8,
+        op.get_var,
+        op.drop,
+    });
+    const branch_pc =
+        engine.bytecode.opcode.sizeOf(op.get_var_undef) +
+        engine.bytecode.opcode.sizeOf(op.typeof_is_function);
+    try std.testing.expectEqual(inequality_condition.code.len, readRelTarget32(inequality_condition.code, branch_pc));
+}
+
 test "F4: numeric discard in void keeps only undefined" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
