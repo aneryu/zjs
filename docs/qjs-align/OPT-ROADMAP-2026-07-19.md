@@ -2804,6 +2804,11 @@ descriptor/interface 包装、额外长期活跃参数、raw resume、target 字
   战役侧面重开。`preserve_none` 是明确工具链缺口，但不是当前结论的唯一证据；
 - 架构可维护性重构另立工作项，不把“代码更少”记成性能收益。
 
+当前裁决（2026-07-24）：`a11f99d3`已完成tail stack等价修复，`a2499f4c`已关闭
+continuation审计；但现有W3 property/native数据不覆盖frame关键链，也没有冻结binary hash的
+post-W2 fib/closure/borrowed-continuation profile证明至少两个frame shape共享同一新热点。
+重开条件未满足，M-FRAME-CONT关闭、收益记零；只有补齐上述frozen profile后才可重新裁决。
+
 ## 8. 候选判定与止损协议
 
 候选只有同时满足以下五项才保留：
@@ -2885,7 +2890,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W3-native（**已完成，correctness + 候选回退**） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零。重复`callable_realm`transport候选在ordinary/cross-realm/C_FUNCTION_DATA/constructor/synthetic/nested语义矩阵通过，并在两个builtin domain的plain/method与exact/missing形状稳定减少每次2～6条指令 | ❌ 独立布局重建虽保留direct指令削减，却使property-read/allocation controls回退+1.477%/+1.660%，越过+1%门槛且暴露code-layout方向翻转；生产候选完整回退，九个direct/control probe与失败结论保留，W3冻结 |
 | W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
 | W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
-| W6 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
+| W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
 失败候选删除代码但保留结论；完成后更新本计划的当前优先级，不追加逐日流水账。
