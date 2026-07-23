@@ -1938,17 +1938,15 @@ test "F4: discarded conditional assignment arms keep function stack balanced" {
     }
 }
 
-test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
+test "F4: ternary cond ? a : b folds the fragment exit goto to its terminator" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a ? b : c");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.goto8, op.get_var });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.return_undef, op.get_var });
     const else_target = readRelTarget32(fn_bc.code, 3);
-    try std.testing.expectEqual(@as(usize, 10), else_target);
-    const end_target = readRelTarget32(fn_bc.code, 8);
-    try std.testing.expectEqual(fn_bc.code.len, end_target);
+    try std.testing.expectEqual(@as(usize, 9), else_target);
 }
 
 test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
@@ -2744,11 +2742,9 @@ test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
     var fn_bc = try parseExpr(&env, "a?.b");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field });
     const next_target = readRelTarget32(fn_bc.code, 5);
-    try std.testing.expectEqual(@as(usize, 11), next_target);
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try std.testing.expectEqual(@as(usize, 10), next_target);
 }
 
 test "F4: optional length value reaches the get_length final fold" {
@@ -2764,12 +2760,11 @@ test "F4: optional length value reaches the get_length final fold" {
         op.if_false8,
         op.drop,
         op.undefined,
-        op.goto8,
+        op.return_undef,
         op.get_length,
     });
-    try std.testing.expectEqual(@as(usize, 11), readRelTarget32(fn_bc.code, 5));
-    try std.testing.expectEqual(@as(usize, 12), fn_bc.code.len);
-    try std.testing.expectEqual(fn_bc.code.len, readRelTarget32(fn_bc.code, 9));
+    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
     try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
 }
 
@@ -2786,15 +2781,14 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
         op.if_false8,
         op.drop,
         op.undefined,
-        op.goto8,
+        op.return_undef,
         op.get_field2,
         op.call_method,
     });
-    try std.testing.expectEqual(@as(usize, 11), readRelTarget32(fn_bc.code, 5));
-    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
-    try std.testing.expectEqual(fn_bc.code.len, readRelTarget32(fn_bc.code, 9));
-    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 12));
-    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 16));
+    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
+    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 11));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 15));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
 
@@ -2804,7 +2798,7 @@ test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
     var fn_bc = try parseExpr(&env, "a?.[i]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_var, op.get_array_el });
 }
 
 test "F4: optional chain a?.b.c — chain test only at the ?. site" {
@@ -2813,9 +2807,7 @@ test "F4: optional chain a?.b.c — chain test only at the ?. site" {
     var fn_bc = try parseExpr(&env, "a?.b.c");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field, op.get_field });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field, op.get_field });
 }
 
 test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
@@ -2825,14 +2817,10 @@ test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{
-        op.get_var,   op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
-        op.get_field, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
+        op.get_var,   op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef,
+        op.get_field, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef,
         op.get_field,
     });
-    const exit_target_1 = readRelTarget32(fn_bc.code, 9);
-    const exit_target_2 = readRelTarget32(fn_bc.code, 22);
-    try std.testing.expectEqual(exit_target_1, exit_target_2);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target_1);
 }
 
 test "F4: optional call a?.() emits chain_test + plain call" {
@@ -2841,9 +2829,7 @@ test "F4: optional call a?.() emits chain_test + plain call" {
     var fn_bc = try parseExpr(&env, "a?.()");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0 });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.call0 });
 }
 
 test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
@@ -2852,8 +2838,8 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
     var fn_bc = try parseExpr(&env, "obj?.b(x)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 19));
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
 }
 
 test "F4: parenthesized optional member call preserves receiver" {
@@ -2903,7 +2889,7 @@ test "F4: optional call after parenthesized optional member keeps balanced exits
         op.drop,
         op.drop,
         op.undefined,
-        op.goto8,
+        op.return_undef,
         op.call_method,
     });
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, fn_bc.code.len - 3));
@@ -2931,8 +2917,8 @@ test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method
     var fn_bc = try parseExpr(&env, "obj?.[k](x)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_var, op.get_array_el2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 17));
 }
 
 // ---- F4 finish: tagged templates -----------------------------------
@@ -2985,9 +2971,7 @@ test "F4: optional call without chain receiver a?.()(b) — chain only on first 
     var fn_bc = try parseExpr(&env, "a?.()(b)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0, op.get_var, op.call1 });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.call0, op.get_var, op.call1 });
 }
 
 // ---- F4 slice 5: template literals -----------------------------------
@@ -3206,27 +3190,30 @@ test "F5: return statement with value" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.@"return" });
 }
 
-test "F5: return comma and conditional expressions use one final return" {
+test "F5: return comma and conditional expressions follow terminal goto folding" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
-    const cases = [_][]const u8{
-        "return a, b;",
-        "return a ? b : c, d;",
-        "return a, b ? c : d;",
-        "return (a, (b, c));",
-        "return c ? g() : h()\n, 42;",
+    const cases = [_]struct {
+        source: []const u8,
+        return_count: usize,
+    }{
+        .{ .source = "return a, b;", .return_count = 1 },
+        .{ .source = "return a ? b : c, d;", .return_count = 1 },
+        .{ .source = "return a, b ? c : d;", .return_count = 2 },
+        .{ .source = "return (a, (b, c));", .return_count = 1 },
+        .{ .source = "return c ? g() : h()\n, 42;", .return_count = 1 },
     };
-    for (cases) |source| {
-        var fn_bc = try parseFunctionBodyStatement(&env, source);
+    for (cases) |case| {
+        var fn_bc = try parseFunctionBodyStatement(&env, case.source);
         defer fn_bc.deinit(env.rt);
-        try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+        try std.testing.expectEqual(case.return_count, countOpcode(fn_bc.code, op.@"return"));
         try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
         try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
     }
 }
 
-test "F5: return conditional expression merges before one plain return" {
+test "F5: return conditional expression folds the then goto to a plain return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return p ? f() : g();");
@@ -3234,7 +3221,7 @@ test "F5: return conditional expression merges before one plain return" {
 
     try std.testing.expectEqual(@as(usize, 2), countCalls(fn_bc.code));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.@"return"));
 }
 
 test "F5: return call remains plain call plus return" {
@@ -3316,11 +3303,70 @@ test "F5: if statement with else" {
     var fn_bc = try parseStatement(&env, "if (x) y; else z;");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.goto8, op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.return_undef, op.get_var, op.drop });
     const if_false_target = readRelTarget32(fn_bc.code, 3);
-    try std.testing.expectEqual(@as(usize, 11), if_false_target);
-    const goto_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, goto_target);
+    try std.testing.expectEqual(@as(usize, 10), if_false_target);
+}
+
+test "W5: final branches normalize at QuickJS instruction boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        name: []const u8,
+        expected: []const u8,
+        branch_pc: ?usize,
+        branch_target: ?usize,
+    }{
+        .{
+            .source = "function ifNext(x){ if (x); }",
+            .name = "ifNext",
+            .expected = &.{ op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = null,
+            .branch_target = null,
+        },
+        .{
+            .source = "function invert(x){ if (x); else x; }",
+            .name = "invert",
+            .expected = &.{ op.get_arg0, op.if_true8, op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = 1,
+            .branch_target = 5,
+        },
+        .{
+            .source = "function gotoNext(x){ if (x) x; else; }",
+            .name = "gotoNext",
+            .expected = &.{ op.get_arg0, op.if_false8, op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = 1,
+            .branch_target = 5,
+        },
+        .{
+            .source = "function keepBoth(x){ if (x) x; else x = 1; }",
+            .name = "keepBoth",
+            .expected = &.{
+                op.get_arg0,
+                op.if_false8,
+                op.get_arg0,
+                op.drop,
+                op.return_undef,
+                op.push_1,
+                op.put_arg0,
+                op.return_undef,
+            },
+            .branch_pc = 1,
+            .branch_target = 6,
+        },
+    };
+
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, case.name) orelse return error.TestExpectedEqual;
+        try expectOpcodeSequence(child.byteCode(), case.expected);
+        if (case.branch_pc) |branch_pc| {
+            try std.testing.expectEqual(case.branch_target.?, readRelTarget32(child.byteCode(), branch_pc));
+        }
+    }
 }
 
 test "F5: while statement" {

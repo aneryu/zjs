@@ -8174,6 +8174,62 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
+    /// QuickJS `code_has_label` recognises a jump whose resolved label is at
+    /// the following bytecode boundary. Consecutive labels and an immediately
+    /// following goto to the same resolved label all denote that boundary.
+    fn targetAppearsAtFollowingBoundary(code: []const u8, boundary_pc: usize, target: usize) !bool {
+        var cursor = boundary_pc;
+        while (cursor < code.len and code[cursor] == opcode.op.label) {
+            if (cursor == target) return true;
+            if (cursor + 5 > code.len) return error.InvalidBytecode;
+            cursor += 5;
+        }
+        if (cursor == target) return true;
+        if (cursor < code.len and code[cursor] == opcode.op.goto) {
+            return try jumpTarget(code, cursor) == target;
+        }
+        return false;
+    }
+
+    fn jumpTargetsNextInstruction(code: []const u8, pc: usize) !bool {
+        if (pc >= code.len) return error.InvalidBytecode;
+        const op_id = code[pc];
+        if (op_id != opcode.op.goto and op_id != opcode.op.if_false and op_id != opcode.op.if_true) {
+            return false;
+        }
+        if (pc + 5 > code.len) return error.InvalidBytecode;
+        const target = try resolvedJumpTarget(code, pc);
+        return targetAppearsAtFollowingBoundary(code, pc + 5, target);
+    }
+
+    const ConditionalGotoPeephole = struct {
+        branch_op: u8,
+        target: usize,
+        total_size: usize,
+    };
+
+    /// `if_* L1; goto L2; L1:` becomes the inverted conditional branch to L2.
+    /// The goto must be adjacent: QuickJS skips source markers here, which are
+    /// already represented out-of-band by this phase, but it does not cross a
+    /// real label or instruction between the conditional and goto.
+    fn matchConditionalGotoPeephole(code: []const u8, pc: usize) !?ConditionalGotoPeephole {
+        if (pc + 10 > code.len) return null;
+        const branch_op = code[pc];
+        if ((branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) or
+            code[pc + 5] != opcode.op.goto)
+        {
+            return null;
+        }
+        if (hasJumpTargetTo(code, pc + 5)) return null;
+        const branch_target = try resolvedJumpTarget(code, pc);
+        if (!try targetAppearsAtFollowingBoundary(code, pc + 10, branch_target)) return null;
+        return .{
+            .branch_op = if (branch_op == opcode.op.if_false) opcode.op.if_true else opcode.op.if_false,
+            .target = try jumpTarget(code, pc + 5),
+            .total_size = 10,
+        };
+    }
+
     /// QuickJS `find_jump_target` folds a goto whose threaded destination is
     /// return/return_undef/throw. It also treats one or more drops immediately
     /// before return_undef as the same terminal target because the whole frame
@@ -8957,7 +9013,9 @@ pub const pipeline_resolve_labels = struct {
             const next = current + size;
 
             if (op_id == opcode.op.goto) {
-                if (gotoTerminalOp(code, current) == null) {
+                if (try jumpTargetsNextInstruction(code, current)) {
+                    try enqueueReachable(states, worklist, &worklist_len, next);
+                } else if (gotoTerminalOp(code, current) == null) {
                     try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
                 }
             } else if (op_id == opcode.op.if_false or op_id == opcode.op.if_true) {
@@ -9116,8 +9174,10 @@ pub const pipeline_resolve_labels = struct {
         out_idx.* += size;
     }
 
-    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) usize {
+    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) !usize {
         if (code[pc] == opcode.op.label) return in_size;
+        if (try jumpTargetsNextInstruction(code, pc)) return in_size;
+        if (try matchConditionalGotoPeephole(code, pc)) |p| return p.total_size;
         if (matchGetLengthPeephole(code, pc, use_short_opcodes)) |size| return size;
         if (matchDiscardedFieldStorePeephole(code, pc)) |p| return p.total_size;
         if (undefinedDropPairSize(code, pc)) |size| return size;
@@ -9195,7 +9255,13 @@ pub const pipeline_resolve_labels = struct {
                     0
                 else if (isEmptyGosub(code, pc))
                     0
-                else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
+                else if (try jumpTargetsNextInstruction(code, pc))
+                    if (op == opcode.op.goto) 0 else instrSize(opcode.op.drop)
+                else if (try matchConditionalGotoPeephole(code, pc)) |p| blk: {
+                    const target_pc = positions[p.target];
+                    const diff = relOffset(out_pc, target_pc);
+                    break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
+                } else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
                     1
                 else if (matchDiscardedFieldStorePeephole(code, pc) != null)
                     instrSize(opcode.op.put_field)
@@ -9257,7 +9323,7 @@ pub const pipeline_resolve_labels = struct {
 
                 sizes[pc] = new_size;
                 if (old_size != new_size) changed = true;
-                const next_pc = pc + optimizedInputSize(code, pc, use_short_opcodes, in_size);
+                const next_pc = pc + try optimizedInputSize(code, pc, use_short_opcodes, in_size);
                 var boundary_pc = pc + 1;
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
@@ -9291,6 +9357,11 @@ pub const pipeline_resolve_labels = struct {
                     // to the replacement goto. The interior-target guard
                     // makes this boundary remap source-only.
                     positions[p.jump_pc] = out_pc;
+                }
+                if (try matchConditionalGotoPeephole(code, pc) != null) {
+                    // QJS carries a source marker before the consumed goto to
+                    // the replacement inverted branch.
+                    positions[pc + 5] = out_pc;
                 }
                 if (matchPutGetPeephole(code, pc) != null) {
                     // QJS applies the source marker before the consumed get to
@@ -9559,6 +9630,15 @@ pub const pipeline_resolve_labels = struct {
                 i += 5;
             } else if (isEmptyGosub(func.code, i)) {
                 i += instrSize(op);
+            } else if (try jumpTargetsNextInstruction(func.code, i)) {
+                if (op != opcode.op.goto) {
+                    output[out_idx] = opcode.op.drop;
+                    out_idx += instrSize(opcode.op.drop);
+                }
+                i += instrSize(op);
+            } else if (try matchConditionalGotoPeephole(func.code, i)) |p| {
+                try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, sizes[i]);
+                i += p.total_size;
             } else if (matchGetLengthPeephole(func.code, i, use_short_opcodes)) |input_size| {
                 output[out_idx] = opcode.op.get_length;
                 out_idx += 1;
