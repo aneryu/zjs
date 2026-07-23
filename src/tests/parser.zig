@@ -1355,7 +1355,7 @@ test "W5: folded parenthesized bigint keeps the unary minus source position" {
     try std.testing.expectEqual(@as(i32, 1), source_loc.col_num);
 }
 
-test "F4: regexp literal stores parse-time compiled bytecode in the constant pool" {
+test "F4: regexp literal stores pattern then parse-time bytecode in the constant pool" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var parsed = try compileForTest(env.rt, "/a+/gi;", .{ .mode = .script, .filename = "regexp-literal.js" });
@@ -1381,12 +1381,22 @@ test "F4: regexp literal stores parse-time compiled bytecode in the constant poo
     }
 
     try std.testing.expect(regexp_pc != null);
-    try std.testing.expectEqual(op.push_atom_value, code[previous_previous_pc.?]);
+    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
     try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
-    try std.testing.expectEqual(@as(usize, 1), constants.len);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), constants.len);
 
-    const constant_index = readConstIndexAtOpcode(code, previous_pc.?);
-    const compiled_value = constants[constant_index].dup();
+    const pattern_index = readConstIndexAtOpcode(code, previous_previous_pc.?);
+    const compiled_index = readConstIndexAtOpcode(code, previous_pc.?);
+    try std.testing.expectEqual(@as(u32, 0), pattern_index);
+    try std.testing.expectEqual(@as(u32, 1), compiled_index);
+
+    const pattern_value = constants[pattern_index].dup();
+    defer pattern_value.free(env.rt);
+    const pattern_string = pattern_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(pattern_string.eqlBytes("a+"));
+
+    const compiled_value = constants[compiled_index].dup();
     defer compiled_value.free(env.rt);
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(!compiled_string.isWide());
@@ -1394,6 +1404,76 @@ test "F4: regexp literal stores parse-time compiled bytecode in the constant poo
     var expected = try engine.libs.regexp.compilePatternAndFlags(std.testing.allocator, "a+", "gi");
     defer expected.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, expected.bytecode, compiled_string.borrowLatin1().?);
+}
+
+test "F4: regexp pattern constant decodes UTF-8 before the following constant" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var parsed = try compileForTest(env.rt, "print(/π+/u, 1.5);", .{
+        .mode = .script,
+        .filename = "regexp-unicode-cpool.js",
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const code = parsed.byteCode();
+    const constants = parsed.constants();
+    try std.testing.expectEqual(@as(usize, 3), constants.len);
+
+    var regexp_pc: ?usize = null;
+    var previous_previous_pc: ?usize = null;
+    var previous_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        if (code[pc] == op.regexp) {
+            regexp_pc = pc;
+            break;
+        }
+        previous_previous_pc = previous_pc;
+        previous_pc = pc;
+        const opcode_size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(opcode_size != 0);
+        pc += opcode_size;
+    }
+
+    try std.testing.expect(regexp_pc != null);
+    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
+    try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(code, previous_previous_pc.?));
+    try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(code, previous_pc.?));
+
+    const pattern = constants[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(pattern.isWide());
+    try std.testing.expectEqualSlices(u16, &.{ 0x03c0, '+' }, pattern.utf16());
+
+    var following_constant_pc: ?usize = null;
+    pc = regexp_pc.? + engine.bytecode.opcode.sizeOf(op.regexp);
+    while (pc < code.len) {
+        if (code[pc] == op.push_const8 or code[pc] == op.push_const) {
+            following_constant_pc = pc;
+            break;
+        }
+        const opcode_size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(opcode_size != 0);
+        pc += opcode_size;
+    }
+    try std.testing.expect(following_constant_pc != null);
+    try std.testing.expectEqual(@as(u32, 2), readConstIndexAtOpcode(code, following_constant_pc.?));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), constants[2].asFloat64().?, 0.0);
+}
+
+test "F4: invalid regexp releases its published pattern constant" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(env.rt, "/(/;", .{
+        .mode = .script,
+        .filename = "invalid-regexp.js",
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expectEqual(parser.CompilePath.syntax_error_guard, parsed.parse_path);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.syntax_error.?.message, "InvalidRegExp") != null);
 }
 
 test "F4: boolean and null literals" {
@@ -3310,9 +3390,10 @@ test "W5: string discard follows QuickJS atom and completion boundaries" {
         .filename = "empty-regexp.js",
     });
     defer empty_matching_regexp.deinit();
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.push_atom_value));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(empty_matching_regexp.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(empty_matching_regexp.byteCode(), op.push_const8));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.regexp));
+    try std.testing.expectEqual(@as(usize, 2), empty_matching_regexp.constants().len);
 
     var tagged = try parseStatement(&env, "\"123\";");
     defer tagged.deinit(env.rt);

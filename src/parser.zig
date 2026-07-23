@@ -8378,22 +8378,28 @@ pub const parser_core = struct {
         return .applied;
     }
 
-    fn emitStringLiteralBytes(s: *State, bytes: []const u8) Error!void {
-        try emitStringLiteralValue(s, bytes);
-    }
-
     fn parseRegExpLiteral(s: *State) Error!void {
         const slash_offset = s.lex.mark_pos;
         s.lex.freeToken(&s.token);
         s.token = try s.lex.rescanRegexp(slash_offset);
         const pattern = s.token.payload.regexp.pattern;
         const flags = s.token.payload.regexp.flags;
+
+        // QuickJS publishes the source pattern as the first constant-pool
+        // operand before compiling the regexp. Keep the raw source spelling,
+        // but decode its UTF-8 bytes into the runtime's Latin-1/UTF-16 string
+        // representation instead of interning it as an atom.
+        const pattern_string = core.string.String.createUtf8(s.runtime.?, pattern) catch |err| switch (err) {
+            error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
+            error.InvalidUtf8 => return Error.InvalidUtf8,
+        };
+        try s.emitPushConstOwned(pattern_string.value());
+
         var compiled = regexp_lib.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.InvalidRegExp,
         };
         defer compiled.deinit(s.function.memory.allocator);
-        try emitStringLiteralBytes(s, pattern);
         // qjs compiles a literal once while parsing, stores the lre bytecode as
         // an 8-bit JSString constant, and lets OP_regexp share that immutable
         // string with each fresh RegExp instance (quickjs.c:26891-26913,
