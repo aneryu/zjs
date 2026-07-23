@@ -2733,6 +2733,20 @@ SHA256为`ea502823ca797558bfa646ff3aa92eab2b3ab4f8e31183bedad257712e869563` /
 Object direct收益忽略non-object regression；生产代码已完整回退。下一项M-ALLOC候选必须不改变
 其他class的codegen，否则关闭这一子方向。
 
+后续 `M-ALLOC-STANDARD-OBJECT` 隔离审计已关闭第二候选空间：冻结ReleaseFast中
+`Object.createInternal`是独立的2676B（`0xa74`）符号，out-of-line
+`Table.beginConstruction`为676B（`0x2a4`）；两个direct消费者实际只需覆盖三处生产调用点：
+`vm_literal.object`的OOM cold路径、`vm_literal.newPlainObjectValue`的`OP_object`热路径，以及
+`object_builtin_ops.qjsObjectCreateCall`。A）comptime-specialized shared body会复制约一份完整
+构造器并重新生成non-object实例；B）抽取shared prepared body会改变generic wrapper/call边界；
+C）保持`createInternal`原样的独立ordinary helper仍须复制约50–80行、预计1–2KB的
+fallible ownership transaction；D）只在out-of-line `beginConstruction`特判Object虽可保持
+`createInternal`逻辑形状，却让Array及其他class多走compare/branch，仍不满足完整non-object隔离。
+新增text还可能改变PC-relative relocation，故源码未动也不能先验保证raw symbol hash不变。
+四案均不进入生产：`M-ALLOC-STANDARD-OBJECT`子方向关闭、收益记零，首候选代码不保留；这不关闭
+整个`M-ALLOC-LIFECYCLE`，accounting、destroy或allocator geometry只有出现新的profile事实才可
+另立独立候选。
+
 Recon 顺序：
 
 1. 用当前同一 `allocation-empty-object-2m.js` 跨 07-08 候选提交复现 0.96x；无法复现就删除
@@ -2915,7 +2929,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
 | W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
 | W3-native（**已完成，correctness + 候选回退**） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零。重复`callable_realm`transport候选在ordinary/cross-realm/C_FUNCTION_DATA/constructor/synthetic/nested语义矩阵通过，并在两个builtin domain的plain/method与exact/missing形状稳定减少每次2～6条指令 | ❌ 独立布局重建虽保留direct指令削减，却使property-read/allocation controls回退+1.477%/+1.660%，越过+1%门槛且暴露code-layout方向翻转；生产候选完整回退，九个direct/control probe与失败结论保留，W3冻结 |
-| W4（进行中；M-ALLOC首候选已回退） | ✅ force-GC liveness 前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | `M-ALLOC-STANDARD-OBJECT-CONSTRUCT-PLAN`虽显著改善两个Object direct消费者，却使pure `[]` control回退cycles +11.787% / instructions +1.680%，按§8完整回退；下一项M-ALLOC必须隔离other-class codegen，否则关闭该子方向。阶段末仍跑统一force-GC/OOM gate；M-SHAPE-PUBLISH保持独立待执行 |
+| W4（进行中；M-ALLOC-STANDARD-OBJECT子方向已关闭） | ✅ force-GC liveness 前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 首候选虽改善两个Object direct消费者，却使pure `[]` control回退cycles +11.787% / instructions +1.680%，按§8完整回退；第二候选隔离审计的A/B/C/D四案均无法同时保持non-object codegen且避免复制大段ownership transaction，故该子方向收益记零、代码不保留。整个M-ALLOC-LIFECYCLE未关闭；accounting/destroy等仅凭新的profile事实另立。阶段末仍跑统一force-GC/OOM gate；M-SHAPE-PUBLISH保持独立待执行 |
 | W5（**进行中；correctness/initial-yield与signed BigInt子项已收口**） | ✅ `fde49b15`以fresh function grammar boundary修复默认参数内generator function expression，正例返回`1`且外层direct-yield负例仍与qjs同为`SyntaxError`；✅ `b8f7e0d2`以canonical `OP_initial_yield`替换四-op marker并删除`generatorBodyPc`扫描，保持sync/async-generator suspended-start及ordinary async/fixture pc 0入口；✅ `b39eb39c`以`resolve_labels`相邻peephole折叠signed `push_bigint_i32 + neg`并保持MIN/cpool/source边界 → 重冻diagnostic/PMU → 继续M-EMIT | hoist construction不算peephole；initial-yield与signed BigInt各自只完成一条producer/finalizer子项。discarded pure expression及表中其他final-bytecode差异仍待逐项裁决，禁止宣称M-EMIT完成 |
 | W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
