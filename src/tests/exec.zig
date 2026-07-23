@@ -12537,6 +12537,76 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
     try std.testing.expect(result.isUndefined());
 }
 
+test "native tail calls preserve iterator and proxy continuation success and throws" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let nextIndex = 0;
+        \\const nativeResultIterator = {
+        \\    results: [
+        \\        { value: 43, done: false },
+        \\        { done: true },
+        \\    ],
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        "use strict";
+        \\        return Object(this.results[nextIndex++]);
+        \\    },
+        \\};
+        \\let iteratorSum = 0;
+        \\for (const value of nativeResultIterator) iteratorSum += value;
+        \\assert.sameValue(iteratorSum, 43);
+        \\assert.sameValue(nextIndex, 2);
+        \\
+        \\let closeCalls = 0;
+        \\const nativeThrowIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        "use strict";
+        \\        return Number(Symbol("iterator native tail throw"));
+        \\    },
+        \\    return() {
+        \\        closeCalls++;
+        \\        return { done: true };
+        \\    },
+        \\};
+        \\let iteratorThrew = false;
+        \\try {
+        \\    for (const value of nativeThrowIterator) {}
+        \\} catch (error) {
+        \\    iteratorThrew = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(iteratorThrew, true);
+        \\assert.sameValue(closeCalls, 0);
+        \\
+        \\const key = ["native", "tail", "continuation"].join("-");
+        \\const nativeResultProxy = new Proxy({}, {
+        \\    get() {
+        \\        "use strict";
+        \\        return Number("47");
+        \\    },
+        \\});
+        \\assert.sameValue(nativeResultProxy[key], 47);
+        \\
+        \\const nativeThrowProxy = new Proxy({}, {
+        \\    get() {
+        \\        "use strict";
+        \\        return Number(Symbol("proxy native tail throw"));
+        \\    },
+        \\});
+        \\let proxyThrew = false;
+        \\try {
+        \\    nativeThrowProxy[key];
+        \\} catch (error) {
+        \\    proxyThrew = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(proxyThrew, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "ordinary arrow and method recursion exhaust the logical stack budget" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

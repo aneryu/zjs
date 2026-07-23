@@ -2546,6 +2546,30 @@ Recon 顺序：
 生产修改受 §2 tail-chain stack budget与W2-0 interrupt counter lifetime共同阻塞。若剩余差异只是 resident Machine 的架构成本，记录为
 “zjs architecture divergence”；只有真实编译器/ABI 证据才能进一步归为 Zig 限制。
 
+W2-cont收口裁决（2026-07-24）：生产callsite census确认非`.next` action只有
+`for_of_next`与`proxy_get`。前者以u8 depth为borrowed/moved iterator call携带返回后的
+`done/value`作业，后者以owned Atom携带Proxy trap返回后的target descriptor invariant检查；
+两者均经`popAndResume → op_post_call_continuation`消费，tail replacement则显式转移同一
+continuation ownership。普通call/method/constructor/generator/async entry都初始化为
+`.next + payload 0`，返回时直接恢复caller，不进入该cold handler。
+
+QuickJS的对应状态由递归`JS_Call`上层的C locals保存：`JS_IteratorNext2`返回后继续读
+`done/value`，`js_proxy_get`返回后继续验证descriptor invariant。resident Machine没有可借用的
+C caller frame，因此当前tag+u32 payload是这两类post-call work的最小durable state；把tag塞进
+payload会与完整32-bit Atom域冲突，改用heap/cold frame会引入allocation，function pointer则扩大
+entry状态，均不形成符合本节约束的共同候选。裁决为**zjs architecture divergence**，不归因为
+Zig限制，收益记零，生产代码不改。
+
+ReleaseFast语义direct/control以同一脚本逐项对照qjs：self-result iterator为
+`2000000 2000000`，constant-result iterator为`2000000 2000000`，zero-arg iterator为
+`-1455759936 2000000`，普通zero-arg method为`10000000`，static/computed Proxy constant trap
+均为`1000000`。现有exec回归继续锁定无备用operand capacity的Proxy continuation、
+for-of result/abrupt顺序，以及computed Proxy nested call/throw/invariant。新增
+`native tail calls preserve iterator and proxy continuation success and throws`直接迫使两类
+continuation经driver `.returned`消费，并覆盖native tail-call成功与抛错。for-of的局部value释放
+顺序与Proxy key临时root lifetime仍分别属于consumer ownership审计，不反向扩大本transport机制。
+这里没有生产候选，不伪造PMU收益；W2 call/return与dispatch继续冻结。
+
 ### 5.4 M-PROPERTY-LOOKUP — named property shape/prototype walk
 
 QuickJS 的 `OP_get_field/get_field2/get_length` 共用 `GET_FIELD_INLINE`：直接查当前 shape hash chain，
@@ -2790,7 +2814,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W1-full-close | W1d/W1e分别完成各自gate、审计、合入与affected-consumer重冻 | 此时才可声明全部closure/module construction对齐；若仍有product extension只能声明“QJS core exact + documented extension”，不追溯改写core-close或plain-put既有A/B |
 | W2-0（**已完成，correctness**） | ✅ RealmContext直接own raw-zero/10000-reset interrupt counter，VM-local 1024 `InterruptPoller`与active gate删除；call/method/native/array/inline/tail/Function.prototype.call融合快路、constructor/Bound/Proxy及simple-field constructor按QJS entry次数扣caller，jump/branch只在唯一handler扣一次；最终bytecode arm后body扣callee。Interrupted按被poll Realm构造真实InternalError并以Runtime uncatchable flag跨inline unwind，catch/finally/IteratorClose不得洗掉；regexp counter、tail stack均未改 | ✅ 无handler推进、首poll与连续10000 cadence、Realm隔离、跨Machine、nested/tail、numeric cold branch、constructor双poll、fused forwarding、generator resume、cross-Realm caller-entry/callee-body及error prototype、outer inline for-of/catch均有回归。2026-07-23证据：focused core 283/283、exec 361/361；checkpoint 26/26（统一Debug 1861/1861、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；OOM 14/14；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
 | W2-tail（**已完成，correctness**） | ✅ Runtime同时记录native/logical depth与按QJS `JS_CallInternal` alloca公式计算的planned bytecode-stack bytes；普通、inline、generator/async resident entry及COPY_ARGV forwarding均精确charge/release。proper-tail-call先在caller仍存活时完整准备target，全部fallible setup成功后才以no-fail transaction转移continuation、最早arena mark、profile restore chain和累计tail budget并复用物理Entry；失败继续由原caller正常unwind/catch。caller guard/poll先于callee Realm切换，async init只准备resident frame，首次resume独占单次guard→poll；interrupt跨Promise边界只局部转移原caller-Realm uncatchable InternalError为rejection reason，不放宽通用error matcher；interrupt error构造OOM时以预制OOM对象维持unconditional uncatchable | ✅ 尾递归/大小frame混合/逻辑深度/stack overflow、raw tail opcode、COPY_ARGV、cross-Realm interrupt-vs-stack次序、generator/async cadence及async rejection Realm、interrupt×OOM catch bypass、target setup deterministic OOM与同Runtime恢复均有回归。2026-07-23证据：focused exec 366/366；OOM 14/14；alternate representation统一1866/1866；opcode-profile启用构建及tail smoke通过；checkpoint 26/26（统一Debug 1866/1866、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
-| W2-cont（下一步） | 只审计非 `.next` 的 M-RETURN-CONT | tail stack与interrupt两个correctness机制已重冻；continuation候选不得跨correctness状态，不重开普通call/return或整体dispatch |
+| W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
 | W3 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | ordinary/global-varref lookup probe 分开；lookup 与 callable dispatch 分开保留/回退 |
 | W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
 | W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
