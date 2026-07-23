@@ -4565,7 +4565,64 @@ test "resolve_labels folds discarded post update stores" {
     try std.testing.expectEqualSlices(core.Atom, &.{field_atom}, bc.atom_operands);
 }
 
-test "resolve_labels collapses chained logical branch prefix" {
+test "resolve_labels collapses two-hop logical branch prefixes with source mapping" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    const op = bytecode.opcode.op;
+    for ([_]u8{ op.if_false, op.if_true }) |branch_op| {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.use_short_opcodes = true;
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        // dup branch L1 drop; value; L1: dup branch L2 drop; value;
+        // L2: branch END; END: return_undef
+        var input = [_]u8{0} ** 22;
+        input[0] = op.dup;
+        input[1] = branch_op;
+        std.mem.writeInt(u32, input[2..6], 8, .little);
+        input[6] = op.drop;
+        input[7] = op.get_loc0;
+        input[8] = op.dup;
+        input[9] = branch_op;
+        std.mem.writeInt(u32, input[10..14], 16, .little);
+        input[14] = op.drop;
+        input[15] = op.get_loc1;
+        input[16] = branch_op;
+        std.mem.writeInt(u32, input[17..21], 21, .little);
+        input[21] = op.return_undef;
+        try bc.setCode(&input);
+        try bc.appendSourceLoc(0, 10, 2);
+        try bc.appendSourceLoc(7, 11, 3);
+        try bc.appendSourceLoc(21, 12, 4);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        const short_branch = if (branch_op == op.if_false) op.if_false8 else op.if_true8;
+        try std.testing.expectEqualSlices(u8, &.{
+            short_branch,
+            7,
+            op.get_loc0,
+            short_branch,
+            4,
+            op.get_loc1,
+            short_branch,
+            1,
+            op.return_undef,
+        }, bc.code);
+        try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 8), bc.source_loc_slots[2].pc);
+    }
+}
+
+test "resolve_labels collapses logical chains deeper than the old fixed limit" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -4579,28 +4636,40 @@ test "resolve_labels collapses chained logical branch prefix" {
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 14;
-    input[0] = op.dup;
-    input[1] = op.if_false;
-    std.mem.writeInt(u32, input[2..6], 8, .little);
-    input[6] = op.drop;
-    input[7] = op.get_loc0;
-    input[8] = op.if_false;
-    std.mem.writeInt(u32, input[9..13], 13, .little);
-    input[13] = op.return_undef;
+    const prefix_count = 33;
+    const final_branch_pc = prefix_count * 8;
+    var input = [_]u8{0} ** (final_branch_pc + 6);
+    for (0..prefix_count) |index| {
+        const pc = index * 8;
+        input[pc] = op.dup;
+        input[pc + 1] = op.if_false;
+        std.mem.writeInt(u32, input[pc + 2 ..][0..4], @intCast(pc + 8), .little);
+        input[pc + 6] = op.drop;
+        input[pc + 7] = op.get_loc0;
+    }
+    input[final_branch_pc] = op.if_false;
+    std.mem.writeInt(u32, input[final_branch_pc + 1 ..][0..4], @intCast(final_branch_pc + 5), .little);
+    input[final_branch_pc + 5] = op.return_undef;
     try bc.setCode(&input);
 
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqualSlices(u8, &.{
-        op.if_false8,
-        4,
-        op.get_loc0,
-        op.if_false8,
-        1,
-        op.return_undef,
-    }, bc.code);
+    const final_output_branch_pc = prefix_count * 3;
+    const return_pc = final_output_branch_pc + 2;
+    try std.testing.expectEqual(return_pc + 1, bc.code.len);
+    for (0..prefix_count) |index| {
+        const pc = index * 3;
+        try std.testing.expectEqual(op.if_false8, bc.code[pc]);
+        try std.testing.expectEqual(
+            @as(i8, @intCast(return_pc - (pc + 1))),
+            @as(i8, @bitCast(bc.code[pc + 1])),
+        );
+        try std.testing.expectEqual(op.get_loc0, bc.code[pc + 2]);
+    }
+    try std.testing.expectEqual(op.if_false8, bc.code[final_output_branch_pc]);
+    try std.testing.expectEqual(@as(u8, 1), bc.code[final_output_branch_pc + 1]);
+    try std.testing.expectEqual(op.return_undef, bc.code[return_pc]);
 }
 
 test "resolve_labels preserves logical prefix with an interior jump target" {

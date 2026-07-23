@@ -8346,8 +8346,11 @@ pub const pipeline_resolve_labels = struct {
         if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
 
         var target = jumpTarget(code, pc + 1) catch return null;
-        var depth: usize = 0;
-        while (depth < 32) : (depth += 1) {
+        var hops: usize = 0;
+        // Every valid hop lands on another instruction in this bytecode.  A
+        // byte-length bound therefore admits every finite chain while making
+        // malformed cyclic jump graphs terminate without a semantic depth cap.
+        while (hops < code.len) : (hops += 1) {
             const target_pc = skipLabels(code, target) catch return null;
             if (target_pc >= code.len) return null;
 

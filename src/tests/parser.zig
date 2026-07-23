@@ -1624,6 +1624,47 @@ test "F4: logical || uses dup + if_true short-circuit" {
     try std.testing.expectEqual(fn_bc.code.len, target);
 }
 
+test "F4: if consumes three-term logical chains with final branch snapshots" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var and_bc = try parseStatement(&env, "if (a && b && c) result;");
+    defer and_bc.deinit(env.rt);
+    try expectOpcodeSequence(and_bc.code, &.{
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.drop,
+    });
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 3));
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 8));
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 13));
+
+    var or_bc = try parseStatement(&env, "if (a || b || c) result;");
+    defer or_bc.deinit(env.rt);
+    try expectOpcodeSequence(or_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.if_true8,
+        op.drop,
+        op.get_var,
+        op.dup,
+        op.if_true8,
+        op.drop,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.drop,
+    });
+    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(or_bc.code, 4));
+    try std.testing.expectEqual(@as(usize, 17), readRelTarget32(or_bc.code, 11));
+    try std.testing.expectEqual(or_bc.code.len, readRelTarget32(or_bc.code, 17));
+}
+
 test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
