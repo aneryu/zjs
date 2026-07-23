@@ -7019,33 +7019,39 @@ pub const parser_core = struct {
     pub fn parseLogicalAndOr(s: *State, op_kind: tok.TokenKind, flags: ParseFlags) Error!void {
         if (op_kind == tok.TOK_LOR) {
             try parseLogicalAndOr(s, tok.TOK_LAND, flags);
-            while (s.peekKind() == tok.TOK_LOR) {
-                try s.advance();
-                // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
-                try s.emitOp(opcode.op.dup);
-                const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-                try s.emitOp(opcode.op.drop);
-                try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
-                try patchForwardJump(s, skip_jump);
-                s.last_anonymous_function_expr = false;
-                if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                    return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_LOR) {
+                const end_label = newParserLabel(s);
+                while (s.peekKind() == tok.TOK_LOR) {
+                    try s.advance();
+                    // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
+                    try s.emitOpNoSource(opcode.op.dup);
+                    try emitParserLabelJumpNoSource(s, opcode.op.if_true, end_label);
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
+                    }
                 }
+                try emitParserLabelNoSource(s, end_label);
             }
         } else {
             try parseExprBinary(s, 8, flags);
-            while (s.peekKind() == tok.TOK_LAND) {
-                try s.advance();
-                // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
-                try s.emitOp(opcode.op.dup);
-                const skip_jump = try emitForwardJump(s, opcode.op.if_false);
-                try s.emitOp(opcode.op.drop);
-                try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
-                try patchForwardJump(s, skip_jump);
-                s.last_anonymous_function_expr = false;
-                if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                    return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_LAND) {
+                const end_label = newParserLabel(s);
+                while (s.peekKind() == tok.TOK_LAND) {
+                    try s.advance();
+                    // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
+                    try s.emitOpNoSource(opcode.op.dup);
+                    try emitParserLabelJumpNoSource(s, opcode.op.if_false, end_label);
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
+                    }
                 }
+                try emitParserLabelNoSource(s, end_label);
             }
         }
     }

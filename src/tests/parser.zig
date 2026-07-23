@@ -1763,9 +1763,112 @@ test "F4: if consumes three-term logical chains with final branch snapshots" {
         op.get_var,
         op.drop,
     });
-    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(or_bc.code, 4));
+    try std.testing.expectEqual(@as(usize, 17), readRelTarget32(or_bc.code, 4));
     try std.testing.expectEqual(@as(usize, 17), readRelTarget32(or_bc.code, 11));
     try std.testing.expectEqual(or_bc.code.len, readRelTarget32(or_bc.code, 17));
+}
+
+test "F4: logical producer uses one source-less shared parser label" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const fixtures = [_]struct {
+        source: []const u8,
+        branch_op: u8,
+    }{
+        .{ .source = "a && b && c", .branch_op = op.if_false },
+        .{ .source = "a || b || c", .branch_op = op.if_true },
+    };
+
+    for (fixtures) |fixture| {
+        var function = try parseRawExprWithRuntime(&env, fixture.source);
+        defer function.deinit(env.rt);
+
+        var branch_target: ?u32 = null;
+        var branch_count: usize = 0;
+        var label_id: ?u32 = null;
+        var label_count: usize = 0;
+        var synthetic_count: usize = 0;
+        var pc: usize = 0;
+        while (pc < function.code.len) {
+            const opcode_id = function.code[pc];
+            const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(opcode_id));
+            try std.testing.expect(size != 0 and pc + size <= function.code.len);
+
+            const is_synthetic = opcode_id == op.dup or
+                opcode_id == fixture.branch_op or
+                opcode_id == op.drop;
+            if (is_synthetic) {
+                synthetic_count += 1;
+                for (function.source_loc_slots) |slot| {
+                    try std.testing.expect(slot.pc != @as(u32, @intCast(pc)));
+                }
+            }
+
+            if (opcode_id == fixture.branch_op) {
+                const target = readU32(function.code, pc + 1);
+                try std.testing.expect((target & op.parser_label_tag) != 0);
+                if (branch_target) |expected_target| {
+                    try std.testing.expectEqual(expected_target, target);
+                } else {
+                    branch_target = target;
+                }
+                branch_count += 1;
+            } else if (opcode_id == op.label) {
+                label_id = readU32(function.code, pc + 1);
+                label_count += 1;
+            }
+            pc += size;
+        }
+
+        try std.testing.expectEqual(@as(usize, 2), branch_count);
+        try std.testing.expectEqual(@as(usize, 1), label_count);
+        try std.testing.expectEqual(@as(usize, 6), synthetic_count);
+        try std.testing.expectEqual(
+            op.parser_label_tag | (label_id orelse return error.TestExpectedEqual),
+            branch_target orelse return error.TestExpectedEqual,
+        );
+    }
+}
+
+test "F4: collapsed multiline logical branches retain source progression" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try parseStatement(&env,
+        \\if (a &&
+        \\    b &&
+        \\    c) result;
+    );
+    defer function.deinit(env.rt);
+
+    const expected_sources = [_]struct {
+        line_num: i32,
+        col_num: i32,
+    }{
+        .{ .line_num = 1, .col_num = 4 },
+        .{ .line_num = 2, .col_num = 5 },
+        .{ .line_num = 3, .col_num = 6 },
+    };
+    var branch_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOf(opcode_id));
+        try std.testing.expect(size != 0 and pc + size <= function.code.len);
+        if (opcode_id == op.if_false8) {
+            try std.testing.expect(branch_count < expected_sources.len);
+            const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+                function.pc2lineBuf(),
+                @intCast(pc),
+            );
+            try std.testing.expectEqual(expected_sources[branch_count].line_num, source_loc.line_num);
+            try std.testing.expectEqual(expected_sources[branch_count].col_num, source_loc.col_num);
+            branch_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(expected_sources.len, branch_count);
 }
 
 test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
