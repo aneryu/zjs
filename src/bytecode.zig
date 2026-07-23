@@ -8953,6 +8953,14 @@ pub const pipeline_resolve_labels = struct {
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
                 }
+                if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| {
+                    // QJS attributes source markers on the consumed compare
+                    // and branch to the replacement nullish test. The matcher
+                    // rejects control-flow entry into those boundaries, so
+                    // mapping them back is source-only.
+                    positions[pc + 1] = out_pc;
+                    if (p.branch_op != null) positions[pc + 2] = out_pc;
+                }
                 if (matchPutGetPeephole(code, pc) != null) {
                     // QJS applies the source marker before the consumed get to
                     // the replacement set. The matcher rejects control-flow

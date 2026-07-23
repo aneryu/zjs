@@ -4637,7 +4637,7 @@ test "resolve_labels preserves logical prefix with an interior jump target" {
     try std.testing.expectEqual(op.dup, bc.code[2]);
 }
 
-test "resolve_labels folds null and undefined comparison families" {
+test "resolve_labels null comparison strict_eq folds both constants with QuickJS source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -4660,24 +4660,46 @@ test "resolve_labels folds null and undefined comparison families" {
             .input = &.{ op.get_loc0, op.undefined, op.strict_eq, op.@"return" },
             .expected = &.{ op.get_loc0, op.is_undefined, op.@"return" },
         },
-        .{
-            .input = &.{ op.undefined, op.@"return" },
-            .expected = &.{op.return_undef},
-        },
     };
 
     for (cases) |case| {
         var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
         try bc.setCode(case.input);
+        try bc.appendSourceLoc(1, 10, 2);
+        try bc.appendSourceLoc(2, 11, 3);
+        try bc.appendSourceLoc(3, 12, 4);
 
         var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_labels.run(&ctx);
         try std.testing.expectEqualSlices(u8, case.expected, bc.code);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[2].pc);
     }
 }
 
-test "resolve_labels folds nullish strict_neq branches by inverting the jump" {
+test "resolve_labels folds undefined return" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    const op = bytecode.opcode.op;
+    try bc.setCode(&.{ op.undefined, op.@"return" });
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+}
+
+test "resolve_labels null comparison strict_neq branches invert both directions with QuickJS source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -4692,14 +4714,105 @@ test "resolve_labels folds nullish strict_neq branches by inverting the jump" {
         .{ .push = op.null, .test_op = op.is_null },
         .{ .push = op.undefined, .test_op = op.is_undefined },
     };
+    const branches = [_]struct { input: u8, expected: u8 }{
+        .{ .input = op.if_false, .expected = op.if_true8 },
+        .{ .input = op.if_true, .expected = op.if_false8 },
+    };
     for (nullish_ops) |nullish| {
-        var input = [_]u8{0} ** 9;
-        input[0] = op.get_loc0;
-        input[1] = nullish.push;
-        input[2] = op.strict_neq;
+        for (branches) |branch| {
+            var input = [_]u8{0} ** 9;
+            input[0] = op.get_loc0;
+            input[1] = nullish.push;
+            input[2] = op.strict_neq;
+            input[3] = branch.input;
+            std.mem.writeInt(u32, input[4..8], 8, .little);
+            input[8] = op.return_undef;
+
+            var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+            defer bc.deinit(rt);
+            try bc.setCode(&input);
+            try bc.appendSourceLoc(1, 10, 2);
+            try bc.appendSourceLoc(2, 11, 3);
+            try bc.appendSourceLoc(3, 12, 4);
+            try bc.appendSourceLoc(8, 13, 5);
+
+            var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+            try pipeline.resolve_labels.run(&ctx);
+            try std.testing.expectEqualSlices(u8, &.{
+                op.get_loc0,
+                nullish.test_op,
+                branch.expected,
+                1,
+                op.return_undef,
+            }, bc.code);
+            try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+            try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[1].pc);
+            try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[2].pc);
+            try std.testing.expectEqual(@as(u32, 4), bc.source_loc_slots[3].pc);
+        }
+    }
+}
+
+test "resolve_labels null comparison does not fold loose equality" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_][]const u8{
+        &.{ op.get_loc0, op.null, op.eq, op.@"return" },
+        &.{ op.get_loc0, op.undefined, op.neq, op.@"return" },
+    };
+    for (cases) |input| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(input);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+        try std.testing.expectEqualSlices(u8, input, bc.code);
+    }
+}
+
+test "resolve_labels null comparison respects the minimal jump-entry boundary" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        target: u32,
+        expected: []const u8,
+    }{
+        .{
+            .target = 10,
+            .expected = &.{ op.get_arg0, op.if_false8, 3, op.get_loc0, op.null, op.strict_eq, op.@"return" },
+        },
+        .{
+            .target = 9,
+            .expected = &.{ op.get_arg0, op.if_false8, 2, op.get_loc0, op.is_null, op.@"return" },
+        },
+    };
+    for (cases) |case| {
+        var input = [_]u8{0} ** 12;
+        input[0] = op.get_arg;
+        std.mem.writeInt(u16, input[1..3], 0, .little);
         input[3] = op.if_false;
-        std.mem.writeInt(u32, input[4..8], 8, .little);
-        input[8] = op.return_undef;
+        std.mem.writeInt(u32, input[4..8], case.target, .little);
+        input[8] = op.get_loc0;
+        input[9] = op.null;
+        input[10] = op.strict_eq;
+        input[11] = op.@"return";
 
         var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
@@ -4707,13 +4820,7 @@ test "resolve_labels folds nullish strict_neq branches by inverting the jump" {
 
         var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_labels.run(&ctx);
-        try std.testing.expectEqualSlices(u8, &.{
-            op.get_loc0,
-            nullish.test_op,
-            op.if_true8,
-            1,
-            op.return_undef,
-        }, bc.code);
+        try std.testing.expectEqualSlices(u8, case.expected, bc.code);
     }
 }
 

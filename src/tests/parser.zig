@@ -1483,6 +1483,33 @@ test "F4: comparison operators map to op.lt/op.lte/op.eq/op.strict_eq" {
     try std.testing.expectEqual(op.strict_eq, seq_bc.code[seq_bc.code.len - 1]);
 }
 
+test "F4: null comparison lowering keeps strict folds and loose equality distinct" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var strict_null = try parseExpr(&env, "value === null");
+    defer strict_null.deinit(env.rt);
+    try expectOpcodeSequence(strict_null.code, &.{ op.get_var, op.is_null });
+
+    var strict_undefined = try parseExpr(&env, "value === void 0");
+    defer strict_undefined.deinit(env.rt);
+    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.is_undefined });
+
+    var strict_neq_condition = try parseStatement(&env, "if (value !== null) result;");
+    defer strict_neq_condition.deinit(env.rt);
+    try expectOpcodeSequence(strict_neq_condition.code, &.{
+        op.get_var,
+        op.is_null,
+        op.if_true8,
+        op.get_var,
+        op.drop,
+    });
+
+    var loose_null = try parseExpr(&env, "value == null");
+    defer loose_null.deinit(env.rt);
+    try expectOpcodeSequence(loose_null.code, &.{ op.get_var, op.null, op.eq });
+}
+
 test "F4: bitwise levels 6/7/8 (and/xor/or) and shifts" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
