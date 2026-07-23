@@ -640,7 +640,11 @@ pub noinline fn putVar(
         value.free(ctx.runtime);
         return .continue_loop;
     }
-    if (runtime_strict or strict_unresolved_get_var) {
+    {
+        // qjs OP_put_var always performs JS_HasProperty on the global object
+        // before its SetProperty slow leg (quickjs.c:18511-18521).  Only the
+        // missing-binding throw is strict-only; skipping HasProperty in sloppy
+        // mode loses observable Proxy/exotic-global `has` traps.
         const global_value = global.value().dup();
         defer global_value.free(ctx.runtime);
         const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
@@ -648,7 +652,7 @@ pub noinline fn putVar(
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-        if (!has_global_binding) {
+        if (!has_global_binding and (runtime_strict or strict_unresolved_get_var)) {
             value.free(ctx.runtime);
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;

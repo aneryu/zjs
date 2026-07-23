@@ -17029,6 +17029,117 @@ test "direct eval inside a module function forwards module live bindings" {
     defer result.free(js.runtime);
 }
 
+test "dynamic global put keeps cell and global-object legs semantically separate" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .name = "initialized-cell-hit",
+            .source =
+            \\var cell = 1;
+            \\function writeCell() { cell = 2; return cell; }
+            \\print(writeCell(), cell);
+            ,
+            .expected = "2 2\n",
+        },
+        .{
+            .name = "uninitialized-global-object-hit",
+            .source =
+            \\globalThis.dynamicHit = 1;
+            \\function writeDynamicHit() { dynamicHit = 2; return dynamicHit; }
+            \\print(writeDynamicHit(), globalThis.dynamicHit);
+            ,
+            .expected = "2 2\n",
+        },
+        .{
+            .name = "uninitialized-global-object-miss",
+            .source =
+            \\delete globalThis.dynamicMiss;
+            \\function writeDynamicMiss() { dynamicMiss = 3; return dynamicMiss; }
+            \\print(writeDynamicMiss(), globalThis.dynamicMiss);
+            ,
+            .expected = "3 3\n",
+        },
+        .{
+            .name = "strict-miss",
+            .source =
+            \\delete globalThis.strictMissing;
+            \\function writeStrictMissing() { "use strict"; strictMissing = 3; }
+            \\try { writeStrictMissing(); print("no throw"); }
+            \\catch (error) { print(error.name, typeof strictMissing); }
+            ,
+            .expected = "ReferenceError undefined\n",
+        },
+        .{
+            .name = "lexical-tdz",
+            .source =
+            \\function writeTdz() { lexicalTdz = 3; }
+            \\try { writeTdz(); print("no throw"); }
+            \\catch (error) { print(error.name); }
+            \\let lexicalTdz;
+            \\print(lexicalTdz);
+            ,
+            .expected = "ReferenceError\nundefined\n",
+        },
+        .{
+            .name = "lexical-const",
+            .source =
+            \\const fixedCell = 1;
+            \\function writeConst() { fixedCell = 2; }
+            \\try { writeConst(); print("no throw"); }
+            \\catch (error) { print(error.name, fixedCell); }
+            ,
+            .expected = "TypeError 1\n",
+        },
+        .{
+            .name = "proxy-global-prototype",
+            .source =
+            \\(function () {
+            \\  var emit = print;
+            \\  var global = globalThis;
+            \\  var ObjectCtor = Object;
+            \\  var oldPrototype = ObjectCtor.getPrototypeOf(global);
+            \\  var log = [];
+            \\  var proxy = new Proxy({}, {
+            \\    has: function (_, key) {
+            \\      log.push("has:" + key);
+            \\      return key === "proxiedDynamic";
+            \\    },
+            \\    set: function (_, key, value, receiver) {
+            \\      log.push("set:" + key + ":" + value + ":" + (receiver === global));
+            \\      return true;
+            \\    },
+            \\  });
+            \\  function writeProxy() { proxiedDynamic = 9; }
+            \\  ObjectCtor.setPrototypeOf(global, proxy);
+            \\  writeProxy();
+            \\  ObjectCtor.setPrototypeOf(global, oldPrototype);
+            \\  emit(
+            \\    log.join("|"),
+            \\    ObjectCtor.prototype.hasOwnProperty.call(global, "proxiedDynamic"),
+            \\  );
+            \\})();
+            ,
+            .expected = "has:proxiedDynamic|set:proxiedDynamic:9:true false\n",
+        },
+    };
+
+    for (cases) |case| {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+
+        var output_buffer: [256]u8 = undefined;
+        var output = std.Io.Writer.fixed(&output_buffer);
+        const result = try js.evalWithOutput(case.source, &output);
+        defer result.free(js.runtime);
+
+        try std.testing.expect(result.isUndefined());
+        try std.testing.expectEqualStrings(case.expected, output.buffered());
+    }
+}
+
 test "get_var uninitialized-cell inline global-object leg preserves the cold waterfall semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
