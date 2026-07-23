@@ -2459,7 +2459,7 @@ test "runtime Plugin host services create and unwrap opaque host objects" {
     try std.testing.expectEqual(@as(usize, 1), Hooks.finalizer_calls);
 }
 
-test "runtime Plugin pending opaque wrapper finalizers trace plugin payload roots" {
+test "runtime Plugin synchronous opaque wrapper finalizers release traced payload roots before free returns" {
     const State = struct {
         rt: *core.JSRuntime,
         slot: core.JSValue = core.JSValue.undefinedValue(),
@@ -2527,43 +2527,21 @@ test "runtime Plugin pending opaque wrapper finalizers trace plugin payload root
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
-    wrapper.free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-
-    const Counter = struct {
-        expected: *core.gc.Header,
-        count: usize = 0,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.refHeader()) |header| {
-                if (header == self.expected) self.count += 1;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-
-    var counter = Counter{ .expected = child_header };
-    var visitor = core.runtime.RootVisitor{
-        .context = &counter,
-        .visit_value = Counter.visitValue,
-        .visit_object = Counter.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expectEqual(@as(usize, 1), counter.count);
+    _ = try rt.forceMajorGC(null);
     try std.testing.expect(state.trace_calls > 0);
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+
+    wrapper.free(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expect(state.slot.isUndefined());
+    try std.testing.expect(!rt.gc.containsHeader(child_header));
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
 }
 
-test "runtime Plugin closes only after queued wrapper callbacks release the class generation" {
+test "runtime Plugin closes only after synchronous wrapper callbacks release the class generation" {
     const State = struct {
         rt: *core.JSRuntime,
         ctx: *core.JSContext,
@@ -2645,35 +2623,22 @@ test "runtime Plugin closes only after queued wrapper callbacks release the clas
     staging_owner_live = false;
     wrapper.free(rt);
 
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), state.close_count);
-    try std.testing.expect(rt.classes.isRegistered(state.class_id));
-
-    const NoopRootVisitor = struct {
-        fn visitValue(_: *anyopaque, _: *core.JSValue) core.runtime.RootTraceError!void {}
-        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
-    };
-    var visitor_context: u8 = 0;
-    var visitor = core.runtime.RootVisitor{
-        .context = &visitor_context,
-        .visit_value = NoopRootVisitor.visitValue,
-        .visit_object = NoopRootVisitor.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-    try std.testing.expect(state.trace_calls > 0);
-    try std.testing.expectEqual(@as(usize, 0), state.close_count);
-
-    rt.drainDeferredClassPayloadFinalizers();
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), state.close_count);
     try std.testing.expect(state.finalizer_order < state.close_order);
     try std.testing.expectEqual(@as(usize, 0), state.callbacks_after_close);
+    try std.testing.expectEqual(@as(usize, 0), state.trace_calls);
     try std.testing.expect(state.close_saw_drained_pins);
     try std.testing.expect(state.close_saw_class_removed);
     try std.testing.expect(state.close_saw_slot_cleared);
+
+    rt.drainDeferredClassPayloadFinalizers();
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 1), state.close_count);
 }
 
-test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
+test "runtime Plugin runtime destroy does not repeat synchronous opaque wrapper finalizers" {
     const State = struct {
         finalizer_calls: usize = 0,
 
@@ -2717,8 +2682,8 @@ test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
     const make_value = try target.getProperty(make_atom);
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
     wrapper.free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
 
     make_value.free(rt);
     rt.atoms.free(make_atom);
@@ -2786,8 +2751,12 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
+    _ = try rt.forceMajorGC(null);
+    try std.testing.expect(state.trace_calls > 0);
+    const live_trace_calls = state.trace_calls;
+
     wrapper.free(rt);
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 
     const Counter = struct {
         expected: *core.gc.Header,
@@ -2814,11 +2783,12 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     };
     try rt.traceActiveRoots(&visitor);
 
-    try std.testing.expectEqual(@as(usize, 1), counter.count);
-    try std.testing.expect(state.trace_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), counter.count);
+    try std.testing.expectEqual(live_trace_calls, state.trace_calls);
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expect(state.slot.isObject());
+    try std.testing.expect(rt.gc.containsHeader(child_header));
 }
 
 test "runtime Plugin opaque wrappers expose only reference branding" {

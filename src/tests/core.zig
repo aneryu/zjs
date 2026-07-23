@@ -1844,16 +1844,6 @@ fn dummyExternalHostCall(_: *anyopaque, _: core.host_function.ExternalCall) anye
     return core.JSValue.undefinedValue();
 }
 
-fn expectOneDeferredClassPayloadFinalizer(rt: *core.JSRuntime) !void {
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().deferred_class_payload_finalizer_count);
-}
-
-fn runOneDeferredClassPayloadFinalizer(rt: *core.JSRuntime) !void {
-    try std.testing.expectEqual(@as(usize, 1), rt.runDeferredClassPayloadFinalizerBudgeted(1));
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-}
-
 fn countPayloadFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
     payload.* = null;
@@ -1918,19 +1908,29 @@ const ClassConstructionGrowthProbe = struct {
 const InlineClassFinalizerReentry = struct {
     var target_id: core.ClassId = core.class.invalid_class_id;
     var growth_id: core.ClassId = core.class.invalid_class_id;
+    var property_atom: core.Atom = core.atom.null_atom;
     var calls: usize = 0;
     var register_failed: bool = false;
     var definition_visible_after_unregister: bool = false;
     var property_storage_was_stripped: bool = false;
+    var prototype_was_stripped: bool = false;
+    var own_property_was_stripped: bool = false;
+    var property_read_was_undefined: bool = false;
+    var property_read_failed: bool = false;
     var owner_thread_observed: bool = false;
 
     fn reset() void {
         target_id = core.class.invalid_class_id;
         growth_id = core.class.invalid_class_id;
+        property_atom = core.atom.null_atom;
         calls = 0;
         register_failed = false;
         definition_visible_after_unregister = false;
         property_storage_was_stripped = false;
+        prototype_was_stripped = false;
+        own_property_was_stripped = false;
+        property_read_was_undefined = false;
+        property_read_failed = false;
         owner_thread_observed = false;
     }
 
@@ -1940,6 +1940,14 @@ const InlineClassFinalizerReentry = struct {
         calls += 1;
         owner_thread_observed = rt.isOwnerThread() and rt.classes.isOwnerThread();
         property_storage_was_stripped = !object.hasPropertyStorage();
+        prototype_was_stripped = object.getPrototype() == null;
+        own_property_was_stripped = !object.hasOwnProperty(property_atom);
+        const property_value = object.getProperty(property_atom) catch blk: {
+            property_read_failed = true;
+            break :blk core.JSValue.undefinedValue();
+        };
+        property_read_was_undefined = property_value.isUndefined();
+        property_value.free(rt);
         rt.classes.unregisterDynamic(target_id);
         definition_visible_after_unregister = rt.classes.isRegistered(target_id) and rt.classes.unregisterPending(target_id);
         rt.classes.register(growth_id, .{ .class_name = "GrowthDuringInlineFinalizer" }) catch {
@@ -1948,6 +1956,131 @@ const InlineClassFinalizerReentry = struct {
         payload.* = null;
     }
 };
+
+const InlineObjectLifecycleProbe = struct {
+    var expected_object: ?*core.Object = null;
+    var expected_heap_live_bytes: usize = 0;
+    var expected_allocated_bytes: usize = 0;
+    var calls: usize = 0;
+    var identity_matches: bool = false;
+    var owns_object: bool = false;
+    var heap_live_bytes: usize = 0;
+    var allocated_bytes: usize = 0;
+
+    fn reset() void {
+        expected_object = null;
+        expected_heap_live_bytes = 0;
+        expected_allocated_bytes = 0;
+        calls = 0;
+        identity_matches = false;
+        owns_object = false;
+        heap_live_bytes = 0;
+        allocated_bytes = 0;
+    }
+
+    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
+        calls += 1;
+        identity_matches = object == expected_object;
+        owns_object = identity_matches and rt.ownsObject(object);
+        heap_live_bytes = rt.gcStats().heap_live_bytes;
+        allocated_bytes = rt.memory.allocated_bytes;
+        payload.* = null;
+    }
+};
+
+const ExternalObjectLifecyclePayload = struct {
+    event: u8,
+};
+
+const ExternalObjectLifecycleProbe = struct {
+    const max_events = 2;
+
+    var expected_objects: [max_events]?*core.Object = @splat(null);
+    var calls: usize = 0;
+    var events: [max_events]u8 = @splat(0xff);
+    var identity_matches: [max_events]bool = @splat(false);
+    var owns_objects: [max_events]bool = @splat(false);
+    var allocated_bytes: [max_events]usize = @splat(0);
+
+    fn reset() void {
+        expected_objects = @splat(null);
+        calls = 0;
+        events = @splat(0xff);
+        identity_matches = @splat(false);
+        owns_objects = @splat(false);
+        allocated_bytes = @splat(0);
+    }
+
+    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+        const typed: *ExternalObjectLifecyclePayload = @ptrCast(@alignCast(payload.*.?));
+        const event: usize = typed.event;
+        const index = calls;
+        calls += 1;
+        if (index < max_events) {
+            events[index] = typed.event;
+            identity_matches[index] = if (event < max_events and expected_objects[event] != null)
+                @intFromPtr(object_ptr) == @intFromPtr(expected_objects[event].?)
+            else
+                false;
+            owns_objects[index] = identity_matches[index] and
+                rt.ownsObject(@ptrCast(@alignCast(object_ptr)));
+            allocated_bytes[index] = rt.memory.allocated_bytes;
+        }
+        rt.memory.destroy(ExternalObjectLifecyclePayload, typed);
+        payload.* = null;
+    }
+};
+
+const ExternalClassFinalizerReentry = struct {
+    var target_id: core.ClassId = core.class.invalid_class_id;
+    var expected_object: ?*core.Object = null;
+    var calls: usize = 0;
+    var identity_matches: bool = false;
+    var owns_object: bool = false;
+    var definition_visible_after_unregister: bool = false;
+
+    fn reset() void {
+        target_id = core.class.invalid_class_id;
+        expected_object = null;
+        calls = 0;
+        identity_matches = false;
+        owns_object = false;
+        definition_visible_after_unregister = false;
+    }
+
+    fn finalize(runtime: *anyopaque, object_ptr: *anyopaque, payload: *core.class.Payload) void {
+        const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
+        const object: *core.Object = @ptrCast(@alignCast(object_ptr));
+        calls += 1;
+        identity_matches = object == expected_object;
+        owns_object = identity_matches and rt.ownsObject(object);
+        rt.classes.unregisterDynamic(target_id);
+        definition_visible_after_unregister =
+            rt.classes.isRegistered(target_id) and rt.classes.unregisterPending(target_id);
+
+        const ptr = payload.* orelse return;
+        const typed: *TestExternalPayload = @ptrCast(@alignCast(ptr));
+        typed.value.free(rt);
+        rt.memory.destroy(TestExternalPayload, typed);
+        payload.* = null;
+    }
+};
+
+fn createExternalObjectLifecycleProbe(
+    rt: *core.JSRuntime,
+    class_id: core.ClassId,
+    event: u8,
+) !*core.Object {
+    const object = try core.Object.create(rt, class_id, null);
+    errdefer object.value().free(rt);
+    const payload = try rt.memory.create(ExternalObjectLifecyclePayload);
+    payload.* = .{ .event = event };
+    object.installExternalClassPayload(@ptrCast(payload));
+    return object;
+}
 
 fn finalizeTestExternalPayload(runtime: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
@@ -2205,6 +2338,7 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     const object = try core.Object.create(rt, target_id, null);
     const property_atom = try rt.internAtom("owned-before-inline-finalizer");
     defer rt.atoms.free(property_atom);
+    InlineClassFinalizerReentry.property_atom = property_atom;
     try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
     try std.testing.expect(object.hasPropertyStorage());
     object.value().free(rt);
@@ -2212,6 +2346,10 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     try std.testing.expectEqual(@as(usize, 1), InlineClassFinalizerReentry.calls);
     try std.testing.expect(InlineClassFinalizerReentry.definition_visible_after_unregister);
     try std.testing.expect(InlineClassFinalizerReentry.property_storage_was_stripped);
+    try std.testing.expect(InlineClassFinalizerReentry.prototype_was_stripped);
+    try std.testing.expect(InlineClassFinalizerReentry.own_property_was_stripped);
+    try std.testing.expect(InlineClassFinalizerReentry.property_read_was_undefined);
+    try std.testing.expect(!InlineClassFinalizerReentry.property_read_failed);
     try std.testing.expect(InlineClassFinalizerReentry.owner_thread_observed);
     try std.testing.expect(!InlineClassFinalizerReentry.register_failed);
     try std.testing.expect(!rt.classes.isRegistered(target_id));
@@ -2219,26 +2357,141 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     rt.classes.unregisterDynamic(growth_id);
 }
 
-test "dynamic class definition stays pinned until a weak husk is reclaimed" {
+test "inline class finalizer observes the live object allocation until callback return" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    InlineObjectLifecycleProbe.reset();
+    defer InlineObjectLifecycleProbe.reset();
+
+    // Keep the shared null-prototype root shape alive so the callback snapshots
+    // differ only by the target object's lifecycle publication.
+    const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
+    defer shape_guard.value().free(rt);
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "InlineObjectLifecycleProbe",
+        .inline_payload_size = 8,
+        .inline_payload_align = 8,
+        .payload_finalizer = InlineObjectLifecycleProbe.finalize,
+    });
+
+    const object = try core.Object.create(rt, class_id, null);
+    InlineObjectLifecycleProbe.expected_object = object;
+    InlineObjectLifecycleProbe.expected_heap_live_bytes = rt.gcStats().heap_live_bytes;
+    InlineObjectLifecycleProbe.expected_allocated_bytes = rt.memory.allocated_bytes;
+    object.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), InlineObjectLifecycleProbe.calls);
+    try std.testing.expect(InlineObjectLifecycleProbe.identity_matches);
+    try std.testing.expect(InlineObjectLifecycleProbe.owns_object);
+    try std.testing.expectEqual(
+        InlineObjectLifecycleProbe.expected_heap_live_bytes,
+        InlineObjectLifecycleProbe.heap_live_bytes,
+    );
+    try std.testing.expectEqual(
+        InlineObjectLifecycleProbe.expected_allocated_bytes,
+        InlineObjectLifecycleProbe.allocated_bytes,
+    );
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "external class finalizers run synchronously with original object identity in zero-ref FIFO order" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    ExternalObjectLifecycleProbe.reset();
+    defer ExternalObjectLifecycleProbe.reset();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "ExternalObjectLifecycleProbe",
+        .payload_finalizer = ExternalObjectLifecycleProbe.finalize,
+    });
+
+    const first = try createExternalObjectLifecycleProbe(rt, class_id, 0);
+    const second = try createExternalObjectLifecycleProbe(rt, class_id, 1);
+    ExternalObjectLifecycleProbe.expected_objects = .{ first, second };
+
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    const first_atom = try rt.internAtom("first-finalized");
+    defer rt.atoms.free(first_atom);
+    const second_atom = try rt.internAtom("second-finalized");
+    defer rt.atoms.free(second_atom);
+    try holder.defineOwnProperty(rt, first_atom, core.Descriptor.data(first.value(), true, true, true));
+    try holder.defineOwnProperty(rt, second_atom, core.Descriptor.data(second.value(), true, true, true));
+    first.value().free(rt);
+    second.value().free(rt);
+
+    holder.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
+    try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
+    try std.testing.expectEqual([_]bool{ true, true }, ExternalObjectLifecycleProbe.identity_matches);
+    try std.testing.expectEqual([_]bool{ true, true }, ExternalObjectLifecycleProbe.owns_objects);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    rt.drainDeferredClassPayloadFinalizers();
+    try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "array teardown releases its unique prototype before its unique dense element" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    ExternalObjectLifecycleProbe.reset();
+    defer ExternalObjectLifecycleProbe.reset();
+
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{
+        .class_name = "ArrayOwnedObjectLifecycleProbe",
+        .payload_finalizer = ExternalObjectLifecycleProbe.finalize,
+    });
+
+    const prototype = try createExternalObjectLifecycleProbe(rt, class_id, 0);
+    const element = try createExternalObjectLifecycleProbe(rt, class_id, 1);
+    ExternalObjectLifecycleProbe.expected_objects = .{ prototype, element };
+
+    const array = try core.Object.createArray(rt, prototype);
+    try std.testing.expect(try array.defineDenseArrayDataProperty(rt, 0, element.value()));
+    prototype.value().free(rt);
+    element.value().free(rt);
+
+    array.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 2), ExternalObjectLifecycleProbe.calls);
+    try std.testing.expectEqual([_]u8{ 0, 1 }, ExternalObjectLifecycleProbe.events);
+    try std.testing.expectEqual([_]bool{ true, true }, ExternalObjectLifecycleProbe.identity_matches);
+    try std.testing.expectEqual([_]bool{ true, true }, ExternalObjectLifecycleProbe.owns_objects);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    rt.classes.unregisterDynamic(class_id);
+}
+
+test "weak husk keeps its class definition after one synchronous finalizer" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(class_id, .{
         .class_name = "WeakHuskDefinitionPin",
-        .payload_kind = .object_data,
+        .payload_finalizer = countPayloadFinalizer,
     });
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
     const target = try core.Object.create(rt, class_id, null);
     try weak_ref.setWeakRefTarget(rt, target.value());
 
+    payload_finalizer_calls = 0;
     rt.classes.unregisterDynamic(class_id);
     target.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(rt.classes.isRegistered(class_id));
     try std.testing.expect(rt.classes.unregisterPending(class_id));
     try std.testing.expect(weak_ref.weakRefDeref(rt).isUndefined());
 
     weak_ref.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
 }
@@ -2293,7 +2546,7 @@ test "class finalizers and context prototype slots are wired" {
     try std.testing.expect(!rt.classes.markPayload(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload, &visitor));
 }
 
-test "object destruction defers class payload finalizers" {
+test "object destruction runs class payload finalizers synchronously without allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2306,12 +2559,16 @@ test "object destruction defers class payload finalizers" {
     payload_finalizer_calls = 0;
     const payloadless = try core.Object.create(rt, payloadless_id, null);
     try std.testing.expect(payloadless.u.payload == null);
+    const payloadless_alloc_calls = rt.memory.alloc_calls;
+    const payloadless_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     payloadless.value().free(rt);
     rt.setMemoryLimit(null);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(payloadless_alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(payloadless_create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2325,16 +2582,20 @@ test "object destruction defers class payload finalizers" {
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{};
     external.u.payload = @ptrCast(payload);
+    const external_alloc_calls = rt.memory.alloc_calls;
+    const external_create_calls = rt.memory.create_calls;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     external.value().free(rt);
     rt.setMemoryLimit(null);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(external_alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(external_create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
-test "strong collection clear defers value finalizer reentry" {
+test "strong collection clear publishes empty state before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2363,17 +2624,13 @@ test "strong collection clear defers value finalizer reentry" {
     defer clear_result.free(rt);
 
     try std.testing.expect(clear_result.isUndefined());
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_collection_clear_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(usize, 0), map.collectionActiveCount());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_collection_clear_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), map.collectionActiveCount());
 }
 
-test "dense array delete defers element finalizer reentry" {
+test "dense array delete publishes sparse state before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2398,19 +2655,15 @@ test "dense array delete defers element finalizer reentry" {
     }
 
     try std.testing.expect(array.deleteProperty(rt, core.atom.atomFromUInt32(0)));
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_array_delete_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array.arrayElementStorageMode());
     try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
     try std.testing.expect(!array.hasOwnProperty(core.atom.atomFromUInt32(0)));
-    try runOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
-    try std.testing.expectEqual(@as(usize, 0), array.arrayElements().len);
 }
 
-test "ordinary property delete defers value finalizer reentry" {
+test "ordinary property delete publishes absence before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2439,21 +2692,15 @@ test "ordinary property delete defers value finalizer reentry" {
     }
 
     try std.testing.expect(object.deleteProperty(rt, key));
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_property_delete_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    var before_cleanup = try object.getProperty(key);
-    defer before_cleanup.free(rt);
-    try std.testing.expect(before_cleanup.isUndefined());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     const after = try object.getProperty(key);
     defer after.free(rt);
     try std.testing.expect(after.isUndefined());
 }
 
-test "regexp lastIndex set defers value finalizer reentry" {
+test "regexp lastIndex set publishes replacement before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2480,17 +2727,13 @@ test "regexp lastIndex set defers value finalizer reentry" {
 
     try regexp.setProperty(rt, core.atom.ids.lastIndex, core.JSValue.int32(7));
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_regexp_last_index_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), regexp.regexpLastIndex().?.asInt32());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
 }
 
-test "regexp lastIndex define defers value finalizer reentry" {
+test "regexp lastIndex define publishes replacement before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2521,17 +2764,13 @@ test "regexp lastIndex define defers value finalizer reentry" {
         core.Descriptor.data(core.JSValue.int32(7), true, false, false),
     );
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_regexp_last_index_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), regexp.regexpLastIndex().?.asInt32());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
 }
 
-test "mapped arguments binding update defers value finalizer reentry" {
+test "mapped arguments binding update publishes value before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2562,17 +2801,13 @@ test "mapped arguments binding update defers value finalizer reentry" {
 
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].?.varRefValue().asInt32());
 }
 
-test "mapped arguments var-ref binding update defers value finalizer reentry" {
+test "mapped arguments var-ref update publishes value before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2603,17 +2838,13 @@ test "mapped arguments var-ref binding update defers value finalizer reentry" {
 
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().asInt32());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().asInt32());
 }
 
-test "mapped arguments binding delete defers value finalizer reentry" {
+test "mapped arguments binding delete publishes disconnection before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2646,23 +2877,16 @@ test "mapped arguments binding delete defers value finalizer reentry" {
 
     try std.testing.expect(arguments.deleteProperty(rt, key));
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
-    var before_cleanup = try arguments.getProperty(key);
-    defer before_cleanup.free(rt);
-    try std.testing.expect(before_cleanup.isUndefined());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(arguments.argumentsVarRefs()[0] == null);
     const after = try arguments.getProperty(key);
     defer after.free(rt);
     try std.testing.expectEqual(@as(?i32, 99), after.asInt32());
 }
 
-test "cached iterator next clear defers value finalizer reentry" {
+test "cached iterator next clear publishes null before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2688,17 +2912,13 @@ test "cached iterator next clear defers value finalizer reentry" {
 
     object.clearCachedIteratorNext(rt);
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_cached_iterator_next_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(object.cachedIteratorNext(rt) == null);
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(object.cachedIteratorNext(rt) == null);
 }
 
-test "exception slot clear defers value finalizer reentry" {
+test "exception slot clear publishes empty state before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2722,17 +2942,13 @@ test "exception slot clear defers value finalizer reentry" {
 
     slot.clear(rt);
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_exception_slot_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(!slot.hasException());
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_exception_slot_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(!slot.hasException());
 }
 
-test "array iterator target clear defers value finalizer reentry" {
+test "array iterator target clear publishes null before synchronous finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2764,13 +2980,9 @@ test "array iterator target clear defers value finalizer reentry" {
     const result = try engine.exec.array_builtin_ops.methodCall(rt, iterator.value(), 20, &.{});
     defer result.free(rt);
 
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 0), reentrant_array_iterator_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expect(iterator.iteratorTargetSlot().* == null);
-    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_iterator_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(iterator.iteratorTargetSlot().* == null);
 }
 
@@ -2811,21 +3023,21 @@ test "runtime cycle removal follows class payload mark hooks" {
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredClassPayloadFinalizerCountForTest());
-    try std.testing.expectEqual(@as(usize, 2), rt.runDeferredClassPayloadFinalizerBudgeted(2));
+    try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(2));
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
     try std.testing.expect(!rt.classes.isRegistered(payloadless_id));
     try std.testing.expect(!rt.classes.isRegistered(external_id));
 }
 
-test "pending class payload finalizers trace payload value roots" {
+test "synchronous class payload finalizer drains payload-owned zero-ref children before free returns" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
     try rt.classes.register(external_id, .{
-        .class_name = "PendingExternalPayloadRoot",
+        .class_name = "SynchronousExternalPayloadChild",
         .payload_finalizer = finalizeTestExternalPayload,
         .payload_mark = markTestExternalPayload,
     });
@@ -2843,53 +3055,30 @@ test "pending class payload finalizers trace payload value roots" {
     payload_mark_calls = 0;
 
     wrapper.value().free(rt);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-
-    const Counter = struct {
-        expected: *core.gc.Header,
-        count: usize = 0,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.refHeader()) |header| {
-                if (header == self.expected) self.count += 1;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-
-    var counter = Counter{ .expected = child_header };
-    var visitor = core.runtime.RootVisitor{
-        .context = &counter,
-        .visit_value = Counter.visitValue,
-        .visit_object = Counter.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expectEqual(@as(usize, 1), counter.count);
-    try std.testing.expect(payload_mark_calls > 0);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-
-    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), payload_mark_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expect(!rt.gc.containsHeader(child_header));
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
-test "deferred payload callback pins the old generation through unregister" {
+test "synchronous external payload callback pins its generation through reentrant unregister" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
+    ExternalClassFinalizerReentry.reset();
+    defer ExternalClassFinalizerReentry.reset();
+
     const class_id = try rt.newClassId(core.class.invalid_class_id);
+    ExternalClassFinalizerReentry.target_id = class_id;
     try rt.classes.register(class_id, .{
-        .class_name = "DeferredDefinitionPin",
-        .payload_finalizer = finalizeTestExternalPayload,
-        .payload_mark = markTestExternalPayload,
+        .class_name = "SynchronousDefinitionPin",
+        .payload_finalizer = ExternalClassFinalizerReentry.finalize,
     });
 
     const wrapper = try core.Object.create(rt, class_id, null);
+    ExternalClassFinalizerReentry.expected_object = wrapper;
     const old_generation = rt.classes.destructionPlan(class_id).?.generation;
     const child = try core.Object.create(rt, core.class.ids.object, null);
     const child_header = &child.header;
@@ -2898,50 +3087,25 @@ test "deferred payload callback pins the old generation through unregister" {
     wrapper.u.payload = @ptrCast(payload);
     child.value().free(rt);
 
-    payload_finalizer_calls = 0;
-    payload_mark_calls = 0;
     wrapper.value().free(rt);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    rt.classes.unregisterDynamic(class_id);
-    try std.testing.expect(rt.classes.isRegistered(class_id));
-    try std.testing.expect(rt.classes.unregisterPending(class_id));
 
-    const Counter = struct {
-        expected: *core.gc.Header,
-        count: usize = 0,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.refHeader()) |header| {
-                if (header == self.expected) self.count += 1;
-            }
-        }
-
-        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
-    };
-    var counter = Counter{ .expected = child_header };
-    var visitor = core.runtime.RootVisitor{
-        .context = &counter,
-        .visit_value = Counter.visitValue,
-        .visit_object = Counter.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-    try std.testing.expectEqual(@as(usize, 1), counter.count);
-    try std.testing.expect(payload_mark_calls > 0);
-
-    try runOneDeferredClassPayloadFinalizer(rt);
-    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 1), ExternalClassFinalizerReentry.calls);
+    try std.testing.expect(ExternalClassFinalizerReentry.identity_matches);
+    try std.testing.expect(ExternalClassFinalizerReentry.owns_object);
+    try std.testing.expect(ExternalClassFinalizerReentry.definition_visible_after_unregister);
+    try std.testing.expect(!rt.gc.containsHeader(child_header));
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expect(!rt.classes.isRegistered(class_id));
     try std.testing.expect(!rt.classes.unregisterPending(class_id));
 
-    try rt.classes.register(class_id, .{ .class_name = "DeferredDefinitionPinRetry" });
+    try rt.classes.register(class_id, .{ .class_name = "SynchronousDefinitionPinRetry" });
     var next_generation = try rt.classes.beginConstruction(class_id);
     defer next_generation.abort();
     try std.testing.expect(next_generation.definition.generation != old_generation);
     rt.classes.unregisterDynamic(class_id);
 }
 
-test "runtime cycle removal clears class payload object slots before finalizers" {
+test "runtime cycle removal synchronously finalizes class payload object slots once" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -2970,9 +3134,9 @@ test "runtime cycle removal clears class payload object slots before finalizers"
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
@@ -6468,9 +6632,9 @@ test "class payload function bytecode constant object cycle is released by runti
 
     try std.testing.expectEqual(@as(usize, 4), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
-    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
-    try expectOneDeferredClassPayloadFinalizer(rt);
-    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.runDeferredClassPayloadFinalizerBudgeted(1));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }

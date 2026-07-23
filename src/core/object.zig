@@ -29,6 +29,46 @@ const ObjectIncomingMap = std.AutoHashMap(usize, usize);
 const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
 
+/// Process-lifetime empty shape exposed only while a class finalizer inspects
+/// an object whose own property buffer and original shape have already been
+/// released. QuickJS publishes `shape = NULL` / `prop = NULL` before invoking
+/// the class finalizer; zjs's public read helpers require a non-null Shape, so
+/// this valid FAM-backed tombstone gives them the equivalent empty view without
+/// leaving `Object.shape_ref` pointed at freed storage.
+///
+/// The Metadata prefix is intentional: a reentrant GC/read helper may inspect
+/// the Shape header even though the tombstone is never linked into a runtime's
+/// GC registry. Its high refcount makes accidental retain/release benign;
+/// object mutation from a class finalizer remains outside the callback contract.
+const FinalizingShapeStorage = extern struct {
+    metadata: gc.Metadata = .{
+        .kind = .shape,
+        .flags = .{ .is_pinned = true },
+        .rc = std.math.maxInt(i32) / 2,
+    },
+    value: shape.Shape = .{
+        .prop_hash_mask = shape.initial_hash_size - 1,
+        .prop_size = shape.initial_prop_size,
+    },
+    buckets: [shape.initial_hash_size]u32 = @splat(shape.no_property_index),
+    properties: [shape.initial_prop_size]shape.Property = @splat(.{}),
+
+    comptime {
+        std.debug.assert(@offsetOf(@This(), "value") == gc.metadata_prefix_size);
+        std.debug.assert(@offsetOf(@This(), "buckets") == gc.metadata_prefix_size + @sizeOf(shape.Shape));
+        std.debug.assert(
+            @offsetOf(@This(), "properties") ==
+                gc.metadata_prefix_size + @sizeOf(shape.Shape) + @sizeOf(u32) * shape.initial_hash_size,
+        );
+    }
+};
+
+threadlocal var finalizing_shape_storage = FinalizingShapeStorage{};
+
+fn finalizingShape() *shape.Shape {
+    return &finalizing_shape_storage.value;
+}
+
 pub const Error = error{
     NotExtensible,
     IncompatibleDescriptor,
@@ -1564,7 +1604,9 @@ pub const ObjectFlags = packed struct(u16) {
     /// intrinsic %Array.prototype% and cleared permanently by mutations that
     /// can make dense Array extension observe the prototype chain.
     is_std_array_prototype: bool = false,
-    reserved_class_payload_finalizer_slot: bool = false,
+    // Reserved to keep the packed ObjectFlags ABI at 16 bits after class
+    // payload finalization moved onto the infallible zero-ref drain.
+    _reserved_lifecycle_bit: bool = false,
     has_exotic_methods: bool = false,
     is_borrowed_reference_holder: bool = false,
     /// Actual active payload state. This is distinct from the class's declared
@@ -1738,12 +1780,6 @@ pub const Object = extern struct {
         const class_payload: class.Payload = @ptrCast(generator_payload);
         errdefer freeClassPayloadAllocation(rt, class_payload, .generator);
 
-        var reserved_class_payload_finalizer_slot = false;
-        errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
-        if (definition.has_payload_finalizer) {
-            try rt.reserveDeferredClassPayloadFinalizerSlot();
-            reserved_class_payload_finalizer_slot = true;
-        }
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
         construction.publishObject();
         self.* = .{
@@ -1755,7 +1791,6 @@ pub const Object = extern struct {
             .prop_values = @ptrFromInt(@alignOf(property.Entry)),
             .flags = .{
                 .class_payload_kind = .generator,
-                .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
                 .has_exotic_methods = has_exotic_methods,
             },
         };
@@ -1790,10 +1825,6 @@ pub const Object = extern struct {
         freeClassPayloadAllocation(rt, self.u.payload, self.flags.class_payload_kind);
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
-        if (self.flags.reserved_class_payload_finalizer_slot) {
-            self.flags.reserved_class_payload_finalizer_slot = false;
-            rt.releaseDeferredClassPayloadFinalizerSlot();
-        }
         rt.memory.destroy(Object, self);
     }
 
@@ -1935,7 +1966,6 @@ pub const Object = extern struct {
     ) !*Object {
         std.debug.assert(!template.isProxy());
         std.debug.assert(!template.flags.is_borrowed_reference_holder);
-        std.debug.assert(!template.flags.reserved_class_payload_finalizer_slot);
         std.debug.assert(!payloadKindAllocates(template.flags.class_payload_kind));
         std.debug.assert(entries.len == template.shape_ref.prop_count);
         std.debug.assert(template.class_id == class.ids.object or
@@ -2117,12 +2147,6 @@ pub const Object = extern struct {
             class_payload = inlineClassPayloadPtr(self, layout);
             class_payload_kind = .none;
         }
-        var reserved_class_payload_finalizer_slot = false;
-        errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
-        if (definition.has_payload_finalizer and definition.inline_payload_size == 0) {
-            try rt.reserveDeferredClassPayloadFinalizerSlot();
-            reserved_class_payload_finalizer_slot = true;
-        }
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
         const initial_storage: ObjectStorage = switch (class_id) {
             class.ids.bytecode_function,
@@ -2149,7 +2173,6 @@ pub const Object = extern struct {
             .u = initial_storage,
             .flags = .{
                 .class_payload_kind = class_payload_kind,
-                .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
                 .has_exotic_methods = has_exotic_methods,
             },
             .shape_ref = shape_ref,
@@ -2164,7 +2187,6 @@ pub const Object = extern struct {
         }
         if (inline_layout != null) self.initInlineClassPayloadGcPrefix();
         property_storage_owned = false;
-        reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
         // The object now owns the payload (stored in `u.payload` +
         // `class_payload_kind`): from here `destroyFromHeader` (the
@@ -2725,6 +2747,7 @@ pub const Object = extern struct {
         // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
+        header.meta().flags.finalizing = true;
         // Keep only immutable scalar destruction data across recursive cleanup.
         // A dynamic object's allocation owns its definition pin until the
         // allocation itself is freed, so the callback can be reacquired by id
@@ -2737,7 +2760,12 @@ pub const Object = extern struct {
         // @sizeOf(Object)) — reuse the layout we just computed instead of a second
         // record-table lookup + inline-layout recompute inside unregisterObject.
         const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
-        rt.unregisterObjectWithBytes(self, alloc_size);
+        // These intrusive/side-table links borrow storage owned by class
+        // payloads, so detach them before that storage is destroyed. Heap-list
+        // unlink and live-byte accounting deliberately remain at the qjs
+        // remove_gc_object boundary below, after the class finalizer.
+        rt.unregisterWeakReferenceHolder(self);
+        rt.unregisterBorrowedReferenceHolder(self);
         // qjs free_object keeps no borrowed-ref / std-file side tables, so the
         // plain-object hot free path must not call into either scan. Hoist each
         // helper's own entry guard to the call site: an object with no realm-
@@ -2757,27 +2785,31 @@ pub const Object = extern struct {
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
-        // Array elements live in the `u.array_values` union arm (gated by
-        // `is_array`), orthogonal to the class-payload arm below.
-        self.destroyArrayElements(rt);
-        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         const object_shape = self.shape_ref;
         if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
             rt.shapes.release(object_shape);
         }
+        self.shape_ref = finalizingShape();
         // qjs free_object strips property storage and releases the shape before
         // reacquiring class_array[class_id].finalizer. The generation-bearing
         // live pin keeps this definition available while recursive cleanup runs;
-        // only now may an inline callback observe the stripped object. Deferred
-        // callbacks are only snapshotted here and run after the allocation dies.
-        if (inline_layout == null or !self.finalizeInlineClassPayload(rt, definition.generation)) {
-            self.enqueueClassPayloadFinalizer(rt, definition.generation);
+        // only now may the callback observe the stripped but still registered
+        // object. qjs runs this callback synchronously, before remove_gc_object
+        // and before the raw allocation is freed.
+        if (definition.has_payload_finalizer) {
+            self.finalizeClassPayload(rt, definition.generation, inline_layout != null);
         }
+        // Array elements live in qjs's class-specific union arm and are released
+        // by the Array class finalizer, after the shape/prototype edge. Keep the
+        // same order for zjs's direct dense-storage teardown. The iterator cache
+        // is likewise class-specific state rather than an own-property slot.
+        self.destroyArrayElements(rt);
+        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
         // The non-array class payloads all share the single `u.payload`
         // union slot, discriminated by `class_payload_kind` — at most ONE is
-        // ever live per object. A deferred callback transfers that payload into
-        // its job above and clears the discriminant, so this switch handles only
-        // definitions without a payload finalizer.
+        // ever live per object. A synchronous callback clears that payload and
+        // its discriminant above, so this switch handles only definitions
+        // without a payload finalizer.
         switch (self.flags.class_payload_kind) {
             .none => {},
             .ordinary => self.destroyOrdinaryPayload(rt),
@@ -2801,6 +2833,11 @@ pub const Object = extern struct {
             .global => self.destroyGlobalPayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
         }
+        // The callback and every class-specific owned edge run while the object
+        // is still heap-accounted. This is qjs free_object's remove_gc_object
+        // boundary: after it returns, callbacks must no longer observe the
+        // object as live even when a weak husk keeps the raw struct allocated.
+        rt.unregisterObjectWithBytes(self, alloc_size);
         // Cycle removal and runtime deinit both use a resource pass followed by
         // a struct-free pass: a not-yet-processed sibling (or a held Shape)
         // may still decref and therefore dereference this header. Defer the
@@ -2818,6 +2855,7 @@ pub const Object = extern struct {
         if (self.weakref_count != 0) {
             self.header.meta().rc = 0;
             self.header.meta().flags.mark = false;
+            self.header.meta().flags.finalizing = false;
             return;
         }
         // qjs releases the weak-id mapping in its weak sweep, never per plain
@@ -2853,33 +2891,27 @@ pub const Object = extern struct {
         rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
-    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime, generation: u64) bool {
-        if (!rt.classes.runPayloadFinalizer(
+    fn finalizeClassPayload(self: *Object, rt: *JSRuntime, generation: u64, inline_payload: bool) void {
+        const payload_kind = self.flags.class_payload_kind;
+        const finalized = rt.classes.runPayloadFinalizer(
             self.class_id,
             generation,
             @ptrCast(rt),
             @ptrCast(self),
             &self.u.payload,
-        )) {
+        );
+        std.debug.assert(finalized);
+        if (inline_payload) {
+            // The callback owns only the contents; the bytes are part of the
+            // Object allocation and are reclaimed by freeObjectAllocation.
             self.u.payload = null;
             self.flags.class_payload_kind = .none;
-            return true;
+            return;
         }
+        var remaining_payload = self.u.payload;
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
-        return true;
-    }
-
-    fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime, generation: u64) void {
-        if (!self.flags.reserved_class_payload_finalizer_slot) return;
-        const payload = self.u.payload;
-        const payload_kind = self.flags.class_payload_kind;
-        const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
-        self.flags.reserved_class_payload_finalizer_slot = false;
-        const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, generation, payload, payload_kind, object_identity);
-        if (!enqueued) return;
-        self.u.payload = null;
-        self.flags.class_payload_kind = .none;
+        destroyDetachedClassPayload(rt, self.class_id, payload_kind, &remaining_payload);
     }
 
     fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
@@ -10302,10 +10334,9 @@ pub const Object = extern struct {
                 // observationally identical to qjs's tail-delete cheap hole
                 // (the index becomes absent, `.length` is preserved because the
                 // convert now restores `array_length`), and crucially it routes
-                // the element's finalizer through the deferred class-payload
-                // machinery instead of finalizing inline (finalizer-reentrancy
-                // safety — see "dense array delete defers element finalizer
-                // reentry"). The cheap inline tail-hole would re-enter.
+                // the element's zero-ref callback through the outer FIFO drain,
+                // after the sparse-property mutation is fully published. The
+                // cheap inline tail-hole would re-enter before that boundary.
                 self.convertDenseArrayElementsToSparseProperties(rt) catch return false;
                 const index = self.findProperty(atom_id) orelse return true;
                 return self.deleteOrdinaryPropertyAt(rt, atom_id, index);
