@@ -2834,15 +2834,76 @@ test "resolve_labels constant tests fold every QuickJS producer and preserve sou
 
             const taken = if (branch_op == op.if_true) producer.truthy else !producer.truthy;
             if (taken) {
-                try std.testing.expectEqualSlices(u8, &.{ op.goto8, 1, op.return_undef }, bc.code);
-                try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[0].pc);
-                try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[1].pc);
-                try std.testing.expectEqual(@as(u32, 2), bc.source_loc_slots[2].pc);
+                try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+                for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
             } else {
                 try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
                 for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
             }
         }
+    }
+}
+
+test "resolve_labels constant tests prune dead consumers without a second jump pass" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("constant-test-cfg");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var input = [_]u8{
+            op.push_false,
+            op.if_false,
+            0,
+            0,
+            0,
+            0,
+            op.nop,
+            op.return_undef,
+        };
+        std.mem.writeInt(u32, input[2..6], 7, .little);
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+    }
+
+    {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var input = [_]u8{
+            op.push_false,
+            op.if_false,
+            0,
+            0,
+            0,
+            0,
+            op.nop,
+            op.nop,
+            op.return_undef,
+        };
+        std.mem.writeInt(u32, input[2..6], 7, .little);
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        // QuickJS emits this synthetic goto before pruning the dead consumer.
+        // It deliberately does not run a second adjacency pass afterwards.
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ op.goto8, 1, op.nop, op.return_undef },
+            bc.code,
+        );
     }
 }
 

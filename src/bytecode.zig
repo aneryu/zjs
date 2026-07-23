@@ -8230,13 +8230,8 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
-    /// QuickJS `find_jump_target` folds a goto whose threaded destination is
-    /// return/return_undef/throw. It also treats one or more drops immediately
-    /// before return_undef as the same terminal target because the whole frame
-    /// is discarded on return.
-    fn gotoTerminalOp(code: []const u8, pc: usize) ?u8 {
-        if (pc >= code.len or code[pc] != opcode.op.goto) return null;
-        var target = skipLabels(code, resolvedJumpTarget(code, pc) catch return null) catch return null;
+    fn terminalOpAtTarget(code: []const u8, raw_target: usize) ?u8 {
+        var target = skipLabels(code, raw_target) catch return null;
         if (target >= code.len) return null;
         switch (code[target]) {
             opcode.op.@"return", opcode.op.return_undef, opcode.op.throw => return code[target],
@@ -8247,6 +8242,15 @@ pub const pipeline_resolve_labels = struct {
             return opcode.op.return_undef;
         }
         return null;
+    }
+
+    /// QuickJS `find_jump_target` folds a goto whose threaded destination is
+    /// return/return_undef/throw. It also treats one or more drops immediately
+    /// before return_undef as the same terminal target because the whole frame
+    /// is discarded on return.
+    fn gotoTerminalOp(code: []const u8, pc: usize) ?u8 {
+        if (pc >= code.len or code[pc] != opcode.op.goto) return null;
+        return terminalOpAtTarget(code, resolvedJumpTarget(code, pc) catch return null);
     }
 
     fn relOffset(from_pc: usize, target_pc: usize) i64 {
@@ -8410,6 +8414,27 @@ pub const pipeline_resolve_labels = struct {
             .jump_pc = jump_pc,
             .total_size = total_size,
         };
+    }
+
+    const ConstantTestAction = union(enum) {
+        fallthrough,
+        terminal: u8,
+        jump: usize,
+    };
+
+    fn constantTestAction(code: []const u8, peephole: ConstantTestPeephole) !ConstantTestAction {
+        if (!peephole.taken) return .fallthrough;
+        const target = try resolvedJumpTarget(code, peephole.jump_pc);
+        // QuickJS tests raw adjacency before terminal folding. Preserve that
+        // ordering because the target instruction, rather than a synthetic
+        // terminal, owns source locations in the adjacent case.
+        if (try targetAppearsAtFollowingBoundary(code, peephole.jump_pc + 5, target)) {
+            return .fallthrough;
+        }
+        if (terminalOpAtTarget(code, target)) |terminal_op| {
+            return .{ .terminal = terminal_op };
+        }
+        return .{ .jump = target };
     }
 
     const PushI32NegPeephole = struct {
@@ -9012,7 +9037,18 @@ pub const pipeline_resolve_labels = struct {
             if (size == 0 or current + size > code.len) return error.InvalidBytecode;
             const next = current + size;
 
-            if (op_id == opcode.op.goto) {
+            if (matchConstantTestPeephole(code, current)) |peephole| {
+                switch (try constantTestAction(code, peephole)) {
+                    .fallthrough => try enqueueReachable(
+                        states,
+                        worklist,
+                        &worklist_len,
+                        current + peephole.total_size,
+                    ),
+                    .terminal => {},
+                    .jump => |target| try enqueueReachable(states, worklist, &worklist_len, target),
+                }
+            } else if (op_id == opcode.op.goto) {
                 if (try jumpTargetsNextInstruction(code, current)) {
                     try enqueueReachable(states, worklist, &worklist_len, next);
                 } else if (gotoTerminalOp(code, current) == null) {
@@ -9292,11 +9328,15 @@ pub const pipeline_resolve_labels = struct {
                 else if (matchPostUpdatePeephole(code, pc)) |p|
                     postUpdateOutputSize(p, use_short_opcodes)
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
-                    if (!p.taken) break :blk 0;
-                    const target = try resolvedJumpTarget(code, p.jump_pc);
-                    const target_pc = positions[target];
-                    const diff = relOffset(out_pc, target_pc);
-                    break :blk jumpSizeForOffset(opcode.op.goto, diff, use_short_opcodes);
+                    break :blk switch (try constantTestAction(code, p)) {
+                        .fallthrough => 0,
+                        .terminal => 1,
+                        .jump => |target| jumpSizeForOffset(
+                            opcode.op.goto,
+                            relOffset(out_pc, positions[target]),
+                            use_short_opcodes,
+                        ),
+                    };
                 } else if (matchPushI32NegPeephole(code, pc)) |p|
                     if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
                 else if (matchPushBigIntI32NegPeephole(code, pc)) |p|
@@ -9706,10 +9746,16 @@ pub const pipeline_resolve_labels = struct {
                 }
                 i += p.total_size;
             } else if (matchConstantTestPeephole(func.code, i)) |p| {
-                if (p.taken) {
-                    const size = sizes[i];
-                    const target = try resolvedJumpTarget(func.code, p.jump_pc);
-                    try emitJumpToTarget(opcode.op.goto, target, output, &out_idx, positions, size);
+                switch (try constantTestAction(func.code, p)) {
+                    .fallthrough => {},
+                    .terminal => |terminal_op| {
+                        output[out_idx] = terminal_op;
+                        out_idx += 1;
+                    },
+                    .jump => |target| {
+                        const size = sizes[i];
+                        try emitJumpToTarget(opcode.op.goto, target, output, &out_idx, positions, size);
+                    },
                 }
                 i += p.total_size;
             } else if (matchPushI32NegPeephole(func.code, i)) |p| {
