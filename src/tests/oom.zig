@@ -85,6 +85,27 @@ const corpus = [_]Snippet{
         .expect = .{ .string = "calls-ok:5:7" },
     },
     .{
+        .name = "private-class-fresh-identity",
+        .source =
+        \\function makeBox(initial) {
+        \\  return class Box {
+        \\    #value = initial;
+        \\    read() { return this.#value; }
+        \\    static has(candidate) { return #value in candidate; }
+        \\  };
+        \\}
+        \\const First = makeBox(11);
+        \\const Second = makeBox(22);
+        \\const first = new First();
+        \\const second = new Second();
+        \\First.has(first) && !First.has(second) &&
+        \\!Second.has(first) && Second.has(second) &&
+        \\first.read() === 11 && second.read() === 22
+        \\  ? "private-fresh-ok" : "private-fresh-bad"
+        ,
+        .expect = .{ .string = "private-fresh-ok" },
+    },
+    .{
         .name = "emitter-lvalue-call-optional",
         .source =
         \\const object = { value: 2 };
@@ -116,6 +137,18 @@ const corpus = [_]Snippet{
         \\`lit-ok:len=${arr.length},d=${o.d}`
         ,
         .expect = .{ .string = "lit-ok:len=4,d=4" },
+    },
+    .{
+        .name = "realm-owned-intrinsic-prototypes",
+        .source =
+        \\const boxed = Object(1);
+        \\const typed = new Uint8Array(4);
+        \\const regexpSource = Object.getOwnPropertyDescriptor(RegExp.prototype, "source").get.call(/x/);
+        \\Object.getPrototypeOf(boxed) === Number.prototype &&
+        \\Object.getPrototypeOf(typed.buffer) === ArrayBuffer.prototype && regexpSource === "x"
+        \\  ? "realm-prototypes-ok" : "realm-prototypes-bad"
+        ,
+        .expect = .{ .string = "realm-prototypes-ok" },
     },
     .{
         .name = "gc-object-cycles",
@@ -164,6 +197,19 @@ const corpus = [_]Snippet{
         .drain_jobs = true,
         .post_source = "out === 6 ? \"jobs-ok\" : \"jobs-bad\"",
         .post_expect = "jobs-ok",
+    },
+    .{
+        .name = "wait-async-host-completion",
+        .source =
+        \\globalThis.waitResult = "pending";
+        \\const view = new Int32Array(new SharedArrayBuffer(4));
+        \\Atomics.waitAsync(view, 0, 0, 1).value.then(value => { waitResult = value; });
+        \\"scheduled"
+        ,
+        .expect = .{ .string = "scheduled" },
+        .drain_jobs = true,
+        .post_source = "waitResult",
+        .post_expect = "timed-out",
     },
     .{
         .name = "string-case-conversion",
@@ -238,6 +284,8 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     const ctx = try core.JSContext.create(rt);
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
+    var waiters_cleaned = false;
+    errdefer if (!waiters_cleaned) zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
     var wrapper = BindingContext.borrowCore(ctx);
 
     const value = try wrapper.eval(snippet.source, .{
@@ -258,6 +306,8 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
         try expectStringValue(rt, post_value, snippet.post_expect);
     }
 
+    zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
+    waiters_cleaned = true;
     ctx_owned = false;
     ctx.destroy();
     rt_owned = false;
@@ -280,21 +330,38 @@ fn stickyFailureTailProbe(allocator: std.mem.Allocator) !void {
     allocator.free(probe);
 }
 
-/// Pure parse lifecycle: lexer + parser + bytecode pipeline, no context and
-/// no execution. Uses a syntax-dense source so the sweep covers the parser
-/// allocation clusters (scopes, function defs, constant pools, arena).
+/// Pure parse lifecycle: realm + lexer + parser + bytecode pipeline, no
+/// execution. Uses a syntax-dense source so the sweep covers the parser
+/// allocation clusters and every root/child RealmRef publication rollback.
 fn runParseOnly(allocator: std.mem.Allocator, source: []const u8) !void {
     const rt = try core.JSRuntime.create(allocator);
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
-    var result = try parser.compile(rt, source, .{
+    const realm = try core.RealmContext.create(rt);
+    var realm_owned = true;
+    errdefer if (realm_owned) realm.destroy();
+    var result = try parser.compile(.{ .realm = realm }, source, .{
         .mode = .script,
         .filename = corpus_filename,
     });
     {
         defer result.deinit();
         if (result.syntax_error != null) return error.TestUnexpectedResult;
+        const root = result.functionBytecode() orelse return error.TestUnexpectedResult;
+        if (root.realmContext() != realm) return error.TestUnexpectedResult;
+        var has_final_child = false;
+        for (root.cpoolSlice()) |value| {
+            if (!value.isFunctionBytecode()) continue;
+            const header = value.objectHeader() orelse return error.TestUnexpectedResult;
+            const child: *const zjs.bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+            if (child.byteCode().len == 0 or child.realmContext() != realm) return error.TestUnexpectedResult;
+            has_final_child = true;
+            break;
+        }
+        if (!has_final_child or @hasField(zjs.bytecode.FunctionBytecode, "cached_view")) return error.TestUnexpectedResult;
     }
+    realm_owned = false;
+    realm.destroy();
     rt_owned = false;
     rt.destroy();
     try stickyFailureTailProbe(allocator);
@@ -636,20 +703,312 @@ fn recoveryCanarySweep(snippet: Snippet) !void {
     try std.testing.expect(attempts_executed > 2);
 }
 
+fn expectIntrinsicBootstrapCleared(ctx: *core.JSContext) !void {
+    try std.testing.expect(ctx.global == null);
+    try std.testing.expect(ctx.eval_function.isNull());
+    try std.testing.expect(ctx.preallocated_oom_error == null);
+    try std.testing.expect(ctx.cached_function_proto == null);
+    try std.testing.expect(ctx.cached_promise_proto == null);
+    for (ctx.cached_values) |value| try std.testing.expect(value == null);
+    for (ctx.native_error_prototypes) |value| try std.testing.expect(value.isNull());
+    try std.testing.expect(ctx.array_shape == null);
+    try std.testing.expect(ctx.arguments_shape == null);
+    try std.testing.expect(ctx.mapped_arguments_shape == null);
+    try std.testing.expect(ctx.regexp_shape == null);
+    try std.testing.expect(ctx.regexp_result_shape == null);
+    const builtin_count = @min(ctx.class_prototypes.len, @as(usize, @intCast(core.class.ids.init_count)));
+    for (ctx.class_prototypes[0..builtin_count]) |value| try std.testing.expect(value.isNull());
+}
+
+test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
+    ensureStandardGlobalsInstaller();
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
+
+    const name = try rt.internAtom("__oomGlobalSelectorAutoInit");
+    defer rt.atoms.free(name);
+    try global.definePerformanceAutoInitProperty(
+        rt,
+        name,
+        core.property.Flags.data(true, false, true),
+        global,
+    );
+
+    // Pin the logical heap at its current size. This rejects the builder's
+    // first allocation even when the small-object slab has a reusable block.
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name),
+    );
+    const index = global.findProperty(name) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(global.propFlagsAt(index).isAutoInit());
+
+    rt.setMemoryLimit(null);
+    const selected = try zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name);
+    defer selected.free(rt);
+    const selected_again = try zjs.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, name);
+    defer selected_again.free(rt);
+    try std.testing.expectEqual(core.VarRef.fromValue(selected).?, core.VarRef.fromValue(selected_again).?);
+}
+
+fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
+    var injector = OneShotFailingAllocator{
+        .backing = std.testing.allocator,
+        .fail_index = fail_index,
+        .disarmed = true,
+    };
+    var induced = false;
+    {
+        ensureStandardGlobalsInstaller();
+        const rt = try core.JSRuntime.create(injector.allocator());
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt);
+        defer ctx.destroy();
+        defer zjs.exec.call_runtime.cleanupAtomicsWaitersForContext(ctx);
+        try std.testing.expect(ctx.isLive());
+        try std.testing.expect(ctx.global == null);
+
+        injector.attempts = 0;
+        injector.induced = false;
+        injector.disarmed = false;
+        const first = zjs.exec.zjs_vm.contextGlobal(ctx);
+        injector.disarmed = true;
+        induced = injector.induced;
+
+        if (first) |_| {
+            try std.testing.expect(ctx.global != null);
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                try std.testing.expect(ctx.isLive());
+                try expectIntrinsicBootstrapCleared(ctx);
+                _ = try zjs.exec.zjs_vm.contextGlobal(ctx);
+            },
+            else => return err,
+        }
+
+        var wrapper = BindingContext.borrowCore(ctx);
+        const canary = try wrapper.eval(
+            \\(function (a) {
+            \\  return Object.getPrototypeOf(arguments) === Object.prototype &&
+            \\    Object.getPrototypeOf(/x/) === RegExp.prototype &&
+            \\    Object.getPrototypeOf(/x/.exec("x")) === Array.prototype
+            \\      ? "realm-retry-ok" : "realm-retry-bad";
+            \\})(1)
+        , .{ .filename = "<realm-bootstrap-retry>" });
+        defer canary.free(rt);
+        try expectStringValue(rt, canary, "realm-retry-ok");
+    }
+    try injector.expectBalanced();
+    return induced;
+}
+
+test "oom recovery canary: same Realm intrinsic bootstrap retry" {
+    var fail_index: usize = 0;
+    while (try runContextGlobalRetryAttempt(fail_index)) : (fail_index += 1) {}
+    try std.testing.expect(fail_index > 2);
+}
+
+fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
+    var injector = OneShotFailingAllocator{
+        .backing = std.testing.allocator,
+        .fail_index = fail_index,
+        .disarmed = true,
+    };
+    var induced = false;
+    {
+        ensureStandardGlobalsInstaller();
+        const rt = try core.JSRuntime.create(injector.allocator());
+        defer rt.destroy();
+
+        // Keep one published Realm in the Runtime so publication of the
+        // binding Realm must grow the one-entry root-provider array. This
+        // makes the final fallible commit part of the injected surface.
+        const anchor = try core.JSContext.create(rt);
+        defer anchor.destroy();
+        try std.testing.expect(anchor.isLive());
+        try std.testing.expectEqual(anchor, rt.firstContext().?);
+        try std.testing.expectEqual(@as(usize, 1), rt.root_providers.len);
+        const external_count_before = rt.external_host_functions.len;
+
+        injector.attempts = 0;
+        injector.induced = false;
+        injector.disarmed = false;
+        const first = BindingContext.create(rt);
+        injector.disarmed = true;
+        induced = injector.induced;
+
+        var created: *BindingContext = undefined;
+        if (first) |ctx| {
+            created = ctx;
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                // Failed native functions may temporarily retain their
+                // constructing Realm. The ordinary cycle pass must retire the
+                // whole unpublished graph without touching the anchor Realm.
+                _ = rt.runObjectCycleRemoval();
+                try std.testing.expect(rt.constructing_context_head == null);
+                try std.testing.expect(rt.constructing_context_tail == null);
+                try std.testing.expectEqual(anchor, rt.firstContext().?);
+                try std.testing.expect(anchor.runtime_next == null);
+                try std.testing.expectEqual(@as(usize, 1), rt.root_providers.len);
+                try std.testing.expect(rt.external_host_functions.len <= external_count_before + 1);
+
+                created = try BindingContext.create(rt);
+            },
+            else => return err,
+        }
+        defer created.destroy();
+
+        try std.testing.expect(created.core.isLive());
+        try std.testing.expect(rt.constructing_context_head == null);
+        try std.testing.expect(rt.constructing_context_tail == null);
+        try std.testing.expectEqual(@as(usize, 2), rt.root_providers.len);
+        // Retrying a partial install must reuse the Runtime-wide output host
+        // record instead of appending a duplicate record on every failure.
+        try std.testing.expectEqual(external_count_before + 1, rt.external_host_functions.len);
+
+        const canary = try created.eval(canary_source, .{ .filename = "<binding-construction-retry>" });
+        defer canary.free(rt);
+        try expectStringValue(rt, canary, "canary-ok");
+    }
+    try injector.expectBalanced();
+    return induced;
+}
+
+test "oom recovery canary: binding Realm construction rollback and retry" {
+    var fail_index: usize = 0;
+    while (try runBindingContextConstructionRetryAttempt(fail_index)) : (fail_index += 1) {}
+    try std.testing.expect(fail_index > 2);
+}
+
+test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("oom-function-bytecode-fixture");
+    defer rt.atoms.free(name);
+    const fixture_options: zjs.bytecode.FunctionBytecode.FixtureOptions = .{
+        .name = name,
+        .arg_count = 3,
+        .var_count = 5,
+        .defined_arg_count = 2,
+        .closure_var_count = 4,
+        .cpool_count = 64,
+        .byte_code = &.{zjs.bytecode.opcode.op.return_undef},
+        .has_debug = true,
+        .has_extension = true,
+    };
+    const layout = try zjs.bytecode.FunctionLayout.init(
+        fixture_options.has_debug,
+        fixture_options.has_extension,
+        fixture_options.cpool_count,
+        fixture_options.arg_count,
+        fixture_options.var_count,
+        fixture_options.closure_var_count,
+        fixture_options.byte_code.len,
+    );
+    // Above the slab ceiling in both JSValue representations, so the exact
+    // MemoryAccount charge is the one main allocation plus its GC prefix.
+    try std.testing.expect(layout.mainPayloadBytes() > 512);
+    try std.testing.expect(layout.total_size > 512);
+    const accounted_bytes = layout.total_size + core.gc.metadata_prefix_size;
+
+    const baseline_bytes = rt.memory.allocated_bytes;
+    const baseline_allocations = rt.memory.allocation_count;
+    const baseline_live = rt.gc.liveCount();
+    const baseline_create_calls = rt.memory.create_calls;
+    const baseline_destroy_calls = rt.memory.destroy_calls;
+
+    // All inline tables and exact code belong to the same createWithFam call.
+    // Leave that full charge one byte short: no partial shell/table owner may
+    // become visible in either accounting or the GC registry.
+    rt.setMemoryLimit(baseline_bytes + accounted_bytes - 1);
+    if (zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options)) |unexpected| {
+        rt.setMemoryLimit(null);
+        unexpected.destroyUnpublishedFixture(rt);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        rt.setMemoryLimit(null);
+        if (err != error.OutOfMemory) return err;
+    }
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
+    try std.testing.expectEqual(baseline_create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
+
+    // The same runtime must immediately create, publish, and destroy the same
+    // full layout. Exactly one successful create/destroy pair proves there is
+    // no second main-artifact allocation left in the transaction.
+    const recovered = try zjs.bytecode.FunctionBytecode.createFixture(rt, fixture_options);
+    var recovered_published = false;
+    errdefer if (!recovered_published) recovered.destroyUnpublishedFixture(rt);
+    for (recovered.closureVar(), 0..) |*closure, index| {
+        closure.* = zjs.bytecode.function_bytecode.BytecodeClosureVar.init(.{
+            .closure_type = .ref,
+            .var_idx = @intCast(index),
+            .var_name = rt.atoms.dup(name),
+        });
+    }
+
+    try std.testing.expectEqual(layout.total_size, recovered.layout().total_size);
+    try std.testing.expectEqual(layout.total_size, recovered.heapByteSize());
+    try std.testing.expect(!recovered.header.meta().flags.metadata_in_slab);
+    try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
+    try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls, rt.memory.destroy_calls);
+    try std.testing.expectEqual(@as(usize, 64), recovered.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 8), recovered.allVarDefs().len);
+    try std.testing.expectEqual(@as(usize, 4), recovered.closureVar().len);
+    try std.testing.expectEqualSlices(u8, fixture_options.byte_code, recovered.byteCode());
+
+    recovered.publishFixtureNoFail(rt);
+    recovered_published = true;
+    try std.testing.expectEqual(baseline_live + 1, rt.gc.liveCount());
+    core.JSValue.functionBytecode(&recovered.header).free(rt);
+
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_live, rt.gc.liveCount());
+    try std.testing.expectEqual(baseline_create_calls + 1, rt.memory.create_calls);
+    try std.testing.expectEqual(baseline_destroy_calls + 1, rt.memory.destroy_calls);
+}
+
+fn corpusSnippetNamed(name: []const u8) Snippet {
+    for (corpus) |snippet| {
+        if (std.mem.eql(u8, snippet.name, name)) return snippet;
+    }
+    unreachable;
+}
+
 test "oom recovery canary: arithmetic snippet" {
-    try recoveryCanarySweep(corpus[0]);
+    try recoveryCanarySweep(corpusSnippetNamed("arith-numbers"));
+}
+
+test "oom recovery canary: root and nested closure construction" {
+    try recoveryCanarySweep(corpusSnippetNamed("calls-closures"));
+}
+
+test "oom recovery canary: repeated private class identity" {
+    try recoveryCanarySweep(corpusSnippetNamed("private-class-fresh-identity"));
 }
 
 test "oom recovery canary: rope concat+flatten snippet" {
-    try recoveryCanarySweep(corpus[4]);
+    try recoveryCanarySweep(corpusSnippetNamed("rope-concat-flatten"));
 }
 
 test "oom recovery canary: promise jobs snippet" {
-    try recoveryCanarySweep(corpus[6]);
+    try recoveryCanarySweep(corpusSnippetNamed("promise-jobs"));
 }
 
 test "oom recovery canary: generator return through shared finalizer" {
-    try recoveryCanarySweep(corpus[9]);
+    try recoveryCanarySweep(corpusSnippetNamed("generator-return-shared-finalizer"));
 }
 
 // ---------------------------------------------------------------------------

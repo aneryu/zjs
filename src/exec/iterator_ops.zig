@@ -28,7 +28,7 @@ pub fn forOfStart(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: ?usize,
     is_async: bool,
@@ -97,7 +97,7 @@ pub noinline fn forOfStartVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     is_async: bool,
@@ -118,7 +118,7 @@ fn iteratorNextMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    function: ?*const bytecode.Bytecode,
+    function: ?*const bytecode.FunctionBytecode,
     frame: ?*frame_mod.Frame,
     comptime getValueProperty: anytype,
 ) !core.JSValue {
@@ -154,7 +154,7 @@ pub fn createAsyncFromSyncIterator(
     output: ?*std.Io.Writer,
     global: *core.Object,
     sync_iterator: core.JSValue,
-    function: ?*const bytecode.Bytecode,
+    function: ?*const bytecode.FunctionBytecode,
     frame: ?*frame_mod.Frame,
     comptime getValueProperty: anytype,
     comptime isCallableValue: anytype,
@@ -206,7 +206,7 @@ fn testAsyncFromSyncGetValueProperty(
     global: *core.Object,
     value: core.JSValue,
     key: core.Atom,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = ctx;
@@ -229,29 +229,26 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
     defer global.value().free(rt);
-    global.class_id = core.class.ids.global_object;
     _ = try global.ensureGlobalPayload(rt);
     core.gc.retain(&global.header);
     ctx.global = global;
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     defer iterator.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var next_method = core.JSValue.functionBytecode(&fb.header);
     var next_method_alive = true;
@@ -295,7 +292,7 @@ fn asyncFromSyncMethod(ctx: *core.JSContext, name: []const u8, method_id: i32) !
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
     if (method_id < 1 or method_id > 3) return error.TypeError;
-    if (!object.addAsyncFromSyncIteratorMethod(rt, @intCast(method_id))) return error.TypeError;
+    if (!try object.addAsyncFromSyncIteratorMethod(rt, @intCast(method_id))) return error.TypeError;
     return method;
 }
 
@@ -339,7 +336,7 @@ pub fn iteratorNext(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     if (stack.len() < 4) return error.StackUnderflow;
@@ -368,7 +365,7 @@ pub noinline fn iteratorNextVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -405,7 +402,7 @@ pub fn forAwaitOfNext(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     if (stack.len() < 3) return error.StackUnderflow;
@@ -430,7 +427,7 @@ pub noinline fn forAwaitOfNextVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -446,7 +443,7 @@ pub fn iteratorGetValueDone(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     try stack.reserveAdditional(1);
@@ -478,7 +475,7 @@ pub noinline fn iteratorGetValueDoneVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -494,11 +491,11 @@ pub fn iteratorCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.pc >= function.code.len) return error.InvalidBytecode;
-    const flags = function.code[frame.pc];
+    if (frame.pc >= function.byteCode().len) return error.InvalidBytecode;
+    const flags = function.byteCode()[frame.pc];
     frame.pc += 1;
     if (stack.len() < 4) return error.StackUnderflow;
 
@@ -535,7 +532,7 @@ pub noinline fn iteratorCallVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -566,11 +563,11 @@ pub fn forOfNext(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.pc >= function.code.len) return error.InvalidBytecode;
-    const depth = function.code[frame.pc];
+    if (frame.pc >= function.byteCode().len) return error.InvalidBytecode;
+    const depth = function.byteCode()[frame.pc];
     frame.pc += 1;
     const iterator_index = try forOfIteratorIndex(stack, depth);
     errdefer forof_ops.abandonForOfIteratorAtIndex(ctx.runtime, stack, iterator_index);
@@ -615,7 +612,7 @@ pub fn finishForOfNextResult(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     depth: u8,
     next_result: core.JSValue,
@@ -681,7 +678,7 @@ inline fn iteratorResultProperty(
     object: *core.Object,
     receiver: core.JSValue,
     atom_id: core.Atom,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !core.JSValue {
     // Iterator-result objects overwhelmingly expose own `done`/`value` data
@@ -895,7 +892,7 @@ pub noinline fn forOfNextVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -1143,15 +1140,15 @@ pub fn arrayIteratorPrototypeFromContext(
         core.function.nativeBuiltinId(.iterator, @intFromEnum(method_ids.iterator.IntrinsicMethod.array_iterator_next)),
     );
     const next_atom = core.atom.predefinedId("next", .string) orelse return error.TypeError;
-    const next_value = object.getProperty(next_atom);
+    const next_value = try object.getProperty(next_atom);
     defer next_value.free(ctx.runtime);
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
-    if (!next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
+    if (!try next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
     const iterator_method = try core.function.nativeFunction(ctx, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
+    if (!try iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
@@ -1283,7 +1280,7 @@ fn testArrayIteratorGetValueProperty(
     global: *core.Object,
     value: core.JSValue,
     atom_id: core.Atom,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = ctx;
@@ -1292,7 +1289,7 @@ fn testArrayIteratorGetValueProperty(
     _ = caller_function;
     _ = caller_frame;
     const object = try property_ops.expectObject(value);
-    return object.getProperty(atom_id);
+    return try object.getProperty(atom_id);
 }
 
 test "arrayIteratorValue roots entry value while creating pair array" {
@@ -1324,7 +1321,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = pair.getProperty(core.atom.atomFromUInt32(1));
+        const stored = try pair.getProperty(core.atom.atomFromUInt32(1));
         defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
@@ -1338,13 +1335,10 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 }
 
 pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    _ = rt;
     const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return null;
-    const iterator_value = global.getProperty(iterator_key);
-    defer iterator_value.free(rt);
-    const iterator = property_ops.expectObject(iterator_value) catch return null;
-    const prototype_value = iterator.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(rt);
-    return property_ops.expectObject(prototype_value) catch return null;
+    const iterator = global.getOwnDataObjectBorrowed(iterator_key) orelse return null;
+    return iterator.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
 pub fn qjsDefineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
@@ -1383,12 +1377,12 @@ pub fn qjsIteratorPrototypeAccessor(
     switch (id) {
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_getter) => {
             const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return error.TypeError;
-            return global.getProperty(iterator_key);
+            return try global.getProperty(iterator_key);
         },
         @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter) => {
             if (args.len == 0) {
                 const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return error.TypeError;
-                return global.getProperty(iterator_key);
+                return try global.getProperty(iterator_key);
             }
             return try qjsIteratorPrototypeAccessorSet(ctx, global, receiver, core.atom.ids.constructor, args[0]);
         },
@@ -1423,7 +1417,7 @@ pub fn qjsIteratorPrototypeAccessorSet(
             if (object == home) return error.TypeError;
         }
     }
-    if (object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+    if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value) catch |err| switch (err) {
             error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
@@ -1440,7 +1434,7 @@ pub fn qjsIteratorFromCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
@@ -1481,7 +1475,7 @@ pub fn qjsInstallIteratorHelperMethod(
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (method_id < 1 or method_id > 2) return error.TypeError;
-    if (!method_object.addIteratorHelperMethod(rt, @intCast(method_id))) return error.TypeError;
+    if (!try method_object.addIteratorHelperMethod(rt, @intCast(method_id))) return error.TypeError;
     try helper.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
 }
 
@@ -1618,20 +1612,16 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     const cached_concat_prototype = try global.cachedRealmValueSlot(rt, .iterator_concat_prototype);
     try global.setOptionalValueSlot(rt, cached_concat_prototype, concat_prototype.value().dup());
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var iterator_method = core.JSValue.functionBytecode(&fb.header);
     var iterator_method_alive = true;
@@ -1659,7 +1649,7 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     const records_value = helper.iteratorTarget() orelse return error.TypeError;
     const records = objectFromValue(records_value) orelse return error.TypeError;
     {
-        const stored_method = records.getProperty(core.atom.atomFromUInt32(1));
+        const stored_method = try records.getProperty(core.atom.atomFromUInt32(1));
         defer stored_method.free(rt);
         try std.testing.expect(stored_method.same(iterator_method));
     }
@@ -1737,7 +1727,7 @@ pub fn qjsIteratorZipCall(
     global: *core.Object,
     args: []const core.JSValue,
     keyed: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const rt = ctx.runtime;
@@ -1854,7 +1844,7 @@ pub fn qjsIteratorZipModeFromOptions(
     output: ?*std.Io.Writer,
     global: *core.Object,
     options: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipMode {
     if (options.isUndefined()) return .shortest;
@@ -1881,7 +1871,7 @@ pub fn qjsIteratorZipCollectIndexed(
     pads: *core.Object,
     padding: core.JSValue,
     mode: IteratorZipMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     var count: usize = 0;
@@ -1986,7 +1976,7 @@ pub fn qjsIteratorZipCollectKeyed(
     keys: *core.Object,
     padding: core.JSValue,
     mode: IteratorZipMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     const own_keys = try object_ops.objectRestOwnKeys(ctx, output, global, iterables);
@@ -2051,7 +2041,7 @@ pub fn qjsIteratorZipFlattenableRecord(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipRecord {
     _ = objectFromValue(value) orelse return error.TypeError;
@@ -2077,7 +2067,7 @@ pub fn qjsIteratorZipNextMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
@@ -2165,20 +2155,16 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var stored_value = core.JSValue.functionBytecode(&fb.header);
     var stored_value_alive = true;
@@ -2233,7 +2219,7 @@ test "qjsIteratorZipStoreIndex roots direct symbol value while defining property
 }
 
 pub fn qjsIteratorZipGetIndex(object: *core.Object, index: usize) core.JSValue {
-    return object.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+    return object.getOwnDataPropertyValue(core.atom.atomFromUInt32(@intCast(index))) orelse core.JSValue.undefinedValue();
 }
 
 pub fn qjsIteratorZipSetIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
@@ -2257,7 +2243,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     global: *core.Object,
     completion: *IteratorZipCompletion,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) void {
     qjsIteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame) catch |err| {
@@ -2277,7 +2263,7 @@ pub fn qjsIteratorZipCloseAllWithCompletion(
     completion: *IteratorZipCompletion,
     iters: *core.Object,
     count: usize,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     var index = count;
@@ -2296,7 +2282,7 @@ pub fn qjsIteratorZipClose(
     output: ?*std.Io.Writer,
     global: *core.Object,
     iterator_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try call_runtime.qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
@@ -2310,7 +2296,7 @@ pub fn qjsIteratorZipCloseAllAndPropagate(
     count: usize,
     err: anytype,
     extra_iterator: ?core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
@@ -2355,7 +2341,7 @@ fn iteratorCloseWithCompletionAndPropagate(
     global: *core.Object,
     iterator_value: core.JSValue,
     err: anytype,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
@@ -2371,7 +2357,7 @@ fn iteratorHelperCloseWithCompletionAndPropagate(
     global: *core.Object,
     helper: *core.Object,
     err: anytype,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
@@ -2392,7 +2378,7 @@ pub fn qjsIteratorPrototypeMethodCall(
     receiver: core.JSValue,
     args: []const core.JSValue,
     method_id: u32,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (method_id) {
@@ -2417,7 +2403,7 @@ fn qjsIteratorDisposeCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const return_key = try ctx.runtime.internAtom("return");
@@ -2436,7 +2422,7 @@ fn qjsIteratorToArrayCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(receiver) orelse return error.TypeError;
@@ -2472,7 +2458,7 @@ fn qjsIteratorPredicateCall(
     receiver: core.JSValue,
     args: []const core.JSValue,
     kind: IteratorPredicateKind,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(receiver) orelse return error.TypeError;
@@ -2535,7 +2521,7 @@ fn qjsIteratorReduceCall(
     global: *core.Object,
     receiver: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const iterator = objectFromValue(receiver) orelse return error.TypeError;
@@ -2586,7 +2572,7 @@ fn iteratorStepWithNext(
     global: *core.Object,
     iterator_value: core.JSValue,
     next_method: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
     const next_result = try call_runtime.callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
@@ -2606,7 +2592,7 @@ fn qjsIteratorCreateCallbackHelper(
     receiver: core.JSValue,
     args: []const core.JSValue,
     kind: IteratorHelperKind,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(receiver) orelse return error.TypeError;
@@ -2623,7 +2609,7 @@ fn qjsIteratorCreateLimitHelper(
     receiver: core.JSValue,
     args: []const core.JSValue,
     kind: IteratorHelperKind,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(receiver) orelse return error.TypeError;
@@ -2665,7 +2651,7 @@ fn qjsIteratorCreateHelper(
     kind: IteratorHelperKind,
     callback: core.JSValue,
     limit: ?usize,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
     comptime getValueProperty: anytype,
 ) !core.JSValue {
@@ -2727,20 +2713,16 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     const cached_helper_prototype = try global.cachedRealmValueSlot(rt, .iterator_helper_prototype);
     try global.setOptionalValueSlot(rt, cached_helper_prototype, helper_prototype.value().dup());
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var callback = core.JSValue.functionBytecode(&fb.header);
     var callback_alive = true;
@@ -2805,7 +2787,7 @@ fn qjsIteratorZipCompleteAbrupt(
     count: usize,
     current_index: ?usize,
     err: anytype,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
@@ -2829,7 +2811,7 @@ fn qjsIteratorZipHelperNext(
     output: ?*std.Io.Writer,
     global: *core.Object,
     helper: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const state = helper.iteratorZipStateSlot().*;
@@ -2955,7 +2937,7 @@ fn qjsIteratorZipHelperReturn(
     output: ?*std.Io.Writer,
     global: *core.Object,
     helper: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const state = helper.iteratorZipStateSlot().*;
@@ -2991,7 +2973,7 @@ pub fn qjsIteratorHelperNext(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.iteratorHelperMethod() != 1) return null;
@@ -3022,9 +3004,9 @@ pub fn qjsIteratorHelperNext(
                 }
                 const item_index: u32 = @intCast((helper.iteratorIndexSlot().*) * 2);
                 helper.iteratorIndexSlot().* += 1;
-                const item = records.getProperty(core.atom.atomFromUInt32(item_index));
+                const item = try records.getProperty(core.atom.atomFromUInt32(item_index));
                 defer item.free(ctx.runtime);
-                const method = records.getProperty(core.atom.atomFromUInt32(item_index + 1));
+                const method = try records.getProperty(core.atom.atomFromUInt32(item_index + 1));
                 defer method.free(ctx.runtime);
                 const inner_iterator = try call_runtime.callValueOrBytecode(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
                 defer inner_iterator.free(ctx.runtime);
@@ -3115,7 +3097,7 @@ fn qjsIteratorHelperSetInner(
     global: *core.Object,
     helper: *core.Object,
     mapped: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const mapped_object = objectFromValue(mapped) orelse return error.TypeError;
@@ -3141,7 +3123,7 @@ fn qjsIteratorHelperSetInnerFromIterator(
     global: *core.Object,
     helper: *core.Object,
     inner_iterator: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     _ = objectFromValue(inner_iterator) orelse return error.TypeError;
@@ -3169,7 +3151,7 @@ pub fn qjsIteratorHelperReturn(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.iteratorHelperMethod() != 2) return null;
@@ -3192,7 +3174,7 @@ fn qjsIteratorHelperClose(
     output: ?*std.Io.Writer,
     global: *core.Object,
     helper: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try qjsIteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
@@ -3223,7 +3205,7 @@ fn qjsIteratorHelperCloseInner(
     output: ?*std.Io.Writer,
     global: *core.Object,
     helper: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const inner_iterator = helper.iteratorData() orelse return;
@@ -3245,7 +3227,7 @@ fn testIteratorGetValuePropertyOptional(
     global: *core.Object,
     value: core.JSValue,
     key: core.Atom,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = ctx;
@@ -3254,5 +3236,5 @@ fn testIteratorGetValuePropertyOptional(
     _ = caller_function;
     _ = caller_frame;
     const object = property_ops.expectObject(value) catch return error.TypeError;
-    return object.getProperty(key);
+    return try object.getProperty(key);
 }

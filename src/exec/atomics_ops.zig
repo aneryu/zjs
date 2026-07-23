@@ -74,11 +74,12 @@ fn atomicsCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return call_runtime.qjsAtomicsCallForNativeRecord(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.magic,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),

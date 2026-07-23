@@ -1,4 +1,4 @@
-//! Class instance element initialization and super/arrow lexical-this helpers.
+//! Class construction and super helpers.
 
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode.zig");
@@ -26,17 +26,13 @@ const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
-const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic utilities outside the class
 // initialization cluster).
-const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
 const constructDynamicFunctionFromSource = call_runtime.constructDynamicFunctionFromSource;
 const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
-const currentArrowFunctionObject = object_ops.currentArrowFunctionObject;
-const defineClassFieldDataProperty = object_ops.defineClassFieldDataProperty;
 const isCallableValue = call_runtime.isCallableValue;
 const isErrorConstructorName = exception_ops.isErrorConstructorName;
 const objectFromValue = object_ops.objectFromValue;
@@ -57,18 +53,8 @@ const qjsStringConstructWithPrototype = string_ops.qjsStringConstructWithPrototy
 const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
 const qjsTypedArrayConstructToIndex = array_ops.qjsTypedArrayConstructToIndex;
 const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
-const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
-const sameObjectIdentity = object_ops.sameObjectIdentity;
-const adapterValueDup = slot_ops.adapterValueDup;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
-
-pub fn classConstructorNewTarget(func: core.JSValue, caller_frame: ?*frame_mod.Frame) core.JSValue {
-    if (caller_frame) |frame| {
-        if (!frame.newTargetValue().isUndefined()) return frame.newTargetValue();
-    }
-    return func;
-}
 
 pub fn constructBuiltinSuperConstructor(
     ctx: *core.JSContext,
@@ -77,13 +63,11 @@ pub fn constructBuiltinSuperConstructor(
     constructor: core.JSValue,
     name: []const u8,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-    explicit_new_target: ?core.JSValue,
+    new_target: core.JSValue,
 ) !?core.JSValue {
     if (std.mem.eql(u8, name, "Symbol") or std.mem.eql(u8, name, "BigInt")) return error.TypeError;
-
-    const new_target = explicit_new_target orelse classConstructorNewTarget(constructor, caller_frame);
 
     if (std.mem.eql(u8, name, "Promise")) {
         const executor = if (args.len >= 1) args[0] else return error.TypeError;
@@ -91,8 +75,9 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "Iterator")) {
         if (new_target.sameValue(constructor)) return error.TypeError;
-        const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         return instance.value();
     }
 
@@ -107,37 +92,44 @@ pub fn constructBuiltinSuperConstructor(
         else
             @as(usize, 0);
         const max_byte_length = try qjsArrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
-        const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
         if (std.mem.eql(u8, name, "SharedArrayBuffer")) {
-            return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+            return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype.object());
         }
-        return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+        return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype.object());
     }
 
     if (std.mem.eql(u8, name, "DataView")) {
         const coerced = try qjsDataViewConstructorArgs(ctx, output, global, args);
-        const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-        return try qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
+        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        return try qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
     }
 
     if (std.mem.eql(u8, name, "RegExp")) {
         return try qjsRegExpConstructCall(ctx, output, global, object_ops.objectFromValue(constructor), new_target, args, caller_function, caller_frame);
     }
 
-    const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
     if (std.mem.eql(u8, name, "Object")) {
         if (new_target.sameValue(constructor) and args.len >= 1 and args[0].isObject()) return args[0].dup();
-        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
+        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
         return instance.value();
     }
-    if (std.mem.eql(u8, name, "Array")) return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, object_ops.objectFromValue(constructor), array_construct_ref, prototype, args, caller_function, caller_frame) catch |err| switch (err) {
-        error.RangeError => {
-            if (exception_ops.pendingExceptionMatchesError(ctx, err)) return err;
-            return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length"));
-        },
-        else => return err,
-    };
-    if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Array")) {
+        const constructor_object = object_ops.objectFromValue(constructor) orelse return null;
+        if (constructor_object.arrayBuiltinMarker() != .constructor) return null;
+        return builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, constructor_object, array_construct_ref, prototype.object(), args, caller_function, caller_frame) catch |err| switch (err) {
+            error.RangeError => {
+                if (exception_ops.pendingExceptionMatchesError(ctx, err)) return err;
+                return @as(?core.JSValue, try throwRangeErrorMessage(ctx, global, "invalid array length"));
+            },
+            else => return err,
+        };
+    }
+    if (std.mem.eql(u8, name, "String")) return try qjsStringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
         if (args.len >= 1 and args[0].isSymbol()) return error.TypeError;
         // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric, then a
@@ -149,134 +141,40 @@ pub fn constructBuiltinSuperConstructor(
                 try value_ops.toNumberValue(ctx.runtime, args[0]))
         else
             core.JSValue.int32(0);
-        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype, primitive);
+        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype.object(), primitive);
     }
     if (std.mem.eql(u8, name, "Boolean")) {
-        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype, core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0])));
+        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype.object(), core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0])));
     }
-    if (std.mem.eql(u8, name, "Date")) return try date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, args);
+    if (std.mem.eql(u8, name, "Date")) return try date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype.object(), args);
     if (std.mem.eql(u8, name, "AggregateError")) {
         const constructor_global = if (objectFromValue(constructor)) |constructor_object|
             objectRealmGlobal(constructor_object) orelse global
         else
             global;
-        return try qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+        return try qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype.object(), args, caller_function, caller_frame);
     }
-    if (std.mem.eql(u8, name, "SuppressedError")) return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
-    if (isErrorConstructorName(name)) return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Promise")) return try qjsPromiseConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "SuppressedError")) return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
+    if (isErrorConstructorName(name)) return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
+    if (std.mem.eql(u8, name, "Promise")) return try qjsPromiseConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "WeakRef")) {
         const target = if (args.len >= 1) args[0] else return error.TypeError;
         if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-        return try qjsConstructWeakRefWithPrototype(ctx.runtime, target, prototype);
+        return try qjsConstructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
     }
     if (std.mem.eql(u8, name, "FinalizationRegistry")) {
         const cleanup_callback = if (args.len >= 1) args[0] else return error.TypeError;
         if (!isCallableValue(cleanup_callback)) return error.TypeError;
-        return try qjsConstructFinalizationRegistryWithPrototype(ctx.runtime, cleanup_callback, prototype);
+        return try qjsConstructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
     }
-    if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
-    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
-    if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
-    if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype);
-    if (construct_mod.typedArrayElement(name)) |element| return try construct_mod.constructTypedArrayValue(ctx.runtime, prototype, element, args, global);
+    if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype.object());
+    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
+    if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
+    if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype.object());
+    if (construct_mod.typedArrayElement(name)) |element| {
+        const function_object = object_ops.objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
+        return try construct_mod.constructTypedArrayValue(ctx.runtime, function_object, prototype.object(), element, args);
+    }
 
     return null;
-}
-
-pub fn currentArrowLexicalSuperThis(rt: *core.JSRuntime, frame: *frame_mod.Frame) ?core.JSValue {
-    const current_object = currentArrowFunctionObject(frame) orelse return null;
-    if (current_object.functionCaptureCell(core.atom.ids.this_)) |cell| return adapterValueDup(cell.varRefValue());
-    _ = rt;
-    return null;
-}
-
-pub fn currentArrowConstructorThis(rt: *core.JSRuntime, frame: *frame_mod.Frame) ?core.JSValue {
-    const current_object = currentArrowFunctionObject(frame) orelse return null;
-    _ = rt;
-    const stored = current_object.functionArrowConstructorThis() orelse return null;
-    return stored.dup();
-}
-
-pub fn setCurrentArrowLexicalThis(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !void {
-    const current_object = currentArrowFunctionObject(frame) orelse {
-        value.free(ctx.runtime);
-        return;
-    };
-    if (current_object.functionCaptureCell(core.atom.ids.this_)) |cell| {
-        cell.setVarRefValue(ctx.runtime, value);
-        return;
-    }
-    value.free(ctx.runtime);
-}
-
-pub inline fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, func: core.JSValue) bool {
-    _ = ctx;
-    if (!frame.current_function.isObject()) return false;
-    const current_object = property_ops.expectObject(frame.current_function) catch return false;
-    const super_constructor = current_object.functionSuperConstructor() orelse return false;
-    if (currentArrowFunctionObject(frame) == null) {
-        if (current_object.getPrototype()) |prototype| {
-            if (sameObjectIdentity(prototype.value(), func)) return true;
-        }
-    }
-    return sameObjectIdentity(super_constructor, func);
-}
-
-pub fn initializeClassInstanceElements(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor_value: core.JSValue,
-    instance: core.JSValue,
-    fb: *const bytecode.FunctionBytecode,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    const constructor_object = objectFromValue(constructor_value);
-    const remap_object = if (constructor_object) |object| object.functionHomeObject() else null;
-    if (remap_object) |home_object| {
-        const instance_object = try property_ops.expectObject(instance);
-        try initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);
-    }
-    try initializeClassInstanceFields(ctx.runtime, instance, fb.classInstanceFields(), remap_object);
-    const init_function = if (constructor_object) |object|
-        object.functionClassFieldsInit()
-    else if (fb.class_fields_init) |boxed|
-        boxed.*
-    else
-        null;
-    if (init_function) |initializer| {
-        const result = try callValueOrBytecode(ctx, output, global, instance, initializer, &.{}, caller_function, caller_frame);
-        result.free(ctx.runtime);
-    }
-}
-
-pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object, home_object: *core.Object) !void {
-    for (home_object.shapeProps()) |prop| {
-        if (rt.atoms.kind(prop.atom_id) != .private) continue;
-        if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
-        if (home_object.getOwnProperty(rt, prop.atom_id)) |desc| {
-            defer desc.destroy(rt);
-            // NO-ALIGN(qjs): qjs brands instances with raw add_property
-            // (JS_AddBrand quickjs.c:8464) ignoring extensibility; test262's
-            // `nonextensible-applies-to-private` feature mandates the
-            // TypeError on non-extensible instances
-            // (staging/sm/PrivateName/modify-non-extensible.js), so zjs keeps
-            // the NotExtensible -> TypeError behavior.
-            instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
-                error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                else => return err,
-            };
-        }
-    }
-}
-
-pub fn initializeClassInstanceFields(rt: *core.JSRuntime, instance: core.JSValue, fields: []const core.Atom, remap_object: ?*const core.Object) !void {
-    if (fields.len == 0) return;
-    const object = try property_ops.expectObject(instance);
-    for (fields) |atom_id| {
-        const effective_atom = remapPrivateAtomForOperation(rt, null, remap_object, atom_id);
-        try defineClassFieldDataProperty(rt, object, effective_atom, core.JSValue.undefinedValue());
-    }
 }

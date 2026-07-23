@@ -209,16 +209,16 @@ pub fn localPutNextPc(put: LocalPut) usize {
     return put.operand_pc + put.consume;
 }
 
-pub fn localCompletionPutWritableForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, put: LocalPut) bool {
+pub fn localCompletionPutWritableForFastPath(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, put: LocalPut) bool {
     if (put.idx >= frame.locals.len) return false;
     if (put.checked) return false;
-    if (put.idx < function.vardefs.len and function.vardefs[put.idx].isLexical()) return false;
-    if (put.idx < function.vardefs.len and function.vardefs[put.idx].isConst()) return false;
+    if (put.idx < function.varDefs().len and function.varDefs()[put.idx].isLexical()) return false;
+    if (put.idx < function.varDefs().len and function.varDefs()[put.idx].isConst()) return false;
     return true;
 }
 
-pub fn decodeOptionalLocalCompletionTail(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalCompletionTail {
-    const code = function.code;
+pub fn decodeOptionalLocalCompletionTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalCompletionTail {
+    const code = function.byteCode();
     if (pc >= code.len) return null;
     if (code[pc] == op.drop) return .{ .tail_pc = pc + 1 };
 
@@ -230,8 +230,8 @@ pub fn decodeOptionalLocalCompletionTail(function: *const bytecode.Bytecode, fra
     };
 }
 
-pub fn decodeOptionalUndefinedLocalCompletionTail(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalCompletionTail {
-    const code = function.code;
+pub fn decodeOptionalUndefinedLocalCompletionTail(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, pc: usize) ?OptionalLocalCompletionTail {
+    const code = function.byteCode();
     if (pc >= code.len or code[pc] != op.undefined) return .{ .tail_pc = pc };
     return decodeOptionalLocalCompletionTail(function, frame, pc + 1);
 }
@@ -311,7 +311,7 @@ pub fn loopLimitReadableInt32(frame: *const frame_mod.Frame, limit: LoopLimitGet
 
 pub fn bindingStoreWritableForFastPath(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: BindingPut,
@@ -331,7 +331,7 @@ pub fn bindingStoreWritableForFastPath(
     if (binding.idx >= frame.locals.len) return false;
     if (binding.checked) {
         if (frame.locals[binding.idx].isUninitialized()) return false;
-        if (binding.idx < function.vardefs.len and function.vardefs[binding.idx].isConst()) return false;
+        if (binding.idx < function.varDefs().len and function.varDefs()[binding.idx].isConst()) return false;
     }
     return true;
 }
@@ -362,12 +362,12 @@ pub fn storeLocalCompletionBorrowedValue(
 
 fn varRefGlobalLexicalWritable(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     var_ref_idx: u16,
-) bool {
+) !bool {
     if (var_ref_idx >= function.varRefNamesLen()) return false;
     const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
-    const desc = env.getOwnProperty(ctx.runtime, function.varRefName(var_ref_idx)) orelse return false;
+    const desc = (try env.getOwnProperty(ctx.runtime, function.varRefName(var_ref_idx))) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
 
@@ -429,14 +429,14 @@ pub fn decodeBindingPut(code: []const u8, pc: usize) ?BindingPut {
     return null;
 }
 
-pub fn globalVarAtom(function: *const bytecode.Bytecode, idx: u16) ?core.Atom {
-    if (idx < function.closure_var.len) return function.closure_var[idx].var_name;
+pub fn globalVarAtom(function: *const bytecode.FunctionBytecode, idx: u16) ?core.Atom {
+    if (idx < function.closureVar().len) return function.closureVar()[idx].var_name;
     if (idx >= function.varRefNamesLen()) return null;
     return function.varRefName(idx);
 }
 
-pub fn decodeGlobalPut(function: *const bytecode.Bytecode, pc: usize) ?GlobalBindingPut {
-    const code = function.code;
+pub fn decodeGlobalPut(function: *const bytecode.FunctionBytecode, pc: usize) ?GlobalBindingPut {
+    const code = function.byteCode();
     if (pc + 3 > code.len or code[pc] != op.put_var) return null;
     const ref_idx = readInt(u16, code[pc + 1 ..][0..2]);
     return .{
@@ -480,14 +480,14 @@ pub fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSV
     return value;
 }
 
-pub fn varRefReadableBorrowedForFastPath(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
+pub fn varRefReadableBorrowedForFastPath(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) return null;
     return varRefReadableBorrowed(frame, idx);
 }
 
 pub fn varRefStoreWritableForFastPath(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     store: VarRefPut,
@@ -541,20 +541,20 @@ pub const CollectionHostOutputKey = struct {
 
 pub fn finishUndefinedCallResult(
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     next_pc: usize,
 ) !void {
     if (canFinishUndefinedCompletionTail(function, next_pc)) {
         try stack.pushOwned(core.JSValue.undefinedValue());
-        frame.pc = function.code.len;
+        frame.pc = function.byteCode().len;
         return;
     }
-    if (next_pc < function.code.len and function.code[next_pc] == op.drop) {
+    if (next_pc < function.byteCode().len and function.byteCode()[next_pc] == op.drop) {
         const after_drop = next_pc + 1;
         if (canFinishWithUndefinedAt(function, after_drop)) {
             try stack.pushOwned(core.JSValue.undefinedValue());
-            frame.pc = function.code.len;
+            frame.pc = function.byteCode().len;
             return;
         }
         frame.pc = after_drop;
@@ -564,9 +564,9 @@ pub fn finishUndefinedCallResult(
     frame.pc = next_pc;
 }
 
-fn canFinishUndefinedCompletionTail(function: *const bytecode.Bytecode, pc: usize) bool {
-    if (function.flags.is_generator or function.flags.is_async) return false;
-    const code = function.code;
+fn canFinishUndefinedCompletionTail(function: *const bytecode.FunctionBytecode, pc: usize) bool {
+    if (function.isGenerator() or function.isAsync()) return false;
+    const code = function.byteCode();
     if (pc + 4 == code.len and
         code[pc] == op.put_loc0 and
         code[pc + 1] == op.undefined and
@@ -585,9 +585,9 @@ fn canFinishUndefinedCompletionTail(function: *const bytecode.Bytecode, pc: usiz
     return false;
 }
 
-pub fn canFinishWithUndefinedAt(function: *const bytecode.Bytecode, pc: usize) bool {
-    if (function.flags.is_generator or function.flags.is_async) return false;
-    const code = function.code;
+pub fn canFinishWithUndefinedAt(function: *const bytecode.FunctionBytecode, pc: usize) bool {
+    if (function.isGenerator() or function.isAsync()) return false;
+    const code = function.byteCode();
     if (pc >= code.len) return false;
     if (code[pc] == op.return_undef) return true;
     return pc + 2 == code.len and code[pc] == op.undefined and code[pc + 1] == op.return_async;
@@ -614,7 +614,7 @@ pub const StringNumberConstArg = struct {
 
 pub fn fastGlobalDataValueForAtomAtPc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     site_pc: usize,
@@ -630,14 +630,14 @@ pub fn fastGlobalDataValueForAtomAtPc(
 
 pub fn fastInstalledGlobalDataValueForAtomAtPc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, global)) return null;
-    if (function.entry_contract.var_environment != .global and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
+    if (functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
     if (call_runtime.globalLexicalValueForGlobal(ctx, global, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
@@ -819,8 +819,8 @@ pub fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
 // --- With-statement and reference opcode handlers moved to vm_property_ref.zig ---
 const vm_property_ref = @import("vm_property_ref.zig");
 
-pub fn decodeGlobalDataGet(function: *const bytecode.Bytecode, pc: usize) ?GlobalBindingGet {
-    const code = function.code;
+pub fn decodeGlobalDataGet(function: *const bytecode.FunctionBytecode, pc: usize) ?GlobalBindingGet {
+    const code = function.byteCode();
     if (pc + 3 > code.len) return null;
     const opc = code[pc];
     if (opc != op.get_var and opc != op.get_var_undef) return null;
@@ -838,7 +838,7 @@ pub fn hasObjectBinding(
     receiver: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !bool {
     return object_ops.hasValueProperty(ctx, output, global, receiver, object, atom_id, function, frame);
@@ -855,7 +855,7 @@ const StringSliceConstLocalStore = struct {
 
 pub fn decodeStringSliceConstLocalStore(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
     receiver: core.JSValue,
@@ -865,7 +865,7 @@ pub fn decodeStringSliceConstLocalStore(
     const string_value = stringFromValue(receiver) orelse return null;
     if (!fastStringPrototypeMethodIsDefault(ctx.runtime, global, atom_id, @intFromEnum(method_ids.string.PrototypeMethod.slice))) return null;
 
-    const code = function.code;
+    const code = function.byteCode();
     const start_arg = immediateInt32Operand(code, arg_pc) orelse return null;
     const call_pc = start_arg.next_pc;
     if (call_pc + 3 > code.len or code[call_pc] != op.call_method) return null;
@@ -874,7 +874,7 @@ pub fn decodeStringSliceConstLocalStore(
     const store = decodeLocalPut(code, call_pc + 3) orelse return null;
     if (store.idx >= frame.locals.len) return null;
     if (frame.locals[store.idx].isUninitialized()) return null;
-    if (store.idx < function.vardefs.len and function.vardefs[store.idx].isConst()) return null;
+    if (store.idx < function.varDefs().len and function.varDefs()[store.idx].isConst()) return null;
 
     const input_len = string_value.len();
     const input_len_i64 = std.math.cast(i64, input_len) orelse return null;
@@ -913,11 +913,11 @@ const StringFromCharCodeInt32Arg = struct {
 };
 
 pub fn stringFromCharCodeInt32Arg(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *const frame_mod.Frame,
     pc: usize,
 ) ?StringFromCharCodeInt32Arg {
-    const code = function.code;
+    const code = function.byteCode();
     const first = immediateInt32Operand(code, pc) orelse return null;
     if (first.next_pc < code.len and code[first.next_pc] == op.call_method) {
         return .{ .value = first.value, .next_pc = first.next_pc };
@@ -970,19 +970,18 @@ pub fn atomStringValueForFastPath(rt: *core.JSRuntime, atom_id: core.Atom) !?cor
 }
 
 pub fn canUseFastGlobalVarLookup(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (function.entry_contract.var_environment != .global) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     return true;
 }
 
 pub fn canUseInstalledGlobalDataIc(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
     global: *const core.Object,
@@ -996,34 +995,34 @@ pub fn canUseInstalledGlobalDataIc(
     return true;
 }
 
-pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    if (call_runtime.atomIdOrNameEql(rt, function.name, atom_id)) return true;
+pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+    if (call_runtime.atomIdOrNameEql(rt, function.funcName(), atom_id)) return true;
     if (functionHasDynamicScopeBindings(function, frame)) return true;
     if (functionLocalOrArgBindingShadowsGlobal(rt, function, frame, atom_id)) return true;
     return false;
 }
 
-fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
-    if (function.varRefNamesLen() != 0 or frame.var_refs.len != 0) return true;
-    const function_object = objectFromValue(frame.current_function) orelse return false;
-    if (function_object.functionCaptures().len != 0) return true;
-    return false;
+fn functionHasDynamicScopeBindings(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
+    if (function.legacyBytecodeAdapter() == null and frame.var_refs.len != 0) {
+        std.debug.assert(frame.var_refs.len == function.closureVar().len);
+    }
+    return function.varRefNamesLen() != 0 or frame.var_refs.len != 0;
 }
 
-fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    const arg_count = @min(function.argdefs.len, frame.args.len);
-    for (function.argdefs[0..arg_count]) |arg| {
+fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+    const arg_count = @min(function.argVarDefs().len, frame.args.len);
+    for (function.argVarDefs()[0..arg_count]) |arg| {
         if (call_runtime.atomIdOrNameEql(rt, arg.var_name, atom_id)) return true;
     }
-    const local_count = @min(function.vardefs.len, frame.locals.len);
-    for (function.vardefs[0..local_count]) |vd| {
+    const local_count = @min(function.varDefs().len, frame.locals.len);
+    for (function.varDefs()[0..local_count]) |vd| {
         if (call_runtime.atomIdOrNameEql(rt, vd.var_name, atom_id)) return true;
     }
     return false;
 }
 
 pub fn canFuseGlobalDataWrite(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *const frame_mod.Frame,
     atom_id: core.Atom,
 ) bool {
@@ -1032,7 +1031,7 @@ pub fn canFuseGlobalDataWrite(
     return true;
 }
 
-pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+pub fn frameHasVarRefBinding(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
     const count = @min(frame.var_refs.len, function.varRefNamesLen());
     var idx: usize = 0;
     while (idx < count) : (idx += 1) {

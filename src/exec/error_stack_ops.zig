@@ -158,12 +158,12 @@ fn defineParseErrorSurface(
 pub fn errorPrepareStackTrace(rt: *core.JSRuntime, global: *core.Object) !?core.JSValue {
     const error_key = try rt.internAtom("Error");
     defer rt.atoms.free(error_key);
-    const error_value = global.getProperty(error_key);
+    const error_value = try global.getProperty(error_key);
     defer error_value.free(rt);
     const error_object = property_ops.expectObject(error_value) catch return null;
     const prepare_key = try rt.internAtom("prepareStackTrace");
     defer rt.atoms.free(prepare_key);
-    const prepare = error_object.getProperty(prepare_key);
+    const prepare = try error_object.getProperty(prepare_key);
     if (!isCallableValue(prepare)) {
         prepare.free(rt);
         return null;
@@ -202,12 +202,10 @@ pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFram
 pub fn errorStackTraceLimit(rt: *core.JSRuntime, global: *core.Object) usize {
     const error_key = rt.internAtom("Error") catch return 10;
     defer rt.atoms.free(error_key);
-    const error_value = global.getProperty(error_key);
-    defer error_value.free(rt);
-    const error_object = property_ops.expectObject(error_value) catch return 10;
+    const error_object = global.getOwnDataObjectBorrowed(error_key) orelse return 10;
     const limit_key = rt.internAtom("stackTraceLimit") catch return 10;
     defer rt.atoms.free(limit_key);
-    const limit_value = error_object.getProperty(limit_key);
+    const limit_value = error_object.getOwnDataPropertyValue(limit_key) orelse return 10;
     defer limit_value.free(rt);
     if (limit_value.isUndefined() or limit_value.isNull()) return 0;
     const number = value_ops.numberValue(limit_value) orelse return 10;

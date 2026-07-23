@@ -1,6 +1,7 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
+const jobs_mod = @import("../core/jobs.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -91,6 +92,7 @@ const proxyTrapKeyValue = object_ops.proxyTrapKeyValue;
 const qjsCreateBuiltinFunction = builtin_glue.qjsCreateBuiltinFunction;
 const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
 const qjsSuppressedErrorForDispose = disposable_ops.qjsSuppressedErrorForDispose;
+const runNextAtomicsHostCompletion = call_runtime.runNextAtomicsHostCompletion;
 const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
 const runNextOsTimer = call_runtime.runNextOsTimer;
 const runtimeErrorValueForDisposableDispose = disposable_ops.runtimeErrorValueForDisposableDispose;
@@ -106,12 +108,8 @@ pub fn promisePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*c
     if (global.cachedPromiseProto(rt)) |prototype| return prototype;
     const promise_atom = rt.internAtom("Promise") catch return null;
     defer rt.atoms.free(promise_atom);
-    const promise_value = global.getProperty(promise_atom);
-    defer promise_value.free(rt);
-    const promise_constructor = property_ops.expectObject(promise_value) catch return null;
-    const prototype_value = promise_constructor.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(rt);
-    return property_ops.expectObject(prototype_value) catch null;
+    const promise_constructor = global.getOwnDataObjectBorrowed(promise_atom) orelse return null;
+    return promise_constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
 pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
@@ -151,7 +149,7 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
         const dispose = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncDispose]", 0);
         defer dispose.free(rt);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
-        if (!dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
+        if (!try dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
         try object.defineOwnProperty(rt, async_dispose_atom, core.Descriptor.data(dispose, true, false, true));
     }
     const value = object.value();
@@ -192,7 +190,7 @@ pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object,
     const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
-    if (!method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
+    if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 
@@ -297,12 +295,11 @@ pub fn asyncDisposableStackMethodFromMarker(marker: u8) ?AsyncDisposableStackMet
 
 pub fn qjsAsyncDisposableStackConstructWithPrototype(
     ctx: *core.JSContext,
-    global: *core.Object,
+    _: *core.Object,
     prototype: ?*core.Object,
 ) !core.JSValue {
     const stack = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &stack.header);
-    try stack.setFunctionRealmGlobalPtr(ctx.runtime, global);
     return stack.value();
 }
 
@@ -319,7 +316,7 @@ pub fn qjsAsyncDisposableStackMethodCall(
     receiver: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const marker = function_object.asyncDisposableStackMethod();
@@ -343,7 +340,7 @@ pub fn qjsAsyncDisposableStackUse(
     global: *core.Object,
     stack: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (stack.disposableStackDisposed()) return error.ReferenceError;
@@ -403,7 +400,6 @@ pub fn qjsAsyncDisposableStackMove(
     const prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "AsyncDisposableStack");
     const moved = try core.Object.create(ctx.runtime, core.class.ids.async_disposable_stack, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &moved.header);
-    try moved.setFunctionRealmGlobalPtr(ctx.runtime, global);
     try stack.moveDisposableResourcesTo(ctx.runtime, moved);
     stack.disposableStackDisposedSlot().* = true;
     return moved.value();
@@ -413,7 +409,7 @@ pub fn qjsDefaultPromiseCapability(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !PromiseCapabilityVm {
     const promise_constructor = try qjsPromiseDefaultConstructor(ctx, global);
@@ -427,7 +423,7 @@ pub fn qjsPromiseResolveCapability(
     global: *core.Object,
     resolve_value: core.JSValue,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{value}, caller_function, caller_frame);
@@ -457,7 +453,7 @@ pub fn qjsAsyncDisposableStackDisposeAsync(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var capability = try qjsDefaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
@@ -501,7 +497,7 @@ pub fn qjsAsyncDisposableStackContinuationCall(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const stack_value = function_object.functionAsyncDisposeStack() orelse return null;
@@ -519,7 +515,7 @@ pub fn qjsAsyncDisposableStackContinueOrReject(
     global: *core.Object,
     stack: *core.Object,
     awaited_rejection: ?core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     qjsAsyncDisposableStackContinue(ctx, output, global, stack, awaited_rejection, caller_function, caller_frame) catch |err| {
@@ -535,7 +531,7 @@ pub fn qjsAsyncDisposableStackContinue(
     global: *core.Object,
     stack: *core.Object,
     awaited_rejection: ?core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (awaited_rejection) |reason| {
@@ -570,7 +566,7 @@ pub fn qjsAsyncDisposeResource(
     output: ?*std.Io.Writer,
     global: *core.Object,
     resource: core.object.DisposableResource,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (resource.method.isUndefined()) return core.JSValue.undefinedValue();
@@ -592,7 +588,7 @@ pub fn qjsAsyncDisposableStackAwaitValue(
     global: *core.Object,
     stack: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const promise_constructor = try qjsPromiseDefaultConstructor(ctx, global);
@@ -616,7 +612,7 @@ pub fn qjsAsyncDisposableStackRecordError(
     global: *core.Object,
     stack: *core.Object,
     error_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const slot = stack.disposableStackAsyncErrorSlot();
@@ -634,7 +630,7 @@ pub fn qjsAsyncDisposableStackResolveStored(
     global: *core.Object,
     stack: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const resolve_value = (stack.disposableStackAsyncResolveSlot().*) orelse return;
@@ -650,7 +646,7 @@ pub fn qjsAsyncDisposableStackRejectStored(
     global: *core.Object,
     stack: *core.Object,
     reason: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const reject_value = (stack.disposableStackAsyncRejectSlot().*) orelse return;
@@ -666,7 +662,7 @@ pub fn qjsPromiseConstruct(
     global: *core.Object,
     constructor: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const executor = if (args.len >= 1) args[0] else return throwTypeErrorMessage(ctx, global, "not a function");
@@ -675,7 +671,9 @@ pub fn qjsPromiseConstruct(
         objectRealmGlobal(constructor_object) orelse global
     else
         global;
-    const prototype = (try constructorPrototypeObject(ctx.runtime, constructor)) orelse promisePrototypeFromGlobal(ctx.runtime, fallback_global);
+    var resolved_prototype = try constructorPrototypeObject(ctx.runtime, constructor);
+    defer resolved_prototype.deinit(ctx.runtime);
+    const prototype = resolved_prototype.object() orelse promisePrototypeFromGlobal(ctx.runtime, fallback_global);
     return qjsPromiseConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
 }
 
@@ -685,12 +683,12 @@ pub fn qjsPromiseConstructWithPrototype(
     global: *core.Object,
     prototype: ?*core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const executor = if (args.len >= 1) args[0] else return throwTypeErrorMessage(ctx, global, "not a function");
     if (!isCallableValue(executor)) return throwTypeErrorMessage(ctx, global, "not a function");
-    const promise = try core.promise.constructWithPrototype(ctx.runtime, prototype);
+    const promise = try core.promise.constructWithPrototype(ctx, prototype);
     errdefer promise.free(ctx.runtime);
 
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
@@ -700,7 +698,7 @@ pub fn qjsPromiseConstructWithPrototype(
     defer reject.free(ctx.runtime);
     const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), executor, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
         _ = objectFromValue(promise) orelse return err;
-        var reason = promiseRejectionReason(ctx, global, err);
+        var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
         // Abrupt executor completion must invoke the REJECT resolving function
         // (qjs js_promise_constructor: JS_Call(resolving_funcs[1], ...)), which
@@ -788,12 +786,10 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    function_val = try core.function.nativeDataFunction(rt, "", 1);
+    const function_proto = functionPrototypeFromGlobal(rt, global) orelse return error.InvalidBuiltinRegistry;
+    function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
     errdefer function_val.free(rt);
     const object = objectFromValue(function_val) orelse return error.TypeError;
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
-        try object.setPrototype(rt, function_proto);
-    }
     try object.setInternalCallableTag(rt, .promise_resolving);
     try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
     try object.setFunctionPromiseResolvingState(rt, state_val.dup());
@@ -801,14 +797,17 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     return function_val;
 }
 
+fn testStandardGlobal(ctx: *core.JSContext) !*core.Object {
+    @import("standard_globals.zig").configureRuntime(ctx.runtime);
+    return zjs_vm.contextGlobal(ctx);
+}
+
 test "createPromiseResolvingFunction roots promise and state while allocating function" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.global_object, null);
-    _ = try global.ensureGlobalPayload(rt);
-    ctx.global = global;
+    const global = try testStandardGlobal(ctx);
 
     const state = try createPromiseResolvingState(rt);
     var state_alive = true;
@@ -850,7 +849,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const stored_state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const stored_state = objectFromValue(stored_state_value) orelse return error.TypeError;
     {
-        const marker_value = stored_state.getProperty(marker_key);
+        const marker_value = try stored_state.getProperty(marker_key);
         defer marker_value.free(rt);
         try std.testing.expectEqual(state_symbol, marker_value.asSymbolAtom().?);
     }
@@ -975,35 +974,12 @@ test "qjsPromiseReactionRecord roots direct symbol fields while allocating slots
 }
 
 pub fn qjsPromiseReactionJob(
-    rt: *core.JSRuntime,
-    global: *core.Object,
+    ctx: *core.JSContext,
     reaction: *core.Object,
     value: core.JSValue,
     rejected: bool,
-) !core.JSValue {
-    var reaction_value = reaction.value();
-    var rooted_value = value;
-    var job_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &reaction_value },
-        .{ .value = &rooted_value },
-        .{ .value = &job_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    job_val = try qjsCreateBuiltinFunction(rt, global, "", 0);
-    errdefer job_val.free(rt);
-    const job_object = objectFromValue(job_val) orelse return error.TypeError;
-    try job_object.setInternalCallableTag(rt, .promise_reaction_job);
-    try job_object.setFunctionPromiseReactionRecord(rt, reaction_value.dup());
-    try job_object.setFunctionPromiseReactionValue(rt, rooted_value.dup());
-    (try job_object.functionPromiseReactionIsRejectedSlot(rt)).* = rejected;
-    return job_val;
+) !jobs_mod.Job {
+    return jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), value, rejected);
 }
 
 test "qjsPromiseReactionJob roots reaction and value while allocating job" {
@@ -1035,32 +1011,31 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     const reaction_payload = try rt.symbolValue(value_symbol);
     var reaction_payload_alive = true;
     defer if (reaction_payload_alive) reaction_payload.free(rt);
-    const job_value = try qjsPromiseReactionJob(rt, global, reaction, reaction_payload, true);
+    var job = try qjsPromiseReactionJob(ctx, reaction, reaction_payload, true);
+    var job_alive = true;
+    defer if (job_alive) job.deinit();
     reaction_payload.free(rt);
     reaction_payload_alive = false;
-    var job_alive = true;
-    defer if (job_alive) job_value.free(rt);
-    const job_object = objectFromValue(job_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    try std.testing.expectEqual(value_symbol, job_object.functionPromiseReactionValue().?.asSymbolAtom().?);
-    try std.testing.expect(job_object.functionPromiseReactionIsRejected());
+    try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
+    try std.testing.expect(job.payload.promise_reaction.rejected);
 
     reaction.value().free(rt);
     reaction_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    const stored_reaction_value = job_object.functionPromiseReactionRecord() orelse return error.TypeError;
+    const stored_reaction_value = job.payload.promise_reaction.reaction;
     const stored_reaction = objectFromValue(stored_reaction_value) orelse return error.TypeError;
     {
-        const marker_value = stored_reaction.getProperty(marker_key);
+        const marker_value = try stored_reaction.getProperty(marker_key);
         defer marker_value.free(rt);
         try std.testing.expectEqual(reaction_symbol, marker_value.asSymbolAtom().?);
     }
 
-    job_value.free(rt);
+    job.deinit();
     job_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(reaction_symbol) == null);
@@ -1068,82 +1043,64 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
 }
 
 pub const PreparedPromiseReactionJobs = struct {
-    jobs: []core.JSValue = &.{},
+    jobs: []jobs_mod.Job = &.{},
     initialized: usize = 0,
-
-    pub fn rootSlice(self: *PreparedPromiseReactionJobs) core.runtime.ValueRootSlice {
-        return .{ .mutable = &self.jobs };
-    }
+    reserved_entries: usize = 0,
 
     pub fn deinit(self: *PreparedPromiseReactionJobs, rt: *core.JSRuntime) void {
-        for (self.jobs[0..self.initialized]) |job| job.free(rt);
-        if (self.jobs.len != 0) rt.memory.free(core.JSValue, self.jobs);
+        if (self.reserved_entries != 0) {
+            rt.job_queue.releaseReservedEntries(self.reserved_entries);
+        }
+        for (self.jobs[0..self.initialized]) |*job| job.deinit();
+        if (self.jobs.len != 0) rt.memory.free(jobs_mod.Job, self.jobs);
         self.* = .{};
     }
 
     pub fn commit(self: *PreparedPromiseReactionJobs, ctx: *core.JSContext, promise: *core.Object) void {
         const reactions = promise.promiseReactions();
-        if (self.initialized == 0) return;
+        if (self.initialized == 0) {
+            std.debug.assert(self.reserved_entries == 0);
+            self.* = .{};
+            return;
+        }
+        std.debug.assert(self.reserved_entries == self.initialized);
 
         promise.promiseReactionsSlot().* = &.{};
         for (reactions) |reaction| reaction.free(ctx.runtime);
         ctx.runtime.memory.free(core.JSValue, reactions);
 
         for (self.jobs[0..self.initialized]) |job| {
-            const index = ctx.runtime.pending_promise_jobs.len;
-            ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0 .. index + 1];
-            ctx.runtime.pending_promise_jobs[index] = .{
-                .sequence = ctx.runtime.nextJobSequence(),
-                .value = job,
-                .realm = core.RealmRef.retain(ctx),
-            };
+            ctx.runtime.job_queue.enqueueReserved(job);
+            self.reserved_entries -= 1;
         }
 
-        ctx.runtime.memory.free(core.JSValue, self.jobs);
+        ctx.runtime.memory.free(jobs_mod.Job, self.jobs);
         self.* = .{};
     }
 };
 
-pub const PreparedPromiseReactionJobsRoot = struct {
-    rt: ?*core.JSRuntime = null,
-    slices: [1]core.runtime.ValueRootSlice = undefined,
-    frame: core.runtime.ValueRootFrame = .{},
-
-    pub fn init(self: *PreparedPromiseReactionJobsRoot, rt: *core.JSRuntime, prepared: *PreparedPromiseReactionJobs) void {
-        self.rt = rt;
-        self.slices[0] = prepared.rootSlice();
-        self.frame = .{
-            .previous = rt.active_value_roots,
-            .slices = &self.slices,
-        };
-        rt.active_value_roots = &self.frame;
-    }
-
-    pub fn deinit(self: *PreparedPromiseReactionJobsRoot) void {
-        const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
-        self.rt = null;
-    }
-};
-
-test "prepared promise reaction jobs root exposes dynamic job slice" {
+test "prepared promise reaction jobs own direct symbol payloads" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const reaction = try core.Object.create(rt, core.class.ids.object, null);
+    defer reaction.value().free(rt);
 
-    const jobs = try rt.memory.alloc(core.JSValue, 2);
+    const jobs = try rt.memory.alloc(jobs_mod.Job, 2);
     const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
-    jobs[0] = try rt.symbolValue(first_atom);
+    const first = try rt.symbolValue(first_atom);
+    defer first.free(rt);
+    jobs[0] = try jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
     const second_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-second");
-    jobs[1] = try rt.symbolValue(second_atom);
+    const second = try rt.symbolValue(second_atom);
+    defer second.free(rt);
+    jobs[1] = try jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), second, false);
     var prepared = PreparedPromiseReactionJobs{
         .jobs = jobs,
         .initialized = 2,
     };
     defer prepared.deinit(rt);
-
-    var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-    prepared_root.init(rt, &prepared);
-    defer prepared_root.deinit();
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
@@ -1152,7 +1109,6 @@ test "prepared promise reaction jobs root exposes dynamic job slice" {
 
 pub fn qjsPreparePromiseReactionJobs(
     ctx: *core.JSContext,
-    global: *core.Object,
     promise: *core.Object,
     value: core.JSValue,
     rejected: bool,
@@ -1160,33 +1116,28 @@ pub fn qjsPreparePromiseReactionJobs(
     const reactions = promise.promiseReactions();
     if (reactions.len == 0) return .{};
     var rooted_value = value;
-    var rooted_prepared_jobs: []core.JSValue = &.{};
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &rooted_prepared_jobs },
-    };
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
-        .slices = &root_slices,
         .values = &root_values,
     };
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const jobs = try ctx.runtime.memory.alloc(core.JSValue, reactions.len);
+    const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, reactions.len);
     var prepared = PreparedPromiseReactionJobs{ .jobs = jobs };
     errdefer prepared.deinit(ctx.runtime);
 
     for (reactions) |reaction_value| {
         const reaction = objectFromValue(reaction_value) orelse return error.TypeError;
-        prepared.jobs[prepared.initialized] = try qjsPromiseReactionJob(ctx.runtime, global, reaction, rooted_value, rejected);
+        prepared.jobs[prepared.initialized] = try qjsPromiseReactionJob(ctx, reaction, rooted_value, rejected);
         prepared.initialized += 1;
-        rooted_prepared_jobs = prepared.jobs[0..prepared.initialized];
     }
 
-    try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + prepared.initialized);
+    try ctx.runtime.job_queue.reserveEntries(prepared.initialized);
+    prepared.reserved_entries = prepared.initialized;
     return prepared;
 }
 
@@ -1197,11 +1148,9 @@ pub fn qjsQueuePromiseReactions(
     value: core.JSValue,
     rejected: bool,
 ) !void {
-    var prepared = try qjsPreparePromiseReactionJobs(ctx, global, promise, value, rejected);
+    _ = global;
+    var prepared = try qjsPreparePromiseReactionJobs(ctx, promise, value, rejected);
     errdefer prepared.deinit(ctx.runtime);
-    var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-    prepared_root.init(ctx.runtime, &prepared);
-    defer prepared_root.deinit();
     prepared.commit(ctx, promise);
 }
 
@@ -1211,16 +1160,22 @@ pub fn qjsPromiseSettleValue(
     promise: *core.Object,
     value: core.JSValue,
     rejected: bool,
-) !void {
+) HostError!void {
     const had_reactions = promise.promiseReactions().len != 0;
     const needs_callback_job = promise.promiseReactionCallback() != null and promise.promiseReactionArg() == null;
-    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, value, rejected);
+    _ = global;
+    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, promise, value, rejected);
     errdefer prepared_reactions.deinit(ctx.runtime);
-    var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-    prepared_root.init(ctx.runtime, &prepared_reactions);
-    defer prepared_root.deinit();
+    var prepared_callback_job: ?jobs_mod.Job = null;
+    var callback_reserved = false;
+    errdefer {
+        if (prepared_callback_job) |*job| job.deinit();
+        if (callback_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
+    }
     if (needs_callback_job) {
-        try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + prepared_reactions.initialized + 1);
+        try ctx.runtime.job_queue.reserveEntries(1);
+        callback_reserved = true;
+        prepared_callback_job = try jobs_mod.Job.initPromise(ctx, promise.value());
     }
 
     const next_result = value.dup();
@@ -1233,7 +1188,6 @@ pub fn qjsPromiseSettleValue(
     const reaction_arg_slot = promise.promiseReactionArgSlot();
     if (needs_callback_job) {
         next_reaction_arg = value.dup();
-        try enqueuePendingPromiseJob(ctx, promise.value());
     }
 
     const old_result = result_slot.*;
@@ -1247,11 +1201,15 @@ pub fn qjsPromiseSettleValue(
         next_reaction_arg = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
-    prepared_reactions.commit(ctx, promise);
-
     if (rejected and !had_reactions and ctx.track_unhandled_rejections) {
         ctx.recordUnhandledPromiseRejection(promise.value(), value);
     }
+    if (prepared_callback_job) |job| {
+        ctx.runtime.job_queue.enqueueReserved(job);
+        prepared_callback_job = null;
+        callback_reserved = false;
+    }
+    prepared_reactions.commit(ctx, promise);
 }
 
 test "qjsPromiseSettleValue handles result self-assignment" {
@@ -1309,16 +1267,122 @@ test "qjsPromiseSettleValue roots direct symbol result while preparing reaction 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const result = promise.promiseResult() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
-    try std.testing.expectEqual(@as(usize, 1), ctx.runtime.pending_promise_jobs.len);
-    const job_object = objectFromValue(ctx.runtime.pending_promise_jobs[0].value) orelse return error.TypeError;
-    const job_value = job_object.functionPromiseReactionValue() orelse return error.TypeError;
+    try std.testing.expectEqual(@as(usize, 1), ctx.runtime.job_queue.jobs.len);
+    const job_value = ctx.runtime.job_queue.jobs[0].payload.promise_reaction.value;
     try std.testing.expectEqual(symbol_atom, job_value.asSymbolAtom().?);
 
-    var pending_job = ctx.takePendingPromiseJob() orelse return error.TypeError;
-    pending_job.deinit(rt);
+    var pending_job = ctx.runtime.job_queue.takeFirst() orelse return error.TypeError;
+    pending_job.deinit();
     try promise.setPromiseResult(rt, null);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+test "qjsPromiseSettleValue preserves pending state across reaction prepare and FIFO reserve OOM" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    defer promise.value().free(rt);
+
+    const reaction = try qjsPromiseReactionRecord(
+        rt,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    defer reaction.free(rt);
+    try qjsAppendPromiseReaction(rt, promise, reaction);
+
+    const baseline = rt.memory.allocated_bytes;
+    const limits = [_]usize{
+        baseline,
+        baseline + @sizeOf(jobs_mod.Job),
+    };
+    for (limits) |limit| {
+        rt.setMemoryLimit(limit);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            qjsPromiseSettleValue(ctx, global, promise, core.JSValue.int32(42), false),
+        );
+        rt.setMemoryLimit(null);
+        try std.testing.expect(promise.promiseResult() == null);
+        try std.testing.expectEqual(@as(usize, 1), promise.promiseReactions().len);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+        try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
+        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    }
+
+    try qjsPromiseSettleValue(ctx, global, promise, core.JSValue.int32(42), false);
+    try std.testing.expectEqual(@as(?i32, 42), promise.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(usize, 0), promise.promiseReactions().len);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    var queued = rt.job_queue.takeFirst().?;
+    queued.deinit();
+}
+
+fn promiseSettlementMayAllocate(target: *const core.Object) bool {
+    return target.promiseReactions().len != 0 or
+        (target.promiseReactionCallback() != null and target.promiseReactionArg() == null);
+}
+
+/// Finish a resolving-function completion while holding one queue
+/// reservation. If reaction preparation exhausts memory after the once-guard
+/// has become visible, publish an allocation-free typed continuation into that
+/// exact slot. The original resolving pair may then die; the Runtime FIFO is
+/// the sole retry authority.
+fn settlePromiseResolutionWithReservedOwner(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    target: *core.Object,
+    completion: core.JSValue,
+    rejected: bool,
+    slot_reserved: *bool,
+) HostError!void {
+    std.debug.assert(slot_reserved.*);
+    qjsPromiseSettleValue(ctx, global, target, completion, rejected) catch |err| {
+        if (err != error.OutOfMemory) return err;
+        ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseSettlementNoFail(
+            ctx,
+            target.value(),
+            completion,
+            rejected,
+        ));
+        slot_reserved.* = false;
+        return;
+    };
+    ctx.runtime.job_queue.releaseReservedEntries(1);
+    slot_reserved.* = false;
+}
+
+/// Scalar/self-resolution has no intervening user callback, so a target with
+/// no reaction/callback work settles without adding an artificial queue OOM
+/// point. Otherwise reserve the durable retry owner before publishing the
+/// shared once-guard.
+fn publishPromiseResolution(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    state: *core.Object,
+    target: *core.Object,
+    completion: core.JSValue,
+    rejected: bool,
+) HostError!void {
+    if (!promiseSettlementMayAllocate(target)) {
+        (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+        try qjsPromiseSettleValue(ctx, global, target, completion, rejected);
+        return;
+    }
+
+    try ctx.runtime.job_queue.reserveEntries(1);
+    var slot_reserved = true;
+    defer if (slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
+    (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+    try settlePromiseResolutionWithReservedOwner(ctx, global, target, completion, rejected, &slot_reserved);
 }
 
 pub fn qjsPromiseResolvingFunctionCall(
@@ -1327,17 +1391,23 @@ pub fn qjsPromiseResolvingFunctionCall(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
+) HostError!?core.JSValue {
     const target_value = function_object.functionPromiseResolvingTarget() orelse return null;
     const target = objectFromValue(target_value) orelse return core.JSValue.undefinedValue();
     if (target.class_id != core.class.ids.promise) return core.JSValue.undefinedValue();
-    if (target.promiseResult() != null) return core.JSValue.undefinedValue();
     const state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state = objectFromValue(state_value) orelse return error.TypeError;
-    if (state.promiseAlreadyResolved()) return core.JSValue.undefinedValue();
-    (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
+    if (target.promiseResult() != null) return core.JSValue.undefinedValue();
+    if (state.promiseAlreadyResolved()) {
+        // A prior call won the shared once-guard. Any allocation-sensitive
+        // completion that could not settle synchronously is owned by the
+        // Runtime FIFO, so later calls are true no-ops rather than an
+        // out-of-order retry channel.
+        return core.JSValue.undefinedValue();
+    }
+
     const reject = function_object.functionPromiseResolvingReject();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!reject and value.sameValue(target_value)) {
@@ -1346,9 +1416,15 @@ pub fn qjsPromiseResolvingFunctionCall(
         const error_global = objectRealmGlobal(function_object) orelse global;
         const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "promise self resolution");
         defer error_value.free(ctx.runtime);
-        try qjsPromiseSettleValue(ctx, global, target, error_value, true);
+        try publishPromiseResolution(ctx, global, state, target, error_value, true);
         return core.JSValue.undefinedValue();
     }
+
+    if (reject or !value.isObject() or objectFromValue(value) == null) {
+        try publishPromiseResolution(ctx, global, state, target, value, reject);
+        return core.JSValue.undefinedValue();
+    }
+
     if (!reject and value.isObject()) {
         if (objectFromValue(value) != null) {
             // No native-promise special case: qjs js_promise_resolve_function_call
@@ -1358,11 +1434,19 @@ pub fn qjsPromiseResolvingFunctionCall(
             // costing the same 2 ticks and observing patched `then`).
             const then_key = try ctx.runtime.internAtom("then");
             defer ctx.runtime.atoms.free(then_key);
+
+            // Hold one FIFO slot before publishing the once-guard. After the
+            // getter runs, a callable result can therefore be transferred to
+            // a typed thenable job without any fallible work or lost owner.
+            try ctx.runtime.job_queue.reserveEntries(1);
+            var thenable_slot_reserved = true;
+            defer if (thenable_slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
+
+            (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
             const then_value = getValueProperty(ctx, output, global, value, then_key, caller_function, caller_frame) catch |err| {
-                var reason = promiseRejectionReason(ctx, global, err);
-                defer reason.deinit(ctx.runtime);
-                try qjsPromiseSettleValue(ctx, global, target, reason.value, true);
-                reason.commit(ctx);
+                const reason = try qjsPromiseErrorValue(ctx, global, err);
+                defer reason.free(ctx.runtime);
+                try settlePromiseResolutionWithReservedOwner(ctx, global, target, reason, true, &thenable_slot_reserved);
                 return core.JSValue.undefinedValue();
             };
             defer then_value.free(ctx.runtime);
@@ -1371,41 +1455,428 @@ pub fn qjsPromiseResolvingFunctionCall(
                 // resolving with a callable-then object ALWAYS enqueues a
                 // js_promise_resolve_thenable_job — never stored lazily, never
                 // run synchronously; then is invoked exactly once, as a job.
-                const thenable_job = try qjsPromiseThenableJob(ctx.runtime, global, target_value, value, then_value);
-                defer thenable_job.free(ctx.runtime);
-                try enqueuePendingPromiseJob(ctx, thenable_job);
+                ctx.runtime.job_queue.enqueueReserved(jobs_mod.Job.initPromiseThenableNoFail(ctx, target_value, value, then_value));
+                thenable_slot_reserved = false;
                 return core.JSValue.undefinedValue();
             }
+
+            try settlePromiseResolutionWithReservedOwner(ctx, global, target, value, false, &thenable_slot_reserved);
+            return core.JSValue.undefinedValue();
         }
     }
-    try qjsPromiseSettleValue(ctx, global, target, value, reject);
-    return core.JSValue.undefinedValue();
+    unreachable;
 }
 
-pub fn qjsPromiseThenableJob(rt: *core.JSRuntime, global: *core.Object, target_value: core.JSValue, thenable_value: core.JSValue, then_value: core.JSValue) !core.JSValue {
-    var rooted_target_value = target_value;
-    var rooted_thenable_value = thenable_value;
-    var rooted_then_value = then_value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_target_value },
-        .{ .value = &rooted_thenable_value },
-        .{ .value = &rooted_then_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
+pub fn qjsPromiseThenableJob(
+    ctx: *core.JSContext,
+    target_value: core.JSValue,
+    thenable_value: core.JSValue,
+    then_value: core.JSValue,
+) !jobs_mod.Job {
+    return jobs_mod.Job.initPromiseThenable(ctx, target_value, thenable_value, then_value);
+}
 
-    const job = try qjsCreateBuiltinFunction(rt, global, "", 0);
-    errdefer job.free(rt);
-    const job_object = objectFromValue(job) orelse return error.TypeError;
-    try job_object.setInternalCallableTag(rt, .promise_thenable_job);
-    try job_object.setFunctionPromiseThenableTarget(rt, rooted_target_value.dup());
-    try job_object.setFunctionPromiseThenableThis(rt, rooted_thenable_value.dup());
-    try job_object.setFunctionPromiseThenableThen(rt, rooted_then_value.dup());
-    return job;
+const PromiseJobOomProbe = struct {
+    calls: usize = 0,
+    fail: bool,
+
+    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *PromiseJobOomProbe = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        const rt = invocation.realm.runtime;
+        rt.setMemoryLimit(rt.memory.allocated_bytes);
+        if (self.fail) return error.TypeError;
+        return core.JSValue.int32(77);
+    }
+};
+
+fn promiseJobOomProbeFunction(
+    ctx: *core.JSContext,
+    probe: *PromiseJobOomProbe,
+    name: []const u8,
+) !core.JSValue {
+    const external_id = try ctx.runtime.registerExternalHostFunction(.{
+        .ptr = probe,
+        .call = PromiseJobOomProbe.call,
+    });
+    const function = try core.function.nativeFunction(ctx, name, 0);
+    errdefer function.free(ctx.runtime);
+    const object = objectFromValue(function) orelse return error.TypeError;
+    object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    object.externalHostFunctionIdSlot().* = external_id;
+    return function;
+}
+
+const PromiseBareCapabilityErrorProbe = struct {
+    calls: usize = 0,
+
+    fn call(ptr: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *PromiseBareCapabilityErrorProbe = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        return error.TypeError;
+    }
+};
+
+fn promiseBareCapabilityErrorFunction(
+    ctx: *core.JSContext,
+    probe: *PromiseBareCapabilityErrorProbe,
+) !core.JSValue {
+    const external_id = try ctx.runtime.registerExternalHostFunction(.{
+        .ptr = probe,
+        .call = PromiseBareCapabilityErrorProbe.call,
+    });
+    const function = try core.function.nativeFunction(ctx, "bareCapabilityError", 0);
+    errdefer function.free(ctx.runtime);
+    const object = objectFromValue(function) orelse return error.TypeError;
+    object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    object.externalHostFunctionIdSlot().* = external_id;
+    return function;
+}
+
+fn appendDummyPromiseReaction(rt: *core.JSRuntime, promise: *core.Object) !void {
+    const reaction = try qjsPromiseReactionRecord(
+        rt,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    defer reaction.free(rt);
+    try qjsAppendPromiseReaction(rt, promise, reaction);
+}
+
+test "Promise executor recursive OOM rejects with preallocated reason" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+    const preallocated = ctx.preallocated_oom_error orelse return error.TestUnexpectedResult;
+
+    var probe = PromiseJobOomProbe{ .fail = true };
+    const executor = try promiseJobOomProbeFunction(ctx, &probe, "executorOomProbe");
+    defer executor.free(rt);
+
+    // The host executor first exhausts the heap and then reports a bare
+    // TypeError. Error construction therefore recursively OOMs after user
+    // code has run; rejection must retain the preallocated abrupt value, not
+    // silently substitute `undefined` or invoke the executor again.
+    const promise = try qjsPromiseConstructWithPrototype(
+        ctx,
+        null,
+        global,
+        null,
+        &.{executor},
+        null,
+        null,
+    );
+    defer promise.free(rt);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    const promise_object = objectFromValue(promise) orelse return error.TypeError;
+    try std.testing.expect(promise_object.promiseIsRejected());
+    const reason = promise_object.promiseResult() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(reason.same(preallocated));
+    try std.testing.expect(!reason.isUndefined());
+}
+
+test "direct Promise resolve OOM is owned by FIFO after resolving pair collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    defer target.value().free(rt);
+    try appendDummyPromiseReaction(rt, target);
+    const resolving = try createPromiseResolvingPair(rt, global, target.value());
+    var resolving_alive = true;
+    defer if (resolving_alive) {
+        resolving.resolve.free(rt);
+        resolving.reject.free(rt);
+    };
+    const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
+    const reject_object = objectFromValue(resolving.reject) orelse return error.TypeError;
+
+    // Isolate the post-once-guard failure: the durable continuation slot is
+    // already available, while preparing the target's reaction batch cannot
+    // allocate.
+    try rt.job_queue.ensureCapacity(1);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    const resolve_result = (try qjsPromiseResolvingFunctionCall(
+        ctx,
+        null,
+        global,
+        resolve_object,
+        &.{core.JSValue.int32(41)},
+        null,
+        null,
+    )).?;
+    resolve_result.free(rt);
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+
+    // The paired reject cannot bypass the continuation's frozen FIFO
+    // position; the once-guard makes it a no-op.
+    const ignored_reject = (try qjsPromiseResolvingFunctionCall(
+        ctx,
+        null,
+        global,
+        reject_object,
+        &.{core.JSValue.int32(99)},
+        null,
+        null,
+    )).?;
+    ignored_reject.free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+
+    resolving.resolve.free(rt);
+    resolving.reject.free(rt);
+    resolving_alive = false;
+    _ = rt.runObjectCycleRemoval();
+
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(?i32, 41), target.promiseResult().?.asInt32());
+    try std.testing.expect(!target.promiseIsRejected());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+}
+
+test "custom Promise reaction capability bare error becomes runOne exception exactly once" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    var probe = PromiseBareCapabilityErrorProbe{};
+    const resolve = try promiseBareCapabilityErrorFunction(ctx, &probe);
+    defer resolve.free(rt);
+    const reaction = try qjsPromiseReactionRecord(
+        rt,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        resolve,
+        core.JSValue.undefinedValue(),
+    );
+    defer reaction.free(rt);
+    try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(5), false);
+
+    const TailJob = struct {
+        fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
+            return core.JSValue.int32(8);
+        }
+    };
+    try rt.job_queue.enqueueFunc(ctx, TailJob.run, &.{});
+
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.exception, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    const exception = ctx.takeException();
+    exception.free(rt);
+
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.empty, try drainOnePendingJob(ctx, null, global));
+}
+
+test "Promise reaction OOM transfers internal settle to FIFO without invoking handler twice" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    defer target.value().free(rt);
+    try appendDummyPromiseReaction(rt, target);
+
+    const resolving = try createPromiseResolvingPair(rt, global, target.value());
+    defer resolving.resolve.free(rt);
+    defer resolving.reject.free(rt);
+
+    var probe = PromiseJobOomProbe{ .fail = false };
+    const handler = try promiseJobOomProbeFunction(ctx, &probe, "reactionOomProbe");
+    defer handler.free(rt);
+    const reaction = try qjsPromiseReactionRecord(
+        rt,
+        handler,
+        core.JSValue.undefinedValue(),
+        resolving.resolve,
+        resolving.reject,
+    );
+    defer reaction.free(rt);
+    try rt.job_queue.enqueuePromiseReaction(ctx, reaction, core.JSValue.int32(1), false);
+
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+    try std.testing.expectEqual(@as(?i32, 77), rt.job_queue.jobs[0].payload.promise_settlement.completion.asInt32());
+
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(?i32, 77), target.promiseResult().?.asInt32());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+}
+
+test "Promise resolving OOM keeps FIFO owner after then getter and resolver collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    defer target.value().free(rt);
+    try appendDummyPromiseReaction(rt, target);
+    const resolving = try createPromiseResolvingPair(rt, global, target.value());
+    var resolving_alive = true;
+    defer if (resolving_alive) {
+        resolving.resolve.free(rt);
+        resolving.reject.free(rt);
+    };
+    const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
+    const state = objectFromValue(resolve_object.functionPromiseResolvingState().?) orelse return error.TypeError;
+
+    const thenable = try core.Object.create(rt, core.class.ids.object, null);
+    defer thenable.value().free(rt);
+    var probe = PromiseJobOomProbe{ .fail = false };
+    const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterOomProbe");
+    defer getter.free(rt);
+    const then_key = try rt.internAtom("then");
+    defer rt.atoms.free(then_key);
+    try thenable.defineOwnProperty(
+        rt,
+        then_key,
+        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
+    );
+
+    const direct_result = (try qjsPromiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
+    direct_result.free(rt);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(state.promiseAlreadyResolved());
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+
+    resolving.resolve.free(rt);
+    resolving.reject.free(rt);
+    resolving_alive = false;
+    _ = rt.runObjectCycleRemoval();
+
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult().?.same(thenable.value()));
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+}
+
+test "Promise resolving getter throw plus settle OOM rejects once after resolver collection" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    defer target.value().free(rt);
+    try appendDummyPromiseReaction(rt, target);
+    const resolving = try createPromiseResolvingPair(rt, global, target.value());
+    var resolving_alive = true;
+    defer if (resolving_alive) {
+        resolving.resolve.free(rt);
+        resolving.reject.free(rt);
+    };
+    const resolve_object = objectFromValue(resolving.resolve) orelse return error.TypeError;
+
+    const thenable = try core.Object.create(rt, core.class.ids.object, null);
+    defer thenable.value().free(rt);
+    var probe = PromiseJobOomProbe{ .fail = true };
+    const getter = try promiseJobOomProbeFunction(ctx, &probe, "thenGetterThrowOomProbe");
+    defer getter.free(rt);
+    const then_key = try rt.internAtom("then");
+    defer rt.atoms.free(then_key);
+    try thenable.defineOwnProperty(
+        rt,
+        then_key,
+        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
+    );
+
+    const direct_result = (try qjsPromiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
+    direct_result.free(rt);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+    try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
+
+    resolving.resolve.free(rt);
+    resolving.reject.free(rt);
+    resolving_alive = false;
+    _ = rt.runObjectCycleRemoval();
+
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() != null);
+    try std.testing.expect(target.promiseIsRejected());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+}
+
+test "Promise thenable OOM resumes rejection without invoking then twice" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const target = try core.Object.create(rt, core.class.ids.promise, null);
+    defer target.value().free(rt);
+    try appendDummyPromiseReaction(rt, target);
+    const thenable = try core.Object.create(rt, core.class.ids.object, null);
+    defer thenable.value().free(rt);
+
+    var probe = PromiseJobOomProbe{ .fail = true };
+    const then_function = try promiseJobOomProbeFunction(ctx, &probe, "thenableOomProbe");
+    defer then_function.free(rt);
+    try rt.job_queue.enqueuePromiseThenable(ctx, target.value(), thenable.value(), then_function);
+
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
+    try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
+
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(target.promiseResult() != null);
+    try std.testing.expect(target.promiseIsRejected());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
 }
 
 test "qjsPromiseThenableJob roots direct function bytecode then callback while creating job" {
@@ -1422,20 +1893,16 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
     defer thenable.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var then_callback = core.JSValue.functionBytecode(&fb.header);
     var then_callback_alive = true;
@@ -1445,16 +1912,15 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const job = try qjsPromiseThenableJob(rt, global, target.value(), thenable.value(), then_callback);
+    var job = try qjsPromiseThenableJob(ctx, target.value(), thenable.value(), then_callback);
     var job_alive = true;
-    defer if (job_alive) job.free(rt);
-    const job_object = objectFromValue(job) orelse return error.TypeError;
+    defer if (job_alive) job.deinit();
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = job_object.functionPromiseThenableThen() orelse return error.TypeError;
+    const stored = job.payload.promise_thenable.then_function;
     try std.testing.expect(stored.same(then_callback));
 
-    job.free(rt);
+    job.deinit();
     job_alive = false;
     then_callback.free(rt);
     then_callback_alive = false;
@@ -1462,84 +1928,164 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn qjsPromiseThenableJobPending(callback: core.JSValue) bool {
-    const callback_object = objectFromValue(callback) orelse return false;
-    return callback_object.functionPromiseThenableTarget() != null;
-}
-
 pub fn qjsPromiseThenableJobCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    payload: *jobs_mod.PromiseThenablePayload,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const target_value = function_object.functionPromiseThenableTarget() orelse return null;
-    const thenable_value = function_object.functionPromiseThenableThis() orelse return error.TypeError;
-    const then_value = function_object.functionPromiseThenableThen() orelse return error.TypeError;
+) HostError!core.JSValue {
+    if (payload.phase == .prepare) {
+        // Preparation is the only phase that may be retried from its start:
+        // no user code has run yet. Keep the pair in the entry so both the
+        // once-guard and the functions survive any later rejection retry.
+        const resolving = try createPromiseResolvingPair(ctx.runtime, global, payload.target);
+        std.debug.assert(payload.resolving_resolve.isUndefined());
+        std.debug.assert(payload.resolving_reject.isUndefined());
+        payload.resolving_resolve = resolving.resolve;
+        payload.resolving_reject = resolving.reject;
+        payload.phase = .invoke;
+    }
 
-    const resolving = try createPromiseResolvingPair(ctx.runtime, global, target_value);
-    const resolve = resolving.resolve;
-    defer resolve.free(ctx.runtime);
-    const reject_value = resolving.reject;
-    defer reject_value.free(ctx.runtime);
+    invoke: {
+        if (payload.phase == .invoke) {
+            const then_result = callValueOrBytecode(
+                ctx,
+                output,
+                global,
+                payload.thenable,
+                payload.then_function,
+                &.{ payload.resolving_resolve, payload.resolving_reject },
+                caller_function,
+                caller_frame,
+            ) catch |err| {
+                // From this point onward the then callback must never run again:
+                // it may already have called resolve/reject or performed arbitrary
+                // side effects. Capture its abrupt completion in the entry and
+                // resume only the rejection call after a retriable OOM.
+                const reason = try qjsPromiseErrorValue(ctx, global, err);
+                payload.replaceCompletionOwned(ctx.runtime, reason);
+                payload.phase = .reject;
+                break :invoke;
+            };
+            then_result.free(ctx.runtime);
+            return core.JSValue.undefinedValue();
+        }
+    }
 
-    const then_result = callValueOrBytecode(ctx, output, global, thenable_value, then_value, &.{ resolve, reject_value }, caller_function, caller_frame) catch |err| {
-        const reason = try qjsPromiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
-        reject_result.free(ctx.runtime);
-        return core.JSValue.undefinedValue();
-    };
-    then_result.free(ctx.runtime);
+    std.debug.assert(payload.phase == .reject);
+    const reject_result = try callValueOrBytecode(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        payload.resolving_reject,
+        &.{payload.completion},
+        caller_function,
+        caller_frame,
+    );
+    reject_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
+}
+
+fn qjsPromiseSettlementJobCall(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    payload: *const jobs_mod.PromiseSettlementPayload,
+) HostError!void {
+    const target = objectFromValue(payload.target) orelse return error.TypeError;
+    if (target.class_id != core.class.ids.promise) return error.TypeError;
+    // A second settlement cannot normally win because the resolving pair's
+    // once-guard was published before this entry. Treat an already-settled
+    // target as a completed continuation so teardown remains idempotent under
+    // defensive host integration.
+    if (target.promiseResult() != null) return;
+    try qjsPromiseSettleValue(ctx, global, target, payload.completion, payload.rejected);
 }
 
 pub fn qjsPromiseReactionJobCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    payload: *jobs_mod.PromiseReactionPayload,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const reaction_value = function_object.functionPromiseReactionRecord() orelse return null;
-    const reaction = objectFromValue(reaction_value) orelse return error.TypeError;
-
-    const payload = function_object.functionPromiseReactionValue() orelse core.JSValue.undefinedValue();
-    const rejected = function_object.functionPromiseReactionIsRejected();
-    const handler_value = if (rejected) reaction.promiseReactionOnRejected() else reaction.promiseReactionOnFulfilled();
-    const handler = handler_value orelse core.JSValue.undefinedValue();
-
+) HostError!core.JSValue {
+    const reaction = objectFromValue(payload.reaction) orelse return error.TypeError;
     const resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
     const reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
 
-    if (!isCallableValue(handler)) {
-        const settle = if (rejected) reject_value else resolve_value;
-        // qjs promise_reaction_job (quickjs.c:53415-53421): "as an extension,
-        // we support undefined as value to avoid creating a dummy promise in
-        // the 'await' implementation of async functions" — an undefined
-        // resolving function is skipped and the value dropped.
-        if (settle.isUndefined()) return core.JSValue.undefinedValue();
-        const settle_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), settle, &.{payload}, caller_function, caller_frame);
-        settle_result.free(ctx.runtime);
-        return core.JSValue.undefinedValue();
+    invoke: {
+        if (payload.phase == .invoke) {
+            const handler_value = if (payload.rejected) reaction.promiseReactionOnRejected() else reaction.promiseReactionOnFulfilled();
+            const handler = handler_value orelse core.JSValue.undefinedValue();
+
+            // perform_promise_then canonicalizes non-callable handlers to
+            // undefined at registration time. Do not re-run IsCallable here:
+            // a callable Proxy may have been revoked after registration and
+            // must still be Called (and reject the child with TypeError), not
+            // silently become the identity/thrower fallback.
+            if (handler.isUndefined()) {
+                payload.phase = if (payload.rejected) .reject else .resolve;
+                break :invoke;
+            }
+
+            const callback_result = callValueOrBytecode(
+                ctx,
+                output,
+                global,
+                core.JSValue.undefinedValue(),
+                handler,
+                &.{payload.value},
+                caller_function,
+                caller_frame,
+            ) catch |err| {
+                // The handler has run and may have observable side effects. Store
+                // its abrupt completion before attempting the capability reject,
+                // so an OOM retries only that settle phase.
+                const reason = try qjsPromiseErrorValue(ctx, global, err);
+                payload.replaceValueOwned(ctx.runtime, reason);
+                payload.phase = .reject;
+                break :invoke;
+            };
+            if (payload.rejected) clearHandledRejectionException(ctx);
+            payload.replaceValueOwned(ctx.runtime, callback_result);
+            payload.phase = .resolve;
+        }
     }
 
-    const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{payload}, caller_function, caller_frame) catch |err| {
-        const reason = try qjsPromiseErrorValue(ctx, global, err);
-        defer reason.free(ctx.runtime);
-        if (reject_value.isUndefined()) return core.JSValue.undefinedValue();
-        const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
-        reject_result.free(ctx.runtime);
-        return core.JSValue.undefinedValue();
+    const settle = switch (payload.phase) {
+        .invoke => unreachable,
+        .resolve => resolve_value,
+        .reject => reject_value,
     };
-    if (rejected) clearHandledRejectionException(ctx);
-    defer callback_result.free(ctx.runtime);
-    if (resolve_value.isUndefined()) return core.JSValue.undefinedValue();
-    const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{callback_result}, caller_function, caller_frame);
-    resolve_result.free(ctx.runtime);
+    // qjs promise_reaction_job (quickjs.c:53415-53421): "as an extension,
+    // we support undefined as value to avoid creating a dummy promise in the
+    // 'await' implementation of async functions" — an undefined resolving
+    // function is skipped and the value dropped.
+    if (settle.isUndefined()) return core.JSValue.undefinedValue();
+    const settle_result = callValueOrBytecode(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        settle,
+        &.{payload.value},
+        caller_function,
+        caller_frame,
+    ) catch |err| {
+        // A custom species capability can be an arbitrary host callable. Its
+        // bare host error is still an abrupt ECMAScript job completion: make
+        // sure runOne observes a value in the job realm's unique exception
+        // slot. Retrying here would repeat user code, so the entry is consumed.
+        if (!ctx.hasException()) {
+            const reason = try qjsPromiseErrorValue(ctx, global, err);
+            _ = ctx.throwValue(reason);
+        }
+        return err;
+    };
+    settle_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
 }
 
@@ -1613,7 +2159,7 @@ pub fn qjsPromiseCombinatorElementCall(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const mode: PromiseCombinatorCallbackMode = switch (function_object.functionPromiseCombinatorMode()) {
@@ -1695,7 +2241,7 @@ pub fn qjsPromiseCapability(
     output: ?*std.Io.Writer,
     global: *core.Object,
     constructor_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !PromiseCapabilityVm {
     var slot_value = core.JSValue.undefinedValue();
@@ -1785,14 +2331,14 @@ pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *c
     var index: u32 = 0;
     while (index < keys.arrayLength()) : (index += 1) {
         const index_atom = core.atom.atomFromUInt32(index);
-        key_value = keys.getProperty(index_atom);
+        key_value = try keys.getProperty(index_atom);
         defer {
             key_value.free(rt);
             key_value = core.JSValue.undefinedValue();
         }
         const key_atom = try property_ops.propertyKeyAtom(rt, key_value);
         defer rt.atoms.free(key_atom);
-        value = values.getProperty(index_atom);
+        value = try values.getProperty(index_atom);
         defer {
             value.free(rt);
             value = core.JSValue.undefinedValue();
@@ -1842,7 +2388,7 @@ test "qjsPromiseKeyedResult roots direct symbol values while defining keyed resu
     const answer_atom = try rt.internAtom("answer");
     defer rt.atoms.free(answer_atom);
     {
-        const stored = result.getProperty(answer_atom);
+        const stored = try result.getProperty(answer_atom);
         defer stored.free(rt);
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
@@ -1897,7 +2443,7 @@ test "qjsPromiseSettlementRecord roots direct symbol payload while defining stat
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
     {
-        const value = record.getProperty(value_atom);
+        const value = try record.getProperty(value_atom);
         defer value.free(rt);
         try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);
     }
@@ -1940,19 +2486,13 @@ test "qjsPromiseCombinatorState roots direct function bytecode resolve while cre
     const values = try core.Object.create(rt, core.class.ids.array, null);
     defer values.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var resolve_value = core.JSValue.functionBytecode(&fb.header);
     var resolve_alive = true;
@@ -2009,7 +2549,7 @@ pub fn qjsPromiseRejectCapability(
     global: *core.Object,
     reject_value: core.JSValue,
     reason: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
@@ -2022,7 +2562,7 @@ pub fn qjsPromiseRejectCapabilityForError(
     global: *core.Object,
     reject_value: core.JSValue,
     err: anytype,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const reason = try qjsPromiseErrorValue(ctx, global, err);
@@ -2036,7 +2576,7 @@ pub fn qjsPromiseResolveIdentity(
     global: *core.Object,
     constructor_value: core.JSValue,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const promise_object = objectFromValue(value) orelse return null;
@@ -2078,7 +2618,7 @@ pub fn qjsPromiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) 
     if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |stored| return stored.dup();
     const promise_key = try ctx.runtime.internAtom("Promise");
     defer ctx.runtime.atoms.free(promise_key);
-    return global.getProperty(promise_key);
+    return try global.getProperty(promise_key);
 }
 
 pub fn qjsPromiseSpeciesConstructor(
@@ -2086,7 +2626,7 @@ pub fn qjsPromiseSpeciesConstructor(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const default_constructor = try qjsPromiseDefaultConstructor(ctx, global);
@@ -2120,7 +2660,7 @@ pub fn qjsPromiseCombinatorCall(
     constructor_value: core.JSValue,
     args: []const core.JSValue,
     mode: PromiseCombinatorMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
@@ -2338,7 +2878,7 @@ pub fn qjsPromiseKeyedCombinatorCall(
     constructor_value: core.JSValue,
     args: []const core.JSValue,
     all_settled: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
@@ -2493,7 +3033,7 @@ pub fn qjsPromiseResolveStaticCall(
     global: *core.Object,
     constructor_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
@@ -2524,7 +3064,7 @@ pub fn qjsPromiseStaticCall(
     constructor_value: core.JSValue,
     args: []const core.JSValue,
     mode: PromiseStaticMode,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (mode == .resolve) return qjsPromiseResolveStaticCall(ctx, output, global, constructor_value, args, caller_function, caller_frame);
@@ -2597,15 +3137,41 @@ pub const PromiseRejectionReason = struct {
     }
 };
 
-pub fn promiseRejectionReason(ctx: *core.JSContext, global: *core.Object, err: anytype) PromiseRejectionReason {
+pub fn promiseRejectionReason(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    err: anytype,
+) HostError!PromiseRejectionReason {
     if (ctx.hasException()) {
         return .{
             .value = ctx.runtime.current_exception.dup(),
             .from_exception = true,
         };
     }
+
+    const value = exception_ops.createNamedError(
+        ctx,
+        global,
+        if (err == error.TypeError) "TypeError" else "Error",
+        "",
+    ) catch |create_err| {
+        if (create_err == error.OutOfMemory) {
+            // The executor/then callback has already run, so losing its abrupt
+            // completion (or retrying it) is not an option.  Use the same
+            // allocation-free recursive-OOM fallback as Promise jobs.
+            if (ctx.preallocated_oom_error) |preallocated| return .{
+                .value = preallocated.dup(),
+                .from_exception = false,
+            };
+            return .{
+                .value = core.JSValue.nullValue(),
+                .from_exception = false,
+            };
+        }
+        return @errorCast(create_err);
+    };
     return .{
-        .value = exception_ops.createNamedError(ctx, global, if (err == error.TypeError) "TypeError" else "Error", "") catch core.JSValue.undefinedValue(),
+        .value = value,
         .from_exception = false,
     };
 }
@@ -2627,7 +3193,7 @@ pub fn constructAsyncFunctionFromSource(
     global: *core.Object,
     constructor: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .async_function, caller_function, caller_frame);
@@ -2639,7 +3205,7 @@ pub fn constructAsyncGeneratorFunctionFromSource(
     global: *core.Object,
     constructor: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return constructDynamicFunctionFromSource(ctx, output, global, constructor, constructor, args, .async_generator, caller_function, caller_frame);
@@ -2648,21 +3214,44 @@ pub fn constructAsyncGeneratorFunctionFromSource(
 pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     const rt = ctx.runtime;
+    rt.assertOwnerThread();
     if (waiter.promise) |promise| promise.free(rt);
     atomicsReleaseWaiterKey(&waiter.key);
     waiter.realm.deinit();
     rt.memory.destroy(AtomicsWaiter, waiter);
 }
 
-pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, result: []const u8) !void {
-    const ctx = waiter.realm.borrow() orelse return;
+pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
+    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(raw_waiter));
+    atomicsDestroyAsyncWaiter(waiter);
+}
+
+/// Run one owner-thread waitAsync completion. `drainOnePendingJob` reserves the
+/// unlinked entry's queue slot before calling this function. Every failure is
+/// before Promise publication and leaves that reservation untouched so the
+/// typed completion can be restored at the FIFO head. Success consumes the
+/// reservation with the follow-up Promise job as its final no-fail step.
+pub fn atomicsRunAsyncWaiterCompletion(
+    ctx: *core.JSContext,
+    payload: *const jobs_mod.AtomicsWaiterPayload,
+) core.context.DynamicImportError!void {
+    const waiter: *AtomicsWaiter = @ptrCast(@alignCast(payload.waiter));
+    std.debug.assert(waiter.realm.borrow() == ctx);
+    ctx.runtime.assertOwnerThread();
+    const promise = payload.promise;
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
-    if (promise_object.promiseResultSlot().* != null) return;
+    if (promise_object.promiseResultSlot().* != null) {
+        ctx.runtime.job_queue.releaseReservedEntries(1);
+        return;
+    }
+    const result = if (waiter.completion == .notified) "ok" else "timed-out";
     const result_value = try value_ops.createStringValue(ctx.runtime, result);
     var result_value_owned = true;
     errdefer if (result_value_owned) result_value.free(ctx.runtime);
-    try ctx.ensurePendingPromiseJobCapacity(ctx.runtime.pending_promise_jobs.len + 1);
+    var prepared_job = try jobs_mod.Job.initPromise(ctx, promise);
+    var prepared_job_owned = true;
+    errdefer if (prepared_job_owned) prepared_job.deinit();
 
     const result_slot = promise_object.promiseResultSlot();
 
@@ -2673,8 +3262,6 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
     if (needs_reaction_arg) {
         reaction_arg_value = result_value.dup();
     }
-
-    try enqueuePendingPromiseJob(ctx, promise);
 
     if (promise_object.promiseReactionCallback() != null) {
         // A .then/await already installed the lazy single reaction callback.
@@ -2699,6 +3286,8 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
         reaction_arg_value = null;
         if (old_reaction_arg) |stored| stored.free(ctx.runtime);
     }
+    ctx.runtime.job_queue.enqueueReserved(prepared_job);
+    prepared_job_owned = false;
 }
 
 pub fn qjsAtomicsWaitAsync(
@@ -2706,7 +3295,7 @@ pub fn qjsAtomicsWaitAsync(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -2735,7 +3324,7 @@ pub fn qjsAtomicsWaitAsync(
         return atomicsWaitAsyncResult(ctx, false, result);
     }
 
-    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
     defer promise.free(ctx.runtime);
     if (objectFromValue(promise)) |promise_object| {
         promise_object.promiseAtomicsWaitAsyncSlot().* = true;
@@ -2744,8 +3333,8 @@ pub fn qjsAtomicsWaitAsync(
         std.Io.Timestamp.now(atomicsWaiterIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms))
     else
         null;
-    const waiter = try ctx.runtime.memory.create(AtomicsWaiter);
     const key = try atomicsWaiterKey(view, bytes);
+    const waiter = try ctx.runtime.memory.create(AtomicsWaiter);
     atomicsRetainWaiterKey(key);
     waiter.* = .{
         .key = key,
@@ -2753,11 +3342,22 @@ pub fn qjsAtomicsWaitAsync(
         .realm = core.RealmRef.retain(ctx),
         .deadline = deadline,
     };
+    var waiter_owned = true;
+    errdefer if (waiter_owned) atomicsDestroyAsyncWaiter(waiter);
+
+    // The result wrapper is observable publication of this wait. Finish every
+    // fallible allocation before linking the node into the cross-runtime
+    // waiter registry; otherwise an OOM here leaves an unreachable Promise and
+    // RealmRef behind until context teardown.
+    const result = try atomicsWaitAsyncResult(ctx, true, promise);
     atomicsLinkAsyncWaiter(waiter);
-    return atomicsWaitAsyncResult(ctx, true, promise);
+    waiter_owned = false;
+    return result;
 }
 
 pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
+    const ctx = waiter.realm.borrow().?;
+    ctx.runtime.assertOwnerThread();
     const io = atomicsWaiterIo();
     call_runtime.atomics_waiter_mutex.lockUncancelable(io);
     defer call_runtime.atomics_waiter_mutex.unlock(io);
@@ -2789,19 +3389,13 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_payload = core.JSValue.functionBytecode(&fb.header);
     var payload_alive = true;
@@ -2820,7 +3414,7 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     const value_key = try rt.internAtom("value");
     defer rt.atoms.free(value_key);
     {
-        const stored = result.getProperty(value_key);
+        const stored = try result.getProperty(value_key);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_payload));
     }
@@ -2843,7 +3437,7 @@ pub fn qjsAsyncFunctionStart(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) HostError!core.JSValue {
-    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
     errdefer promise.free(ctx.runtime);
 
     const continuation_value = try createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, false);
@@ -2866,8 +3460,6 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.generatorFunctionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    var nested_view = bytecode.makeBytecodeView(fb, &ctx.runtime.memory, &ctx.runtime.atoms);
-    const nested = &nested_view;
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
     defer continuation.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
@@ -2878,11 +3470,11 @@ pub fn qjsAsyncFunctionRunState(
 
     const async_global = objectRealmGlobal(continuation) orelse global;
     const current_function_value = continuation.generatorCurrentFunction() orelse continuation.value();
-    const fb_runtime_strict = fb.flags.is_strict_mode or fb.flags.runtime_strict_mode;
+    const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
     return runWithCallEnv(.{
         .ctx = ctx,
         .stack = &nested_stack,
-        .function = nested,
+        .function = fb,
         .initial_this_value = continuation.generatorThis() orelse core.JSValue.undefinedValue(),
         .args = continuation.generatorArgs(),
         .var_refs = continuation.generatorCaptures(),
@@ -2932,7 +3524,7 @@ pub fn qjsAsyncFunctionAwaitOrReject(
     global: *core.Object,
     continuation: *core.Object,
     awaited_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     qjsAsyncFunctionAwait(ctx, output, global, continuation, awaited_value, caller_function, caller_frame) catch |err| {
@@ -2955,7 +3547,7 @@ pub fn qjsAsyncFunctionAwait(
     global: *core.Object,
     continuation: *core.Object,
     awaited_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     const promise_constructor = try qjsPromiseDefaultConstructor(ctx, global);
@@ -2996,7 +3588,7 @@ pub fn qjsAsyncFunctionResumeCallbackCall(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     const continuation_value = function_object.functionAsyncContinuation() orelse return null;
@@ -3016,7 +3608,7 @@ pub fn qjsAsyncFunctionSettle(
     continuation: *core.Object,
     value: core.JSValue,
     rejected: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!void {
     var rooted_value = value;
@@ -3042,9 +3634,7 @@ pub fn qjsAsyncFunctionSettle(
 test "qjsAsyncFunctionSettle roots direct symbol result before promise stores it" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.global_object, null);
-    _ = try global.ensureGlobalPayload(rt);
-    ctx.global = global;
+    const global = try testStandardGlobal(ctx);
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
     defer {
         continuation.value().free(rt);
@@ -3052,7 +3642,7 @@ test "qjsAsyncFunctionSettle roots direct symbol result before promise stores it
         rt.destroy();
     }
 
-    const promise = try core.promise.constructWithPrototype(rt, promisePrototypeFromGlobal(rt, global));
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
     defer promise.free(rt);
     try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise.dup());
 
@@ -3101,7 +3691,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
     global: *core.Object,
     receiver: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!function_object.isAsyncIteratorAsyncDisposeFunction()) return null;
@@ -3113,7 +3703,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
     };
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) {
-        return try core.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
+        return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) {
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
@@ -3130,7 +3720,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
         // Adopt the (possibly pending) inner promise through a real reaction —
         // the dispose promise settles only when `.return()`'s promise does
         // (no in-VM draining/sleeping; jobs are host-pumped).
-        const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+        const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
         errdefer promise.free(ctx.runtime);
         const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
         defer resolving.resolve.free(ctx.runtime);
@@ -3138,7 +3728,7 @@ pub fn qjsAsyncIteratorAsyncDispose(
         try qjsPerformPromiseThen(ctx, output, global, result, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), resolving.resolve, resolving.reject);
         return promise;
     }
-    return try core.promise.fulfilledWithPrototype(ctx.runtime, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
+    return try core.promise.fulfilledWithPrototype(ctx, core.JSValue.undefinedValue(), promisePrototypeFromGlobal(ctx.runtime, global));
 }
 
 pub fn qjsAsyncFromSyncIteratorMethodCall(
@@ -3148,7 +3738,7 @@ pub fn qjsAsyncFromSyncIteratorMethodCall(
     receiver: core.JSValue,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const method_id = function_object.asyncFromSyncIteratorMethod();
@@ -3174,7 +3764,7 @@ pub fn qjsAsyncFromSyncIteratorThrow(
     wrapper: *core.Object,
     sync_iterator: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = wrapper;
@@ -3193,12 +3783,12 @@ pub fn qjsAsyncFromSyncIteratorThrow(
         };
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
         defer reason.free(ctx.runtime);
-        return core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+        return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(throw_method)) {
         const reason = try exception_ops.createNamedError(ctx, global, "TypeError", "throw is not a method");
         defer reason.free(ctx.runtime);
-        return core.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
+        return core.promise.rejectedWithPrototype(ctx, reason, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     const result = if (args.len > 0)
         callValueOrBytecode(ctx, output, global, sync_iterator, throw_method, args[0..1], caller_function, caller_frame)
@@ -3254,7 +3844,7 @@ pub fn qjsAsyncFromSyncIteratorNext(
     wrapper: *core.Object,
     sync_iterator: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const next_method = if (wrapper.iteratorNext()) |stored| stored.dup() else blk: {
@@ -3285,7 +3875,7 @@ pub fn qjsAsyncFromSyncIteratorReturn(
     wrapper: *core.Object,
     sync_iterator: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = wrapper;
@@ -3296,7 +3886,7 @@ pub fn qjsAsyncFromSyncIteratorReturn(
     if (return_method.isUndefined() or return_method.isNull()) {
         const done_result = try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
-        return core.promise.fulfilledWithPrototype(ctx.runtime, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
+        return core.promise.fulfilledWithPrototype(ctx, done_result, promisePrototypeFromGlobal(ctx.runtime, global));
     }
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = if (args.len > 0)
@@ -3317,7 +3907,7 @@ pub fn qjsAsyncFromSyncIteratorContinuation(
     result: core.JSValue,
     sync_iterator: core.JSValue,
     close_on_rejection: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var capability = try qjsDefaultPromiseCapability(ctx, output, global, caller_function, caller_frame);
@@ -3453,11 +4043,10 @@ pub fn qjsPromiseFinallyCallback(
 
 test "qjsPromiseFinallyCallback roots direct symbol payload while allocating callback" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer {
-        global.value().free(rt);
-        rt.destroy();
-    }
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-finally-payload-symbol");
     const old_threshold = rt.gcThreshold();
@@ -3497,7 +4086,7 @@ pub fn qjsPromiseFinallyCallbackCall(
     global: *core.Object,
     function_object: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const mode: PromiseFinallyCallbackMode = switch (function_object.functionPromiseFinallyMode()) {
@@ -3555,7 +4144,7 @@ pub fn qjsPromiseFinally(
     global: *core.Object,
     receiver: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const constructor_value = try qjsPromiseSpeciesConstructor(ctx, output, global, receiver, caller_function, caller_frame);
@@ -3597,14 +4186,14 @@ pub fn qjsPerformPromiseThen(
     reject_value: core.JSValue,
 ) !void {
     _ = output;
+    _ = global;
     const object = objectFromValue(receiver) orelse return error.TypeError;
     if (object.class_id != core.class.ids.promise) return error.TypeError;
-    try processExpiredAtomicsWaiters(ctx);
     // zjs-specific Atomics.waitAsync promises settle through the lazy
-    // promiseReactionCallback machinery only (atomicsSettleAsyncWaiter never
-    // fires the reactions list, it may run cross-thread from a notify); keep
-    // the same fast path qjsPromiseThen uses so awaiting a waitAsync promise
-    // still resumes.
+    // promiseReactionCallback machinery. Foreign notify only publishes a
+    // scalar winner; the typed Runtime FIFO completion later installs the
+    // reaction argument on the owner thread. Keep the same fast path
+    // qjsPromiseThen uses so awaiting a waitAsync promise still resumes.
     if (object.promiseResultSlot().* == null and !object.promiseIsRejected() and
         qjsAtomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled))
     {
@@ -3612,20 +4201,86 @@ pub fn qjsPerformPromiseThen(
         try object.setPromiseReactionArg(ctx.runtime, null);
         return;
     }
-    if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
-    const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, resolve_value, reject_value);
+    const stored_on_fulfilled = if (isCallableValue(on_fulfilled)) on_fulfilled else core.JSValue.undefinedValue();
+    const stored_on_rejected = if (isCallableValue(on_rejected)) on_rejected else core.JSValue.undefinedValue();
+    const reaction = try qjsPromiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, resolve_value, reject_value);
     defer reaction.free(ctx.runtime);
     if (object.promiseResultSlot().* == null) {
         try qjsAppendPromiseReaction(ctx.runtime, object, reaction);
+        if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
         return;
     }
 
     const result_value = if (object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result_value.free(ctx.runtime);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
-    const job = try qjsPromiseReactionJob(ctx.runtime, global, reaction_object, result_value, object.promiseIsRejected());
-    defer job.free(ctx.runtime);
-    try enqueuePendingPromiseJob(ctx, job);
+    const rejected = object.promiseIsRejected();
+    var prepared_job = try ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job_owned = true;
+    defer if (prepared_job_owned) prepared_job.deinit();
+    try ctx.runtime.job_queue.reserveEntries(1);
+    var job_slot_reserved = true;
+    defer if (job_slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
+
+    // QJS prepares reaction data before the handled tracker notification, then
+    // performs only no-fail publication. Preserve that phase boundary: an OOM
+    // above leaves the original rejection tracked and no phantom handled state.
+    if (rejected) core.promise.markHandled(ctx, object);
+    ctx.runtime.job_queue.enqueueReserved(prepared_job);
+    prepared_job_owned = false;
+    job_slot_reserved = false;
+}
+
+test "already-rejected Promise remains tracked when then preparation OOMs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    @import("standard_globals.zig").configureRuntime(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    defer rt.setMemoryLimit(null);
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    const reason = core.JSValue.int32(73);
+    const promise_value = try core.promise.rejectedWithUnhandledPrototype(ctx, reason, null);
+    defer promise_value.free(rt);
+    try std.testing.expect(ctx.hasUnhandledRejection());
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expect(ctx.runtime.current_exception.sameValue(reason));
+
+    const baseline = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(baseline);
+    try std.testing.expectError(error.OutOfMemory, qjsPerformPromiseThen(
+        ctx,
+        null,
+        global,
+        promise_value,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    ));
+    try std.testing.expect(ctx.hasUnhandledRejection());
+    try std.testing.expect(ctx.hasException());
+    try std.testing.expect(ctx.runtime.current_exception.sameValue(reason));
+    try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
+    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+
+    rt.setMemoryLimit(null);
+    try qjsPerformPromiseThen(
+        ctx,
+        null,
+        global,
+        promise_value,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    try std.testing.expect(!ctx.hasUnhandledRejection());
+    try std.testing.expect(!ctx.hasException());
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
 }
 
 pub fn qjsPromiseThen(
@@ -3635,7 +4290,7 @@ pub fn qjsPromiseThen(
     receiver: core.JSValue,
     method_name: []const u8,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const is_catch = std.mem.eql(u8, method_name, "catch");
@@ -3658,14 +4313,14 @@ pub fn qjsPromiseThen(
         if (is_catch) return try qjsPromiseCatchGeneric(ctx, output, global, receiver, args);
         return error.TypeError;
     }
-    try processExpiredAtomicsWaiters(ctx);
     const constructor_value = try qjsPromiseSpeciesConstructor(ctx, output, global, receiver, caller_function, caller_frame);
     defer constructor_value.free(ctx.runtime);
     var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
-    if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
     const on_fulfilled = if (is_catch) core.JSValue.undefinedValue() else if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const on_rejected = if (is_catch) (if (args.len >= 1) args[0] else core.JSValue.undefinedValue()) else if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const stored_on_fulfilled = if (isCallableValue(on_fulfilled)) on_fulfilled else core.JSValue.undefinedValue();
+    const stored_on_rejected = if (isCallableValue(on_rejected)) on_rejected else core.JSValue.undefinedValue();
     if (object.promiseResultSlot().* == null) {
         if (!object.promiseIsRejected() and qjsAtomicsWaitAsyncPromise(ctx.runtime, object) and isCallableValue(on_fulfilled)) {
             try object.setPromiseReactionCallback(ctx.runtime, on_fulfilled.dup());
@@ -3680,22 +4335,33 @@ pub fn qjsPromiseThen(
             const chain_reaction = try qjsPromiseReactionRecord(ctx.runtime, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), capability.resolve, capability.reject);
             defer chain_reaction.free(ctx.runtime);
             try qjsAppendPromiseReaction(ctx.runtime, object, chain_reaction);
+            if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
             return capability.releaseCallbacks(ctx.runtime);
         }
-        const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, capability.resolve, capability.reject);
+        const reaction = try qjsPromiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
         defer reaction.free(ctx.runtime);
         try qjsAppendPromiseReaction(ctx.runtime, object, reaction);
+        if (object.promiseIsRejected()) core.promise.markHandled(ctx, object);
         return capability.releaseCallbacks(ctx.runtime);
     }
     const result_value = if (object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result_value.free(ctx.runtime);
 
-    const reaction = try qjsPromiseReactionRecord(ctx.runtime, on_fulfilled, on_rejected, capability.resolve, capability.reject);
+    const reaction = try qjsPromiseReactionRecord(ctx.runtime, stored_on_fulfilled, stored_on_rejected, capability.resolve, capability.reject);
     defer reaction.free(ctx.runtime);
     const reaction_object = objectFromValue(reaction) orelse return error.TypeError;
-    const job = try qjsPromiseReactionJob(ctx.runtime, global, reaction_object, result_value, object.promiseIsRejected());
-    defer job.free(ctx.runtime);
-    try enqueuePendingPromiseJob(ctx, job);
+    const rejected = object.promiseIsRejected();
+    var prepared_job = try ctx.runtime.job_queue.preparePromiseReaction(ctx, reaction_object.value(), result_value, rejected);
+    var prepared_job_owned = true;
+    defer if (prepared_job_owned) prepared_job.deinit();
+    try ctx.runtime.job_queue.reserveEntries(1);
+    var job_slot_reserved = true;
+    defer if (job_slot_reserved) ctx.runtime.job_queue.releaseReservedEntries(1);
+
+    if (rejected) core.promise.markHandled(ctx, object);
+    ctx.runtime.job_queue.enqueueReserved(prepared_job);
+    prepared_job_owned = false;
+    job_slot_reserved = false;
     return capability.releaseCallbacks(ctx.runtime);
 }
 
@@ -3723,7 +4389,6 @@ pub fn settlePendingPromiseReaction(
     promise: *core.Object,
 ) !void {
     const callback = promise.promiseReactionCallback() orelse return;
-    const callback_is_thenable_job = qjsPromiseThenableJobPending(callback);
     var callback_value = callback.dup();
     defer callback_value.free(ctx.runtime);
     var arg = if (promise.promiseReactionArg()) |stored| stored.dup() else core.JSValue.undefinedValue();
@@ -3751,11 +4416,8 @@ pub fn settlePendingPromiseReaction(
         const next_result = if (rejected_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         var next_result_owned = true;
         defer if (next_result_owned) next_result.free(ctx.runtime);
-        var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, next_result, is_rejected);
+        var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, promise, next_result, is_rejected);
         errdefer prepared_reactions.deinit(ctx.runtime);
-        var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-        prepared_root.init(ctx.runtime, &prepared_reactions);
-        defer prepared_root.deinit();
         promise.promiseIsRejectedSlot().* = is_rejected;
         try promise.setPromiseResult(ctx.runtime, next_result);
         next_result_owned = false;
@@ -3763,18 +4425,15 @@ pub fn settlePendingPromiseReaction(
         return;
     };
     defer callback_result.free(ctx.runtime);
-    if (callback_is_thenable_job or promise.promiseResult() != null or promise.promiseReactionCallback() != null) return;
+    if (promise.promiseResult() != null or promise.promiseReactionCallback() != null) return;
     if (promise.promiseResult()) |stored| stored.free(ctx.runtime);
     if (objectFromValue(callback_result)) |result_promise| {
         if (result_promise.class_id == core.class.ids.promise and result_promise.promiseIsRejected()) {
             const next_result = if (result_promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             var next_result_owned = true;
             defer if (next_result_owned) next_result.free(ctx.runtime);
-            var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, next_result, true);
+            var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, promise, next_result, true);
             errdefer prepared_reactions.deinit(ctx.runtime);
-            var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-            prepared_root.init(ctx.runtime, &prepared_reactions);
-            defer prepared_root.deinit();
             try promise.setPromiseResult(ctx.runtime, next_result);
             next_result_owned = false;
             promise.promiseIsRejectedSlot().* = true;
@@ -3782,11 +4441,8 @@ pub fn settlePendingPromiseReaction(
             return;
         }
     }
-    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, callback_result, false);
+    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, promise, callback_result, false);
     errdefer prepared_reactions.deinit(ctx.runtime);
-    var prepared_root: PreparedPromiseReactionJobsRoot = .{};
-    prepared_root.init(ctx.runtime, &prepared_reactions);
-    defer prepared_root.deinit();
     try promise.setPromiseResult(ctx.runtime, callback_result.dup());
     promise.promiseIsRejectedSlot().* = false;
     prepared_reactions.commit(ctx, promise);
@@ -3795,9 +4451,7 @@ pub fn settlePendingPromiseReaction(
 test "settlePendingPromiseReaction roots callback and arg after clearing promise slots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.global_object, null);
-    _ = try global.ensureGlobalPayload(rt);
-    ctx.global = global;
+    const global = try testStandardGlobal(ctx);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
         promise.value().free(rt);
@@ -3805,20 +4459,17 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
         rt.destroy();
     }
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = ctx,
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
-    fb.cpool[0] = try rt.symbolValue(callback_symbol);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(callback_symbol);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var callback = core.JSValue.functionBytecode(&fb.header);
     var callback_alive = true;
@@ -3860,11 +4511,14 @@ pub fn awaitPendingPromise(
     if (!ctx.runtime.canBlock()) return;
     if (!qjsAtomicsWaitAsyncPromise(ctx.runtime, promise)) return;
 
-    const io = atomicsWaiterIo();
     while (promise.promiseResultSlot().* == null) {
-        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-        try processExpiredAtomicsWaiters(ctx);
-        try settlePendingPromiseReaction(ctx, output, global, promise);
+        while (true) switch (try drainOnePendingJob(ctx, output, global)) {
+            .empty => break,
+            .success => {},
+            .exception => return error.JSException,
+        };
+        if (promise.promiseResultSlot().* != null) break;
+        if (!try runNextAtomicsHostCompletion(ctx, true)) return;
     }
 }
 
@@ -3872,82 +4526,175 @@ pub fn drainPendingPromiseJobs(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-) !void {
+) HostError!void {
     while (true) {
-        while (try drainOnePendingJob(ctx, output, global)) {}
+        while (true) switch (try drainOnePendingJob(ctx, output, global)) {
+            .empty => break,
+            .success => {},
+            .exception => return error.JSException,
+        };
         if (try call_mod.runNextOsSignalHandler(ctx, output, global)) continue;
         if (try runNextOsRwHandler(ctx, output, global)) continue;
-        if (!try runNextOsTimer(ctx, output, global)) break;
+        if (try runNextOsTimer(ctx, output, global)) continue;
+        if (try runNextAtomicsHostCompletion(ctx, false)) continue;
+        break;
     }
 }
 
-/// Execute exactly one promise/finalization job, preserving the global job
-/// sequence. The ordinary host drain loops over this helper; the module
-/// evaluator alternates it with TLA resume reactions.
+fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
+    if (payload.phase == .invoke) return false;
+    const reaction = objectFromValue(payload.reaction) orelse return false;
+    const settle = switch (payload.phase) {
+        .invoke => unreachable,
+        .resolve => reaction.promiseReactionResolve(),
+        .reject => reaction.promiseReactionReject(),
+    } orelse return false;
+    const function = objectFromValue(settle) orelse return false;
+    return function.internalCallableTag() == .promise_resolving;
+}
+
+/// Execute exactly one typed ECMAScript FIFO entry. The host context selects
+/// the Runtime only; the entry's owned RealmRef selects the execution realm.
 pub fn drainOnePendingJob(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-) !bool {
+) HostError!jobs_mod.RunOneStatus {
+    _ = global;
     try processExpiredAtomicsWaiters(ctx);
-    const promise_sequence = ctx.peekPendingPromiseJobSequence();
-    const finalization_sequence = ctx.runtime.peekPendingFinalizationJobSequence();
-    if (promise_sequence == null and finalization_sequence == null) return false;
+    if (!ctx.runtime.job_queue.hasJobs()) return .empty;
 
-    if (finalization_sequence != null and (promise_sequence == null or finalization_sequence.? < promise_sequence.?)) {
-        var cleanup_job = ctx.runtime.takePendingFinalizationJob().?;
-        defer cleanup_job.deinit(ctx.runtime);
-        const job_ctx = cleanup_job.realm.borrow() orelse ctx;
-        const job_global = if (cleanup_job.realm.borrow() != null) job_ctx.global orelse return error.InvalidBuiltinRegistry else global;
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &cleanup_job.callback },
-            .{ .value = &cleanup_job.held_value },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
-
-        const result = try callValueOrBytecode(job_ctx, output, job_global, core.JSValue.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
-        result.free(job_ctx.runtime);
-        try pollGCSafePoint(job_ctx);
-        return true;
-    }
-
-    var pending_job = ctx.takePendingPromiseJob().?;
-    defer pending_job.deinit(ctx.runtime);
-    const job_ctx = pending_job.realm.borrow() orelse unreachable;
+    var entry = ctx.runtime.job_queue.takeFirst().?;
+    var entry_owned = true;
+    defer if (entry_owned) entry.deinit();
+    const job_ctx = entry.realm.borrow() orelse unreachable;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
-    const job = pending_job.value;
-    const promise = objectFromValue(job) orelse {
-        if (isCallableValue(job)) {
-            const result = try callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null);
-            result.free(job_ctx.runtime);
-            try pollGCSafePoint(job_ctx);
-        }
-        return true;
+    var result: ?core.JSValue = null;
+    switch (entry.payload) {
+        .generic => {
+            result = entry.run();
+        },
+        .promise => |*payload| {
+            const job = payload.value;
+            if (objectFromValue(job)) |object| {
+                if (object.class_id == core.class.ids.promise) {
+                    settlePendingPromiseReaction(job_ctx, output, job_global, object) catch |err| {
+                        if (job_ctx.hasException()) return .exception;
+                        return err;
+                    };
+                } else if (isCallableValue(job)) {
+                    result = callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                        if (job_ctx.hasException()) return .exception;
+                        return err;
+                    };
+                }
+            } else if (isCallableValue(job)) {
+                result = callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                    if (job_ctx.hasException()) return .exception;
+                    return err;
+                };
+            }
+        },
+        .promise_reaction => |*payload| {
+            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
+            result = qjsPromiseReactionJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
+                if (err == error.OutOfMemory and promiseReactionInternalSettleCanRetry(payload)) {
+                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    ctx.runtime.job_queue.prependReserved(entry);
+                    entry_owned = false;
+                    return err;
+                }
+                ctx.runtime.job_queue.releaseReservedEntries(1);
+                if (job_ctx.hasException()) return .exception;
+                return err;
+            };
+            ctx.runtime.job_queue.releaseReservedEntries(1);
+            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+        },
+        .promise_thenable => |*payload| {
+            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
+            result = qjsPromiseThenableJobCall(job_ctx, output, job_global, payload, null, null) catch |err| {
+                if (err == error.OutOfMemory) {
+                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    ctx.runtime.job_queue.prependReserved(entry);
+                    entry_owned = false;
+                    return err;
+                }
+                ctx.runtime.job_queue.releaseReservedEntries(1);
+                if (job_ctx.hasException()) return .exception;
+                return err;
+            };
+            ctx.runtime.job_queue.releaseReservedEntries(1);
+            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+        },
+        .promise_settlement => |*payload| {
+            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
+            qjsPromiseSettlementJobCall(job_ctx, job_global, payload) catch |err| {
+                if (err == error.OutOfMemory) {
+                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    ctx.runtime.job_queue.prependReserved(entry);
+                    entry_owned = false;
+                    return err;
+                }
+                ctx.runtime.job_queue.releaseReservedEntries(1);
+                if (job_ctx.hasException()) return .exception;
+                return err;
+            };
+            ctx.runtime.job_queue.releaseReservedEntries(1);
+            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+        },
+        .dynamic_import => |*payload| {
+            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
+            result = payload.runner(job_ctx, output, payload) catch |err| {
+                if (err == error.OutOfMemory) {
+                    std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                    ctx.runtime.job_queue.prependReserved(entry);
+                    entry_owned = false;
+                    return err;
+                }
+                ctx.runtime.job_queue.releaseReservedEntries(1);
+                if (job_ctx.hasException()) return .exception;
+                return err;
+            };
+            ctx.runtime.job_queue.releaseReservedEntries(1);
+            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+        },
+        .atomics_waiter => |*payload| {
+            const reservations_before = ctx.runtime.job_queue.reserved_entries;
+            ctx.runtime.job_queue.reserveUnlinkedEntrySlot();
+            payload.runner(job_ctx, payload) catch |err| {
+                std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before + 1);
+                ctx.runtime.job_queue.prependReserved(entry);
+                entry_owned = false;
+                return err;
+            };
+            std.debug.assert(ctx.runtime.job_queue.reserved_entries == reservations_before);
+        },
+        .finalization => |*payload| {
+            result = callValueOrBytecode(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {
+                if (job_ctx.hasException()) return .exception;
+                return err;
+            };
+        },
+    }
+    if (result) |value| {
+        const status: jobs_mod.RunOneStatus = if (value.isException()) .exception else .success;
+        value.free(job_ctx.runtime);
+        if (status == .exception) return .exception;
+    }
+    pollGCSafePoint(job_ctx) catch |err| {
+        if (job_ctx.hasException()) return .exception;
+        return err;
     };
-    if (promise.class_id == core.class.ids.promise) {
-        try settlePendingPromiseReaction(job_ctx, output, job_global, promise);
-        try pollGCSafePoint(job_ctx);
-        return true;
-    }
-    if (isCallableValue(job)) {
-        const result = try callValueOrBytecode(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null);
-        result.free(job_ctx.runtime);
-        try pollGCSafePoint(job_ctx);
-    }
-    return true;
+    return .success;
 }
 
 pub fn enqueuePendingPromiseJob(ctx: *core.JSContext, promise: core.JSValue) !void {
-    const index = ctx.runtime.pending_promise_jobs.len;
-    try ctx.ensurePendingPromiseJobCapacity(index + 1);
-    const job = try core.context.PendingPromiseJob.init(ctx, ctx.runtime.nextJobSequence(), promise);
-    ctx.runtime.pending_promise_jobs = ctx.runtime.pending_promise_jobs.ptr[0 .. index + 1];
-    ctx.runtime.pending_promise_jobs[index] = job;
+    try ctx.runtime.job_queue.enqueuePromise(ctx, promise);
 }
 
 pub fn awaitThenableValue(
@@ -3955,9 +4702,9 @@ pub fn awaitThenableValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     awaited: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
+) HostError!?core.JSValue {
     const awaited_object = objectFromValue(awaited) orelse return null;
     if (awaited_object.class_id == core.class.ids.promise) return null;
 
@@ -3967,7 +4714,7 @@ pub fn awaitThenableValue(
     defer then_value.free(ctx.runtime);
     if (!isCallableValue(then_value)) return null;
 
-    const promise = try core.promise.constructWithPrototype(ctx.runtime, promisePrototypeFromGlobal(ctx.runtime, global));
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
     defer promise.free(ctx.runtime);
     const promise_object = objectFromValue(promise) orelse return error.TypeError;
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, promise);
@@ -3977,7 +4724,7 @@ pub fn awaitThenableValue(
     defer reject.free(ctx.runtime);
 
     const then_result = callValueOrBytecode(ctx, output, global, awaited, then_value, &.{ resolve, reject }, caller_function, caller_frame) catch |err| {
-        var reason = promiseRejectionReason(ctx, global, err);
+        var reason = try promiseRejectionReason(ctx, global, err);
         defer reason.deinit(ctx.runtime);
         try promise_object.setPromiseResult(ctx.runtime, reason.value);
         reason.value = core.JSValue.undefinedValue();
@@ -3991,7 +4738,7 @@ pub fn awaitThenableValue(
     // (js_promise_resolve_function_call -> JS_EnqueueJob). This helper serves
     // the drain-model await paths (async generators / module TLA), which
     // synchronously run the pending queue until the awaited promise settles.
-    if (promise_object.promiseResultSlot().* == null and ctx.runtime.pending_promise_jobs.len != 0) {
+    if (promise_object.promiseResultSlot().* == null and ctx.runtime.job_queue.jobs.len != 0) {
         try drainPendingPromiseJobs(ctx, output, global);
     }
     return try finishAwaitedPromise(ctx, promise_object);
@@ -4079,7 +4826,6 @@ test "promise enqueues reactions and executes jobs via engine" {
     promise_jobs = 0;
     try core.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
 
-    rt.job_queue.runAll();
     try drainPendingPromiseJobs(ctx, null, global);
 
     try std.testing.expectEqual(@as(usize, 3), promise_jobs);

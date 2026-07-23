@@ -225,6 +225,26 @@ test "production embedding can create external host function values" {
     const prototype = try ctx.getProperty(function, "prototype");
     defer prototype.free(rt);
     try std.testing.expect(prototype.isObject());
+
+    const global = try ctx.globalObject();
+    try ctx.defineDataProperty(global.value(), "HostCtor", function, .{});
+    const surface = try ctx.eval(
+        \\var prototypeDescriptor = Object.getOwnPropertyDescriptor(HostCtor, "prototype");
+        \\var constructorDescriptor = Object.getOwnPropertyDescriptor(HostCtor.prototype, "constructor");
+        \\if (Object.getPrototypeOf(HostCtor) !== Function.prototype ||
+        \\    Object.getPrototypeOf(HostCtor.prototype) !== Object.prototype ||
+        \\    prototypeDescriptor.writable !== true ||
+        \\    prototypeDescriptor.enumerable !== false ||
+        \\    prototypeDescriptor.configurable !== false ||
+        \\    constructorDescriptor.value !== HostCtor ||
+        \\    constructorDescriptor.writable !== true ||
+        \\    constructorDescriptor.enumerable !== false ||
+        \\    constructorDescriptor.configurable !== true) {
+        \\    throw new Error("invalid external constructor surface");
+        \\}
+    , .{});
+    defer surface.free(rt);
+    try std.testing.expect(surface.isUndefined());
 }
 
 test "production embedding can create objects and define data properties" {
@@ -653,6 +673,32 @@ test "production embedding lifecycle deinitializes repeated script and module ev
         , .{ .mode = .module });
         defer module_result.free(rt);
     }
+}
+
+test "production module import.meta identity survives methods and nested closures" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try ctx.eval(
+        \\const rootMeta = import.meta;
+        \\class Holder {
+        \\  read() { return import.meta; }
+        \\}
+        \\function nested() {
+        \\  const arrow = () => import.meta;
+        \\  return [import.meta, arrow()];
+        \\}
+        \\const [nestedMeta, arrowMeta] = nested();
+        \\if (new Holder().read() !== rootMeta ||
+        \\    nestedMeta !== rootMeta ||
+        \\    arrowMeta !== rootMeta) {
+        \\  throw new Error("import.meta identity escaped its module");
+        \\}
+    , .{ .mode = .module });
+    defer result.free(rt);
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {

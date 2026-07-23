@@ -277,7 +277,7 @@ fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8
 fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    const value = object.getProperty(key);
+    const value = try object.getProperty(key);
     defer value.free(rt);
     return value.asInt32() orelse error.TypeError;
 }
@@ -382,19 +382,13 @@ test "closure iteratorResult roots direct function bytecode value while creating
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -413,7 +407,7 @@ test "closure iteratorResult roots direct function bytecode value while creating
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
     {
-        const stored = iterator_result.getProperty(value_atom);
+        const stored = try iterator_result.getProperty(value_atom);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
@@ -432,19 +426,13 @@ const TestFunctionBytecodeValue = struct {
 };
 
 fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8) !TestFunctionBytecodeValue {
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     return .{
         .value = core.JSValue.functionBytecode(&fb.header),
@@ -455,13 +443,13 @@ fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8)
 fn expectObjectPropertySame(rt: *core.JSRuntime, object: *core.Object, name: []const u8, expected: core.JSValue) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const stored = object.getProperty(atom_id);
+    const stored = try object.getProperty(atom_id);
     defer stored.free(rt);
     try std.testing.expect(stored.same(expected));
 }
 
 fn expectArrayIndexSame(rt: *core.JSRuntime, array: *core.Object, index: u32, expected: core.JSValue) !void {
-    const stored = array.getProperty(core.atom.atomFromUInt32(index));
+    const stored = try array.getProperty(core.atom.atomFromUInt32(index));
     defer stored.free(rt);
     try std.testing.expect(stored.same(expected));
 }
@@ -500,7 +488,7 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
     try std.testing.expect(rt.atoms.name(record_this.symbol_atom) != null);
 
     {
-        const stored_record_value = results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_record_value.free(rt);
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "value", record_value.value);
@@ -557,7 +545,7 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
     try std.testing.expect(rt.atoms.name(record_this.symbol_atom) != null);
 
     {
-        const stored_record_value = results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_record_value = try results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_record_value.free(rt);
         const stored_record = try expectObject(stored_record_value);
         try expectObjectPropertySame(rt, stored_record, "_this", record_this.value);
@@ -610,7 +598,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     try std.testing.expect(rt.atoms.name(pair_value.symbol_atom) != null);
 
     {
-        const stored_pair_value = results.getProperty(core.atom.atomFromUInt32(0));
+        const stored_pair_value = try results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_pair_value.free(rt);
         const stored_pair = try core.array.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
@@ -863,12 +851,12 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     defer expects_value.free(rt);
     const expects = try core.array.expectArray(expects_value);
     if (expects.arrayLength() == 0) return error.JSException;
-    const expected = expects.getProperty(core.atom.atomFromUInt32(0));
+    const expected = try expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
     if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.arrayLength()) : (index += 1) {
-        const next = expects.getProperty(core.atom.atomFromUInt32(index));
+        const next = try expects.getProperty(core.atom.atomFromUInt32(index));
         defer next.free(rt);
         try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
     }
@@ -1028,7 +1016,7 @@ fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
     const global = try getGlobalThisObject(rt, globals);
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    return global.getProperty(key);
+    return try global.getProperty(key);
 }
 
 fn getGlobalThisValue(rt: *core.JSRuntime, globals: []globals_mod.Slot) !core.JSValue {

@@ -17,13 +17,13 @@ Active configuration:
 Run the gate through Zig:
 
 ```sh
-zig build test262-gate --summary all
+zig build test262-gate --seed 0 --summary all
 ```
 
 Or invoke the runner directly:
 
 ```sh
-zig build run-test262 --summary all
+zig build run-test262 --seed 0 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
@@ -95,8 +95,8 @@ upstream QuickJS:
 Common checks:
 
 ```sh
-zig build test --summary all
-zig build smoke --summary all
+zig build test --seed 0 --summary all
+zig build smoke --seed 0 --summary all
 git diff --check
 ```
 
@@ -117,10 +117,10 @@ The engine-only Production v1 compatibility target is QuickJS parity within the
 repository validation profile. Required gates from a clean checkout:
 
 ```sh
-zig build test --summary all
-zig build test -Doptimize=ReleaseSafe --summary all
-zig build test262-gate --summary all
-zig build engine-production-gate --summary all
+zig build test --seed 0 --summary all
+zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+zig build test262-gate --seed 0 --summary all
+zig build engine-production-gate --seed 0 --summary all
 git diff --check
 ```
 

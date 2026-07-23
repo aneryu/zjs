@@ -68,7 +68,7 @@ const DataSlot = struct {
 };
 
 pub inline fn dataPropertyValueForFastPath(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
     receiver: core.JSValue,
@@ -98,7 +98,7 @@ pub inline fn dataPropertyValueForFastPath(
 /// falls through to the cold `field` handler, which performs the full shape-hash
 /// lookup directly. The signature is retained for ABI stability with callers.
 pub inline fn cachedDataPropertyValueForFastPath(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
     receiver: core.JSValue,
@@ -118,7 +118,7 @@ pub fn functionOwnDataPropertyValueForFastPath(rt: *core.JSRuntime, value: core.
 }
 
 pub fn functionOwnNativeBuiltinRefForFastPath(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
     value: core.JSValue,
@@ -138,7 +138,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
                 return nativeBuiltinRefFromFunctionValue(object.prop_values[index].slot.data);
             },
             .auto_init => {
-                const materialized = object.getProperty(atom_id);
+                const materialized = try object.getProperty(atom_id);
                 defer materialized.free(rt);
                 return nativeBuiltinRefFromFunctionValue(materialized);
             },
@@ -162,15 +162,28 @@ fn nativeBuiltinRefFromFunctionValue(value: core.JSValue) ?core.function.NativeB
 
 fn isFunctionLikeClassId(class_id: core.ClassId) bool {
     return class_id == core.class.ids.c_function or
-        class_id == core.class.ids.bytecode_function or
+        core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
         class_id == core.class.ids.c_closure;
 }
 
+test "function-like class predicate recognizes every bytecode function class" {
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        try std.testing.expect(isFunctionLikeClassId(class_id));
+    }
+    try std.testing.expect(!isFunctionLikeClassId(core.class.ids.object));
+}
+
 pub fn setObjectDataPropertyForPutFieldFastPath(
     rt: *core.JSRuntime,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     receiver: core.JSValue,
     atom_id: core.Atom,
@@ -187,7 +200,7 @@ pub fn setObjectDataPropertyForPutFieldFastPath(
 /// `setObjectDataPropertyForPutFieldFastPath` (simple-put + slow path). The
 /// signature is retained for ABI stability with callers.
 pub inline fn cachedSetObjectDataPropertyForPutFastPath(
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     rt: *core.JSRuntime,
     receiver: core.JSValue,
@@ -289,7 +302,7 @@ fn plainObjectDataPropertyFastPathReceiver(object: *core.Object) bool {
     return object.class_id == core.class.ids.object and !object.isArray() and !object.isGlobal();
 }
 
-pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
+pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.hasExoticMethods()) return null;
@@ -301,7 +314,7 @@ pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: c
         .slow => {},
     }
 
-    const desc = object.getOwnProperty(rt, atom_id) orelse return null;
+    const desc = (try object.getOwnProperty(rt, atom_id)) orelse return null;
     defer desc.destroy(rt);
     if (desc.kind != .data or !desc.value_present) return null;
 
@@ -419,8 +432,8 @@ pub fn ordinaryDataPropertyIsUndefinedForFastPath(rt: *core.JSRuntime, value: co
     };
 }
 
-fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.Bytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
-    for (function.closure_var) |cv| {
+fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const bytecode.FunctionBytecode, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
+    for (function.closureVar()) |cv| {
         if (cv.closureType() != .global_decl or cv.var_name != atom_id) continue;
         return globalOwnDataPropertyBorrowedLookup(global, atom_id);
     }
@@ -457,7 +470,7 @@ fn globalOwnWritableDataPropertyLookup(global: *core.Object, atom_id: core.Atom)
 fn globalDataPropertyLookupForFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?BorrowedGlobalDataLookup {
@@ -467,7 +480,7 @@ fn globalDataPropertyLookupForFastPath(
 pub fn globalDataPropertyValueForFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?core.JSValue {
@@ -478,7 +491,7 @@ pub fn globalDataPropertyValueForFastPath(
 fn globalDataPropertyLookupForFastPathNoProfile(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?BorrowedGlobalDataLookup {
@@ -488,7 +501,7 @@ fn globalDataPropertyLookupForFastPathNoProfile(
 pub fn globalDataPropertyValueForFastPathNoProfile(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?core.JSValue {
@@ -499,7 +512,7 @@ pub fn globalDataPropertyValueForFastPathNoProfile(
 pub fn setGlobalDataPropertyForFastPath(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
     new_value: core.JSValue,
@@ -512,7 +525,7 @@ fn globalWritableDataStoreIndexForFastPath(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?usize {
@@ -524,7 +537,7 @@ fn globalWritableDataStoreLookupForFastPath(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?WritableGlobalDataStore {
@@ -544,7 +557,7 @@ pub fn globalWritableDataStoreInt32ForFastPath(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?i32 {
@@ -556,7 +569,7 @@ pub fn globalWritableDataStoreAvailableForFastPath(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) bool {
@@ -567,7 +580,7 @@ pub fn setGlobalWritableDataStoreForFastPathOwned(
     rt: *core.JSRuntime,
     lexicals: ?*core.Object,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
     new_value: core.JSValue,
@@ -599,7 +612,7 @@ fn setGlobalDataPropertyLookup(
 fn installableGlobalDataPropertyLookup(
     rt: *core.JSRuntime,
     global: *core.Object,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     site_pc: usize,
     atom_id: core.Atom,
 ) ?BorrowedGlobalDataLookup {
@@ -658,26 +671,39 @@ test "fast own data property replacement retains private brand atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
-    defer object.value().free(rt);
+    var object_alive = true;
+    defer if (object_alive) object.value().free(rt);
 
     const brand = try rt.atoms.newSymbol("fastPrivateBrandReplacement", .private);
-    try object.defineOwnProperty(
-        rt,
-        core.atom.ids.Private_brand,
-        core.Descriptor.data(try rt.symbolValue(brand), true, true, true),
-    );
+    {
+        const initial = try rt.symbolValue(brand);
+        defer initial.free(rt);
+        try object.defineOwnProperty(
+            rt,
+            core.atom.ids.Private_brand,
+            core.Descriptor.data(initial, true, true, true),
+        );
+    }
     rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
+    const lookup_value = try rt.symbolValue(brand);
+    defer lookup_value.free(rt);
     const lookup = writableOwnDataPropertyLookup(
         object,
-        .{ .index = 0, .value = try rt.symbolValue(brand) },
+        .{ .index = 0, .value = lookup_value },
         core.atom.ids.Private_brand,
     ).?;
-    try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, try rt.symbolValue(brand)));
+    const replacement = try rt.symbolValue(brand);
+    defer replacement.free(rt);
+    try std.testing.expect(try setOwnDataPropertyLookup(rt, object, lookup, core.atom.ids.Private_brand, replacement));
     try std.testing.expect(rt.atoms.name(brand) != null);
-    const stored = object.getProperty(core.atom.ids.Private_brand);
+    const stored = try object.getProperty(core.atom.ids.Private_brand);
+    defer stored.free(rt);
     try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());
+
+    object.value().free(rt);
+    object_alive = false;
 }
 
 test "global own data slot helpers preserve lookup and write ownership" {
@@ -706,6 +732,8 @@ test "global own data slot helpers preserve lookup and write ownership" {
         .var_idx = 0,
         .var_name = rt.atoms.dup(key),
     });
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
 
     const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
     try std.testing.expectEqual(@as(usize, 0), lookup.index);
@@ -716,29 +744,29 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const writable_lookup = globalWritableDataPropertyLookupAt(global, lookup.index, key).?;
     try std.testing.expectEqual(lookup.index, writable_lookup.index);
     try std.testing.expectEqual(initial.header(), writable_lookup.value.stringHeader().?);
-    try std.testing.expectEqual(@as(?usize, lookup.index), globalWritableDataStoreIndexForFastPath(rt, null, global, &function, 0, key));
-    const store_lookup = globalWritableDataStoreLookupForFastPath(rt, null, global, &function, 0, key).?;
+    try std.testing.expectEqual(@as(?usize, lookup.index), globalWritableDataStoreIndexForFastPath(rt, null, global, execution_function, 0, key));
+    const store_lookup = globalWritableDataStoreLookupForFastPath(rt, null, global, execution_function, 0, key).?;
     try std.testing.expectEqual(lookup.index, store_lookup.index);
     try std.testing.expectEqual(initial.header(), store_lookup.value.stringHeader().?);
     try std.testing.expectEqual(initial.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), declaredGlobalVarDataBorrowedLookup(global, &function, key).?.value.stringHeader().?);
-    try std.testing.expect(declaredGlobalVarDataBorrowedLookup(global, &function, other_key) == null);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPath(rt, global, &function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPath(rt, global, &function, 0, key).?.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPathNoProfile(rt, global, &function, 0, key).?.value.stringHeader().?);
-    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPathNoProfile(rt, global, &function, 0, key).?.stringHeader().?);
-    try std.testing.expect(globalDataPropertyLookupForFastPath(rt, global, &function, 0, other_key) == null);
-    try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, &function, 0, other_key) == null);
+    try std.testing.expectEqual(initial.header(), declaredGlobalVarDataBorrowedLookup(global, execution_function, key).?.value.stringHeader().?);
+    try std.testing.expect(declaredGlobalVarDataBorrowedLookup(global, execution_function, other_key) == null);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPath(rt, global, execution_function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPath(rt, global, execution_function, 0, key).?.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyLookupForFastPathNoProfile(rt, global, execution_function, 0, key).?.value.stringHeader().?);
+    try std.testing.expectEqual(initial.header(), globalDataPropertyValueForFastPathNoProfile(rt, global, execution_function, 0, key).?.stringHeader().?);
+    try std.testing.expect(globalDataPropertyLookupForFastPath(rt, global, execution_function, 0, other_key) == null);
+    try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, execution_function, 0, other_key) == null);
 
     const lexicals = try core.Object.create(rt, core.class.ids.object, null);
     defer lexicals.value().free(rt);
     try lexicals.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
-    try std.testing.expect(globalWritableDataStoreIndexForFastPath(rt, lexicals, global, &function, 0, key) == null);
-    try std.testing.expect(globalWritableDataStoreLookupForFastPath(rt, lexicals, global, &function, 0, key) == null);
+    try std.testing.expect(globalWritableDataStoreIndexForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
+    try std.testing.expect(globalWritableDataStoreLookupForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
     const shadowed_owned = try core.string.String.createAscii(rt, "shadowed-owned");
     var shadowed_transferred = false;
     errdefer if (!shadowed_transferred) shadowed_owned.value().free(rt);
-    const shadowed_store = setGlobalWritableDataStoreForFastPathOwned(rt, lexicals, global, &function, 0, key, shadowed_owned.value());
+    const shadowed_store = setGlobalWritableDataStoreForFastPathOwned(rt, lexicals, global, execution_function, 0, key, shadowed_owned.value());
     if (shadowed_store) shadowed_transferred = true;
     try std.testing.expect(!shadowed_store);
     try std.testing.expectEqual(@as(i32, 1), shadowed_owned.header().rc);
@@ -767,7 +795,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const lookup_owned = try core.string.String.createAscii(rt, "lookup-owned");
     var lookup_transferred = false;
     errdefer if (!lookup_transferred) lookup_owned.value().free(rt);
-    const writable_store = globalWritableDataStoreLookupForFastPath(rt, null, global, &function, 0, key).?;
+    const writable_store = globalWritableDataStoreLookupForFastPath(rt, null, global, execution_function, 0, key).?;
     try std.testing.expect(setGlobalWritableDataStoreLookupOwned(rt, global, writable_store, key, lookup_owned.value()));
     lookup_transferred = true;
     try std.testing.expectEqual(@as(i32, 1), lookup_owned.header().rc);
@@ -776,7 +804,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const fast_path_owned = try core.string.String.createAscii(rt, "fast-path-owned");
     var fast_path_transferred = false;
     errdefer if (!fast_path_transferred) fast_path_owned.value().free(rt);
-    try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, &function, 0, key, fast_path_owned.value()));
+    try std.testing.expect(setGlobalWritableDataStoreForFastPathOwned(rt, null, global, execution_function, 0, key, fast_path_owned.value()));
     fast_path_transferred = true;
     try std.testing.expectEqual(@as(i32, 1), fast_path_owned.header().rc);
     try std.testing.expectEqual(fast_path_owned.header(), globalOwnDataPropertyBorrowedAt(global, lookup.index, key).?.stringHeader().?);

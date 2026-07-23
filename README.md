@@ -16,7 +16,7 @@ no checked-in known failures. The current `test262_errors.txt` boundary is
 empty.
 
 ```sh
-zig build test262-gate --summary all
+zig build test262-gate --seed 0 --summary all
 ```
 
 The gate uses `test262.conf` and writes the latest bucket/failure reports under
@@ -26,7 +26,7 @@ current compatibility boundary.
 For day-to-day optimization and repair work, prefer the fast tier:
 
 ```sh
-zig build quick-check --summary all
+mise run quick-check
 ```
 
 `quick-check` builds the Debug `zjs-dev` and runs the CLI smoke fixtures. Add a
@@ -34,24 +34,26 @@ focused Zig test or test262 slice for the changed semantic area. The checkpoint
 gate adds the unified Debug suite, architecture checks, and `test262-smoke`;
 neither iteration tier replaces the full release gates.
 
-`zig build engine-production-gate --summary all` is the engine semantic and
-architecture gate. A Production v1 release requires this gate to pass from a
-clean checkout; the full release checklist also requires ReleaseSafe testing,
-diff hygiene, and performance evidence when runtime-sensitive code changed.
+`zig build engine-production-gate --seed 0 --summary all` is the engine
+semantic and architecture gate. A Production v1 release requires this gate to
+pass from a clean checkout; the full release checklist also requires
+ReleaseSafe testing, diff hygiene, and performance evidence when
+runtime-sensitive code changed.
 
 ## Requirements
 
 - Zig 0.16.0
+- mise, for the stable-seed quick/checkpoint/watch task wrappers
 - A POSIX-like shell for helper scripts
 - Bun, only for the optional multi-case performance self-baseline workflow
 
 ## Build
 
 ```sh
-zig build zjs --summary all
-zig build zjs-dev --summary all
-zig build run-test262 --summary all
-zig build run-test262-dev --summary all
+zig build zjs --seed 0 --summary all
+zig build zjs-dev --seed 0 --summary all
+zig build run-test262 --seed 0 --summary all
+zig build run-test262-dev --seed 0 --summary all
 ```
 
 The ReleaseFast CLI is installed as `zig-out/bin/zjs`, its Debug inner-loop
@@ -62,17 +64,17 @@ counterpart as `zig-out/bin/zjs-dev`, and the test262 runners as
 Useful build steps:
 
 ```sh
-zig build quick-check --summary all
-zig build checkpoint-check --summary all
-zig build test --summary all
-zig build test -Doptimize=ReleaseSafe --summary all
-zig build smoke-dev --summary all
-zig build smoke --summary all
-zig build test262-smoke --summary all
-zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
-zig build test -Dzjs_force_gc=true --summary all
-zig build perf-self-check --summary all
-zig build engine-production-gate --summary all
+mise run quick-check
+mise run checkpoint-check
+zig build test --seed 0 --summary all
+zig build test -Doptimize=ReleaseSafe --seed 0 --summary all
+zig build smoke-dev --seed 0 --summary all
+zig build smoke --seed 0 --summary all
+zig build test262-smoke --seed 0 --summary all
+zig build test-oom --seed 0 --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
+zig build test -Dzjs_force_gc=true --seed 0 --summary all
+zig build perf-self-check --seed 0 --summary all
+zig build engine-production-gate --seed 0 --summary all
 ```
 
 Focused subsystem steps are available as `test-core`, `test-parser`,
@@ -80,9 +82,10 @@ Focused subsystem steps are available as `test-core`, `test-parser`,
 `test-runner`. For an edit/rebuild loop, `mise run quick-watch` keeps the Debug
 quick-check compiler alive with Zig incremental compilation enabled.
 
-Zig test runners use seed `0` by default so unchanged builds remain
-reproducible and cacheable. Pass `-Dzjs_test_seed=<u32>` for an explicit
-randomized validation run.
+The one-shot commands above pin CLI `--seed 0` so Zig 0.16 build-runner
+traversal stays reproducible and cacheable. Zig test runners also use seed `0`
+by default; pass `-Dzjs_test_seed=<u32>` for an explicit randomized validation
+run.
 
 `-Dzjs_enable_ic=false` disables shape-keyed inline caches for diagnosis.
 
@@ -126,8 +129,8 @@ The full direct test262 invocation is:
 ```
 
 For parser, runner, execution, or semantic changes, run
-`zig build test262-smoke --summary all` plus a focused test262 slice before the
-full gate.
+`zig build test262-smoke --seed 0 --summary all` plus a focused test262 slice
+before the full gate.
 
 ## Garbage Collection And Host Ownership
 
@@ -144,9 +147,11 @@ and must be destroyed before `JSRuntime.destroy`.
 GC may run only at audited safe points where VM temporaries are rooted.
 Low-level allocation marks GC as pending but does not directly collect.
 
-FinalizationRegistry cleanup jobs are best-effort but not silently dropped on
-allocation failure. If cleanup job enqueueing fails, the registry cell remains
-pending and is retried by a later GC pass.
+Each FinalizationRegistry owns its construction RealmRef. Cleanup work enters
+the runtime's unified ECMAScript FIFO with that Realm; invoking the callback
+may then switch to the callback function's own Realm. Cleanup is never silently
+dropped on allocation failure: cells remain pending in stable order and a later
+GC pass retries them without duplicating already-published jobs.
 
 ## Performance
 
@@ -154,14 +159,14 @@ The repeatable performance gate is a ZJS self-baseline regression check, which
 does not require a C QuickJS binary:
 
 ```sh
-zig build perf-self-check --summary all
+zig build perf-self-check --seed 0 --summary all
 ```
 
 See [docs/perf/README.md](docs/perf/README.md) for performance workflow details.
 A smaller single-script diagnostic benchmark is also available:
 
 ```sh
-zig build perf-benchmark --summary all
+zig build perf-benchmark --seed 0 --summary all
 ```
 
 ## Repository Layout

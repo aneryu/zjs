@@ -230,13 +230,13 @@ pub fn main(init: std.process.Init) !void {
     // loop turns) still resolve.
     var dynamic_import_state = engine.exec.module_graph.DynamicImportState{
         .runtime = runtime.context.runtimePtr(),
-        .context = runtime.context.core,
         .output = &stdout_writer.interface,
         .io = io,
         .allocator = allocator,
         .max_source_size = max_source_size,
     };
-    engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    defer dynamic_import_scope.deinit();
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
     // `JSRuntime.destroy` asserts that the runtime has no outstanding
@@ -306,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const jobs_start = monotonicNanos();
-    try dynamic_import_state.runJobs();
+    try dynamic_import_state.runJobs(runtime.context.core);
     // Post-eval jobs (module-mode microtasks in particular) print into the
     // buffered stdout writer; flush before any exit path so their output is
     // not dropped (qjs.c main: js_std_loop writes unbuffered per job).

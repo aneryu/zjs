@@ -85,17 +85,25 @@ fn functionCall(
     const id: u32 = host_call.magic;
     return switch (id) {
         @intFromEnum(PrototypeMethod.to_string) => call.functionToStringValue(ctx.runtime, host_call.this_value),
-        @intFromEnum(PrototypeMethod.bind) => call.qjsFunctionBindCall(ctx, host_call.output, host_call.global, host_call.globals, host_call.this_value, host_call.args),
-        @intFromEnum(PrototypeMethod.apply) => call_runtime.qjsFunctionApplyCall(
-            ctx,
-            host_call.output,
-            host_call.global orelse return error.TypeError,
-            host_call.this_value,
-            host_call.func_obj orelse return error.TypeError,
-            host_call.args,
-            builtin_dispatch.callerBytecode(host_call),
-            builtin_dispatch.callerFrame(host_call),
-        ),
+        @intFromEnum(PrototypeMethod.bind) => {
+            const realm = try builtin_dispatch.callableRealm(host_call);
+            std.debug.assert(realm.realm == ctx);
+            return call.qjsFunctionBindCall(ctx, host_call.output, realm.global, &.{}, host_call.this_value, host_call.args);
+        },
+        @intFromEnum(PrototypeMethod.apply) => {
+            const realm = try builtin_dispatch.callableRealm(host_call);
+            std.debug.assert(realm.realm == ctx);
+            return call_runtime.qjsFunctionApplyCall(
+                ctx,
+                host_call.output,
+                realm.global,
+                host_call.this_value,
+                host_call.func_obj orelse return error.TypeError,
+                host_call.args,
+                builtin_dispatch.callerBytecode(host_call),
+                builtin_dispatch.callerFrame(host_call),
+            );
+        },
         else => error.TypeError,
     };
 }
@@ -107,10 +115,12 @@ fn functionCallRecord(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return call_runtime.qjsFunctionCallCall(
         host_call.ctx,
         host_call.output,
-        host_call.global orelse return error.TypeError,
+        realm.global,
         host_call.this_value,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
@@ -122,9 +132,9 @@ fn functionCallRecord(
 /// `Function.prototype.toString`-style inspection.
 pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []const u8) !core.JSValue {
     const rt = realm.runtimePtr();
-    const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
-    function_object.setNativeFunctionRealm(realm);
-    var function_value = function_object.value();
+    const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    var function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, 0, 2);
+    const function_object = try core.Object.expect(function_value);
     var source_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &function_value },
@@ -143,7 +153,6 @@ pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []con
         failed_function.free(rt);
     }
 
-    try defineFunctionName(rt, function_object, name);
     const source_string = try core.string.String.createUtf8(rt, source);
     source_value = source_string.value();
     try function_object.setOptionalValueSlot(rt, try function_object.functionSourceSlot(rt), source_value.dup());
@@ -153,45 +162,13 @@ pub fn sourceFunction(realm: *core.RealmContext, name: []const u8, source: []con
     return function_value;
 }
 
-fn defineFunctionData(
-    rt: *core.JSRuntime,
-    target: *core.Object,
-    name: []const u8,
-    value: core.JSValue,
-    writable: bool,
-    enumerable: bool,
-    configurable: bool,
-) !void {
-    var target_value = target.value();
-    var rooted_value = value;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &target_value },
-        .{ .value = &rooted_value },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, writable, enumerable, configurable));
-}
-
-fn defineFunctionName(rt: *core.JSRuntime, function_object: *core.Object, name: []const u8) !void {
-    const name_string = try core.string.String.createUtf8(rt, name);
-    const name_value = name_string.value();
-    defer name_value.free(rt);
-    try defineFunctionData(rt, function_object, "name", name_value, false, false, true);
-}
-
 test "sourceFunction roots function and source while attaching source text" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.RealmContext.create(rt);
     defer ctx.destroy();
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);

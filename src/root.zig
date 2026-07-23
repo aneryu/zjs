@@ -544,7 +544,7 @@ pub const object = struct {
         const obj = coreFromValue(v) orelse return false;
         return obj.class_id == zjs_core.class.ids.c_function or
             obj.class_id == zjs_core.class.ids.c_function_data or
-            obj.class_id == zjs_core.class.ids.bytecode_function or
+            zjs_core.class.isBytecodeFunctionClass(obj.class_id) or
             obj.class_id == zjs_core.class.ids.c_closure or
             obj.class_id == zjs_core.class.ids.bound_function;
     }
@@ -603,11 +603,11 @@ pub const object = struct {
     pub fn getProperty(rt: *JSRuntime, obj: *Object, name: []const u8) !value.Value {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        return toCore(obj).getProperty(key);
+        return try toCore(obj).getProperty(key);
     }
 
-    pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) ?value.Value {
-        const desc = toCore(obj).getOwnProperty(rt, atomFromUInt32(index)) orelse return null;
+    pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) !?value.Value {
+        const desc = (try toCore(obj).getOwnProperty(rt, atomFromUInt32(index))) orelse return null;
         if (!desc.value_present) {
             desc.destroy(rt);
             return null;
@@ -702,10 +702,10 @@ pub const object = struct {
     pub fn constructorPrototypeObject(rt: *JSRuntime, global: *Object, name: []const u8) !?*Object {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        const constructor_value = toCore(global).getProperty(key);
+        const constructor_value = try toCore(global).getProperty(key);
         defer constructor_value.free(rt);
         const constructor = coreFromValue(constructor_value) orelse return null;
-        const prototype_value = constructor.getProperty(zjs_core.atom.ids.prototype);
+        const prototype_value = try constructor.getProperty(zjs_core.atom.ids.prototype);
         defer prototype_value.free(rt);
         return fromValue(prototype_value);
     }
@@ -732,9 +732,9 @@ test "public object appendArrayValue maintains array length once" {
     try object.appendArrayValue(rt, array, value.int32(2));
 
     try std.testing.expectEqual(@as(u32, 2), object.arrayLength(array));
-    const first = object.getOwnIndexPropertyValue(rt, array, 0).?;
+    const first = (try object.getOwnIndexPropertyValue(rt, array, 0)).?;
     defer first.free(rt);
-    const second = object.getOwnIndexPropertyValue(rt, array, 1).?;
+    const second = (try object.getOwnIndexPropertyValue(rt, array, 1)).?;
     defer second.free(rt);
     try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
@@ -787,6 +787,27 @@ test "public Buffer helpers create and copy Uint8Array bytes" {
     const copied_owned = try object.Buffer.ownedBytesFromObject(rt, owned_typed_array);
     defer rt.memory.allocator.free(copied_owned);
     try std.testing.expectEqualStrings("xyz", copied_owned);
+}
+
+test "public callable predicate recognizes every bytecode function class" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_ids = [_]zjs_core.ClassId{
+        zjs_core.class.ids.bytecode_function,
+        zjs_core.class.ids.generator_function,
+        zjs_core.class.ids.async_function,
+        zjs_core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        const function_object = try CoreObject.create(rt, class_id, null);
+        defer function_object.value().free(rt);
+        try std.testing.expect(object.isCallableValue(function_object.value()));
+    }
+
+    const plain_object = try CoreObject.create(rt, zjs_core.class.ids.object, null);
+    defer plain_object.value().free(rt);
+    try std.testing.expect(!object.isCallableValue(plain_object.value()));
 }
 
 test "public object isArray brands real arrays only" {
@@ -1109,15 +1130,132 @@ pub const job = struct {
     };
 
     pub fn drain(ctx: *JSContext, options: DrainOptions) !DrainResult {
-        _ = options;
-        const had_work = ctx.peekPendingPromiseJobSequence() != null;
-        try ctx.runJobs(null);
-        return DrainResult{
-            .jobs_drained = if (had_work) 1 else 0,
-            .has_more = ctx.peekPendingPromiseJobSequence() != null,
+        const limit = options.budget orelse std.math.maxInt(usize);
+        if (limit == 0) return .{
+            .jobs_drained = 0,
+            .has_more = hasPending(ctx.core),
+        };
+
+        const global = try ctx.globalObject();
+        var drained: usize = 0;
+        while (drained < limit) {
+            switch (try zjs_exec.promise_ops.drainOnePendingJob(ctx.core, null, global)) {
+                .empty => break,
+                .success => drained += 1,
+                .exception => return error.JSException,
+            }
+        }
+        return .{
+            .jobs_drained = drained,
+            .has_more = hasPending(ctx.core),
         };
     }
+
+    fn hasPending(ctx: *zjs_core.JSContext) bool {
+        return ctx.runtime.job_queue.hasJobs();
+    }
 };
+
+test "public job drain honors budget and reports the real remaining FIFO" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try JSContext.create(rt);
+    defer ctx.destroy();
+
+    const observed = try zjs_core.Object.createArray(rt, null);
+    defer observed.value().free(rt);
+    const TestJob = struct {
+        fn append(core_ctx: *zjs_core.JSContext, args: []const zjs_core.JSValue) zjs_core.JSValue {
+            const array = zjs_core.Object.expect(args[0]) catch return core_ctx.throwValue(zjs_core.JSValue.int32(-1));
+            const index = array.arrayLength();
+            const appended = array.appendDenseArrayDefineIndex(
+                core_ctx.runtime,
+                index,
+                zjs_core.atom.atomFromUInt32(index),
+                args[1],
+            ) catch return core_ctx.throwValue(zjs_core.JSValue.int32(-2));
+            if (!appended) return core_ctx.throwValue(zjs_core.JSValue.int32(-3));
+            return zjs_core.JSValue.undefinedValue();
+        }
+    };
+
+    for (1..4) |ordinal| {
+        try rt.job_queue.enqueueFunc(ctx.core, TestJob.append, &.{ observed.value(), zjs_core.JSValue.int32(@intCast(ordinal)) });
+    }
+
+    const zero = try job.drain(ctx, .{ .budget = 0 });
+    try std.testing.expectEqual(@as(usize, 0), zero.jobs_drained);
+    try std.testing.expect(zero.has_more);
+
+    const two = try job.drain(ctx, .{ .budget = 2 });
+    try std.testing.expectEqual(@as(usize, 2), two.jobs_drained);
+    try std.testing.expect(two.has_more);
+    try std.testing.expectEqual(@as(u32, 2), observed.arrayLength());
+
+    const rest = try job.drain(ctx, .{});
+    try std.testing.expectEqual(@as(usize, 1), rest.jobs_drained);
+    try std.testing.expect(!rest.has_more);
+    try std.testing.expectEqual(@as(u32, 3), observed.arrayLength());
+}
+
+test "public job drain stops at the first exception and leaves the tail queued" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try JSContext.create(rt);
+    defer ctx.destroy();
+
+    const TestJob = struct {
+        fn fail(core_ctx: *zjs_core.JSContext, _: []const zjs_core.JSValue) zjs_core.JSValue {
+            return core_ctx.throwValue(zjs_core.JSValue.int32(73));
+        }
+
+        fn succeed(_: *zjs_core.JSContext, _: []const zjs_core.JSValue) zjs_core.JSValue {
+            return zjs_core.JSValue.undefinedValue();
+        }
+    };
+
+    try rt.job_queue.enqueueFunc(ctx.core, TestJob.fail, &.{});
+    try rt.job_queue.enqueueFunc(ctx.core, TestJob.succeed, &.{});
+    try std.testing.expectError(error.JSException, job.drain(ctx, .{}));
+    try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+    try std.testing.expect(ctx.core.hasException());
+    const exception = ctx.core.takeException();
+    defer exception.free(rt);
+    try std.testing.expectEqual(@as(?i32, 73), exception.asInt32());
+
+    const tail = try job.drain(ctx, .{});
+    try std.testing.expectEqual(@as(usize, 1), tail.jobs_drained);
+    try std.testing.expect(!tail.has_more);
+}
+
+test "public job drain executes each entry in its retained Realm" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const host_ctx = try JSContext.create(rt);
+    defer host_ctx.destroy();
+    const entry_ctx = try JSContext.create(rt);
+    const entry_core = entry_ctx.core;
+    _ = try entry_ctx.globalObject();
+
+    const Probe = struct {
+        var seen: ?*zjs_core.JSContext = null;
+
+        fn run(core_ctx: *zjs_core.JSContext, _: []const zjs_core.JSValue) zjs_core.JSValue {
+            seen = core_ctx;
+            return zjs_core.JSValue.undefinedValue();
+        }
+    };
+    Probe.seen = null;
+    try rt.job_queue.enqueueFunc(entry_core, Probe.run, &.{});
+
+    // The queue entry owns the RealmRef; the public facade is not part of the
+    // deferred callback's lifetime or realm selection.
+    entry_ctx.destroy();
+    const drained = try job.drain(host_ctx, .{});
+    try std.testing.expectEqual(@as(usize, 1), drained.jobs_drained);
+    try std.testing.expect(!drained.has_more);
+    try std.testing.expect(Probe.seen == entry_core);
+}
 
 test {
     _ = zjs_binding;

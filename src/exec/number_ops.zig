@@ -88,28 +88,36 @@ fn numberCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
+    // Number prototype glue deliberately reuses these records without a
+    // materialized function object after coercion. Only that synthetic arm may
+    // consume the algorithm-supplied optional global.
+    const call_global: ?*core.Object = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     return switch (id) {
         @intFromEnum(StaticMethod.parse_int) => {
-            if (host_call.global) |global| return builtin_glue.qjsGlobalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
+            if (call_global) |global| return builtin_glue.qjsGlobalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const radix = if (args.len >= 2) args[1] else null;
             return value_ops.numberToValue(try parseIntValue(ctx.runtime, input, radix));
         },
         @intFromEnum(StaticMethod.parse_float) => {
-            if (host_call.global) |global| return builtin_glue.qjsGlobalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
+            if (call_global) |global| return builtin_glue.qjsGlobalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
         },
         @intFromEnum(StaticMethod.is_nan) => {
-            const global = host_call.global orelse return error.TypeError;
+            const global = call_global orelse return error.TypeError;
             return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
         },
         @intFromEnum(StaticMethod.is_finite) => {
-            const global = host_call.global orelse return error.TypeError;
+            const global = call_global orelse return error.TypeError;
             return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
         },
         @intFromEnum(StaticMethod.is_integer) => {
@@ -128,7 +136,7 @@ fn numberCall(
         @intFromEnum(PrototypeMethod.to_exponential),
         @intFromEnum(PrototypeMethod.to_precision),
         => {
-            const global = host_call.global orelse return error.TypeError;
+            const global = call_global orelse return error.TypeError;
             return numberPrototypeMethod(ctx, host_call.output, global, host_call.this_value, id, args);
         },
         else => error.TypeError,

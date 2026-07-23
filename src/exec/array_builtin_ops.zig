@@ -14,7 +14,7 @@ const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 const RootedValueCopies = struct {
     values: []core.JSValue,
@@ -113,7 +113,7 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
 /// (`qjsArrayPrototypeNativeRecord`) and its leaf method bodies are BOTH —
 /// reached through this record table AND directly by the VM's residual
 /// fast-array fast-call (`qjsArrayMethodFastCall`) and the realm-fallback name
-/// cascade (`call_runtime.callValueOrBytecodeClassModeDispatch`) — so per the
+/// cascade (`call_runtime.callValueOrBytecodeDispatch`) — so per the
 /// client model the implementation core and its record entry both stay in exec.
 /// (Phase 6b-relocate inventory: unlike String — whose six
 /// movable bodies were reachable only through `stringCall` — almost every
@@ -290,6 +290,14 @@ fn arrayCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    // Observable functions take their global only from the atomic call view.
+    // A null function object is the explicit synthetic constructor/body reuse
+    // used by the construct and fast algorithm paths.
+    const call_global: ?*core.Object = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const id: u32 = host_call.magic;
     if (id == @intFromEnum(ConstructorMethod.construct)) {
         // `new Array(...)` arrives through the construct record path with
@@ -305,19 +313,19 @@ fn arrayCall(
         // unchanged for an invalid `new Array(length)`.
         const prototype = if (host_call.is_constructor)
             host_call.new_target
-        else if (host_call.global) |global|
+        else if (call_global) |global|
             arrayPrototypeFromGlobal(host_call.ctx.runtime, global)
         else
             null;
         return constructConstructorWithPrototype(host_call.ctx.runtime, host_call.args, prototype) catch |err| switch (err) {
-            error.RangeError => if (host_call.global) |global|
+            error.RangeError => if (call_global) |global|
                 exception_ops.throwRangeErrorMessage(host_call.ctx, global, "invalid array length")
             else
                 error.RangeError,
             else => return err,
         };
     }
-    const global = host_call.global orelse return error.TypeError;
+    const global = call_global orelse return error.TypeError;
     if (try builtin_glue.qjsArrayNativeRecord(
         host_call.ctx,
         host_call.output,
@@ -343,11 +351,12 @@ fn arrayPushCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return (try builtin_glue.qjsArrayPushNativeRecord(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.this_value,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
@@ -366,11 +375,12 @@ fn arrayPopCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return (try builtin_glue.qjsArrayPopNativeRecord(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.this_value,
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
@@ -426,7 +436,9 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
     try object.reserveDenseArrayElements(rt, @intCast(rooted.values.len));
     for (rooted.values, 0..) |value, index| {
         const atom_id = core.atom.atomFromUInt32(@intCast(index));
-        if (try object.appendDenseArrayIndex(rt, @intCast(index), atom_id, value)) continue;
+        // Array constructor arguments are fresh own data properties;
+        // inherited indexed setters do not participate.
+        if (try object.appendDenseArrayDefineIndex(rt, @intCast(index), atom_id, value)) continue;
         try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
     }
     return object.value();
@@ -464,7 +476,7 @@ pub fn join(rt: *core.JSRuntime, array_value: core.JSValue, separator_value: cor
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.appendSlice(rt.memory.allocator, separator.items);
-        const item = object.getProperty(core.atom.atomFromUInt32(index));
+        const item = try object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (!item.isUndefined() and !item.isNull()) try appendValueString(rt, &buffer, item);
     }
@@ -474,6 +486,18 @@ pub fn join(rt: *core.JSRuntime, array_value: core.JSValue, separator_value: cor
 /// QuickJS source map: selected Array.prototype methods currently covered by
 /// smoke fixtures and transitional array opcodes.
 pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
+    return methodCallWithRealm(null, rt, receiver, method, args);
+}
+
+/// Realm-aware form for the three iterator-producing transitional methods.
+/// Pure methods and iterator `next` remain available through `methodCall`; an
+/// object-producing iterator call must carry its construction RealmContext so
+/// it can use the already-final %ArrayIteratorPrototype% identity.
+pub fn methodCallInRealm(realm: *core.RealmContext, receiver: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
+    return methodCallWithRealm(realm, realm.runtime, receiver, method, args);
+}
+
+fn methodCallWithRealm(realm: ?*core.RealmContext, rt: *core.JSRuntime, receiver: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     return switch (method) {
         1 => {
             if (args.len != 0) return error.TypeError;
@@ -528,15 +552,15 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, method: u32, args
         16 => sort(rt, receiver, args),
         17 => {
             if (args.len != 0) return error.TypeError;
-            return arrayIterator(rt, receiver, .value);
+            return arrayIterator(realm orelse return error.InvalidBuiltinRegistry, receiver, .value);
         },
         18 => {
             if (args.len != 0) return error.TypeError;
-            return arrayIterator(rt, receiver, .key);
+            return arrayIterator(realm orelse return error.InvalidBuiltinRegistry, receiver, .key);
         },
         19 => {
             if (args.len != 0) return error.TypeError;
-            return arrayIterator(rt, receiver, .key_value);
+            return arrayIterator(realm orelse return error.InvalidBuiltinRegistry, receiver, .key_value);
         },
         20 => {
             if (args.len != 0) return error.TypeError;
@@ -552,37 +576,42 @@ const ArrayIteratorKind = enum(u8) {
     key_value = 3,
 };
 
-fn arrayIterator(rt: *core.JSRuntime, receiver: core.JSValue, kind: ArrayIteratorKind) !core.JSValue {
+fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayIteratorKind) !core.JSValue {
+    const rt = realm.runtime;
     _ = try expectArrayIteratorTarget(receiver);
-    const prototype = try iteratorPrototype(rt, "Array Iterator");
-    defer prototype.value().free(rt);
+    const prototype_slot: usize = core.class.ids.array_iterator;
+    if (prototype_slot >= realm.class_prototypes.len) return error.InvalidBuiltinRegistry;
+    const prototype_value = realm.class_prototypes[prototype_slot];
+    if (!prototype_value.isObject()) return error.InvalidBuiltinRegistry;
+    const prototype = try expectObject(prototype_value);
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, prototype);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), receiver.dup());
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
-    try core.function.defineNativeMethod(rt, iterator, "next", 0);
     return iterator.value();
 }
 
-fn iteratorPrototype(rt: *core.JSRuntime, tag_name: []const u8) !*core.Object {
-    const base = try core.Object.create(rt, core.class.ids.object, null);
-    var base_raw_owned = true;
-    errdefer if (base_raw_owned) core.Object.destroyFromHeader(rt, &base.header);
-    try defineToStringTag(rt, base, "Iterator");
-    const specific = try core.Object.create(rt, core.class.ids.object, base);
-    errdefer core.Object.destroyFromHeader(rt, &specific.header);
-    base_raw_owned = false;
-    base.value().free(rt);
-    try defineToStringTag(rt, specific, tag_name);
-    return specific;
-}
+test "realm-aware primitive array iterator reuses the final realm prototype" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
 
-fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
-    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    const tag_value = try core.string.String.createUtf8(rt, tag_name);
-    defer tag_value.value().free(rt);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const prototype_slot: usize = core.class.ids.array_iterator;
+    realm.class_prototypes[prototype_slot] = prototype.value().dup();
+
+    const array = try core.Object.createArray(rt, null);
+    defer array.value().free(rt);
+    try std.testing.expectError(error.InvalidBuiltinRegistry, methodCall(rt, array.value(), 17, &.{}));
+    const iterator_value = try methodCallInRealm(realm, array.value(), 17, &.{});
+    defer iterator_value.free(rt);
+    const iterator = try expectObject(iterator_value);
+
+    try std.testing.expectEqual(prototype, iterator.getPrototype().?);
+    try std.testing.expect(!iterator.hasOwnProperty(core.atom.predefinedId("next", .string).?));
 }
 
 fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
@@ -590,7 +619,7 @@ fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue 
     if (iterator.class_id != core.class.ids.array_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const target = try expectArrayIteratorTarget(target_value);
-    const length = arrayIteratorTargetLength(rt, target);
+    const length = try arrayIteratorTargetLength(rt, target);
     if ((iterator.iteratorIndexSlot().*) >= length) {
         const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
         iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
@@ -606,11 +635,11 @@ fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue 
 fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kind: ArrayIteratorKind) !core.JSValue {
     return switch (kind) {
         .key => core.JSValue.int32(@intCast(index)),
-        .value => if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else target.getProperty(core.atom.atomFromUInt32(index)),
+        .value => if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index)),
         .key_value => blk: {
             const pair = try core.Object.createArray(rt, null);
             errdefer core.Object.destroyFromHeader(rt, &pair.header);
-            const value = if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else target.getProperty(core.atom.atomFromUInt32(index));
+            const value = if (buffer_builtin.isTypedArrayObject(target)) try buffer_builtin.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.atom.atomFromUInt32(index));
             defer value.free(rt);
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
             try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
@@ -643,19 +672,13 @@ test "array iteratorResult roots direct function bytecode value while creating r
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -672,7 +695,7 @@ test "array iteratorResult roots direct function bytecode value while creating r
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
+        const stored = try iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
@@ -694,35 +717,23 @@ test "array splice roots direct function bytecode insert values while creating r
     var array_alive = true;
     defer if (array_alive) array_value.free(rt);
 
-    const first_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const first_fb = &first_slice[0];
-    first_fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&first_fb.header);
-
+    const first_fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var first_fb_published = false;
+    errdefer if (!first_fb_published) first_fb.destroyUnpublishedFixture(rt);
     const first_symbol_value = try rt.newSymbolValue("gc-array-splice-first-bytecode-symbol");
     const first_symbol = first_symbol_value.asSymbolAtom().?;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        first_fb.cpool = __cp.ptr;
-        first_fb.cpool_count = @intCast(__cp.len);
-    }
-    first_fb.cpool[0] = first_symbol_value;
-    first_fb.cpool_count = 1;
+    first_fb.cpoolSlice()[0] = first_symbol_value;
+    first_fb.publishFixtureNoFail(rt);
+    first_fb_published = true;
 
-    const second_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const second_fb = &second_slice[0];
-    second_fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&second_fb.header);
-
+    const second_fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var second_fb_published = false;
+    errdefer if (!second_fb_published) second_fb.destroyUnpublishedFixture(rt);
     const second_symbol_value = try rt.newSymbolValue("gc-array-splice-second-bytecode-symbol");
     const second_symbol = second_symbol_value.asSymbolAtom().?;
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        second_fb.cpool = __cp.ptr;
-        second_fb.cpool_count = @intCast(__cp.len);
-    }
-    second_fb.cpool[0] = second_symbol_value;
-    second_fb.cpool_count = 1;
+    second_fb.cpoolSlice()[0] = second_symbol_value;
+    second_fb.publishFixtureNoFail(rt);
+    second_fb_published = true;
 
     var first_value = core.JSValue.functionBytecode(&first_fb.header);
     var first_alive = true;
@@ -748,10 +759,10 @@ test "array splice roots direct function bytecode insert values while creating r
     try std.testing.expect(rt.atoms.name(first_symbol) != null);
     try std.testing.expect(rt.atoms.name(second_symbol) != null);
     {
-        const stored_first = array.getProperty(core.atom.atomFromUInt32(0));
+        const stored_first = try array.getProperty(core.atom.atomFromUInt32(0));
         defer stored_first.free(rt);
         try std.testing.expect(stored_first.same(first_value));
-        const stored_second = array.getProperty(core.atom.atomFromUInt32(1));
+        const stored_second = try array.getProperty(core.atom.atomFromUInt32(1));
         defer stored_second.free(rt);
         try std.testing.expect(stored_second.same(second_value));
     }
@@ -774,19 +785,13 @@ test "array constructWithPrototype roots direct function bytecode elements while
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var element_value = core.JSValue.functionBytecode(&fb.header);
     var element_alive = true;
@@ -804,7 +809,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = array.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try array.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
         try std.testing.expect(stored.same(element_value));
     }
@@ -827,19 +832,13 @@ test "array concat roots direct function bytecode argument while creating output
     var receiver_alive = true;
     defer if (receiver_alive) receiver_value.free(rt);
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var arg_value = core.JSValue.functionBytecode(&fb.header);
     var arg_alive = true;
@@ -857,7 +856,7 @@ test "array concat roots direct function bytecode argument while creating output
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = out.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try out.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
         try std.testing.expect(stored.same(arg_value));
     }
@@ -880,7 +879,7 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var out_index: u32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (item.asInt32()) |n| {
             if (@mod(n, 2) == 0) {
@@ -897,7 +896,7 @@ fn reduceSum(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var sum: i32 = 0;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         sum += item.asInt32() orelse 0;
     }
@@ -909,7 +908,7 @@ fn someEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var found = false;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (item.asInt32()) |n| found = found or @mod(n, 2) == 0;
     }
@@ -921,7 +920,7 @@ fn everyPositive(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     var ok = true;
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if ((item.asInt32() orelse 0) <= 0) ok = false;
     }
@@ -963,7 +962,7 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
     }
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         if (valuesEqual(item, needle)) {
             found_index = @intCast(index);
@@ -996,7 +995,7 @@ fn at(_: *core.JSRuntime, array_value: core.JSValue, index_value: core.JSValue) 
     var index = index_value.asInt32() orelse 0;
     if (index < 0) index = @as(i32, @intCast(array.arrayLength())) + index;
     if (index < 0 or index >= array.arrayLength()) return core.JSValue.undefinedValue();
-    return array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+    return try array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
 }
 
 fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSValue) !core.JSValue {
@@ -1009,7 +1008,7 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
     var out_index: u32 = 0;
     var index: u32 = @intCast(start);
     while (index < array.arrayLength()) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
+        const item = try array.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(item, true, true, true));
         out_index += 1;
@@ -1038,11 +1037,11 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     errdefer core.Object.destroyFromHeader(rt, &removed.header);
     var i: u32 = 0;
     while (i < delete_count) : (i += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(start + i));
+        const item = try array.getProperty(core.atom.atomFromUInt32(start + i));
         defer item.free(rt);
         try removed.defineOwnProperty(rt, core.atom.atomFromUInt32(i), core.Descriptor.data(item, true, true, true));
     }
-    const tail = array.getProperty(core.atom.atomFromUInt32(start + delete_count));
+    const tail = try array.getProperty(core.atom.atomFromUInt32(start + delete_count));
     defer tail.free(rt);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start), core.Descriptor.data(insert_a, true, true, true));
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 1), core.Descriptor.data(insert_b, true, true, true));
@@ -1063,7 +1062,7 @@ fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     if (array.arrayLength() == 0) return core.JSValue.undefinedValue();
     const index = array.arrayLength() - 1;
     const key = core.atom.atomFromUInt32(index);
-    const value = array.getProperty(key);
+    const value = try array.getProperty(key);
     _ = array.deleteProperty(rt, key);
     try array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, false, false));
     return value;
@@ -1083,9 +1082,9 @@ fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     }) {
         const lower_key = core.atom.atomFromUInt32(lower);
         const upper_key = core.atom.atomFromUInt32(upper);
-        const lower_value = array.getProperty(lower_key);
+        const lower_value = try array.getProperty(lower_key);
         defer lower_value.free(rt);
-        const upper_value = array.getProperty(upper_key);
+        const upper_value = try array.getProperty(upper_key);
         defer upper_value.free(rt);
 
         _ = array.deleteProperty(rt, lower_key);
@@ -1123,7 +1122,7 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
 
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const value = array.getProperty(core.atom.atomFromUInt32(index));
+        const value = try array.getProperty(core.atom.atomFromUInt32(index));
         if (value.isUndefined()) {
             value.free(rt);
             continue;
@@ -1202,7 +1201,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
-                const item = object.getProperty(core.atom.atomFromUInt32(index));
+                const item = try object.getProperty(core.atom.atomFromUInt32(index));
                 defer item.free(rt);
                 if (!item.isUndefined()) {
                     try out.defineOwnProperty(rt, core.atom.atomFromUInt32(next_index.*), core.Descriptor.data(item, true, true, true));
@@ -1239,10 +1238,10 @@ fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     return error.TypeError;
 }
 
-fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) u32 {
+fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     if (object.isArray()) return object.arrayLength();
     if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
-    const length = object.getProperty(core.atom.ids.length);
+    const length = try object.getProperty(core.atom.ids.length);
     defer length.free(rt);
     return @intCast(length.asInt32() orelse 0);
 }
@@ -1337,7 +1336,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

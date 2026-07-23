@@ -1,6 +1,14 @@
 [tools]
 zig = "0.16.0"
 
+[tasks.quick-check]
+description = "Run the stable-seed Debug inner-loop gate once"
+run = "zig build quick-check --seed 0 --summary all"
+
+[tasks.checkpoint-check]
+description = "Run the stable-seed checkpoint gate"
+run = "zig build checkpoint-check --seed 0 --summary all"
+
 [tasks.quick-watch]
 description = "Keep the Debug quick-check compiler alive for faster incremental edit feedback"
-run = "zig build quick-check --watch -fincremental --summary new"
+run = "zig build quick-check --watch -fincremental --seed 0 --summary new"

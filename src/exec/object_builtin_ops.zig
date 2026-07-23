@@ -277,14 +277,22 @@ fn objectCall(
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     const output = host_call.output;
-    const global = host_call.global;
-    const globals = host_call.globals;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const this_value = host_call.this_value;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
+    if (host_call.func_obj != null) {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        return try objectCallForNativeRecord(ctx, output, realm.global, this_value, id, args, caller_function, caller_frame);
+    }
+
+    // Explicit synthetic/prebootstrap reuse has no callable carrier. Preserve
+    // the algorithm-local optional global and legacy slots only in this arm.
+    const global = host_call.global;
+    const globals = host_call.globals;
     if (global) |global_object| return try objectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);
     if (prototypeMethodOrdinal(id)) |method| {
         return call.objectPrototypeMethodCall(ctx, output, global, globals, method, this_value, args);
@@ -392,19 +400,13 @@ test "object literal roots direct function bytecode values while creating object
     defer rt.atoms.free(key);
     const names = [_]core.Atom{key};
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var literal_value = core.JSValue.functionBytecode(&fb.header);
     var literal_alive = true;
@@ -422,7 +424,7 @@ test "object literal roots direct function bytecode values while creating object
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = object.getProperty(key);
+        const stored = try object.getProperty(key);
         defer stored.free(rt);
         try std.testing.expect(stored.same(literal_value));
     }
@@ -477,19 +479,13 @@ test "object entryArrayValue roots direct function bytecode value while creating
     const key = try rt.internAtom("entryKey");
     defer rt.atoms.free(key);
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var entry_value = core.JSValue.functionBytecode(&fb.header);
     var entry_value_alive = true;
@@ -506,7 +502,7 @@ test "object entryArrayValue roots direct function bytecode value while creating
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = pair.getProperty(core.atom.atomFromUInt32(1));
+        const stored = try pair.getProperty(core.atom.atomFromUInt32(1));
         defer stored.free(rt);
         try std.testing.expect(stored.same(entry_value));
     }

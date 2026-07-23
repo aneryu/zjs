@@ -24,19 +24,19 @@ pub const EvalStep = union(enum) {
 pub noinline fn directEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    class_field_initializer_flag: u16,
+    caller_eval_global_var_bindings: bool,
     allow_tail_inline: bool,
 ) !EvalStep {
-    const eval_operands = readInt(u32, function.code[frame.pc..][0..4]);
+    const eval_operands = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
-    const eval_scope_head = @as(i32, eval_scope & ~class_field_initializer_flag) + bytecode.function_bytecode.arg_scope_end;
+    const eval_scope_head = @as(i32, eval_scope) + bytecode.function_bytecode.arg_scope_end;
     return switch (try eval_ops.execDirectEval(
         ctx,
         stack,
@@ -47,7 +47,7 @@ pub noinline fn directEval(
         output,
         global,
         eval_scope_head,
-        (eval_scope & class_field_initializer_flag) != 0,
+        caller_eval_global_var_bindings,
         allow_tail_inline,
     )) {
         .done => .done,
@@ -59,16 +59,16 @@ pub noinline fn directEval(
 pub noinline fn applyEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    class_field_initializer_flag: u16,
+    caller_eval_global_var_bindings: bool,
 ) !Step {
-    const eval_scope = readInt(u16, function.code[frame.pc..][0..2]);
+    const eval_scope = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    const eval_scope_head = @as(i32, eval_scope & ~class_field_initializer_flag) + bytecode.function_bytecode.arg_scope_end;
+    const eval_scope_head = @as(i32, eval_scope) + bytecode.function_bytecode.arg_scope_end;
     return switch (try eval_ops.execApplyEval(
         ctx,
         stack,
@@ -78,7 +78,7 @@ pub noinline fn applyEval(
         output,
         global,
         eval_scope_head,
-        (eval_scope & class_field_initializer_flag) != 0,
+        caller_eval_global_var_bindings,
     )) {
         .done => .done,
         .continue_loop => .continue_loop,
@@ -92,7 +92,7 @@ pub noinline fn dynamicImport(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     const options = try stack.pop();
@@ -120,7 +120,7 @@ pub noinline fn dynamicImport(
     // GetActiveScriptOrModule, qjs JS_GetScriptOrModuleName quickjs.c:30854).
     // Direct eval retains this separately from its "<eval>" display filename,
     // so escaped eval-created functions do not depend on live caller frames.
-    const referrer_path = ctx.runtime.atoms.name(function.script_or_module) orelse "";
+    const referrer_path = ctx.runtime.atoms.name(function.scriptOrModule()) orelse "";
     const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);

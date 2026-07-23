@@ -4,5 +4,33 @@
     "pattern": "@panic",
     "reason": "rope flatten last resort: borrowed-slice readers (resolveData) cannot propagate errors; flattenRopeNode retries after one object-cycle collection and only a second allocation failure aborts (eecf6c8)",
     "exit_milestone": "make the remaining borrowed-slice readers rope-aware or fallible (String.ensureFlat first) so the infallible flatten backstop can be deleted"
+  },
+  {
+    "source": "src/core/class.zig",
+    "pattern": "@panic",
+    "contains": "@panic(\"class table mutation from non-owner Runtime thread\")",
+    "reason": "class-table mutation is restricted to the Runtime owner thread; this internal invariant catches API misuse after checked public mutation boundaries and is unrelated to allocation failure",
+    "exit_milestone": "retain until the class-table mutation API contract changes so every internal caller can propagate WrongRuntimeThread instead of relying on an owner-thread invariant"
+  },
+  {
+    "source": "src/core/runtime.zig",
+    "pattern": "@panic",
+    "contains": "@panic(\"JSRuntime mutation from non-owner thread\")",
+    "reason": "unchecked internal Runtime mutation requires the owner thread; this invariant catches API misuse behind the checked requireOwnerThread boundary and is unrelated to allocation failure",
+    "exit_milestone": "retain until the Runtime mutation API contract changes so every internal mutation path can propagate WrongRuntimeThread without an asserting owner-only tier"
+  },
+  {
+    "source": "src/core/runtime.zig",
+    "pattern": "@panic",
+    "contains": "@panic(\"JSRuntime destroyed with outstanding value handles\")",
+    "reason": "destroying a Runtime with live local, persistent, or weak value handles would leave caller-owned handles pointing into freed Runtime storage; teardown must reject that API misuse",
+    "exit_milestone": "retain until value-handle ownership changes so Runtime teardown can safely invalidate or transfer every outstanding handle instead of requiring callers to deinitialize them first"
+  },
+  {
+    "source": "src/core/runtime.zig",
+    "pattern": "@panic",
+    "contains": "@panic(\"JSRuntime destroyed while execution or root frames are active\")",
+    "reason": "execution and root frames borrow Runtime state, so destroying the Runtime before they unwind would make deferred cleanup access freed storage; this is a teardown lifetime invariant",
+    "exit_milestone": "retain until execution and root-frame lifetimes become owned or cancellable by Runtime teardown instead of requiring every active frame to unwind before destroy"
   }
 ]

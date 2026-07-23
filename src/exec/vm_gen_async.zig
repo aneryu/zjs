@@ -4,6 +4,7 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const call_runtime = @import("call_runtime.zig");
+const HostError = @import("exceptions.zig").HostError;
 const forof_ops = @import("forof_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -75,7 +76,7 @@ fn clearLiveExecutionViews(stack: *stack_mod.Stack, frame: *frame_mod.Frame) voi
     frame.open_var_refs = &.{};
 }
 
-/// Park live execution views without moving the resident frame on the common
+/// Park live execution slices without moving the resident frame on the common
 /// path. QuickJS keeps one JSAsyncFunctionState backing allocation and changes
 /// only cur_sp/cur_pc at a suspension; this is the corresponding zjs seam.
 ///
@@ -179,7 +180,7 @@ pub noinline fn saveGeneratorExecutionState(
     std.debug.assert(frame.ownership.storage == .owned or frame.storage_values.len == 0 or execution.frameUsesCombinedStorage());
     std.debug.assert(frame.ownership.var_refs == .owned or frame.var_refs.len == 0);
     std.debug.assert(frame.open_var_refs.len == 0 or frame.storage_values.len != 0);
-    if (frame.open_var_refs.len != @as(usize, frame.function.open_var_ref_count)) return error.InvalidBytecode;
+    if (frame.open_var_refs.len != @as(usize, frame.function.openVarRefCount())) return error.InvalidBytecode;
     // Encode every fallible scalar before changing any ownership. An invalid
     // oversized target must leave the live VM state intact for normal unwind.
     const catch_target_pc = if (catch_target) |target|
@@ -192,7 +193,7 @@ pub noinline fn saveGeneratorExecutionState(
 pub fn resumeExecutionState(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     resume_value: ?core.JSValue,
@@ -250,7 +251,7 @@ pub fn finishExecutionStateRun(rt: *core.JSRuntime, stack: *stack_mod.Stack, fra
 noinline fn resumeExecutionStateRaw(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: *core.Object,
     resume_value: ?core.JSValue,
@@ -279,10 +280,10 @@ noinline fn resumeExecutionStateRaw(
     const completion_type = if (generator_started) payload.resume_completion_type else 0;
     const resume_needs_branch_false = generator_started and
         resume_pc > 0 and
-        resume_pc <= function.code.len and
-        function.code[resume_pc - 1] == bytecode.opcode.op.yield and
-        resume_pc < function.code.len and
-        (function.code[resume_pc] == bytecode.opcode.op.if_false or function.code[resume_pc] == bytecode.opcode.op.if_false8);
+        resume_pc <= function.byteCode().len and
+        function.byteCode()[resume_pc - 1] == bytecode.opcode.op.yield and
+        resume_pc < function.byteCode().len and
+        (function.byteCode()[resume_pc] == bytecode.opcode.op.if_false or function.byteCode()[resume_pc] == bytecode.opcode.op.if_false8);
 
     var resume_push_count: usize = if (!generator_started)
         0
@@ -306,7 +307,7 @@ noinline fn resumeExecutionStateRaw(
     frame.pc = resume_pc;
     const resident_stack = execution.stackUsesCombinedStorage();
     const resident_frame = execution.frameUsesCombinedStorage();
-    if (state.storage.frame.open_var_refs.len != @as(usize, function.open_var_ref_count)) return error.InvalidBytecode;
+    if (state.storage.frame.open_var_refs.len != @as(usize, function.openVarRefCount())) return error.InvalidBytecode;
     installSuspendedExecutionStorage(stack, frame, state, resident_stack, resident_frame);
     // The parked target is the authoritative dynamic control state. A shared
     // finalizer PC can be entered from several differently nested catch legs,
@@ -345,7 +346,7 @@ pub fn completeResumeState(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     state: ResumeState,
     resume_value: ?core.JSValue,
@@ -366,11 +367,11 @@ fn handleAwaitError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    err: anyerror,
-) !bool {
+    err: HostError,
+) HostError!bool {
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
     return try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err);
 }
@@ -452,7 +453,7 @@ pub noinline fn yieldStar(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
@@ -471,14 +472,14 @@ fn yieldStarRaw(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
     catch_target: ?usize,
 ) !Result {
     const opcode_pc = frame.pc - 1;
-    const expanded_lowering = frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.dup;
+    const expanded_lowering = frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.dup;
     if (expanded_lowering) {
         const result_object = try stack.pop();
         var result_object_owned = true;
@@ -564,13 +565,13 @@ pub noinline fn awaitValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     suspend_on_module_await: bool,
     stop_on_yield: bool,
     catch_target: *?usize,
-) !Result {
+) HostError!Result {
     return awaitValueRaw(ctx, output, global, stack, function, frame, generator, suspend_on_module_await, stop_on_yield, catch_target.*) catch |err| {
         if (try handleAwaitError(ctx, output, global, stack, function, frame, catch_target, err)) {
             return .continue_loop;
@@ -584,13 +585,13 @@ fn awaitValueRaw(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     suspend_on_module_await: bool,
     stop_on_yield: bool,
     catch_target: ?usize,
-) !Result {
+) HostError!Result {
     const suspend_mode = awaitSuspendMode(function, suspend_on_module_await, stop_on_yield);
     const awaited = try stack.pop();
     defer awaited.free(ctx.runtime);
@@ -653,14 +654,14 @@ fn suspendAwaitValue(
     return .{ .return_value = value.dup() };
 }
 
-fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
-    if (suspend_on_module_await and function.flags.is_module) return .raw;
-    if (suspend_on_module_await and function.flags.is_async) return .raw;
+fn awaitSuspendMode(function: *const bytecode.FunctionBytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
+    if (suspend_on_module_await and function.isModule()) return .raw;
+    if (suspend_on_module_await and function.isAsync()) return .raw;
     // Async-generator bodies genuinely suspend at every await; the queue
     // machine (exec/async_generator.zig) resumes them via promise-reaction
     // jobs (mirrors js_async_generator_await + resume trampolines,
     // quickjs.c:21446/21670).
-    if (stop_on_yield and function.flags.is_async) return .raw;
+    if (stop_on_yield and function.isAsync()) return .raw;
     return .none;
 }
 
@@ -669,10 +670,10 @@ fn closeIteratorForPendingError(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    if (frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
+    if (frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
         // for-await-of: qjs js_for_await_of_next DISABLES the catch offset for
         // the await between OP_for_await_of_next and
         // OP_iterator_get_value_done (quickjs.c:16713-16726) — a rejection

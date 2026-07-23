@@ -18,10 +18,11 @@ const HostError = exceptions.HostError;
 
 var empty_realm_globals: [0]core.global_slots.Slot = .{};
 
-pub const Bytecode = bytecode.Bytecode;
+pub const Bytecode = bytecode.FunctionBytecode;
 pub const Frame = frame_mod.Frame;
 
 const NativeCallEnvironment = struct {
+    callable_realm: ?CallRealmView,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
@@ -32,30 +33,76 @@ const NativeCallEnvironment = struct {
     caller_frame: ?*Frame,
 };
 
-const CallRealmView = struct {
+/// Atomic execution authority for one observable callable invocation.  The
+/// global is a borrowed alias of `realm.global`; keeping the pair in one value
+/// prevents native handlers from independently selecting a context and a
+/// global from different realms.
+pub const CallRealmView = struct {
+    realm: *core.RealmContext,
+    global: *core.Object,
+
+    pub fn caller(realm: *core.RealmContext) HostError!CallRealmView {
+        return .{
+            .realm = realm,
+            .global = realm.global orelse return error.InvalidBuiltinRegistry,
+        };
+    }
+
+    pub fn cFunction(object: *core.Object) HostError!CallRealmView {
+        if (object.class_id != core.class.ids.c_function) return error.InvalidBuiltinRegistry;
+        const realm = object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+        return caller(realm);
+    }
+};
+
+const FinalCallEnvironment = struct {
     ctx: *core.RealmContext,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
+    callable_realm: ?CallRealmView,
 };
+
+/// Select the active realm at a proven final callable arm.  True C_FUNCTION
+/// objects use their owned construction realm; every caller-semantics class
+/// (including C_FUNCTION_DATA) uses the incoming realm.  The incoming `global`
+/// and legacy slot slice are intentionally ignored for observable calls: they
+/// are not independent authorities.  A null `func_obj` denotes an explicitly
+/// synthetic record invocation and retains the supplied algorithm-local view.
+pub fn finalCallableRealmView(
+    caller: *core.RealmContext,
+    object: *core.Object,
+) HostError!CallRealmView {
+    const view = if (object.class_id == core.class.ids.c_function)
+        try CallRealmView.cFunction(object)
+    else
+        try CallRealmView.caller(caller);
+    if (view.realm.runtime != caller.runtime) return error.InvalidBuiltinRegistry;
+    return view;
+}
 
 /// Resolve the final call carrier only after the caller has selected a record
 /// and completed its call-side preflight. True C_FUNCTION objects switch to
 /// their owned construction realm; C_FUNCTION_DATA and synthetic calls retain
 /// the incoming view. This mirrors js_call_c_function's late
 /// `ctx = p->u.cfunc.realm` assignment (quickjs.c:17586).
-fn finalCallRealmView(
+fn finalCallEnvironment(
     ctx: *core.JSContext,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
     func_obj: ?*core.Object,
-) HostError!CallRealmView {
-    const object = func_obj orelse return .{ .ctx = ctx, .global = global, .globals = globals };
-    if (object.class_id != core.class.ids.c_function) return .{ .ctx = ctx, .global = global, .globals = globals };
-    const realm = object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+) HostError!FinalCallEnvironment {
+    const object = func_obj orelse return .{
+        .ctx = ctx,
+        .global = global,
+        .globals = globals,
+        .callable_realm = null,
+    };
+    const view = try finalCallableRealmView(ctx, object);
     return .{
-        .ctx = realm,
-        .global = realm.global,
+        .ctx = view.realm,
+        .global = view.global,
         .globals = empty_realm_globals[0..],
+        .callable_realm = view,
     };
 }
 
@@ -64,6 +111,9 @@ fn finalCallRealmView(
 /// stack-local environment and is not stored in `InternalRecord`.
 pub const NativeCall = struct {
     ctx: *core.JSContext,
+    /// Non-null only for an observable JS callable invocation. Synthetic
+    /// algorithmic record reuse has no callable carrier and keeps this null.
+    callable_realm: ?CallRealmView,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []core.global_slots.Slot,
@@ -93,6 +143,7 @@ pub inline fn nativeCall(
     const env = activeNativeEnvironment(ctx) orelse return null;
     return .{
         .ctx = ctx,
+        .callable_realm = env.callable_realm,
         .output = env.output,
         .global = env.global,
         .globals = env.globals,
@@ -105,6 +156,13 @@ pub inline fn nativeCall(
         .caller_function = env.caller_function,
         .caller_frame = env.caller_frame,
     };
+}
+
+/// Require the atomic authority attached to an observable JS callable. Native
+/// implementations with a separate algorithmic/bare-runtime entry should
+/// branch on `callable_realm == null` before calling this helper.
+pub inline fn callableRealm(call: NativeCall) HostError!CallRealmView {
+    return call.callable_realm orelse error.InvalidBuiltinRegistry;
 }
 
 pub fn genericMagicFunction(comptime implementation: core.host_function.NativeGenericMagicFn) core.host_function.NativeFunctionPtr {
@@ -222,7 +280,43 @@ pub inline fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
-    const view = try finalCallRealmView(ctx, global, globals, func_obj);
+    const view = try finalCallEnvironment(ctx, global, globals, func_obj);
+    return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+/// Final C-function terminal for a dispatcher that already loaded the record
+/// and RealmContext together from the function payload.  No generic realm
+/// resolver or caller-global transport is consulted after this boundary.
+pub inline fn callInternalRecordDirectInRealm(
+    view: CallRealmView,
+    output: ?*std.Io.Writer,
+    func_obj: *core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
+    if (func_obj.class_id != core.class.ids.c_function) return error.InvalidBuiltinRegistry;
+    if (func_obj.nativeFunctionRealm() != view.realm) return error.InvalidBuiltinRegistry;
+    return callInternalRecordDirectWithEnvironment(.{
+        .ctx = view.realm,
+        .global = view.global,
+        .globals = empty_realm_globals[0..],
+        .callable_realm = view,
+    }, output, func_obj, this_value, record, args, caller_function, caller_frame);
+}
+
+inline fn callInternalRecordDirectWithEnvironment(
+    view: FinalCallEnvironment,
+    output: ?*std.Io.Writer,
+    func_obj: ?*core.Object,
+    this_value: core.JSValue,
+    record: *const core.host_function.InternalRecord,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) HostError!core.JSValue {
     // QuickJS links a JSStackFrame around every C function call. Use the same
     // active-frame chain as bytecode invocations so an error created inside a
     // builtin captures the native callee before its bytecode caller. The data
@@ -233,6 +327,7 @@ pub inline fn callInternalRecordDirect(
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
+        .callable_realm = view.callable_realm,
         .output = output,
         .global = view.global,
         .globals = view.globals,
@@ -427,12 +522,13 @@ fn callConstructRecordImpl(
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.isConstructor()) return null;
-    const view = try finalCallRealmView(ctx, global, globals, func_obj);
+    const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     if (push_native_frame) native_scope.push();
     defer native_scope.deinit();
 
     const native_env: NativeCallEnvironment = .{
+        .callable_realm = view.callable_realm,
         .output = output,
         .global = view.global,
         .globals = view.globals,
@@ -482,5 +578,5 @@ pub fn callerFrame(call: NativeCall) ?*Frame {
 pub fn callerResultIsDropped(caller_function: ?*const Bytecode, caller_frame: ?*Frame) bool {
     const function = caller_function orelse return false;
     const frame = caller_frame orelse return false;
-    return frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.drop;
+    return frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.drop;
 }

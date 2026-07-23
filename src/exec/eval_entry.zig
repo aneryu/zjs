@@ -8,6 +8,7 @@ const error_stack_ops = @import("error_stack_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const module_graph = @import("module_graph.zig");
+const object_ops = @import("object_ops.zig");
 const property_ops = @import("property_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -35,13 +36,26 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
     if (ctx.runtime.call_depth == 0) rt.updateNativeStackTop();
+    var module_name_buf: [64]u8 = undefined;
+    const module_name: core.Atom = if (options.mode == .module) blk: {
+        const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
+            try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{ctx.modules.count})
+        else
+            options.filename;
+        break :blk try rt.internAtom(module_name_bytes);
+    } else core.atom.null_atom;
+    defer if (module_name != core.atom.null_atom) rt.atoms.free(module_name);
+
     const parse_start = monotonicNanos();
-    var compiled = try parser.compile(rt, source_text, .{
+    var compiled = try parser.compile(.{
+        .realm = ctx,
+        .policy = .{ .runtime_strict = options.runtime_strict },
+    }, source_text, .{
         .mode = parserMode(options.mode),
         .filename = options.filename,
+        .script_or_module = if (module_name != core.atom.null_atom) module_name else null,
         .source_kind = parserSourceKind(options.source_kind),
         .strict = options.parse_strict,
-        .runtime_strict = options.runtime_strict,
         .return_completion = options.mode == .script and options.return_completion,
     });
     if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
@@ -55,23 +69,21 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
         return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
     }
-    if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(rt, &compiled.function);
+    const legacy_module = compiled.legacyModuleConst();
+    var module_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const function: *const bytecode.FunctionBytecode = compiled.functionBytecode() orelse if (legacy_module) |module_function|
+        module_adapter.init(module_function)
+    else
+        return error.InvalidBytecode;
 
-    var module_name: core.Atom = core.atom.null_atom;
     var has_module_record = false;
-    defer if (has_module_record) rt.atoms.free(module_name);
-    if (options.mode == .module and compiled.function.module_record != null) {
-        var module_name_buf: [64]u8 = undefined;
-        const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
-            try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{rt.modules.modules.len})
-        else
-            options.filename;
-        module_name = try rt.internAtom(module_name_bytes);
+    if (options.mode == .module and legacy_module != null and legacy_module.?.module_record != null) {
+        const module_function = legacy_module.?;
         has_module_record = true;
         const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
-        _ = try module_exec.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
-        if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
-        rt.modules.linkModule(rt, module_name) catch |err| {
+        try module_exec.instantiateParsedRecordWithReferrer(ctx, module_name, module_function, referrer_path);
+        if (ctx.modules.find(module_name)) |record| record.import_meta_main = true;
+        ctx.modules.linkModule(rt, module_name) catch |err| {
             try module_graph.throwModuleLinkError(rt, ctx, options.filename, err);
             return moduleResolutionError(err);
         };
@@ -80,29 +92,59 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         // entry guard performs declaration instantiation and returns before
         // the body. Keep the in-memory eval entry on the same mechanism as the
         // file-module graph instead of relying on evaluation-time fallbacks.
-        try module_graph.initializeModuleFunctionDeclarations(rt, ctx, module_name, &compiled.function);
+        try module_graph.initializeModuleFunctionDeclarations(rt, ctx, module_name, module_function);
     }
 
     var module_var_refs: []*core.VarRef = &.{};
     if (has_module_record) {
-        module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, &compiled.function);
+        module_var_refs = try module_exec.buildModuleVarRefs(ctx, module_name, legacy_module.?);
     }
     defer module_exec.freeModuleVarRefs(rt, module_var_refs);
+
+    // Ordinary script/direct/indirect roots are real function objects, just as
+    // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
+    // owner into that object; the explicitly legacy module path remains on its
+    // W1e state machine.
+    var root_function_value = core.JSValue.undefinedValue();
+    defer root_function_value.free(rt);
+    var root_function_object: ?*core.Object = null;
+    if (compiled.functionBytecode() != null) {
+        const root_realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
+        if (root_realm != ctx) return error.InvalidBytecode;
+        const root_global = try zjs_vm.contextGlobal(root_realm);
+        const owned_function = compiled.takeFunctionBytecodeValue() orelse return error.InvalidBytecode;
+        root_function_value = try object_ops.createRootBytecodeFunctionObject(
+            ctx,
+            root_global,
+            owned_function,
+            .root_global,
+        );
+        root_function_object = object_ops.objectFromValue(root_function_value) orelse return error.InvalidBytecode;
+    }
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &root_function_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
 
     const result = if (has_module_record) blk: {
         // Track the record through the evaluation status machine (mirrors
         // js_evaluate_module quickjs.c: EVALUATING → EVALUATED, with the
         // thrown value cached as eval_exception on failure) so a later
         // dynamic import of the same module never re-runs its body.
-        if (rt.modules.find(module_name)) |record| record.status = .evaluating;
-        errdefer if (rt.modules.find(module_name)) |record| {
+        if (ctx.modules.find(module_name)) |record| record.status = .evaluating;
+        errdefer if (ctx.modules.find(module_name)) |record| {
             if (record.status == .evaluating) {
                 record.status = .errored;
                 if (ctx.hasException()) record.setEvalException(rt, ctx.runtime.current_exception.dup());
             }
         };
-        const value = try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing);
-        if (rt.modules.find(module_name)) |record| {
+        const value = try runEvalModuleWithVarRefs(ctx, function, options.output, module_var_refs, options.timing);
+        if (ctx.modules.find(module_name)) |record| {
             if (record.status == .evaluating) record.status = .evaluated;
         }
         break :blk value;
@@ -110,22 +152,30 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         const vm_start = monotonicNanos();
         var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
         defer stack.deinit(rt);
-        try stack.reserveAdditional(compiled.function.stack_size);
-        // `.eval_direct`/`.eval_indirect` run through the EVAL runner contract
-        // (`is_eval_code = true` with eval declaration instantiation) — qjs
-        // JS_EVAL_TYPE_DIRECT/INDIRECT — so a top-level let/const/class stays a
-        // pure eval frame-local (no redundant ctx.lexicals property). `.script`
-        // keeps the script runner (JS_EVAL_TYPE_GLOBAL → global_decl cell).
-        const value = switch (options.mode) {
-            .eval_direct, .eval_indirect => v: {
-                // Indirect eval registers its top-level var/function declarations
-                // as configurable global data properties (non-lexical), mirroring
-                // parser.zig:176 (`eval_global_var_bindings = … or mode == .eval_indirect`)
-                // and the in-VM eval() builtin.
-                const eval_global_var_bindings = options.mode == .eval_indirect;
-                break :v try zjs_vm.runEvalWithOutput(ctx, &stack, &compiled.function, options.output, eval_global_var_bindings);
-            },
-            .script, .module => try zjs_vm.runWithOutput(ctx, &stack, &compiled.function, options.output),
+        try stack.reserveAdditional(function.stack_size);
+        const value = if (root_function_object) |root_object| v: {
+            const is_eval_code = options.mode == .eval_direct or options.mode == .eval_indirect;
+            const initial_this = if (function.runtimeStrictMode()) core.JSValue.undefinedValue() else root_object.bytecodeFunctionRealmGlobalPtr().?.value();
+            break :v try zjs_vm.runWithCallEnv(.{
+                .ctx = ctx,
+                .stack = &stack,
+                .function = function,
+                .initial_this_value = initial_this,
+                .var_refs = root_object.functionCaptures(),
+                .output = options.output,
+                .global = root_object.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry,
+                .break_var_ref_cycles_on_exit = true,
+                .strict_unresolved_get_var = function.isStrictMode(),
+                .current_function_value = root_function_value,
+                .eval_global_var_bindings = options.mode == .eval_indirect,
+                .direct_eval_vars_reach_global = options.mode == .script or
+                    (options.mode == .eval_indirect and !function.isStrictMode()),
+                .is_eval_code = is_eval_code,
+                .global_declarations_prevalidated = true,
+            });
+        } else switch (options.mode) {
+            .module => try zjs_vm.runWithOutput(ctx, &stack, function, options.output),
+            .script, .eval_direct, .eval_indirect => return error.InvalidBytecode,
         };
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
@@ -149,7 +199,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
 
 fn runEvalModuleWithVarRefs(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
     module_var_refs: []const *core.VarRef,
     timing: ?*core.context.ContextEvalTiming,
@@ -226,23 +276,6 @@ fn parserSourceKind(kind: core.context.EvalSourceKind) parser.SourceKind {
     };
 }
 
-fn forceRuntimeStrict(rt: *core.JSRuntime, function: *bytecode.Bytecode) void {
-    function.flags.runtime_strict = true;
-    for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(rt, value);
-}
-
-fn forceFunctionBytecodeRuntimeStrict(rt: *core.JSRuntime, value: core.JSValue) void {
-    if (!value.isFunctionBytecode()) return;
-    const header = value.objectHeader() orelse return;
-    const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
-    const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", aligned);
-    function_bytecode.flags.runtime_strict_mode = true;
-    // No cached execution view to refresh: runtime-strict forcing happens
-    // before the script's first execution, so the lazy cached view observes
-    // this flag when it is materialized for the first call.
-    for (function_bytecode.cpoolSlice()) |child| forceFunctionBytecodeRuntimeStrict(rt, child);
-}
-
 fn elapsedNanosSince(start: u64) u64 {
     const end = monotonicNanos();
     return if (end > start) end - start else 0;
@@ -256,10 +289,10 @@ fn monotonicNanos() u64 {
 
 // Eval compile wrappers (moved from the dissolved exec/eval.zig).
 
-pub fn compileDirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
-    return parser.compile(rt, source, .{ .mode = .eval_direct, .filename = "<eval>" });
+pub fn compileDirect(realm: *core.RealmContext, source: []const u8) !parser.Result {
+    return parser.compile(.{ .realm = realm }, source, .{ .mode = .eval_direct, .filename = "<eval>" });
 }
 
-pub fn compileIndirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
-    return parser.compile(rt, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
+pub fn compileIndirect(realm: *core.RealmContext, source: []const u8) !parser.Result {
+    return parser.compile(.{ .realm = realm }, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
 }

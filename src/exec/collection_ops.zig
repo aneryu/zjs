@@ -198,10 +198,18 @@ fn collectionCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
+    const observable = host_call.func_obj != null;
+    const callable_global: ?*core.Object = if (observable) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
-    const globals = host_call.globals;
+    // Legacy slots belong only to func-object-free algorithmic reuse. An
+    // observable callable's realm/global authority is the view above.
+    const globals: []core.global_slots.Slot = if (observable) &.{} else host_call.globals;
     const this_value = host_call.this_value;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
@@ -214,7 +222,7 @@ fn collectionCall(
         return constructWithPrototype(ctx.runtime, kind, host_call.new_target);
     }
     if (id == @intFromEnum(StaticMethod.group_by)) {
-        return collectionGroupByRecord(ctx, output, host_call.global, globals, this_value, args, caller_function, caller_frame);
+        return collectionGroupByRecord(ctx, output, callable_global, globals, this_value, args, caller_function, caller_frame);
     }
     const function_object = host_call.func_obj orelse {
         // Internal engine call sites route a collection method body through the
@@ -239,7 +247,7 @@ fn collectionCall(
         }
         return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(globals));
     };
-    const active_global = host_call.global orelse return collectionRecordWithoutGlobal(ctx, globals, this_value, function_object, id, args);
+    const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
     if (try qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
@@ -265,62 +273,15 @@ fn collectionGroupByRecord(
     // Bare-runtime path (no realm intrinsics): keep deriving the result
     // prototype from a constructor receiver when one is supplied, but never
     // require the receiver.
-    const prototype: ?*core.Object = if (object_ops.objectFromValue(this_value) != null)
-        object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null
-    else
-        null;
-    return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
+    var prototype: ?object_ops.OwnedPrototype = null;
+    defer if (prototype) |*owned| owned.deinit(ctx.runtime);
+    if (object_ops.objectFromValue(this_value) != null) {
+        prototype = object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null;
+    }
+    const prototype_object = if (prototype) |owned| owned.object() else null;
+    return groupByWithCallbackHost(ctx.runtime, args, prototype_object, collection_adapter.host(globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
-    };
-}
-
-fn collectionRecordWithoutGlobal(
-    ctx: *core.JSContext,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
-    const owner_class = function_object.collectionMethodOwnerClass();
-    if (owner_class != core.class.invalid_class_id) {
-        if (receiver.class_id != owner_class) return error.TypeError;
-    }
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.set),
-        @intFromEnum(PrototypeMethod.get),
-        @intFromEnum(PrototypeMethod.has),
-        @intFromEnum(PrototypeMethod.delete),
-        @intFromEnum(PrototypeMethod.clear),
-        @intFromEnum(PrototypeMethod.add),
-        @intFromEnum(PrototypeMethod.keys),
-        @intFromEnum(PrototypeMethod.values),
-        @intFromEnum(PrototypeMethod.entries),
-        @intFromEnum(PrototypeMethod.for_each),
-        @intFromEnum(PrototypeMethod.get_or_insert),
-        @intFromEnum(PrototypeMethod.get_or_insert_computed),
-        @intFromEnum(PrototypeMethod.size_getter),
-        @intFromEnum(PrototypeMethod.difference),
-        @intFromEnum(PrototypeMethod.intersection),
-        @intFromEnum(PrototypeMethod.is_disjoint_from),
-        @intFromEnum(PrototypeMethod.is_subset_of),
-        @intFromEnum(PrototypeMethod.is_superset_of),
-        @intFromEnum(PrototypeMethod.symmetric_difference),
-        @intFromEnum(PrototypeMethod.union_),
-        => methodCallWithContextAndHost(ctx, this_value, id, args, collection_adapter.host(globals)) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        },
-        @intFromEnum(PrototypeMethod.iterator_next) => {
-            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
-            return methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        },
-        else => error.TypeError,
     };
 }
 
@@ -587,7 +548,7 @@ pub fn groupByWithCallbackHost(
     if (!source.isArray()) return error.TypeError;
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        const item = source.getProperty(core.atom.atomFromUInt32(index));
+        const item = try source.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         try addGroupedItem(rt, map, args[1], host, item, index);
     }
@@ -659,6 +620,25 @@ const IteratorPrototypeRef = struct {
     owned: bool,
 };
 
+const IteratorRealm = struct {
+    context: *core.JSContext,
+    global: *core.Object,
+};
+
+fn iteratorRealm(
+    rt: *core.JSRuntime,
+    current_context: ?*core.JSContext,
+    explicit_global: ?*core.Object,
+) !IteratorRealm {
+    if (explicit_global) |global| {
+        const context = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
+        return .{ .context = context, .global = global };
+    }
+    const context = current_context orelse return error.InvalidBuiltinRegistry;
+    const global = context.global orelse return error.InvalidBuiltinRegistry;
+    return .{ .context = context, .global = global };
+}
+
 fn collectionIterator(
     rt: *core.JSRuntime,
     ctx: ?*core.JSContext,
@@ -683,11 +663,11 @@ fn collectionIterator(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
+    const realm = try iteratorRealm(rt, ctx, global);
     const prototype = try iteratorPrototype(
         rt,
-        ctx,
-        global,
-        object,
+        realm.context,
+        realm.global,
         iterator_class,
         if (object.class_id == core.class.ids.map) "Map Iterator" else "Set Iterator",
     );
@@ -702,52 +682,44 @@ fn collectionIterator(
 
 fn iteratorPrototype(
     rt: *core.JSRuntime,
-    ctx: ?*core.JSContext,
-    global: ?*core.Object,
-    receiver: *core.Object,
+    realm: *core.JSContext,
+    global: *core.Object,
     iterator_class: core.ClassId,
     tag_name: []const u8,
 ) !IteratorPrototypeRef {
-    if (ctx) |context| {
-        const slot: usize = iterator_class;
-        if (slot < context.class_prototypes.len) {
-            const stored = context.class_prototypes[slot];
-            if (stored.isObject()) return .{ .object = try expectObject(stored), .owned = false };
-        }
+    const slot: usize = iterator_class;
+    if (slot < realm.class_prototypes.len) {
+        const stored = realm.class_prototypes[slot];
+        if (stored.isObject()) return .{ .object = try expectObject(stored), .owned = false };
     }
 
-    const prototype = try createIteratorPrototype(rt, global, receiver, iterator_class, tag_name);
-    if (ctx) |context| {
-        const slot: usize = iterator_class;
-        if (slot < context.class_prototypes.len) {
-            const value = prototype.value();
-            context.class_prototypes[slot] = value.dup();
-            value.free(rt);
-            return .{ .object = prototype, .owned = false };
-        }
+    const prototype = try createIteratorPrototype(rt, global, iterator_class, tag_name);
+    if (slot < realm.class_prototypes.len) {
+        const value = prototype.value();
+        realm.class_prototypes[slot] = value.dup();
+        value.free(rt);
+        return .{ .object = prototype, .owned = false };
     }
     return .{ .object = prototype, .owned = true };
 }
 
 fn createIteratorPrototype(
     rt: *core.JSRuntime,
-    global: ?*core.Object,
-    receiver: *core.Object,
+    global: *core.Object,
     iterator_class: core.ClassId,
     tag_name: []const u8,
 ) !*core.Object {
-    const realm_global = global orelse receiver.functionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
     var owned_base: ?*core.Object = null;
     errdefer if (owned_base) |base| base.value().free(rt);
-    const base = iteratorPrototypeFromGlobal(rt, global) orelse blk: {
-        const fallback = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobalOrReceiver(rt, global, receiver));
+    const base = iteratorPrototypeFromGlobal(global) orelse blk: {
+        const fallback = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(global));
         errdefer core.Object.destroyFromHeader(rt, &fallback.header);
         try defineToStringTag(rt, fallback, "Iterator");
 
-        const iterator_method = try function_builtin.nativeFunctionForGlobal(rt, realm_global, "[Symbol.iterator]", 0);
+        const iterator_method = try function_builtin.nativeFunctionForGlobal(rt, global, "[Symbol.iterator]", 0);
         defer iterator_method.free(rt);
         const iterator_function = try expectObject(iterator_method);
-        if (!iterator_function.addIteratorIdentityFunction(rt)) return error.TypeError;
+        if (!try iterator_function.addIteratorIdentityFunction(rt)) return error.TypeError;
         try fallback.defineOwnProperty(rt, core.atom.predefinedId("Symbol.iterator", .symbol).?, core.Descriptor.data(iterator_method, true, false, true));
 
         owned_base = fallback;
@@ -761,44 +733,28 @@ fn createIteratorPrototype(
         owned_base = null;
     }
     try defineToStringTag(rt, specific, tag_name);
-    const next = try function_builtin.nativeFunctionForGlobal(rt, realm_global, "next", 0);
+    const next = try function_builtin.nativeFunctionForGlobal(rt, global, "next", 0);
     defer next.free(rt);
     const next_object = try expectObject(next);
     next_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
     // Mirrors js_map_iterator_next (quickjs.c:52576): the next function is
     // bound to one iterator class (JS_GetOpaque2 with JS_CLASS_MAP_ITERATOR +
     // magic), so a Map Iterator's next rejects Set iterators and vice versa.
-    if (!next_object.addCollectionMethodOwnerClass(rt, iterator_class)) return error.TypeError;
+    if (!try next_object.addCollectionMethodOwnerClass(rt, iterator_class)) return error.TypeError;
     try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return specific;
 }
 
-fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
-    const global_object = global orelse return null;
+fn iteratorPrototypeFromGlobal(global: *core.Object) ?*core.Object {
     const iterator_atom = core.atom.predefinedId("Iterator", .string) orelse return null;
-    const iterator_value = global_object.getProperty(iterator_atom);
-    defer iterator_value.free(rt);
-    const iterator = expectObject(iterator_value) catch return null;
-    const prototype_value = iterator.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(rt);
-    return expectObject(prototype_value) catch null;
+    const iterator = global.getOwnDataObjectBorrowed(iterator_atom) orelse return null;
+    return iterator.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
-fn objectPrototypeFromGlobalOrReceiver(rt: *core.JSRuntime, global: ?*core.Object, receiver: *core.Object) ?*core.Object {
-    if (global) |global_object| {
-        const object_atom = core.atom.predefinedId("Object", .string) orelse return null;
-        const object_value = global_object.getProperty(object_atom);
-        defer object_value.free(rt);
-        if (expectObject(object_value) catch null) |object_ctor| {
-            const prototype_value = object_ctor.getProperty(core.atom.ids.prototype);
-            defer prototype_value.free(rt);
-            if (expectObject(prototype_value) catch null) |prototype| return prototype;
-        }
-    }
-
-    var candidate = receiver.getPrototype() orelse return null;
-    while (candidate.getPrototype()) |next| candidate = next;
-    return candidate;
+fn objectPrototypeFromGlobal(global: *core.Object) ?*core.Object {
+    const object_atom = core.atom.predefinedId("Object", .string) orelse return null;
+    const object_ctor = global.getOwnDataObjectBorrowed(object_atom) orelse return null;
+    return object_ctor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
 }
 
 fn globalObjectFromGlobals(rt: *core.JSRuntime, globals: []const globals_mod.Slot) ?*core.Object {
@@ -881,19 +837,13 @@ test "collection iteratorResult roots direct function bytecode value while creat
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -912,7 +862,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
     {
-        const stored = iterator_result.getProperty(value_atom);
+        const stored = try iterator_result.getProperty(value_atom);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
@@ -1311,7 +1261,7 @@ fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object) !SetLikeRecord {
 
 fn setLikeSize(rt: *core.JSRuntime, object: *core.Object) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
-    const size_value = object.getProperty(core.atom.predefinedId("size", .string).?);
+    const size_value = try object.getProperty(core.atom.predefinedId("size", .string).?);
     defer size_value.free(rt);
     const size = size_value.asInt32() orelse return error.TypeError;
     if (size < 0) return error.TypeError;
@@ -1323,13 +1273,13 @@ fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object) !void {
 
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
-    const has_value = object.getProperty(has_key);
+    const has_value = try object.getProperty(has_key);
     defer has_value.free(rt);
     if (!isCallableClosure(has_value)) return error.TypeError;
 
     const keys_key = try rt.internAtom("keys");
     defer rt.atoms.free(keys_key);
-    const keys_value = object.getProperty(keys_key);
+    const keys_value = try object.getProperty(keys_key);
     defer keys_value.free(rt);
     if (!isCallableClosure(keys_value)) return error.TypeError;
 }
@@ -1342,7 +1292,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, hos
     }
     const has_key = try rt.internAtom("has");
     defer rt.atoms.free(has_key);
-    const has_value = object.getProperty(has_key);
+    const has_value = try object.getProperty(has_key);
     defer has_value.free(rt);
     if (!isCallableClosure(has_value)) return error.TypeError;
     var has_args = [_]core.JSValue{key};
@@ -1365,7 +1315,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
 
     const keys_key = try rt.internAtom("keys");
     defer rt.atoms.free(keys_key);
-    const keys_value = object.getProperty(keys_key);
+    const keys_value = try object.getProperty(keys_key);
     defer keys_value.free(rt);
     if (!isCallableClosure(keys_value)) return error.TypeError;
     const iterable_value = try host.callWithThis(rt, keys_value, object.value(), &.{});
@@ -1376,7 +1326,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
         while (index < iterable.arrayLength()) : (index += 1) {
-            const value = iterable.getProperty(core.atom.atomFromUInt32(index));
+            const value = try iterable.getProperty(core.atom.atomFromUInt32(index));
             defer value.free(rt);
             try appendValue(rt, &values, value);
         }

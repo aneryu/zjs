@@ -42,6 +42,32 @@ else
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
+/// Runtime-wide dynamic-import loader authority. A Runtime can execute many
+/// Realms; the active Realm is supplied to the callback at invocation time.
+pub const DynamicImportLoader = struct {
+    callback: ?context_mod.DynamicImportCallback = null,
+    userdata: ?*anyopaque = null,
+};
+
+/// Scoped loader override. Scopes are intended to be restored in LIFO order;
+/// `restore`/`deinit` are idempotent so error-path defers are safe.
+pub const DynamicImportLoaderScope = struct {
+    runtime: *JSRuntime,
+    previous: DynamicImportLoader,
+    active: bool = true,
+
+    pub fn restore(self: *DynamicImportLoaderScope) void {
+        if (!self.active) return;
+        self.runtime.assertOwnerThread();
+        self.runtime.dynamic_import_loader = self.previous;
+        self.active = false;
+    }
+
+    pub fn deinit(self: *DynamicImportLoaderScope) void {
+        self.restore();
+    }
+};
+
 /// Installs the standard ECMAScript global object (every builtin constructor,
 /// prototype, namespace, and the `rt.internal_builtins` record table) onto a
 /// freshly-created global `Object`. The implementation lives in
@@ -408,50 +434,6 @@ pub const WeakRootSlot = struct {
     callback_context: ?*anyopaque = null,
 };
 
-pub const FinalizationJob = struct {
-    sequence: u64 = 0,
-    callback: JSValue = JSValue.undefinedValue(),
-    held_value: JSValue = JSValue.undefinedValue(),
-    symbol_root_mask: u2 = 0,
-    realm: context_mod.RealmRef = .{},
-
-    pub fn init(rt: *JSRuntime, realm: ?*context_mod.JSContext, sequence: u64, callback: JSValue, held_value: JSValue) !FinalizationJob {
-        var job = FinalizationJob{
-            .sequence = sequence,
-            .callback = callback.dup(),
-            .held_value = held_value.dup(),
-            .realm = if (realm) |ctx| context_mod.RealmRef.retain(ctx) else .{},
-        };
-        errdefer {
-            job.callback.free(rt);
-            job.held_value.free(rt);
-            job.realm.deinit();
-        }
-        errdefer job.unregisterSymbolRoots(rt);
-        if (try rt.registerExternalValueSymbolRoot(callback)) job.symbol_root_mask |= 0b01;
-        if (try rt.registerExternalValueSymbolRoot(held_value)) job.symbol_root_mask |= 0b10;
-        return job;
-    }
-
-    pub fn deinit(self: FinalizationJob, rt: *JSRuntime) void {
-        self.unregisterSymbolRoots(rt);
-        self.callback.free(rt);
-        self.held_value.free(rt);
-        var realm = self.realm;
-        realm.deinit();
-    }
-
-    fn unregisterSymbolRoots(self: FinalizationJob, rt: *JSRuntime) void {
-        if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.callback);
-        if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.held_value);
-    }
-
-    pub fn traceRoots(self: *FinalizationJob, visitor: *RootVisitor) RootTraceError!void {
-        try visitor.value(&self.callback);
-        try visitor.value(&self.held_value);
-    }
-};
-
 pub const JSValueHandle = struct {
     runtime: ?*JSRuntime = null,
     slot: ?*RootSlot = null,
@@ -656,12 +638,15 @@ pub const NativeCleanupJob = struct {
 
 pub const DeferredClassPayloadFinalizer = struct {
     class_id: class.ClassId = class.invalid_class_id,
+    generation: u64 = 0,
     finalizer: class.PayloadFinalizer,
+    mark: ?class.PayloadMark = null,
     payload: class.Payload = null,
     payload_kind: class.PayloadKind = .none,
     object_identity: usize = 0,
 
     pub fn run(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime) void {
+        defer rt.classes.releaseDeferredPayloadCallbacks(self.class_id, self.generation);
         var payload = self.payload;
         self.payload = null;
         self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &payload);
@@ -670,6 +655,7 @@ pub const DeferredClassPayloadFinalizer = struct {
 
     pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
         if (self.payload == null) return;
+        const mark = self.mark orelse return;
         const PayloadTraceAdaptor = struct {
             root_visitor: *RootVisitor,
             err: ?RootTraceError = null,
@@ -696,7 +682,7 @@ pub const DeferredClassPayloadFinalizer = struct {
             .visit_value = PayloadTraceAdaptor.visitValue,
             .visit_object = PayloadTraceAdaptor.visitObject,
         };
-        _ = rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(&self.object_identity), &self.payload, &payload_visitor);
+        mark(@ptrCast(rt), @ptrCast(&self.object_identity), &self.payload, &payload_visitor);
         if (adaptor.err) |err| return err;
     }
 };
@@ -717,8 +703,14 @@ const RecentAtomString = struct {
     string: *string.String,
 };
 
-pub const shared_lazy_native_function_slots = 12;
 const root_provider_inline_capacity = 1;
+
+/// A Runtime and every Realm/heap structure owned by it are mutated only by
+/// the thread that initialized the Runtime. Process-global facilities with
+/// their own synchronization (notably ClassId allocation) are independent of
+/// this contract.
+pub const RuntimeMutationError = error{WrongRuntimeThread};
+pub const RuntimeCollectionError = gc.CollectionError || RuntimeMutationError;
 
 /// Cold runtime bookkeeping whose ranges fit in one byte. The atom-string
 /// cache is four-way, so its cursor needs only two bits; combining it with the
@@ -733,20 +725,15 @@ const RuntimeCompactState = packed struct(u8) {
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
+    owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
     gc: gc.Registry,
     atoms: atom.AtomTable,
     classes: class.Table,
     shapes: shape.Registry,
-    modules: module.Registry,
-    auto_init_table: std.ArrayListUnmanaged(property.AutoInit) = .empty,
-    /// Shared, interned-once descriptor id for the lazy `function.prototype`
-    /// auto-init placeholder (`property.AutoInitKind.function_prototype`). All
-    /// functions reuse this single table entry; the materializer derives the
-    /// realm + constructor from the owner function object, so no per-function
-    /// descriptor is needed (avoids unbounded `auto_init_table` growth).
-    function_prototype_auto_init: ?property.AutoInitRef = null,
+    dynamic_import_loader: DynamicImportLoader = .{},
+    auto_init_descriptors: std.ArrayListUnmanaged(*property.AutoInit) = .empty,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
     /// Bootstrap install seam: builds the standard global object. Seeded from the
@@ -780,9 +767,12 @@ pub const JSRuntime = struct {
     weak_root_slots: []*WeakRootSlot = &.{},
     weak_root_slots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
-    pending_finalization_jobs: []FinalizationJob = &.{},
-    pending_finalization_jobs_capacity: usize = 0,
     job_queue: job_mod.Queue = undefined,
+    /// Cross-thread, allocation-free wake signal for host completions that
+    /// must be consumed on this Runtime's owner thread. Atomics.waitAsync is
+    /// the first producer; the signal carries no JS state and is reset only
+    /// while the producer registry mutex excludes a lost-wakeup race.
+    host_completion_event: std.Io.Event = .unset,
     deferred_native_cleanups: []NativeCleanupJob = &.{},
     deferred_native_cleanups_capacity: usize = 0,
     draining_deferred_native_cleanups: bool = false,
@@ -816,7 +806,6 @@ pub const JSRuntime = struct {
     borrowed_weak_cleanup_seen_holder: bool = false,
     borrowed_weak_cleanup_needs_rescan: bool = false,
     current_deferred_weak_value_free_identity: ?usize = null,
-    next_job_sequence: u64 = 0,
     malloc_gc_threshold: usize = default_gc_threshold,
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
@@ -830,8 +819,6 @@ pub const JSRuntime = struct {
     backtrace_capacity: usize = 0,
     current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
     active_native_call: ?*const anyopaque = null,
-    pending_promise_jobs: []context_mod.PendingPromiseJob = &.{},
-    pending_promise_jobs_capacity: usize = 0,
     stack_size: usize = default_stack_size,
     vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
     /// Native (machine C-stack) recursion guard, mirroring QuickJS
@@ -900,7 +887,6 @@ pub const JSRuntime = struct {
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
     internal_builtins: []const []const host_function.InternalRecord = &.{},
-    any_prototype_may_have_indexed_properties: bool = false,
     pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
         const account = if (options.trace_writer) |writer|
             memory.MemoryAccount.initWithTrace(allocator, writer)
@@ -933,6 +919,7 @@ pub const JSRuntime = struct {
     }
 
     fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
+        rt.owner_thread_id = std.Thread.getCurrentId();
         rt.memory = account;
         rt.compact_state = .{ .owns_self_allocation = owns_self_allocation };
         // MemoryAccount's std.mem.Allocator facade stores a pointer to the
@@ -951,8 +938,8 @@ pub const JSRuntime = struct {
             rt.classes.deinit();
         }
         rt.shapes = shape.Registry.init(rt, &rt.memory, &rt.atoms, &rt.gc);
-        rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
-        rt.auto_init_table = .empty;
+        rt.dynamic_import_loader = .{};
+        rt.auto_init_descriptors = .empty;
         rt.materialize_builtin_namespace_cb = null;
         rt.materialize_context_global_cb = null;
         rt.install_standard_globals_cb = default_standard_globals_installer;
@@ -975,8 +962,6 @@ pub const JSRuntime = struct {
         rt.weak_root_slots = &.{};
         rt.weak_root_slots_capacity = 0;
         rt.active_value_roots = null;
-        rt.pending_finalization_jobs = &.{};
-        rt.pending_finalization_jobs_capacity = 0;
         rt.job_queue = job_mod.Queue.init(&rt.memory);
         rt.deferred_native_cleanups = &.{};
         rt.deferred_native_cleanups_capacity = 0;
@@ -1003,7 +988,6 @@ pub const JSRuntime = struct {
         rt.borrowed_weak_cleanup_seen_holder = false;
         rt.borrowed_weak_cleanup_needs_rescan = false;
         rt.current_deferred_weak_value_free_identity = null;
-        rt.next_job_sequence = 0;
         rt.malloc_gc_threshold = options.gc_threshold;
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
@@ -1014,8 +998,6 @@ pub const JSRuntime = struct {
         rt.backtrace_capacity = 0;
         rt.current_backtrace_frame = null;
         rt.active_native_call = null;
-        rt.pending_promise_jobs = &.{};
-        rt.pending_promise_jobs_capacity = 0;
         rt.stack_size = options.stack_size;
         rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
         rt.native_stack_size = initial_native_stack_size;
@@ -1046,7 +1028,6 @@ pub const JSRuntime = struct {
         rt.cached_iterator_next_entries = &.{};
         rt.cached_iterator_next_entries_capacity = 0;
         rt.internal_builtins = &.{};
-        rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
         rt.memory.enableSmallObjectSlab();
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
@@ -1058,17 +1039,22 @@ pub const JSRuntime = struct {
         self.memory.profile_alloc_count = if (opcode_profile) |prof| &prof.alloc_count else null;
     }
 
+    pub fn isOwnerThread(self: *const JSRuntime) bool {
+        return self.owner_thread_id == std.Thread.getCurrentId();
+    }
+
+    pub fn requireOwnerThread(self: *const JSRuntime) RuntimeMutationError!void {
+        if (!self.isOwnerThread()) return error.WrongRuntimeThread;
+    }
+
+    pub fn assertOwnerThread(self: *const JSRuntime) void {
+        if (!self.isOwnerThread()) @panic("JSRuntime mutation from non-owner thread");
+    }
+
     pub fn deinit(self: *JSRuntime) void {
+        self.assertOwnerThread();
         self.assertIdleForTeardown();
         self.vm_stack.deinit(&self.memory);
-        const pending_promise_jobs = self.pending_promise_jobs;
-        const pending_promise_jobs_capacity = self.pending_promise_jobs_capacity;
-        self.pending_promise_jobs = &.{};
-        self.pending_promise_jobs_capacity = 0;
-        for (pending_promise_jobs) |job| job.deinit(self);
-        if (pending_promise_jobs_capacity != 0) {
-            self.memory.free(context_mod.PendingPromiseJob, pending_promise_jobs.ptr[0..pending_promise_jobs_capacity]);
-        }
         const backtrace_frames = self.backtrace_frames;
         const backtrace_capacity = self.backtrace_capacity;
         self.backtrace_frames = &.{};
@@ -1119,7 +1105,6 @@ pub const JSRuntime = struct {
         self.assertNoOutstandingValueHandles();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
-        self.modules.deinit(self);
         self.releaseNativeFunctionRealmsForTeardown();
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
@@ -1160,7 +1145,8 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
         self.weak_object_ids.deinit(self.memory.persistent_allocator);
         self.weak_id_objects.deinit(self.memory.persistent_allocator);
-        self.auto_init_table.deinit(self.memory.persistent_allocator);
+        for (self.auto_init_descriptors.items) |stored| self.destroyRuntime(property.AutoInit, stored);
+        self.auto_init_descriptors.deinit(self.memory.persistent_allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
@@ -1211,10 +1197,18 @@ pub const JSRuntime = struct {
     }
 
     pub fn destroy(self: *JSRuntime) void {
+        self.assertOwnerThread();
         self.deinit();
         var account = self.memory;
         account.destroy(JSRuntime, self);
         std.debug.assert(!account.hasOutstandingAllocations());
+    }
+
+    /// Checked teardown entry for hosts that cannot prove their call thread.
+    /// On rejection the Runtime is untouched and remains owned by its creator.
+    pub fn tryDestroy(self: *JSRuntime) RuntimeMutationError!void {
+        try self.requireOwnerThread();
+        self.destroy();
     }
 
     pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
@@ -1270,6 +1264,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
+        self.assertOwnerThread();
         // qjs add_gc_object (quickjs.c:6540) only links the header into
         // gc_obj_list; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
@@ -1291,6 +1286,7 @@ pub const JSRuntime = struct {
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
+        self.assertOwnerThread();
         try self.gc.addInitializedWithSize(&object.header, bytes);
         if (self.gc.hasPendingMajorRequest()) {
             _ = self.pollGC(null, .normal) catch {};
@@ -1298,6 +1294,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
+        self.assertOwnerThread();
         self.unregisterObjectWithBytes(object, object.allocationSize(self));
     }
 
@@ -1311,6 +1308,7 @@ pub const JSRuntime = struct {
     /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
     /// teardown either (the slab block carries it).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
+        self.assertOwnerThread();
         self.unregisterWeakReferenceHolder(object);
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObjectWithBytes(&object.header, bytes);
@@ -1416,6 +1414,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn linkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        self.assertOwnerThread();
         std.debug.assert(ctx.runtime == self);
         std.debug.assert(ctx.runtime_prev == null and ctx.runtime_next == null);
         ctx.runtime_prev = self.context_tail;
@@ -1428,6 +1427,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn linkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        self.assertOwnerThread();
         std.debug.assert(ctx.runtime == self);
         std.debug.assert(ctx.construction_prev == null and ctx.construction_next == null);
         ctx.construction_prev = self.constructing_context_tail;
@@ -1440,6 +1440,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn unlinkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        self.assertOwnerThread();
         if (ctx.construction_prev == null and ctx.construction_next == null and self.constructing_context_head != ctx) return;
         if (ctx.construction_prev) |prev| {
             prev.construction_next = ctx.construction_next;
@@ -1458,6 +1459,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn unlinkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
+        self.assertOwnerThread();
         if (ctx.runtime_prev == null and ctx.runtime_next == null and self.context_head != ctx) return;
         if (ctx.runtime_prev) |prev| {
             prev.runtime_next = ctx.runtime_next;
@@ -1535,6 +1537,31 @@ pub const JSRuntime = struct {
         return null;
     }
 
+    /// QuickJS `add_property` invalidation for a tagged-integer mutation of
+    /// the immutable intrinsic %Object.prototype%. Find only the owning
+    /// realm(s) and clear their exact %Array.prototype% marker; unrelated
+    /// realms in the same Runtime remain eligible for dense extension.
+    pub fn invalidateStandardArrayPrototypeForObjectPrototype(self: *JSRuntime, object_prototype: *Object) void {
+        self.assertOwnerThread();
+        var live = self.context_head;
+        while (live) |ctx| : (live = ctx.runtime_next) {
+            invalidateContextStandardArrayPrototype(ctx, object_prototype);
+        }
+        var constructing = self.constructing_context_head;
+        while (constructing) |ctx| : (constructing = ctx.construction_next) {
+            invalidateContextStandardArrayPrototype(ctx, object_prototype);
+        }
+    }
+
+    fn invalidateContextStandardArrayPrototype(ctx: *context_mod.JSContext, object_prototype: *Object) void {
+        const object_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.object_prototype)] orelse return;
+        const realm_object_prototype = Object.expect(object_value) catch unreachable;
+        if (realm_object_prototype != object_prototype) return;
+        const array_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.array_prototype)] orelse return;
+        const array_prototype = Object.expect(array_value) catch unreachable;
+        array_prototype.flags.is_std_array_prototype = false;
+    }
+
     pub fn initialArrayShapeForPrototype(self: *const JSRuntime, prototype: ?*const Object) ?*shape.Shape {
         var current = self.context_head;
         while (current) |ctx| : (current = ctx.runtime_next) {
@@ -1553,6 +1580,7 @@ pub const JSRuntime = struct {
     /// published to callers.  This closes the old "registered after context
     /// creation" hole without making the runtime list an ownership edge.
     pub fn ensureContextClassPrototypeCapacity(self: *JSRuntime, class_id: class.ClassId) !void {
+        try self.requireOwnerThread();
         var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
         defer current_owner.deinit();
         while (current_owner.borrow()) |ctx| {
@@ -1563,11 +1591,23 @@ pub const JSRuntime = struct {
             current_owner = next_owner;
             next_owner = .{};
         }
+
+        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer constructing_owner.deinit();
+        while (constructing_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            errdefer next_owner.deinit();
+            _ = try ctx.ensureClassPrototypeSlot(class_id);
+            constructing_owner.deinit();
+            constructing_owner = next_owner;
+            next_owner = .{};
+        }
     }
 
     /// Drop a dynamically unregistered class prototype from every live realm
     /// before its runtime definition (and possibly its plugin DSO) disappears.
     pub fn clearContextClassPrototype(self: *JSRuntime, class_id: class.ClassId) void {
+        self.assertOwnerThread();
         var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
         defer current_owner.deinit();
         while (current_owner.borrow()) |ctx| {
@@ -1577,13 +1617,29 @@ pub const JSRuntime = struct {
             current_owner = next_owner;
             next_owner = .{};
         }
+
+        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
+        defer constructing_owner.deinit();
+        while (constructing_owner.borrow()) |ctx| {
+            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
+            ctx.clearClassPrototype(class_id);
+            constructing_owner.deinit();
+            constructing_owner = next_owner;
+            next_owner = .{};
+        }
     }
 
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
+        self.assertOwnerThread();
         for (self.root_providers) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
         }
         try self.appendRootProvider(provider);
+    }
+
+    pub fn registerRootProviderChecked(self: *JSRuntime, provider: RootProvider) !void {
+        try self.requireOwnerThread();
+        return self.registerRootProvider(provider);
     }
 
     fn rootProvidersUsingInline(self: *const JSRuntime) bool {
@@ -1609,6 +1665,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn unregisterRootProvider(self: *JSRuntime, provider: RootProvider) void {
+        self.assertOwnerThread();
         var found: ?usize = null;
         for (self.root_providers, 0..) |registered, index| {
             if (registered.context == provider.context and registered.trace == provider.trace) {
@@ -1643,17 +1700,11 @@ pub const JSRuntime = struct {
         for (self.persistent_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
-        for (self.pending_finalization_jobs) |*job| {
-            try job.traceRoots(visitor);
-        }
         for (self.deferred_class_payload_finalizers) |*job| {
             try job.traceRoots(self, visitor);
         }
         for (self.deferred_weak_value_frees) |*item| {
             try visitor.value(&item.value);
-        }
-        for (self.pending_promise_jobs) |*job| {
-            try job.traceRoots(visitor);
         }
         try self.job_queue.traceRoots(visitor);
         for (self.root_providers) |provider| {
@@ -2134,10 +2185,12 @@ pub const JSRuntime = struct {
     }
 
     pub fn runObjectCycleRemoval(self: *JSRuntime) usize {
+        self.assertOwnerThread();
         return self.runObjectCycleRemovalWithValueRoots(null);
     }
 
     pub fn runObjectCycleRemovalWithValueRoots(self: *JSRuntime, roots: ?*const ValueRootFrame) usize {
+        self.assertOwnerThread();
         const result = self.tryRunObjectCycleRemovalWithValueRoots(roots) catch return 0;
         return result.freed_objects;
     }
@@ -2150,7 +2203,11 @@ pub const JSRuntime = struct {
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
     ) gc.CollectionError!gc.CollectionResult {
-        if (self.gc_running) return .{};
+        self.assertOwnerThread();
+        // `gc_running` covers the major driver. The refcount/cycle phases also
+        // invoke allocation and callback boundaries, and a previously queued
+        // request must remain pending rather than nest a second collection.
+        if (self.gc_running or self.gc.phase != .none) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting(self) catch unreachable;
         defer if (builtin.mode == .Debug) {
@@ -2193,8 +2250,9 @@ pub const JSRuntime = struct {
         roots: ?*const ValueRootFrame,
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
+        self.assertOwnerThread();
         _ = roots;
-        if (self.gc_running) return .{};
+        if (self.gc_running or self.gc.phase != .none) return .{};
         const scheduler_point: gc.SchedulerPoint = switch (mode) {
             .normal => .allocation_slow_path,
             .callback_boundary => .callback_boundary,
@@ -2222,6 +2280,18 @@ pub const JSRuntime = struct {
         return try self.tryRunObjectCycleRemovalWithValueRoots(null);
     }
 
+    /// Host-facing checked form of `pollGC`. Internal engine paths use the
+    /// asserting form so the mutation-contract error does not widen ordinary
+    /// JavaScript execution error sets.
+    pub fn pollGCChecked(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+        mode: GCPollMode,
+    ) RuntimeCollectionError!gc.CollectionResult {
+        try self.requireOwnerThread();
+        return self.pollGC(roots, mode);
+    }
+
     pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
         return self.pollGC(roots, .safepoint);
     }
@@ -2241,6 +2311,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        self.assertOwnerThread();
         self.gc.requestGC(.manual, .urgent);
         return self.pollGC(roots, .urgent);
     }
@@ -2251,6 +2322,7 @@ pub const JSRuntime = struct {
 
     pub fn requestGCForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
+        self.assertOwnerThread();
         self.gc.requestGC(.manual, .soon);
     }
 
@@ -2294,9 +2366,11 @@ pub const JSRuntime = struct {
             if (record.isRegistered()) registered_classes += 1;
         }
 
-        const object_count = self.gc.liveCount();
+        const object_count = self.gc.liveCountKind(.object);
         const shape_count = self.shapes.live_shape_count;
-        const module_count = self.modules.modules.len;
+        // Count heap nodes, not Realm registry membership: an externally
+        // retained record remains live and reportable after its Realm unlinks.
+        const module_count = self.gc.liveCountKind(.module);
         const class_record_count = self.classes.records.len;
         return .{
             .memory_limit = self.memoryLimit(),
@@ -2351,25 +2425,12 @@ pub const JSRuntime = struct {
         return self.gc.stats.allocation_debt;
     }
 
-    /// Interned-once shared descriptor for the lazy `function.prototype`
-    /// auto-init placeholder. Created on first use and cached on the runtime.
-    pub fn functionPrototypeAutoInitRef(self: *JSRuntime) !property.AutoInitRef {
-        if (self.function_prototype_auto_init) |ref| return ref;
-        const ref = try property.internAutoInit(self, .{
-            .name = "",
-            .length = 0,
-            .rt = self,
-            .kind = .function_prototype,
-        });
-        self.function_prototype_auto_init = ref;
-        return ref;
-    }
-
     pub fn gcStats(self: JSRuntime) gc.Stats {
         var stats = self.gc.statsSnapshot(&self);
         stats.weak_ref_count = self.weakReferenceCount();
-        stats.finalizer_queue_length = self.pending_finalization_jobs.len;
-        stats.pending_finalization_job_count = self.pending_finalization_jobs.len;
+        const finalization_jobs = self.job_queue.countKind(.finalization);
+        stats.finalizer_queue_length = finalization_jobs;
+        stats.pending_finalization_job_count = finalization_jobs;
         stats.deferred_native_cleanup_count = self.deferred_native_cleanups.len;
         stats.deferred_native_cleanup_run_count = self.deferred_native_cleanup_run_count;
         stats.deferred_class_payload_finalizer_count = self.deferred_class_payload_finalizers.len;
@@ -2462,9 +2523,13 @@ pub const JSRuntime = struct {
                 }
             }
         }
+        // Allocation is legal from class/native finalizers while the refcount
+        // queue is in its decref phase, but starting a nested major collection
+        // is not. `gc_running` covers the major driver; the explicit phase guard
+        // also covers outer zero-ref drains that run without that flag.
+        if (self.gc_running or self.gc.phase != .none) return;
         if (comptime memory.force_gc_on_allocation_enabled) {
             if (self.memory.trigger_gc_fn == null) return;
-            if (self.gc_running) return;
             // The force-GC build option is diagnostic instrumentation, not a
             // scheduling-policy change. Preserve an explicitly configured
             // threshold across the synthetic pre-allocation collection.
@@ -2473,7 +2538,6 @@ pub const JSRuntime = struct {
             _ = self.forceGC(null) catch {};
             return;
         }
-        if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
@@ -2487,7 +2551,7 @@ pub const JSRuntime = struct {
     /// cycles before rejecting the replacement object.
     pub fn collectBeforeObjectAllocation(self: *JSRuntime, size: usize) void {
         self.requestGCForAllocation(size);
-        if (self.gc_running or !self.gc.hasPendingMajorRequest()) return;
+        if (self.gc_running or self.gc.phase != .none or !self.gc.hasPendingMajorRequest()) return;
         _ = self.pollGC(null, .normal) catch {};
     }
 
@@ -2636,8 +2700,8 @@ pub const JSRuntime = struct {
         return self.atoms.internString(bytes);
     }
 
-    pub fn newClassId(self: *JSRuntime, requested: class.ClassId) error{ClassIdExhausted}!class.ClassId {
-        _ = self;
+    pub fn newClassId(self: *JSRuntime, requested: class.ClassId) (error{ClassIdExhausted} || RuntimeMutationError)!class.ClassId {
+        try self.requireOwnerThread();
         if (requested != class.invalid_class_id) return requested;
         return class.allocateDynamicClassId();
     }
@@ -2645,6 +2709,20 @@ pub const JSRuntime = struct {
     pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
         self.interrupt_handler = handler;
         self.interrupt_context = context;
+    }
+
+    pub fn getDynamicImportLoader(self: *const JSRuntime) DynamicImportLoader {
+        return self.dynamic_import_loader;
+    }
+
+    pub fn installDynamicImportLoader(self: *JSRuntime, next: DynamicImportLoader) DynamicImportLoaderScope {
+        self.assertOwnerThread();
+        const previous = self.dynamic_import_loader;
+        self.dynamic_import_loader = next;
+        return .{
+            .runtime = self,
+            .previous = previous,
+        };
     }
 
     /// Reserve count for a global object's own-property table prior to running
@@ -2676,6 +2754,7 @@ pub const JSRuntime = struct {
                 gc.retain(&global.header);
                 ctx.global = global;
                 _ = global.ensureGlobalPayload(self) catch |err| {
+                    ctx.rollbackIntrinsicBootstrap();
                     ctx.global = null;
                     global.value().free(self);
                     return @errorCast(err);
@@ -2687,6 +2766,7 @@ pub const JSRuntime = struct {
         }
         installer(self, global) catch |err| {
             if (adopted_context) |ctx| {
+                ctx.rollbackIntrinsicBootstrap();
                 ctx.global = null;
                 global.value().free(self);
             }
@@ -2711,76 +2791,40 @@ pub const JSRuntime = struct {
         return self.can_block;
     }
 
-    pub fn nextJobSequence(self: *JSRuntime) u64 {
-        const sequence = self.next_job_sequence;
-        self.next_job_sequence +%= 1;
-        return sequence;
+    pub fn signalHostCompletion(self: *JSRuntime, io: std.Io) void {
+        self.host_completion_event.set(io);
     }
 
-    pub fn enqueueFinalizationJob(self: *JSRuntime, callback: JSValue, held_value: JSValue) !void {
-        return self.enqueueFinalizationJobForRealm(null, callback, held_value);
+    pub fn resetHostCompletionSignal(self: *JSRuntime) void {
+        self.host_completion_event.reset();
     }
 
-    pub fn enqueueFinalizationJobForRealm(self: *JSRuntime, realm: ?*context_mod.JSContext, callback: JSValue, held_value: JSValue) !void {
-        const index = self.pending_finalization_jobs.len;
-        try self.ensurePendingFinalizationJobCapacity(index + 1);
-        var job = try FinalizationJob.init(self, realm, self.nextJobSequence(), callback, held_value);
-        errdefer job.deinit(self);
-        self.pending_finalization_jobs = self.pending_finalization_jobs.ptr[0 .. index + 1];
-        self.pending_finalization_jobs[index] = job;
+    pub fn waitForHostCompletion(self: *JSRuntime, io: std.Io) void {
+        self.host_completion_event.waitUncancelable(io);
     }
 
-    pub fn peekPendingFinalizationJobSequence(self: JSRuntime) ?u64 {
-        if (self.pending_finalization_jobs.len == 0) return null;
-        return self.pending_finalization_jobs[0].sequence;
+    pub fn waitForHostCompletionUntil(self: *JSRuntime, io: std.Io, deadline: std.Io.Timestamp) bool {
+        self.host_completion_event.waitTimeout(io, .{ .deadline = deadline.withClock(.awake) }) catch |err| switch (err) {
+            error.Timeout, error.Canceled => return false,
+        };
+        return true;
     }
 
-    pub fn takePendingFinalizationJob(self: *JSRuntime) ?FinalizationJob {
-        if (self.pending_finalization_jobs.len == 0) return null;
-        const job = self.pending_finalization_jobs[0];
-        const old_len = self.pending_finalization_jobs.len;
-        if (old_len == 1) {
-            const old_jobs = self.pending_finalization_jobs.ptr[0..self.pending_finalization_jobs_capacity];
-            self.pending_finalization_jobs = &.{};
-            self.pending_finalization_jobs_capacity = 0;
-            self.memory.free(FinalizationJob, old_jobs);
-            return job;
-        }
-        @memmove(self.pending_finalization_jobs[0 .. old_len - 1], self.pending_finalization_jobs[1..old_len]);
-        self.pending_finalization_jobs = self.pending_finalization_jobs.ptr[0 .. old_len - 1];
-        return job;
+    pub fn enqueueFinalizationJobForRealm(self: *JSRuntime, realm: *context_mod.JSContext, callback: JSValue, held_value: JSValue) !void {
+        std.debug.assert(realm.runtime == self);
+        try self.job_queue.enqueueFinalization(realm, callback, held_value);
     }
 
     pub fn clearPendingFinalizationJobs(self: *JSRuntime) void {
-        const jobs = self.pending_finalization_jobs;
-        const capacity = self.pending_finalization_jobs_capacity;
-        self.pending_finalization_jobs = &.{};
-        self.pending_finalization_jobs_capacity = 0;
-        for (jobs) |job| job.deinit(self);
-        if (capacity != 0) {
-            self.memory.free(FinalizationJob, jobs.ptr[0..capacity]);
+        while (self.job_queue.firstIndexOfKind(.finalization)) |index| {
+            var entry = self.job_queue.takeAt(index);
+            entry.deinit();
         }
     }
 
     pub fn pendingFinalizationJobCountForTest(self: JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.pending_finalization_jobs.len;
-    }
-
-    fn ensurePendingFinalizationJobCapacity(self: *JSRuntime, min_capacity: usize) !void {
-        if (self.pending_finalization_jobs_capacity >= min_capacity) return;
-        var next_capacity = if (self.pending_finalization_jobs_capacity == 0) @as(usize, 4) else self.pending_finalization_jobs_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.memory.alloc(FinalizationJob, next_capacity);
-        errdefer self.memory.free(FinalizationJob, next);
-        const old_jobs = self.pending_finalization_jobs;
-        const old_capacity = self.pending_finalization_jobs_capacity;
-        @memcpy(next[0..old_jobs.len], old_jobs);
-        self.pending_finalization_jobs = next[0..old_jobs.len];
-        self.pending_finalization_jobs_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.memory.free(FinalizationJob, old_jobs.ptr[0..old_capacity]);
-        }
+        return self.job_queue.countKind(.finalization);
     }
 
     pub fn enqueueDeferredNativeCleanup(self: *JSRuntime, finalizer: host_function.ExternalFinalizer, ptr: *anyopaque) !void {
@@ -2794,14 +2838,16 @@ pub const JSRuntime = struct {
     }
 
     pub fn enqueueDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) !bool {
-        const record = self.classes.record(class_id) orelse return false;
-        const finalizer = record.payload_finalizer orelse return false;
+        const definition = self.classes.destructionPlan(class_id) orelse return false;
         const index = self.deferred_class_payload_finalizers.len;
         try self.ensureDeferredClassPayloadFinalizerCapacity(index + self.reserved_deferred_class_payload_finalizer_slots + 1);
+        const callbacks = self.classes.pinDeferredPayloadCallbacks(class_id, definition.generation) orelse return false;
         self.deferred_class_payload_finalizers = self.deferred_class_payload_finalizers.ptr[0 .. index + 1];
         self.deferred_class_payload_finalizers[index] = .{
             .class_id = class_id,
-            .finalizer = finalizer,
+            .generation = callbacks.generation,
+            .finalizer = callbacks.finalizer,
+            .mark = callbacks.mark,
             .payload = payload,
             .payload_kind = payload_kind,
             .object_identity = object_identity,
@@ -2820,15 +2866,11 @@ pub const JSRuntime = struct {
         self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
     }
 
-    pub fn enqueueReservedDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) bool {
+    pub fn enqueueReservedDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, generation: u64, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) bool {
         std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
         self.reserved_deferred_class_payload_finalizer_slots -= 1;
 
-        const record = self.classes.record(class_id) orelse {
-            self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-            return false;
-        };
-        const finalizer = record.payload_finalizer orelse {
+        const callbacks = self.classes.pinDeferredPayloadCallbacks(class_id, generation) orelse {
             self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
             return false;
         };
@@ -2837,7 +2879,9 @@ pub const JSRuntime = struct {
         self.deferred_class_payload_finalizers = self.deferred_class_payload_finalizers.ptr[0 .. index + 1];
         self.deferred_class_payload_finalizers[index] = .{
             .class_id = class_id,
-            .finalizer = finalizer,
+            .generation = callbacks.generation,
+            .finalizer = callbacks.finalizer,
+            .mark = callbacks.mark,
             .payload = payload,
             .payload_kind = payload_kind,
             .object_identity = object_identity,

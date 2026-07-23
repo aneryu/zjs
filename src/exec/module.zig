@@ -19,6 +19,7 @@ const ModuleNamespaceError = error{
     OutOfMemory,
     InvalidAtom,
     InvalidBytecode,
+    InvalidClassId,
     InvalidUtf8,
     ModuleNotFound,
     MissingExport,
@@ -60,26 +61,27 @@ pub fn isLinked(function: bytecode.Bytecode) bool {
 }
 
 pub fn instantiateParsedRecord(
-    runtime: *core.JSRuntime,
+    ctx: *core.JSContext,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
-) !*core.module.ModuleRecord {
-    return instantiateParsedRecordWithReferrer(runtime, module_name, function, null);
+) !void {
+    return instantiateParsedRecordWithReferrer(ctx, module_name, function, null);
 }
 
 pub fn instantiateParsedRecordWithReferrer(
-    runtime: *core.JSRuntime,
+    ctx: *core.JSContext,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
     referrer_path: ?[]const u8,
-) !*core.module.ModuleRecord {
+) !void {
+    const runtime = ctx.runtime;
     const parsed = function.module_record orelse return error.InvalidBytecode;
     for (parsed.imports) |entry| _ = try requestName(parsed, entry.request_index);
     for (parsed.indirect_exports) |entry| _ = try requestName(parsed, entry.request_index);
     for (parsed.star_exports) |entry| _ = try requestName(parsed, entry.request_index);
     for (parsed.import_attributes) |entry| _ = try requestName(parsed, entry.request_index);
 
-    const record = try runtime.modules.createFresh(runtime, module_name);
+    const record = try ctx.modules.createFresh(runtime, module_name);
     for (parsed.requests, 0..) |request, request_index| {
         const resolved = try resolvedRequestAtomForParsed(runtime, &parsed, request.module_name, @intCast(request_index), referrer_path);
         defer runtime.atoms.free(resolved);
@@ -111,14 +113,12 @@ pub fn instantiateParsedRecordWithReferrer(
         try record.addImportAttribute(resolved, entry.key, entry.value);
     }
     record.has_top_level_await = parsed.has_top_level_await;
-    return record;
 }
 
 pub fn preloadFileModuleGraph(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: ?*core.JSContext,
+    context: *core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -128,14 +128,13 @@ pub fn preloadFileModuleGraph(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInner(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, null);
+    try preloadFileModuleGraphInner(io, allocator, context, root_source, root_path, max_source_size, &seen, null);
 }
 
 pub fn preloadFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: ?*core.JSContext,
+    context: *core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -146,14 +145,13 @@ pub fn preloadFileModuleGraphWithOrder(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInner(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, postorder);
+    try preloadFileModuleGraphInner(io, allocator, context, root_source, root_path, max_source_size, &seen, postorder);
 }
 
 pub fn preloadMissingFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: ?*core.JSContext,
+    context: *core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -164,7 +162,7 @@ pub fn preloadMissingFileModuleGraphWithOrder(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, postorder, true);
+    try preloadFileModuleGraphInnerMode(io, allocator, context, root_source, root_path, max_source_size, &seen, postorder, true);
 }
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
@@ -183,8 +181,8 @@ pub fn buildModuleVarRefs(
     function: *const bytecode.Bytecode,
 ) ![]*core.VarRef {
     if (function.varRefNamesLen() == 0) return &.{};
-    const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
-    if (function.closure_var.len == 0) {
+    const record = ctx.modules.find(module_name) orelse return error.ModuleNotFound;
+    if (function.closureVar().len == 0) {
         var idx: usize = 0;
         while (idx < function.varRefNamesLen()) : (idx += 1) {
             const name = function.varRefName(idx);
@@ -193,7 +191,7 @@ pub fn buildModuleVarRefs(
             cell.free(ctx.runtime);
         }
     } else {
-        for (function.closure_var, 0..) |cv, idx| {
+        for (function.closureVar(), 0..) |cv, idx| {
             if (idx >= function.varRefNamesLen()) return error.InvalidBytecode;
             if (cv.closureType() != .module_decl) continue;
             const name = function.varRefName(idx);
@@ -220,14 +218,14 @@ pub fn buildModuleVarRefs(
     var idx: usize = 0;
     while (idx < function.varRefNamesLen()) : (idx += 1) {
         const name = function.varRefName(idx);
-        const cell_value = if (idx < function.closure_var.len) switch (function.closure_var[idx].closureType()) {
+        const cell_value = if (idx < function.closureVar().len) switch (function.closureVar()[idx].closureType()) {
             .module_import => try moduleImportCell(ctx, record, name),
             .module_decl => if (moduleHasResolvedImport(record, name))
                 try moduleImportCell(ctx, record, name)
             else
                 try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx)),
-            .global, .global_ref, .global_decl => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
-            .local, .arg, .ref => try createGlobalModuleVarRef(ctx, function.closure_var[idx]),
+            .global, .global_ref, .global_decl => try createGlobalModuleVarRef(ctx, function.closureVar()[idx]),
+            .local, .arg, .ref => try createGlobalModuleVarRef(ctx, function.closureVar()[idx]),
         } else if (moduleHasResolvedImport(record, name))
             try moduleImportCell(ctx, record, name)
         else
@@ -260,7 +258,7 @@ pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []*core.VarRef) void {
 }
 
 pub fn moduleNamespaceValue(ctx: *core.JSContext, module_name: core.Atom) !core.JSValue {
-    const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
+    const record = ctx.modules.find(module_name) orelse return error.ModuleNotFound;
     const cell = try moduleNamespaceCell(ctx, record);
     defer cell.free(ctx.runtime);
     return moduleBindingCellValue(cell);
@@ -292,8 +290,7 @@ fn resolvedRequestAtomForParsed(
 fn moduleImportCell(ctx: *core.JSContext, record: *const core.module.ModuleRecord, local_name: core.Atom) !core.JSValue {
     for (record.resolved_imports) |entry| {
         if (entry.local_name != local_name) continue;
-        if (entry.module_index >= ctx.runtime.modules.modules.len) return error.ModuleNotFound;
-        const dep = &ctx.runtime.modules.modules[entry.module_index];
+        const dep = ctx.modules.find(entry.module_name) orelse return error.ModuleNotFound;
         // qjs js_inner_module_linking (quickjs.c:30765-30777): the import slot
         // is a direct alias of the exporting module's cell (`var_ref =
         // res_me->u.local.var_ref` / `p1->u.func.var_refs[var_idx]`, then
@@ -435,11 +432,10 @@ fn initializeModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.Mo
     defer ctx.runtime.active_value_roots = payload_cell_root_frame.previous;
 
     for (exports.items) |export_name| {
-        const resolution = try ctx.runtime.modules.resolveExport(record.module_name, export_name);
+        const resolution = try ctx.modules.resolveExport(record.module_name, export_name);
         if (resolution != .resolved) continue;
         const binding = resolution.resolved;
-        if (binding.module_index >= ctx.runtime.modules.modules.len) continue;
-        const dep = &ctx.runtime.modules.modules[binding.module_index];
+        const dep = ctx.modules.find(binding.module_name) orelse continue;
         var rooted_cell = if (binding.local_name == atom_star)
             try moduleNamespaceCell(ctx, dep)
         else if (explicitStarNamespaceTarget(dep, binding.local_name) != null)
@@ -461,7 +457,9 @@ fn initializeModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.Mo
         ctx.runtime.active_value_roots = &loop_root_frame;
         defer ctx.runtime.active_value_roots = loop_root_frame.previous;
 
-        try object.defineOwnProperty(ctx.runtime, export_name, core.Descriptor.data(rooted_value, true, true, false));
+        // Namespace export properties are populated on this fresh object before
+        // its payload is published, so no existing AUTOINIT slot can be reached.
+        object.defineOwnProperty(ctx.runtime, export_name, core.Descriptor.data(rooted_value, true, true, false)) catch |err| return @errorCast(err);
         const payload_name = ctx.runtime.atoms.dup(export_name);
         var payload_name_owned = true;
         errdefer if (payload_name_owned) ctx.runtime.atoms.free(payload_name);
@@ -477,12 +475,14 @@ fn initializeModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.Mo
     object.flags.extensible = false;
 }
 
-fn defineModuleNamespaceToStringTag(ctx: *core.JSContext, object: *core.Object) !void {
+fn defineModuleNamespaceToStringTag(ctx: *core.JSContext, object: *core.Object) ModuleNamespaceError!void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.InvalidAtom;
     const tag_string = try core.string.String.createUtf8(ctx.runtime, "Module");
     const tag_value = tag_string.value();
     defer tag_value.free(ctx.runtime);
-    try object.defineOwnProperty(ctx.runtime, tag_atom, core.Descriptor.data(tag_value, false, false, false));
+    // This is the final own property on a freshly populated namespace object;
+    // it cannot encounter an AUTOINIT slot.
+    object.defineOwnProperty(ctx.runtime, tag_atom, core.Descriptor.data(tag_value, false, false, false)) catch |err| return @errorCast(err);
 }
 
 fn ownedAtomSliceFromList(ctx: *core.JSContext, list: *std.ArrayList(core.Atom)) ![]core.Atom {
@@ -577,21 +577,20 @@ fn collectModuleNamespaceExports(ctx: *core.JSContext, record: *core.module.Modu
             try appendUniqueExport(ctx, exports, entry.export_name);
             continue;
         }
-        const dep_index = ctx.runtime.modules.findIndex(entry.module_name) orelse continue;
-        const dep = &ctx.runtime.modules.modules[dep_index];
+        const dep = ctx.modules.find(entry.module_name) orelse continue;
         for (dep.exports) |dep_export| {
             if (dep_export.export_name == atom_default) continue;
-            const resolution = try ctx.runtime.modules.resolveExport(record.module_name, dep_export.export_name);
+            const resolution = try ctx.modules.resolveExport(record.module_name, dep_export.export_name);
             if (resolution == .resolved) try appendUniqueExport(ctx, exports, dep_export.export_name);
         }
         for (dep.indirect_exports) |dep_export| {
             if (dep_export.export_name == atom_default) continue;
-            const resolution = try ctx.runtime.modules.resolveExport(record.module_name, dep_export.export_name);
+            const resolution = try ctx.modules.resolveExport(record.module_name, dep_export.export_name);
             if (resolution == .resolved) try appendUniqueExport(ctx, exports, dep_export.export_name);
         }
         for (dep.star_exports) |dep_export| {
             if (dep_export.export_name == atom_star or dep_export.export_name == atom_default) continue;
-            const resolution = try ctx.runtime.modules.resolveExport(record.module_name, dep_export.export_name);
+            const resolution = try ctx.modules.resolveExport(record.module_name, dep_export.export_name);
             if (resolution == .resolved) try appendUniqueExport(ctx, exports, dep_export.export_name);
         }
     }
@@ -621,8 +620,7 @@ fn moduleBindingCellValue(cell_value: core.JSValue) core.JSValue {
 
 fn moduleExplicitNamespaceExportCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, export_name: core.Atom) ModuleNamespaceError!core.JSValue {
     const target_name = explicitStarNamespaceTarget(record, export_name) orelse return moduleLocalCell(ctx, record, export_name, true, false);
-    const target_index = ctx.runtime.modules.findIndex(target_name) orelse return error.ModuleNotFound;
-    const target = &ctx.runtime.modules.modules[target_index];
+    const target = ctx.modules.find(target_name) orelse return error.ModuleNotFound;
     try record.ensureLocalBinding(export_name);
     const index = record.findLocalBindingIndex(export_name) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell) == null) {
@@ -647,22 +645,20 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 fn preloadFileModuleGraphInner(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: ?*core.JSContext,
+    context: *core.JSContext,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
     seen: *std.ArrayList([]const u8),
     postorder: ?*std.ArrayList([]const u8),
 ) !void {
-    try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, source_text, path, max_source_size, seen, postorder, false);
+    try preloadFileModuleGraphInnerMode(io, allocator, context, source_text, path, max_source_size, seen, postorder, false);
 }
 
 fn preloadFileModuleGraphInnerMode(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.JSRuntime,
-    context: ?*core.JSContext,
+    context: *core.JSContext,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
@@ -670,32 +666,32 @@ fn preloadFileModuleGraphInnerMode(
     postorder: ?*std.ArrayList([]const u8),
     skip_existing: bool,
 ) !void {
+    const runtime = context.runtime;
     for (seen.items) |existing| {
         if (std.mem.eql(u8, existing, path)) return;
     }
     try appendTrackedPath(allocator, seen, path);
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
-    if (skip_existing and runtime.modules.find(module_name) != null) return;
+    if (skip_existing and context.modules.find(module_name) != null) return;
 
-    var parsed = try parser.compile(runtime, source_text, .{ .mode = .module, .filename = path });
+    var parsed = try parser.compile(.{ .realm = context }, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
-        if (context) |ctx| {
-            const exception_ops = @import("vm_exception_ops.zig");
-            const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
-            var msg_buf = std.ArrayList(u8).empty;
-            defer msg_buf.deinit(runtime.memory.allocator);
-            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
-            const error_val = try exception_ops.createNamedError(ctx, global_object, "SyntaxError", msg_buf.items);
-            _ = ctx.throwValue(error_val);
-        }
+        const exception_ops = @import("vm_exception_ops.zig");
+        const global_object = try @import("zjs_vm.zig").contextGlobal(context);
+        var msg_buf = std.ArrayList(u8).empty;
+        defer msg_buf.deinit(runtime.memory.allocator);
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+        const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
+        _ = context.throwValue(error_val);
         return error.SyntaxError;
     }
+    const function = parsed.legacyModuleConst() orelse return error.InvalidBytecode;
 
-    _ = try instantiateParsedRecordWithReferrer(runtime, module_name, &parsed.function, path);
+    try instantiateParsedRecordWithReferrer(context, module_name, function, path);
 
-    const record = parsed.function.module_record orelse return;
+    const record = function.module_record orelse return;
     for (record.requests, 0..) |request, request_index| {
         const specifier = runtime.atoms.name(request.module_name) orelse return error.InvalidAtom;
         const dep_path_base = try resolveModuleSpecifier(allocator, path, specifier);
@@ -707,18 +703,18 @@ fn preloadFileModuleGraphInnerMode(
             try allocator.dupe(u8, dep_path_base);
         defer allocator.free(dep_path);
         if (synthetic_kind) |kind| {
-            _ = try preloadSyntheticFileModule(runtime, dep_path, kind);
+            try preloadSyntheticFileModule(context, dep_path, kind);
             continue;
         }
         const dep_source = std.Io.Dir.cwd().readFileAlloc(io, dep_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
             error.FileNotFound => {
-                if (context) |ctx| try throwCouldNotLoadModule(ctx, dep_path);
+                try throwCouldNotLoadModule(context, dep_path);
                 return error.ModuleNotFound;
             },
             else => |e| return e,
         };
         defer allocator.free(dep_source);
-        try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, dep_source, dep_path, max_source_size, seen, postorder, skip_existing);
+        try preloadFileModuleGraphInnerMode(io, allocator, context, dep_source, dep_path, max_source_size, seen, postorder, skip_existing);
     }
     if (postorder) |order| {
         try appendTrackedPath(allocator, order, path);
@@ -792,17 +788,17 @@ pub fn syntheticModuleFilePath(path: []const u8) []const u8 {
 }
 
 pub fn preloadSyntheticFileModule(
-    runtime: *core.JSRuntime,
+    ctx: *core.JSContext,
     path: []const u8,
     kind: core.module.SyntheticKind,
-) !*core.module.ModuleRecord {
+) !void {
+    const runtime = ctx.runtime;
     const module_name = try runtime.internAtom(path);
     defer runtime.atoms.free(module_name);
-    if (runtime.modules.find(module_name)) |existing| return existing;
-    const record = try runtime.modules.createFresh(runtime, module_name);
+    if (ctx.modules.find(module_name) != null) return;
+    const record = try ctx.modules.createFresh(runtime, module_name);
     record.synthetic_kind = kind;
     try record.addExport(atom_default, atom_default);
-    return record;
 }
 
 pub fn initializeSyntheticFileModule(
@@ -811,7 +807,7 @@ pub fn initializeSyntheticFileModule(
     module_name: core.Atom,
     source_text: []const u8,
 ) !bool {
-    const record = ctx.runtime.modules.find(module_name) orelse return false;
+    const record = ctx.modules.find(module_name) orelse return false;
     if (record.synthetic_kind == .none) return false;
     switch (record.synthetic_kind) {
         .none => unreachable,

@@ -20,7 +20,7 @@ const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 pub const StaticMethod = core.host_function.builtin_method_ids.regexp.StaticMethod;
 
@@ -248,6 +248,11 @@ fn regexpCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
+    const callable_global: ?*core.Object = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
@@ -267,35 +272,31 @@ fn regexpCall(
         // already a RegExp and no flags are given" call-only behavior).
         if (host_call.is_constructor) {
             const rt = ctx.runtime;
-            // QJS's context is permanently tied to its realm. ZJS also permits
-            // callers to run bytecode against an explicit global before
-            // `ctx.global` is initialized, so OP_regexp supplies that active
-            // VM global through the construct environment.
-            const active_global = host_call.global orelse ctx.global orelse return error.TypeError;
+            // Synthetic construct terminals explicitly supply their active
+            // global; observable calls receive it through `callable_realm`.
+            const active_global = callable_global orelse return error.TypeError;
             const pattern = if (args.len >= 1) args[0] else try createStringValue(rt, "");
             defer if (args.len < 1) pattern.free(rt);
             const flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
             defer if (args.len < 2) flags.free(rt);
             return constructWithPrototypeInRealm(rt, active_global, pattern, flags, host_call.new_target);
         }
-        const active_global = host_call.global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, host_call.func_obj, args, caller_function, caller_frame);
     }
 
     const function_object = host_call.func_obj orelse return error.TypeError;
     if (id == @intFromEnum(StaticMethod.escape)) return escape(ctx.runtime, args);
     if (legacyAccessorMethodFromId(id)) |method| {
-        const active_global = host_call.global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
     }
     const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
-    // `compile` resolves the global through the function object's realm first
-    // (matching the retired call.zig branch); the rest take `host_call.global`.
     if (method_id == 9) {
-        const compile_global = function_object.functionRealmGlobalPtr() orelse host_call.global orelse return error.TypeError;
-        return (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
+        return (try regexp_fastpath.qjsRegExpCompile(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError;
     }
-    const active_global = host_call.global orelse return error.TypeError;
+    const active_global = callable_global orelse return error.TypeError;
     return switch (method_id) {
         1 => string_ops.qjsRegExpToString(ctx, output, active_global, this_value, caller_function, caller_frame),
         2 => (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
@@ -314,7 +315,9 @@ fn regexpFlagsAccessorCall(
     native_this: core.JSValue,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, 0) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
     // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe the
@@ -356,7 +359,9 @@ fn regexpSourceAccessorCall(
     native_this: core.JSValue,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, 0) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     const function_object = host_call.func_obj orelse return error.TypeError;
     if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
@@ -368,8 +373,10 @@ fn regexpSourceAccessorCall(
             else => err,
         };
     }
-    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |proto| {
-        if (receiver == proto) return createStringValue(native_ctx.runtime, "(?:)");
+    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |resolved| {
+        var prototype = resolved;
+        defer prototype.deinit(native_ctx.runtime);
+        if (receiver == prototype.object()) return createStringValue(native_ctx.runtime, "(?:)");
     }
     _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
     return error.TypeError;
@@ -381,7 +388,9 @@ fn regexpFlagAccessorCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, &.{}, native_magic) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     const function_object = host_call.func_obj orelse return error.TypeError;
     if (!native_this.isObject()) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
@@ -393,8 +402,10 @@ fn regexpFlagAccessorCall(
             return core.JSValue.boolean((bits & mask) != 0);
         }
     }
-    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |proto| {
-        if (receiver == proto) return core.JSValue.undefinedValue();
+    if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |resolved| {
+        var prototype = resolved;
+        defer prototype.deinit(native_ctx.runtime);
+        if (receiver == prototype.object()) return core.JSValue.undefinedValue();
     }
     _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, active_global, function_object.value());
     return error.TypeError;
@@ -406,7 +417,9 @@ fn regexpExecCall(
     native_args: []const core.JSValue,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     return try regexp_fastpath.qjsRegExpExecMethod(
         native_ctx,
         host_call.output,
@@ -424,7 +437,9 @@ fn regexpSymbolMatchCall(
     native_args: []const core.JSValue,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     return (try string_ops.qjsRegExpSymbolMatch(
         native_ctx,
         host_call.output,
@@ -442,7 +457,9 @@ fn regexpSymbolSplitCall(
     native_args: []const core.JSValue,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const active_global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == native_ctx);
+    const active_global = realm.global;
     return (try string_ops.qjsRegExpSymbolSplit(
         native_ctx,
         host_call.output,
@@ -1762,7 +1779,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

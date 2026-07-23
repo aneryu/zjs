@@ -36,14 +36,14 @@ pub noinline fn withGetOrDelete(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
 ) !Step {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
-    const is_with = function.code[frame.pc + 8] != 0;
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
+    const is_with = function.byteCode()[frame.pc + 8] != 0;
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
@@ -76,7 +76,7 @@ pub noinline fn withGetOrDelete(
         }
     else
         true;
-    if (opc == op.with_get_var and !still_has_binding and (function.flags.is_strict or function.flags.runtime_strict)) {
+    if (opc == op.with_get_var and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
@@ -115,7 +115,7 @@ pub noinline fn withGetOrDelete(
                     old_value.free(ctx.runtime);
                 }
             }
-            if (!deleted and function.flags.is_strict) {
+            if (!deleted and function.isStrictMode()) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
@@ -145,12 +145,12 @@ pub noinline fn withGetOrDelete(
 pub noinline fn makeSlotRef(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     opc: u8,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const idx = readInt(u16, function.code[frame.pc + 4 ..][0..2]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const idx = readInt(u16, function.byteCode()[frame.pc + 4 ..][0..2]);
     frame.pc += 6;
 
     const cell: *core.VarRef = switch (opc) {
@@ -181,10 +181,10 @@ pub fn makeVarRef(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const global_value = global.value();
     const object_value = object_value: {
@@ -223,7 +223,7 @@ pub noinline fn makeVarRefVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -239,7 +239,7 @@ pub fn getRefValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     if (stack.len() < 2) return error.StackUnderflow;
@@ -260,7 +260,7 @@ pub fn getRefValue(
     const object = try property_ops.expectObject(obj);
     const still_exists = try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame);
     if (!still_exists) {
-        if (function.flags.is_strict or function.flags.runtime_strict) {
+        if (function.isStrictMode() or function.runtimeStrictMode()) {
             _ = exception_ops.throwReferenceErrorMessage(ctx, global, "binding is not defined") catch |err| return err;
             return error.ReferenceError;
         }
@@ -277,7 +277,7 @@ pub noinline fn getRefValueVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -293,7 +293,7 @@ pub fn putRefValue(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
@@ -303,7 +303,7 @@ pub fn putRefValue(
     var obj = try stack.pop();
     defer obj.free(ctx.runtime);
 
-    const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
+    const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (obj.isUndefined()) {
         if (runtime_strict) return error.ReferenceError;
         const global_value = global.value().dup();
@@ -343,7 +343,7 @@ pub noinline fn putRefValueVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -359,13 +359,13 @@ pub noinline fn withPut(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
-    const diff = readInt(i32, function.code[frame.pc + 4 ..][0..4]);
-    const mode: bytecode.opcode.WithPutMode = switch (function.code[frame.pc + 8]) {
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
+    const mode: bytecode.opcode.WithPutMode = switch (function.byteCode()[frame.pc + 8]) {
         @intFromEnum(bytecode.opcode.WithPutMode.var_object_probe) => .var_object_probe,
         @intFromEnum(bytecode.opcode.WithPutMode.selected_reference) => .selected_reference,
         @intFromEnum(bytecode.opcode.WithPutMode.with_probe) => .with_probe,
@@ -394,7 +394,7 @@ pub noinline fn withPut(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    if (!still_exists and (function.flags.is_strict or function.flags.runtime_strict)) {
+    if (!still_exists and (function.isStrictMode() or function.runtimeStrictMode())) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
@@ -413,10 +413,10 @@ pub noinline fn deleteVar(
     ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     // qjs JS_DeleteGlobalVar: declarative globals are not deletable; every
     // object-environment binding goes through the ordinary global property
@@ -435,7 +435,7 @@ pub noinline fn deletePropertyVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -475,7 +475,7 @@ pub noinline fn deletePropertyVm(
         typed_deleted
     else
         object.deleteProperty(ctx.runtime, atom_id);
-    if (!deleted and function.flags.is_strict) {
+    if (!deleted and function.isStrictMode()) {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }

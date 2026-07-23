@@ -1752,14 +1752,14 @@ fn runEmbeddedEngine(
     // outlive eval + the job drain below (the import job resolves in runJobs).
     var dynamic_import_state = test262_root.exec.module_graph.DynamicImportState{
         .runtime = ctx.runtimePtr(),
-        .context = ctx.core,
         .output = &output,
         .io = io,
         .allocator = allocator,
         .max_source_size = 16 * 1024 * 1024,
     };
     defer dynamic_import_state.deinit();
-    test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
         runtime_layer.evalFileModuleGraphWithOutput(ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
@@ -1784,7 +1784,7 @@ fn runEmbeddedEngine(
     defer value.free(rt);
 
     if (!value.isException()) {
-        try dynamic_import_state.runJobs();
+        try dynamic_import_state.runJobs(ctx.core);
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
             const async_exception = ctx.takePendingException();
@@ -3433,7 +3433,7 @@ fn expectedHas(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !bool
 }
 
 fn expectedValue(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !zjs.JSValue {
-    return ctx.getProperty(object, name);
+    return try ctx.getProperty(object, name);
 }
 
 fn stringBytes(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
@@ -3607,7 +3607,7 @@ test "test262 globals do not retain local namespace object reference" {
 
     const ns_key = try rt.internAtom("$262");
     defer rt.atoms.free(ns_key);
-    const ns_val = global.getProperty(ns_key);
+    const ns_val = try global.getProperty(ns_key);
     var weak = try rt.createWeakPersistentValue(ns_val, null, null);
     defer weak.deinit();
     ns_val.free(rt);
@@ -4179,7 +4179,7 @@ test "test262 typed array iterator staging source parses after installing global
         const ctx = try zjs.JSContext.create(rt);
         defer ctx.destroy();
         _ = try ctx.globalObject();
-        var parsed = try parser.compile(rt, source, .{
+        var parsed = try parser.compile(.{ .realm = ctx.core }, source, .{
             .mode = .script,
             .filename = "<eval>",
             .return_completion = true,
@@ -4196,7 +4196,7 @@ test "test262 typed array iterator staging source parses after installing global
         defer ctx.destroy();
         const global = try ctx.globalObject();
         try installTest262Globals(rt, ctx, global);
-        var parsed = try parser.compile(rt, source, .{
+        var parsed = try parser.compile(.{ .realm = ctx.core }, source, .{
             .mode = .script,
             .filename = "<eval>",
             .return_completion = true,

@@ -10,7 +10,7 @@ pub const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
@@ -231,7 +231,7 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
             }
             return core.JSValue.float64(@floatFromInt(object_value.arrayLength()));
         }
-        const length_value = object_value.getProperty(core.atom.ids.length);
+        const length_value = try object_value.getProperty(core.atom.ids.length);
         if (!length_value.isUndefined()) return length_value;
         length_value.free(rt);
         return core.JSValue.undefinedValue();
@@ -625,7 +625,7 @@ pub fn isFunctionObject(value: core.JSValue) bool {
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.proxyTarget() != null) return proxyTargetIsFunction(value);
     return object.class_id == core.class.ids.c_function or
-        object.class_id == core.class.ids.bytecode_function or
+        core.class.isBytecodeFunctionClass(object.class_id) or
         object.class_id == core.class.ids.bound_function or
         object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure;
@@ -637,6 +637,27 @@ fn proxyTargetIsFunction(value: core.JSValue) bool {
     const object: *core.Object = @fieldParentPtr("header", header);
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or isFunctionObject(target);
+}
+
+test "function predicate recognizes every bytecode function class" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        const function_object = try core.Object.create(rt, class_id, null);
+        defer function_object.value().free(rt);
+        try std.testing.expect(isFunctionObject(function_object.value()));
+    }
+
+    const plain_object = try core.Object.create(rt, core.class.ids.object, null);
+    defer plain_object.value().free(rt);
+    try std.testing.expect(!isFunctionObject(plain_object.value()));
 }
 
 pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool {
@@ -1318,7 +1339,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

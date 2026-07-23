@@ -233,7 +233,7 @@ fn completedReturn(
         }
         const reason = if (ctx.hasException()) ctx.takeException() else try exception_ops.qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
-        break :blk try core.promise.rejectedWithPrototype(ctx.runtime, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
+        break :blk try core.promise.rejectedWithPrototype(ctx, reason, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
     };
     defer promise.free(ctx.runtime);
     const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, .awaiting_return, false);
@@ -294,7 +294,6 @@ fn resumeBodyValue(
         gen,
         resume_value,
         stop_before_pc,
-        core.JSValue.undefinedValue(),
         core.JSValue.undefinedValue(),
     );
 }
@@ -497,9 +496,9 @@ pub fn asyncGeneratorEnqueue(
     magic: i32,
 ) HostError!core.JSValue {
     const rt = ctx.runtime;
-    const gen_global = object_ops.objectRealmGlobal(gen) orelse global;
+    const gen_global = gen.generatorFunctionRealmGlobalPtr() orelse global;
     // Capability FIRST (observable via then-getter ticks; quickjs.c:21713).
-    const promise = try core.promise.constructWithPrototype(rt, promise_ops.promisePrototypeFromGlobal(rt, gen_global));
+    const promise = try core.promise.constructWithPrototype(ctx, promise_ops.promisePrototypeFromGlobal(rt, gen_global));
     errdefer promise.free(rt);
     const resolving = try promise_ops.createPromiseResolvingPair(rt, gen_global, promise);
     var resolving_owned = true;
@@ -544,7 +543,7 @@ pub fn qjsAsyncGeneratorResolveFunctionCall(
     const is_reject = function_object.functionAsyncContinuationRejected();
     const action: ResolveAction = @enumFromInt(function_object.functionAsyncGeneratorAction());
     const arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const gen_global = object_ops.objectRealmGlobal(gen) orelse global;
+    const gen_global = gen.generatorFunctionRealmGlobalPtr() orelse global;
     switch (action) {
         .none => return null,
         .awaiting_return => {

@@ -425,6 +425,15 @@ pub const CallFrame = extern struct {
     result: core.JSValue = core.JSValue.undefinedValue(),
     error_status: Status = .ok,
     error_message: BorrowedBytes = .{},
+
+    /// Returns the typed context view borrowed by this callback frame.
+    /// The returned pointer is valid only until the callback returns and does
+    /// not carry an owning reference. Do not store or release it, or use it to
+    /// reconstruct an outer context wrapper.
+    pub fn borrowContext(self: *const CallFrame) error{TypeError}!*core.JSContext {
+        const raw_ctx = self.ctx orelse return error.TypeError;
+        return @ptrCast(@alignCast(raw_ctx));
+    }
 };
 
 pub const Trampoline = *const fn (frame: *CallFrame) callconv(.c) Status;
@@ -437,9 +446,8 @@ pub const ZigCall = struct {
     args: []const core.JSValue,
 
     pub fn fromFrame(frame: *const CallFrame) error{TypeError}!ZigCall {
-        const raw_ctx = frame.ctx orelse return error.TypeError;
         return .{
-            .ctx = @ptrCast(@alignCast(raw_ctx)),
+            .ctx = try frame.borrowContext(),
             .this_value = frame.this_value,
             .args = frame.args.slice(),
         };
@@ -1263,7 +1271,7 @@ test "FFI prop name descriptors validate and resolve to interned PropNameID" {
     const object_value = object.value();
     defer object_value.free(rt);
     try resolved.ids[0].defineDataProperty(rt, object, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
-    const stored = resolved.ids[0].getProperty(object);
+    const stored = try resolved.ids[0].getProperty(object);
     defer stored.free(rt);
     try std.testing.expectEqual(@as(i32, 42), stored.asInt32().?);
 }
@@ -1281,6 +1289,26 @@ test "FFI byte and value descriptors are zero-copy views" {
     const view = JSValueSlice.from(&values);
     try std.testing.expect(view.slice().ptr == &values);
     try std.testing.expectEqual(@as(i32, 1), view.slice()[0].asInt32().?);
+}
+
+test "FFI CallFrame borrowed context adapter rejects a null context" {
+    const frame = CallFrame{};
+    try std.testing.expectError(error.TypeError, frame.borrowContext());
+    try std.testing.expectError(error.TypeError, ZigCall.fromFrame(&frame));
+}
+
+test "FFI CallFrame borrowed context adapter preserves typed identity" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const frame = CallFrame{ .ctx = ctx };
+    const borrowed_ctx = try frame.borrowContext();
+    const call = try ZigCall.fromFrame(&frame);
+
+    try std.testing.expect(borrowed_ctx == ctx);
+    try std.testing.expect(call.ctx == borrowed_ctx);
 }
 
 test "FFI trampoline adapts C ABI frame to ZigCall without copying args" {

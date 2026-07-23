@@ -77,9 +77,8 @@ fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u
     };
 }
 
-/// Shared record handler for the `.primitive` domain. It resolves the active
-/// realm global (call global, else the function object's realm, else the
-/// context global) and delegates to `qjsPrimitivePrototypeMethod`, which stays in
+/// Shared record handler for the `.primitive` domain. It consumes the atomic
+/// final-call realm view and delegates to `qjsPrimitivePrototypeMethod`, which stays in
 /// exec because the VM's prototype-method fast path also calls it.
 pub fn primitiveCall(
     native_ctx: *core.JSContext,
@@ -88,13 +87,13 @@ pub fn primitiveCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const ctx = host_call.ctx;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
     const function_object = host_call.func_obj orelse return error.TypeError;
-    const active_global = host_call.global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
     return object_ops.qjsPrimitivePrototypeMethod(
         ctx,
         host_call.output,
-        active_global,
+        realm.global,
         function_object,
         host_call.this_value,
         host_call.magic,

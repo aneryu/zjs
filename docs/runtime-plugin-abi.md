@@ -151,6 +151,15 @@ There is no separate async binding helper in the first ABI.
 not a VM bytecode frame. `this_value` and `args` are borrowed for the duration
 of the call. `result` is an owned `JSValue` when the final status is `ok`.
 
+`ctx` remains pointer-sized and opaque for ABI stability, but its referent is a
+typed context view borrowed only for the duration of the callback. Zig plugins
+must obtain that view through `frame.borrowContext()` or use the already-typed
+`ZigCall.ctx`; they must not cast `frame.ctx` directly. The borrowed view is not
+an owner: it must not be stored beyond the callback, released, or used to
+recover an outer `zjs.JSContext` wrapper. This ABI does not provide a way to
+retain the view, so code that needs context state after return must arrange a
+separate explicitly owned host lifetime instead.
+
 `host_context` is an opaque runtime-owned field. Plugins must not dereference,
 compare, store, or interpret it.
 
@@ -206,17 +215,39 @@ value.
 ## Installed Lifetime
 
 Installed plugin state is runtime-owned and reference-counted on the runtime
-thread. References are held by artifacts that need the dynamic library to remain
-loaded:
+thread. It separates artifact owners, registered class-definition generations,
+and active callback pins. Artifacts that need the dynamic library to remain
+loaded include:
 
 - installed binding functions;
 - live opaque wrappers;
 - pending wrapper finalizer jobs;
-- committed runtime records that contain plugin function pointers.
+- committed runtime class records that dispatch plugin-backed payload hooks.
 
-The dynamic library must not be closed while any dependent artifact can still
-call descriptor hooks. Runtime destruction is a hard cleanup path and must
-release remaining installed artifacts safely.
+Install, class-slot cleanup, unregistration, and unload must execute on the
+owning Runtime thread. A checked foreign install/unload attempt returns
+`error.WrongRuntimeThread` before consuming the loaded handle, allocating
+Runtime storage, changing a realm slot, or publishing unload state. Plugin
+trampolines, payload finalizers/tracers, and the eventual dynamic-library close
+also run on that owner thread. Callback reentry is allowed; lifetime and class
+generation pins, rather than a structural lock, reconcile it. Runtime never
+holds a waiter or mutation mutex across JavaScript, GC, plugin, or DSO
+callbacks.
+
+Dropping the last artifact first prevents new binding/wrapper entries, clears
+the plugin class prototype slot from every live or constructing realm, and
+requests class unregistration. Existing calls, finalizers, tracers, and queued
+payload callbacks retain their exact class generation until they return.
+Unregistration publishes an empty class record before releasing its plugin
+definition owner. Only after every definition and active callback pin drains
+does runtime close the dynamic library, exactly once.
+
+A binding record retired by its own trampoline is therefore destroyed only
+after that trampoline and any borrowed error-message handling return. Likewise,
+the last opaque wrapper may initiate unload from its deferred finalizer, but the
+library stays open until the deferred callback returns and its class-generation
+pin completes. Runtime destruction follows the same ordered path rather than
+closing a library around outstanding hooks.
 
 ## Opaque Host Objects
 

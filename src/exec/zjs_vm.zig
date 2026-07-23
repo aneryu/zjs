@@ -36,7 +36,7 @@ const HostError = exceptions.HostError;
 pub fn run(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
 ) !core.JSValue {
     return runWithOutput(ctx, stack, function, null);
 }
@@ -44,61 +44,69 @@ pub fn run(
 pub fn runWithOutput(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
 ) !core.JSValue {
-    const global_object = try contextGlobal(ctx);
-    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false);
-}
+    // Modules keep their explicit legacy owner/state machine until W1e. Every
+    // canonical ordinary FB, including a borrowed embedding/test input, enters
+    // through a real root function object. A borrowed caller duplicates at this
+    // outer boundary; the closure2 attach itself still consumes exactly one
+    // owned reference without an internal dup/free round trip.
+    if (!function.isModule() and function.legacyBytecodeAdapter() == null) {
+        const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
+        const global_object = try contextGlobal(realm);
+        const owned_function = core.JSValue.functionBytecode(@constCast(&function.header)).dup();
+        var root_function_value = try class_vm.createRootBytecodeFunctionObject(
+            realm,
+            global_object,
+            owned_function,
+            .root_global,
+        );
+        defer root_function_value.free(ctx.runtime);
+        var root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &root_function_value },
+        };
+        const root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &root_values,
+        };
+        ctx.runtime.active_value_roots = &root_frame;
+        defer ctx.runtime.active_value_roots = root_frame.previous;
+        const root_function_object = class_vm.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
+        const this_value = if (function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
+        return runWithCallEnv(.{
+            .ctx = realm,
+            .stack = stack,
+            .function = function,
+            .initial_this_value = this_value,
+            .var_refs = root_function_object.functionCaptures(),
+            .output = output,
+            .global = global_object,
+            .break_var_ref_cycles_on_exit = true,
+            .strict_unresolved_get_var = function.isStrictMode(),
+            .current_function_value = root_function_value,
+            .direct_eval_vars_reach_global = true,
+            .global_declarations_prevalidated = true,
+        }) catch |err| {
+            if (!realm.preserve_uncaught_exception and err != error.JSException and realm.hasException()) realm.clearException();
+            return err;
+        };
+    }
 
-/// Host eval-mode entry (`ctx.eval(.eval_direct/.eval_indirect)`). Runs the
-/// compiled eval source through the EVAL runner contract — `is_eval_code = true`
-/// with eval-specific declaration instantiation — exactly as the in-VM `eval()` builtin
-/// (`eval_ops.zig` runWithCallEnv site). The script runner (`runWithOutput`)
-/// uses the SCRIPT contract, which would materialise a `ctx.lexicals` property
-/// instead of the eval frame-local. qjs keeps top-level `let`/`const`/`class`
-/// in a `JS_EVAL_TYPE_DIRECT`/`INDIRECT` eval as `add_scope_var` frame locals
-/// (discarded with the eval frame; no global cell, no env property —
-/// `quickjs.c:24362-24372` requires GLOBAL/MODULE for the cell). With
-/// `eval_global_var_bindings = (mode == .eval_indirect)` an indirect eval still
-/// registers its top-level `var`/function declarations on the global object as
-/// configurable data properties (non-lexical), matching the in-VM builtin and
-/// `parser.zig:176`.
-pub fn runEvalWithOutput(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    output: ?*std.Io.Writer,
-    eval_global_var_bindings: bool,
-) !core.JSValue {
     const global_object = try contextGlobal(ctx);
-    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
-    return runWithCallEnv(.{
-        .ctx = ctx,
-        .stack = stack,
-        .function = function,
-        .initial_this_value = this_value,
-        .output = output,
-        .global = global_object,
-        .break_var_ref_cycles_on_exit = true,
-        .eval_global_var_bindings = eval_global_var_bindings,
-        .is_eval_code = true,
-    }) catch |err| {
-        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
-        return err;
-    };
+    const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
+    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false);
 }
 
 pub fn runWithOutputAndVarRefs(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
     var_refs: []const *core.VarRef,
 ) !core.JSValue {
     const global_object = try contextGlobal(ctx);
-    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
+    const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
     return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false);
 }
 
@@ -108,10 +116,10 @@ pub fn runWithOutputAndVarRefs(
 pub fn runModuleInstantiationWithVarRefs(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     var_refs: []const *core.VarRef,
 ) !core.JSValue {
-    if (!function.flags.is_module) return error.InvalidBytecode;
+    if (!function.isModule()) return error.InvalidBytecode;
     const global_object = try contextGlobal(ctx);
     return runWithArgs(
         ctx,
@@ -131,7 +139,7 @@ pub fn runModuleInstantiationWithVarRefs(
 pub fn runModuleWithOutputAndVarRefsState(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
     var_refs: []const *core.VarRef,
     module_state: *core.Object,
@@ -143,7 +151,7 @@ pub fn runModuleWithOutputAndVarRefsState(
 pub fn runModuleWithOutputAndVarRefsStateAtPc(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
     var_refs: []const *core.VarRef,
     module_state: *core.Object,
@@ -194,7 +202,10 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     // accessors can resolve that private association, but public Runtime/GC
     // traversal cannot observe it until finishConstruction's commit below.
     ctx.global = global_object;
-    errdefer ctx.global = null;
+    errdefer {
+        ctx.rollbackIntrinsicBootstrap();
+        ctx.global = null;
+    }
     try call_mod.installHostGlobals(ctx.runtime, global_object);
     const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);
@@ -211,7 +222,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
             global_object,
         ) catch null;
     }
-    const next_eval = global_object.getProperty(core.atom.predefinedId("eval", .string).?);
+    const next_eval = try global_object.getProperty(core.atom.predefinedId("eval", .string).?);
     const old_eval = ctx.eval_function;
     ctx.eval_function = next_eval;
     old_eval.free(ctx.runtime);
@@ -222,7 +233,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
 pub fn runWithArgs(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     initial_this_value: core.JSValue,
     args: []const core.JSValue,
     var_refs: []const *core.VarRef,
@@ -232,22 +243,126 @@ pub fn runWithArgs(
     strict_unresolved_get_var: bool,
     stop_on_yield: bool,
 ) !core.JSValue {
+    const result = if (function.legacyBytecodeAdapter() == null and !function.isModule())
+        runCanonicalRootWithArgs(
+            ctx,
+            stack,
+            function,
+            initial_this_value,
+            args,
+            var_refs,
+            output,
+            global,
+            break_var_ref_cycles_on_exit,
+            strict_unresolved_get_var,
+            stop_on_yield,
+        )
+    else
+        runWithCallEnv(.{
+            .ctx = ctx,
+            .stack = stack,
+            .function = function,
+            .initial_this_value = initial_this_value,
+            .args = args,
+            .var_refs = var_refs,
+            .output = output,
+            .global = global,
+            .break_var_ref_cycles_on_exit = break_var_ref_cycles_on_exit,
+            .strict_unresolved_get_var = strict_unresolved_get_var,
+            .stop_on_yield = stop_on_yield,
+        });
+    return result catch |err| {
+        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
+        return err;
+    };
+}
+
+const SuppliedRootCaptures = struct {
+    cells: []const *core.VarRef,
+};
+
+fn resolveSuppliedRootCapture(
+    opaque_context: ?*anyopaque,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.FunctionBytecode,
+    index: usize,
+    cv: bytecode.function_bytecode.BytecodeClosureVar,
+) HostError!*core.VarRef {
+    _ = ctx;
+    _ = global;
+    _ = function;
+    _ = cv;
+    const supplied: *SuppliedRootCaptures = @ptrCast(@alignCast(opaque_context orelse return error.InvalidBytecode));
+    if (index >= supplied.cells.len) return error.InvalidBytecode;
+    return supplied.cells[index].retain();
+}
+
+/// Compatibility entry for embedders/tests that execute a borrowed canonical
+/// FB with explicit args/captures. It now constructs the same real root
+/// function/current-function used by parser.Result consumers; the bare-frame
+/// cell builder remains reachable only through the W1e legacy adapter.
+fn runCanonicalRootWithArgs(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.FunctionBytecode,
+    initial_this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const *core.VarRef,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    break_var_ref_cycles_on_exit: bool,
+    strict_unresolved_get_var: bool,
+    stop_on_yield: bool,
+) HostError!core.JSValue {
+    const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
+    const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
+    if (realm.runtime != ctx.runtime or realm_global != global) return error.InvalidBuiltinRegistry;
+    if (var_refs.len != 0 and var_refs.len != function.closureVar().len) return error.InvalidBytecode;
+
+    var supplied = SuppliedRootCaptures{ .cells = var_refs };
+    const capture_source: class_vm.ClosureCaptureSource = if (var_refs.len == 0)
+        .root_global
+    else
+        .{ .custom = .{
+            .context = @ptrCast(&supplied),
+            .resolve = resolveSuppliedRootCapture,
+        } };
+    const owned_function = core.JSValue.functionBytecode(@constCast(&function.header)).dup();
+    var root_function_value = try class_vm.createRootBytecodeFunctionObject(
+        realm,
+        realm_global,
+        owned_function,
+        capture_source,
+    );
+    defer root_function_value.free(ctx.runtime);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &root_function_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+    const root_object = class_vm.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
+
     return runWithCallEnv(.{
-        .ctx = ctx,
+        .ctx = realm,
         .stack = stack,
         .function = function,
         .initial_this_value = initial_this_value,
         .args = args,
-        .var_refs = var_refs,
+        .var_refs = root_object.functionCaptures(),
         .output = output,
-        .global = global,
+        .global = realm_global,
         .break_var_ref_cycles_on_exit = break_var_ref_cycles_on_exit,
         .strict_unresolved_get_var = strict_unresolved_get_var,
         .stop_on_yield = stop_on_yield,
-    }) catch |err| {
-        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
-        return err;
-    };
+        .current_function_value = root_function_value,
+        .direct_eval_vars_reach_global = true,
+        .global_declarations_prevalidated = true,
+    });
 }
 
 const argumentsNeedsOriginalSnapshot = frame_mod.argumentsNeedsOriginalSnapshot;
@@ -262,7 +377,7 @@ pub const PreparedEntryFrame = struct {
 pub const CallEnv = struct {
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     initial_this_value: core.JSValue = core.JSValue.undefinedValue(),
     args: []const core.JSValue = &.{},
     var_refs: []const *core.VarRef = &.{},
@@ -276,11 +391,15 @@ pub const CallEnv = struct {
     stop_before_pc: ?usize = null,
     current_function_value: core.JSValue = core.JSValue.undefinedValue(),
     new_target_value: core.JSValue = core.JSValue.undefinedValue(),
-    constructor_this_value: core.JSValue = core.JSValue.undefinedValue(),
     eval_global_var_bindings: bool = false,
+    /// Invocation-root variable-environment fact inherited by a direct eval.
+    /// Unlike `eval_global_var_bindings`, this is true for ordinary scripts
+    /// but false in nested ordinary function calls.
+    direct_eval_vars_reach_global: bool = false,
     is_eval_code: bool = false,
-    /// Direct eval must validate before it builds the externally-owned capture
-    /// array. Other entries validate inside runWithArgsState.
+    /// The real root function object already completed closure2 pass 1 and
+    /// installed its final GLOBAL_DECL cells. Legacy bare-root entries leave
+    /// this false and perform both steps inside runWithArgsState.
     global_declarations_prevalidated: bool = false,
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
@@ -288,37 +407,45 @@ pub const CallEnv = struct {
 };
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
+    var effective = env;
+    if (env.function.realmContext()) |realm| {
+        // Canonical FunctionBytecode carries its publication RealmRef. Switch
+        // only at the final bytecode entry, after caller-side
+        // Bound/Proxy work, matching qjs `ctx = b->realm`.
+        effective.ctx = realm;
+        effective.global = realm.global orelse return error.InvalidBuiltinRegistry;
+    }
     return runWithArgsState(
-        env.ctx,
-        env.stack,
-        env.function,
-        env.initial_this_value,
-        env.args,
-        env.var_refs,
-        env.output,
-        env.global,
-        env.break_var_ref_cycles_on_exit,
-        env.strict_unresolved_get_var,
-        env.stop_on_yield,
-        env.generator_state,
-        env.resume_value,
-        env.stop_before_pc,
-        env.current_function_value,
-        env.new_target_value,
-        env.constructor_this_value,
-        env.eval_global_var_bindings,
-        env.is_eval_code,
-        env.global_declarations_prevalidated,
-        env.suspend_on_module_await,
-        env.initial_pc,
-        env.prepared_entry_frame,
+        effective.ctx,
+        effective.stack,
+        effective.function,
+        effective.initial_this_value,
+        effective.args,
+        effective.var_refs,
+        effective.output,
+        effective.global,
+        effective.break_var_ref_cycles_on_exit,
+        effective.strict_unresolved_get_var,
+        effective.stop_on_yield,
+        effective.generator_state,
+        effective.resume_value,
+        effective.stop_before_pc,
+        effective.current_function_value,
+        effective.new_target_value,
+        effective.eval_global_var_bindings,
+        effective.direct_eval_vars_reach_global,
+        effective.is_eval_code,
+        effective.global_declarations_prevalidated,
+        effective.suspend_on_module_await,
+        effective.initial_pc,
+        effective.prepared_entry_frame,
     );
 }
 
 fn runWithArgsState(
     ctx: *core.JSContext,
     entry_stack: *stack_mod.Stack,
-    entry_function: *const bytecode.Bytecode,
+    entry_function: *const bytecode.FunctionBytecode,
     initial_this_value: core.JSValue,
     args: []const core.JSValue,
     var_refs: []const *core.VarRef,
@@ -332,8 +459,8 @@ fn runWithArgsState(
     entry_stop_before_pc: ?usize,
     current_function_value: core.JSValue,
     new_target_value: core.JSValue,
-    constructor_this_value: core.JSValue,
     entry_eval_global_var_bindings: bool,
+    entry_direct_eval_vars_reach_global: bool,
     entry_is_eval_code: bool,
     entry_global_declarations_prevalidated: bool,
     entry_suspend_on_module_await: bool,
@@ -345,10 +472,17 @@ fn runWithArgsState(
     const call_profile_guard = call_vm.enterCallProfile(ctx.runtime);
     defer call_profile_guard.deinit();
 
+    // Ordinary canonical entry always has the real function object built by
+    // closure2. Generator/async execution may instead carry its explicit
+    // resident state, and legacy module/fixture adapters keep their W1e seam.
+    if (entry_function.legacyBytecodeAdapter() == null and
+        entry_generator_state == null and
+        current_function_value.isUndefined()) return error.InvalidBytecode;
+
     // qjs js_closure2 PASS1 (quickjs.c:17280-17296): validate the complete
     // GLOBAL_DECL table before creating a single declaration cell. Direct eval
     // already ran this pass before constructing its caller-capture array.
-    if (entry_function.flags.is_global_var and !entry_global_declarations_prevalidated) {
+    if (entry_function.isGlobalVar() and !entry_global_declarations_prevalidated) {
         try vm_property_globals.validateGlobalVarDeclarations(ctx, global, entry_function, entry_is_eval_code);
     }
 
@@ -357,7 +491,7 @@ fn runWithArgsState(
     const frame_arena_mark = ctx.runtime.vm_stack.mark();
     defer ctx.runtime.vm_stack.restore(frame_arena_mark);
 
-    const resident_binding_shell = entry_generator_state != null and constructor_this_value.isUndefined();
+    const resident_binding_shell = entry_generator_state != null;
     var frame_storage = if (resident_binding_shell) blk: {
         // Generator/async functions are not constructors; arrow new.target is
         // an ordinary capture. A resident shell therefore never needs the cold
@@ -386,6 +520,7 @@ fn runWithArgsState(
             .catch_target = &catch_target_storage,
         },
         .eval_global_var_bindings = entry_eval_global_var_bindings,
+        .direct_eval_vars_reach_global = entry_direct_eval_vars_reach_global,
         .is_eval_code = entry_is_eval_code,
         .strict_unresolved_get_var = entry_strict_unresolved_get_var,
         .generator_state = entry_generator_state,
@@ -408,22 +543,12 @@ fn runWithArgsState(
     // invocation is still observable; the L0 Frame is destroyed afterwards.
     defer machine.deinit();
 
-    const call_bindings = frame_mod.CallBindingInputs{
-        .initial_this_value = initial_this_value,
-        .current_function_value = current_function_value,
-        .new_target_value = new_target_value,
-        .constructor_this_value = constructor_this_value,
-    };
-    if (entry_generator_state != null and !resident_binding_shell) {
-        // The resident execution state owns these two values for the entire
-        // VM run. Borrow them exactly like qjs's JSAsyncFunctionState frame;
-        // completion is finalized only after this live Frame has unwound.
-        try frame_storage.initCallBindingValues(&ctx.runtime.memory, call_bindings, .{
-            .this_value = .borrow,
-            .current_function = .borrow,
+    if (entry_generator_state == null) {
+        try frame_storage.initCallBindings(ctx.runtime, .{
+            .initial_this_value = initial_this_value,
+            .current_function_value = current_function_value,
+            .new_target_value = new_target_value,
         });
-    } else if (entry_generator_state == null) {
-        try frame_storage.initCallBindings(ctx.runtime, call_bindings);
     }
     // A generator/async resume with a resident frame immediately frees any slab built
     // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig), so
@@ -444,7 +569,7 @@ fn runWithArgsState(
     if (!skip_resume_slab) {
         try initFreshEntryFrame(ctx, entry_stack, entry_function, &frame_storage, global, args, var_refs, entry_generator_state, entry_prepared_frame);
     }
-    if (entry_generator_state == null and entry_function.flags.is_global_var) {
+    if (entry_generator_state == null and entry_function.isGlobalVar() and !entry_global_declarations_prevalidated) {
         try vm_property_globals.instantiateGlobalVarDeclarationCells(ctx, global, entry_function, &frame_storage, entry_is_eval_code);
     }
 
@@ -487,7 +612,7 @@ fn runWithArgsState(
 noinline fn initFreshEntryFrame(
     ctx: *core.JSContext,
     entry_stack: *stack_mod.Stack,
-    entry_function: *const bytecode.Bytecode,
+    entry_function: *const bytecode.FunctionBytecode,
     frame_storage: *frame_mod.Frame,
     global: *core.Object,
     args: []const core.JSValue,
@@ -495,7 +620,7 @@ noinline fn initFreshEntryFrame(
     entry_generator_state: ?*core.Object,
     entry_prepared_frame: ?*const PreparedEntryFrame,
 ) HostError!void {
-    const use_inline_frame_storage = entry_generator_state == null and !entry_function.flags.is_generator and !entry_function.flags.is_async;
+    const use_inline_frame_storage = entry_generator_state == null and !entry_function.isGenerator() and !entry_function.isAsync();
     const frame_arena: ?*core.VmStackArena = if (use_inline_frame_storage) &ctx.runtime.vm_stack else null;
     const need_original_args = if (entry_prepared_frame) |prepared|
         prepared.need_original_args
@@ -594,20 +719,20 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
         .stack = level.stack,
         .machine = m,
         .output = m.output,
-        .code_base = func.code.ptr,
+        .code_base = func.byteCode().ptr,
         .catch_target = level.catch_target,
         .poller = .init(m.ctx.runtime),
     };
     return tailcall_dispatch.run(&vm);
 }
 
-fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.Bytecode) !void {
+fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.FunctionBytecode) !void {
     const frame_stack_size: usize = if (comptime builtin.mode == .Debug)
         // Some colocated tests hand-build bytecode without running finalize's
         // stack-size pass. Keep those Debug-only fixtures checked at entry;
         // ReleaseFast relies on finalized bytecode's verified stack_size.
-        if (entry_function.stack_size == 0 and entry_function.code.len != 0)
-            entry_function.code.len
+        if (entry_function.stack_size == 0 and entry_function.byteCode().len != 0)
+            entry_function.byteCode().len
         else
             entry_function.stack_size
     else

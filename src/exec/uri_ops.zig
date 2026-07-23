@@ -22,7 +22,7 @@ const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 /// Throw a `URIError` with `message` (mirrors qjs `js_throw_URIError`,
 /// quickjs.c:54734): construct the error value, set the context exception, and
@@ -83,9 +83,17 @@ fn uriCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
+    // The VM's name fallback deliberately invokes this record without a
+    // function object. Observable URI functions use only the atomic realm view;
+    // the optional legacy global belongs solely to that synthetic reuse.
+    const call_global: ?*core.Object = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const mode: u32 = host_call.magic;
     const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
-    if (host_call.global) |global| {
+    if (call_global) |global| {
         // Realm path: coerce the argument through the user-visible ToString
         // (Annex B) before the body, except an already-string input which the
         // body consumes directly (matching the retired exec coercion glue).
@@ -760,7 +768,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

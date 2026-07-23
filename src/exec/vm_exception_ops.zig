@@ -3,6 +3,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const error_stack_ops = @import("error_stack_ops.zig");
+const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
@@ -36,6 +37,34 @@ pub fn createNamedErrorWithConstructor(ctx: *core.JSContext, global: *core.Objec
     return error_value;
 }
 
+/// Construct a named error directly on a realm-owned native-error prototype.
+/// This is the QuickJS `ctx->native_error_proto[]` path: mutable constructor
+/// bindings and receiver objects do not participate in Realm selection.
+pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object, prototype: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+    var rooted_prototype = prototype.value().dup();
+    defer rooted_prototype.free(ctx.runtime);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_prototype },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    const rooted_object = property_ops.expectObject(rooted_prototype) catch return error.InvalidBuiltinRegistry;
+    const object = try core.Object.create(ctx.runtime, core.class.ids.error_, rooted_object);
+    const error_value = object.value();
+    errdefer error_value.free(ctx.runtime);
+    const message_value = try value_ops.createStringValue(ctx.runtime, message);
+    defer message_value.free(ctx.runtime);
+    try defineNonEnumValueProperty(ctx.runtime, object, "message", message_value);
+    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    _ = name;
+    return error_value;
+}
+
 /// Raw, stack-less variant of `createNamedError`. Every user-observable
 /// throw path must construct through the stack-attaching primitives above.
 /// The only allowed uses of this entry are:
@@ -50,7 +79,7 @@ pub fn createNamedErrorWithConstructor(ctx: *core.JSContext, global: *core.Objec
 pub fn createNamedErrorWithoutStack(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const ctor_key = try rt.internAtom(name);
     defer rt.atoms.free(ctor_key);
-    const ctor_value = global.getProperty(ctor_key);
+    const ctor_value = try global.getProperty(ctor_key);
     defer ctor_value.free(rt);
     return buildNamedErrorObject(rt, ctor_value, name, message);
 }
@@ -94,7 +123,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
     if (rooted_ctor_value.isObject()) {
         const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
         if (ctor) |ctor_object| {
-            const proto_value = ctor_object.getProperty(core.atom.ids.prototype);
+            const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
             defer proto_value.free(rt);
             if (proto_value.isObject()) {
                 const proto = property_ops.expectObject(proto_value) catch null;
@@ -142,14 +171,14 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     const message_key = try rt.internAtom("message");
     defer rt.atoms.free(message_key);
     {
-        const stored = object.getProperty(message_key);
+        const stored = try object.getProperty(message_key);
         defer stored.free(rt);
         try std.testing.expect(stored.isString());
     }
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
     {
-        const stored = object.getProperty(constructor_key);
+        const stored = try object.getProperty(constructor_key);
         defer stored.free(rt);
         try std.testing.expect(!stored.same(ctor_value));
     }
@@ -158,7 +187,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
     const name_key = try rt.internAtom("name");
     defer rt.atoms.free(name_key);
     {
-        const stored = object.getProperty(name_key);
+        const stored = try object.getProperty(name_key);
         defer stored.free(rt);
         try std.testing.expect(stored.isString());
     }
@@ -174,58 +203,33 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
 /// Throw the canonical `ReferenceError` for a TDZ violation.
 /// Returns `error.ReferenceError` to align with the VM sentinel convention.
 pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
-    const rt = ctx.runtime;
-
-    const error_obj = core.Object.create(rt, core.class.ids.error_, null) catch {
+    const global = ctx.global orelse {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer error_obj.value().free(rt);
-
-    const name_str = core.string.String.createUtf8(rt, "ReferenceError") catch {
+    // QuickJS constructs engine-thrown errors directly on the current
+    // realm's native_error_proto[] entry. A self-describing null-prototype
+    // object is sufficient for runner name matching but fails observable
+    // `instanceof ReferenceError`, so use the realm-owned intrinsic rather
+    // than the mutable global constructor binding.
+    const prototype = ctx.nativeErrorPrototypeObject(.reference_error) orelse {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer core.JSValue.string(name_str.header()).free(rt);
-
-    const name_atom = rt.internAtom("ReferenceError") catch {
+    const error_value = createNamedErrorWithPrototype(
+        ctx,
+        global,
+        prototype,
+        "ReferenceError",
+        "Cannot access 'x' before initialization",
+    ) catch {
+        // Preserve the allocation-failure-hardened TDZ path. The caller still
+        // receives the ReferenceError sentinel and can materialize or replace
+        // it at its existing exception boundary.
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer rt.atoms.free(name_atom);
-
-    const name_value = core.JSValue.string(name_str.header());
-    error_obj.defineOwnProperty(rt, name_atom, core.Descriptor.data(name_value, true, false, true)) catch {
-        throwReferenceErrorSentinel(ctx);
-        return error.ReferenceError;
-    };
-
-    const message_str = core.string.String.createUtf8(rt, "Cannot access 'x' before initialization") catch {
-        throwReferenceErrorSentinel(ctx);
-        return error.ReferenceError;
-    };
-    defer core.JSValue.string(message_str.header()).free(rt);
-
-    const message_atom = rt.internAtom("message") catch {
-        throwReferenceErrorSentinel(ctx);
-        return error.ReferenceError;
-    };
-    defer rt.atoms.free(message_atom);
-
-    const message_value = core.JSValue.string(message_str.header());
-    error_obj.defineOwnProperty(rt, message_atom, core.Descriptor.data(message_value, true, false, true)) catch {
-        throwReferenceErrorSentinel(ctx);
-        return error.ReferenceError;
-    };
-
-    // Best-effort stack capture: this throw path is hardened to survive
-    // allocation failure (sentinel fallback above), so a failed capture
-    // degrades to a stack-less TDZ error instead of losing the throw.
-    if (ctx.global) |global| {
-        error_stack_ops.attachStackToErrorValue(ctx, global, error_obj.value()) catch {};
-    }
-
-    _ = ctx.throwValue(error_obj.value().dup());
+    _ = ctx.throwValue(error_value);
     return error.ReferenceError;
 }
 
@@ -263,7 +267,7 @@ pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, erro
     const rt = ctx.runtime;
     const ctor_key = try rt.internAtom("AggregateError");
     defer rt.atoms.free(ctor_key);
-    const ctor_value = global.getProperty(ctor_key);
+    const ctor_value = try global.getProperty(ctor_key);
     defer ctor_value.free(rt);
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
@@ -271,7 +275,7 @@ pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, erro
     errdefer aggregate_error.free(rt);
     if (ctor_value.isObject()) {
         if (property_ops.expectObject(ctor_value) catch null) |ctor_object| {
-            const proto_value = ctor_object.getProperty(core.atom.ids.prototype);
+            const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
             defer proto_value.free(rt);
             if (proto_value.isObject()) {
                 if (property_ops.expectObject(proto_value) catch null) |prototype| {
@@ -285,10 +289,25 @@ pub fn qjsPromiseAggregateError(ctx: *core.JSContext, global: *core.Object, erro
     return aggregate_error;
 }
 
-pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
+pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) exceptions.HostError!core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const error_info = promiseErrorInfo(err);
-    return createNamedError(ctx, global, error_info.name, error_info.message);
+    return createNamedError(ctx, global, error_info.name, error_info.message) catch |create_err| {
+        // Promise jobs must be able to retain an abrupt completion after user
+        // code has run. Under a fully exhausted heap, use the same allocation-
+        // free OOM value as VM catch delivery so the job can advance to its
+        // rejection phase instead of either disappearing or invoking user code
+        // a second time on retry.
+        if (create_err == error.OutOfMemory) {
+            if (ctx.preallocated_oom_error) |preallocated| return preallocated.dup();
+            // Construction-only/bare contexts may not yet have installed the
+            // zjs preallocated safety object. Match QuickJS's recursive-OOM
+            // escape hatch: retain a non-allocating null abrupt value rather
+            // than losing an already-started Promise job.
+            return core.JSValue.nullValue();
+        }
+        return @errorCast(create_err);
+    };
 }
 
 pub fn rejectedPromiseForRuntimeError(
@@ -299,14 +318,14 @@ pub fn rejectedPromiseForRuntimeError(
 ) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.runtime.current_exception;
-        const promise = try core.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
+        const promise = try core.promise.rejectedWithPrototype(ctx, thrown_value, prototype);
         ctx.clearException();
         return promise;
     }
     const error_info = runtimeErrorInfo(err) orelse return err;
     const error_value = try createNamedError(ctx, global, error_info.name, error_info.message);
     defer error_value.free(ctx.runtime);
-    const promise = try core.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
+    const promise = try core.promise.rejectedWithPrototype(ctx, error_value, prototype);
     if (ctx.hasException()) ctx.clearException();
     return promise;
 }
@@ -377,7 +396,7 @@ pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core
 
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
     const function_object = objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
-    const name_desc = function_object.getOwnProperty(ctx.runtime, core.atom.ids.name) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    const name_desc = (try function_object.getOwnProperty(ctx.runtime, core.atom.ids.name)) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
     defer name_desc.destroy(ctx.runtime);
     if (name_desc.kind != .data or !name_desc.value.isString()) return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
 
@@ -409,15 +428,14 @@ pub fn resolveBacktraceFunctionName(ctx: *core.JSContext, frame: *core.Backtrace
 }
 
 pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.BacktraceLocation {
-    const function: *const bytecode.Bytecode = @ptrCast(@alignCast(data orelse return .{ .line_num = 1, .col_num = 1 }));
-    const slots = function.source_loc_slots;
-    if (slots.len != 0) {
-        const index = sourceSlotUpperBound(slots, target_pc);
-        if (index == 0) return .{ .line_num = function.pc2line_start_line, .col_num = function.pc2line_start_col };
-        const slot = slots[index - 1];
-        return .{ .line_num = slot.line_num, .col_num = slot.col_num };
+    const function: *const bytecode.FunctionBytecode = @ptrCast(@alignCast(data orelse return .{ .line_num = 1, .col_num = 1 }));
+    if (function.pc2lineBuf().len == 0) {
+        return .{ .line_num = function.lineNum(), .col_num = function.colNum() };
     }
-    return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
+    // A present full-debug buffer is authoritative. QuickJS find_line_num
+    // returns 0:0 for any malformed header or transition; falling back to a
+    // valid header here would conceal a corrupt artifact.
+    return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = 0, .col_num = 0 };
 }
 
 /// Snapshot one live VM frame for the backtrace walk. The Machine-owned
@@ -428,10 +446,10 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktraceSnapshot {
     const function = frame.function;
     return .{
-        .function_name = function.name,
-        .filename = function.filename,
-        .line_num = function.line_num,
-        .col_num = function.col_num,
+        .function_name = function.funcName(),
+        .filename = function.filenameAtom(),
+        .line_num = function.lineNum(),
+        .col_num = function.colNum(),
         // The published frame.pc is the resume/return address (it points past
         // the currently-executing instruction, like qjs sf->cur_pc). Back off
         // one byte so the line/col lookup lands inside that instruction —
@@ -442,7 +460,6 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
         .location_data = function,
         .location_resolver = resolveBacktraceLocation,
         .function_value = frame.current_function,
-        .backtrace_barrier = function.flags.backtrace_barrier,
     };
 }
 
@@ -452,7 +469,7 @@ pub fn isErrorConstructorName(name: []const u8) bool {
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
     const object = property_ops.expectObject(value) catch return rt.memory.allocator.dupe(u8, "");
-    const name_value = object.getProperty(core.atom.ids.name);
+    const name_value = try object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
     if (!name_value.isString()) return rt.memory.allocator.dupe(u8, "");
     var bytes = std.ArrayList(u8).empty;
@@ -466,9 +483,34 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
     const object = objectFromValue(ctx.runtime.current_exception) orelse return false;
-    const name_value = object.getProperty(core.atom.ids.name);
-    defer name_value.free(ctx.runtime);
-    const string = name_value.asStringBody() orelse return false;
+    return objectDataStringPropertyMatches(object, core.atom.ids.name, expected);
+}
+
+/// Error dispatch is already handling an abrupt completion, so it cannot
+/// allocate merely to materialize the standard lazy `name` string. Walk only
+/// data/VARREF facts and immutable string-constant AUTOINIT descriptors; an
+/// accessor or other lazy builder is not an authoritative internal error name.
+fn objectDataStringPropertyMatches(object: *core.Object, atom_id: core.Atom, expected: []const u8) bool {
+    var cursor: ?*core.Object = object;
+    while (cursor) |current| : (cursor = current.getPrototype()) {
+        const lookup = current.findOwnPropertySlotTrusted(atom_id) orelse continue;
+        if (lookup.flags.deleted) continue;
+        const value = switch (lookup.flags.kind) {
+            .data => lookup.entry.slot.data,
+            .var_ref => lookup.entry.slot.var_ref.varRefValue(),
+            .auto_init => {
+                const info = core.property.autoInit(lookup.entry.slot.auto_init);
+                return info.kind == .string_constant and std.mem.eql(u8, info.name, expected);
+            },
+            .accessor => return false,
+        };
+        const string = value.asStringBody() orelse return false;
+        return stringBodyEqualsAscii(string, expected);
+    }
+    return false;
+}
+
+fn stringBodyEqualsAscii(string: *core.string.String, expected: []const u8) bool {
     switch (string.resolveData()) {
         .latin1 => |bytes| return std.mem.eql(u8, bytes, expected),
         .utf16 => |units| {
@@ -499,6 +541,13 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c:4078/4368/4655/4898).
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
+        // qjs OP_check_ctor_return deliberately creates this TypeError in the
+        // constructor's caller context (quickjs.c:18273-18278). Keep a distinct
+        // sentinel so the caller frame can materialize the exact message there.
+        error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
+        // qjs OP_get_loc_checkthis likewise uses caller_ctx for the implicit
+        // derived-constructor return (quickjs.c:18717-18728).
+        error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },
         error.TypeError => .{ .name = "TypeError", .message = "" },
         // qjs JS_CreateProperty not_extensible (quickjs.c:10144).
         error.NotExtensible => .{ .name = "TypeError", .message = "object is not extensible" },
@@ -519,8 +568,11 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
 pub fn promiseErrorInfo(err: anytype) ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
+        error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
+        error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },
         error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
@@ -540,89 +592,20 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
         error.URIError, error.InvalidUtf8 => "URIError",
         error.StackOverflow => "InternalError",
         error.StringTooLong => "InternalError",
-        error.TypeError => "TypeError",
+        error.DerivedConstructorReturn, error.TypeError => "TypeError",
+        error.DerivedThisUninitialized, error.ReferenceError => "ReferenceError",
         error.InvalidCharacterError => "InvalidCharacterError",
         error.SyntaxError => "SyntaxError",
         error.RangeError, error.BigIntTooLarge, error.DivisionByZero, error.NegativeExponent => "RangeError",
-        error.ReferenceError => "ReferenceError",
         else => null,
     };
 }
 
-fn sourceSlotUpperBound(slots: []const bytecode.pipeline.pc2line.SourceLocSlot, target_pc: usize) usize {
-    var low: usize = 0;
-    var high = slots.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (slots[mid].pc <= target_pc) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    return low;
-}
-
-fn sourceLocationFromPc2Line(function: *const bytecode.Bytecode, target_pc: usize) ?SourceLocation {
-    if (function.pc2line_buf.len == 0) return null;
-
-    var pc: usize = 0;
-    var line_num: i32 = function.pc2line_start_line;
-    var col_num: i32 = function.pc2line_start_col;
-    var best = SourceLocation{ .line_num = line_num, .col_num = col_num };
-    var i: usize = 0;
-    while (i < function.pc2line_buf.len) {
-        const marker = function.pc2line_buf[i];
-        i += 1;
-        if (marker == 0) {
-            const diff_pc = readPc2LineLeb128(function.pc2line_buf, &i) orelse break;
-            const diff_line = readPc2LineSleb128(function.pc2line_buf, &i) orelse break;
-            pc += diff_pc;
-            line_num += diff_line;
-        } else {
-            const adjusted: i32 = @as(i32, marker) - 1;
-            pc += @intCast(@divFloor(adjusted, 5));
-            line_num += @mod(adjusted, 5) - 1;
-        }
-        const diff_col = readPc2LineSleb128(function.pc2line_buf, &i) orelse break;
-        col_num += diff_col;
-        if (pc > target_pc) break;
-        best = .{ .line_num = line_num, .col_num = col_num };
-    }
-    return best;
-}
-
-fn readPc2LineLeb128(bytes: []const u8, index: *usize) ?usize {
-    var result: usize = 0;
-    var shift: u6 = 0;
-    while (true) {
-        if (index.* >= bytes.len) return null;
-        const byte = bytes[index.*];
-        index.* += 1;
-        result |= @as(usize, byte & 0x7f) << shift;
-        if ((byte & 0x80) == 0) return result;
-        shift += 7;
-        if (shift >= @bitSizeOf(usize)) return null;
-    }
-}
-
-fn readPc2LineSleb128(bytes: []const u8, index: *usize) ?i32 {
-    var result: i32 = 0;
-    var shift: u5 = 0;
-    while (true) {
-        if (index.* >= bytes.len) return null;
-        const byte = bytes[index.*];
-        index.* += 1;
-        result |= @as(i32, @intCast(byte & 0x7f)) << shift;
-        shift += 7;
-        if ((byte & 0x80) == 0) {
-            if (shift < 32 and (byte & 0x40) != 0) {
-                result |= @as(i32, -1) << shift;
-            }
-            return result;
-        }
-        if (shift >= 32) return null;
-    }
+fn sourceLocationFromPc2Line(function: *const bytecode.FunctionBytecode, target_pc: usize) ?SourceLocation {
+    const bytes = function.pc2lineBuf();
+    const pc = std.math.cast(u32, target_pc) orelse return null;
+    const location = bytecode.pipeline.pc2line.findSourceLocation(bytes, pc) catch return null;
+    return .{ .line_num = location.line_num, .col_num = location.col_num };
 }
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {

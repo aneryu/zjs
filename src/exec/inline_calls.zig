@@ -15,6 +15,7 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
+const op = bytecode.opcode.op;
 const core = @import("../core/root.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
@@ -39,17 +40,17 @@ pub const RegionLayout = enum {
 
 /// Compile-time `this` arm of an empty-leaf frame constructor. The published
 /// leaf bit is mode-independent; the call adapter picks the arm from the call
-/// shape (plain vs method region) and the view's is_strict/runtime_strict
-/// bits, mirroring qjs JS_CallInternal where `this_obj` is the caller-supplied
+/// shape (plain vs method region) and the function's strict-mode flags,
+/// mirroring qjs JS_CallInternal where `this_obj` is the caller-supplied
 /// raw word and only OP_push_this consults the callee's strict flag
 /// (quickjs.c:17924-17944).
 pub const LeafThis = enum {
     /// Sloppy plain call: borrow the realm global as the frame's `this`.
     sloppy_global,
-    /// Raw-`this` plain call (strict function or arrow): preserve undefined
-    /// `this` (no substitution). Arrow bytecode never consults the frame
-    /// slot — lexical `this`/`new.target` are ordinary closure cells — so
-    /// both modes share this arm.
+    /// Raw-`this` strict plain call: preserve undefined `this` (no
+    /// substitution). Arrow bytecode never consults the frame slot —
+    /// lexical `this`/`new.target` are ordinary closure cells — so arrows
+    /// use either plain arm according to their enclosing strictness.
     raw_undefined,
     /// Method call: move the raw receiver into the frame's owned `this`;
     /// identical for strict and sloppy callees (coercion, when sloppy,
@@ -67,49 +68,38 @@ pub const InlineTarget = struct {
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
-    /// The pointer-stable per-FB cached execution view (`cachedBytecodeView`,
-    /// built once per FB). Cache construction failure declines the same-Machine
-    /// path before an InlineTarget exists; the authoritative generic call can
-    /// execute the FB without this compatibility cache. qjs's OP_call hands
-    /// `JS_CallInternal` only the 16B `func_obj` and the callee prologue
-    /// dereferences `p->u.func.function_bytecode` (quickjs.c:17800) — zero
-    /// struct freight. Keeping only pointers here keeps the target (and the
-    /// `InlineCallRequest` riding through the dispatch driver) at qjs's
-    /// scalars-only scale instead of dragging a by-value `Bytecode` through
-    /// every call.
-    view: *const bytecode.Bytecode,
+    /// Immutable call-policy snapshot loaded with the FunctionBytecode while
+    /// resolving the callable.  The two 16-bit halves are adjacent in the
+    /// W1c4 extension, so resolution pays one locator and one 32-bit load;
+    /// frame selectors must not walk the optional tail again.
+    call_facts: bytecode.CallFacts,
     /// Raw receiver before [[Call]] `this` boxing: `undefined` for plain calls,
     /// the property base for method calls, or Function.call's explicit thisArg.
     /// Arrow bytecode ignores this frame binding and reads its ordinary lexical
     /// capture instead. Borrowed from the rooted operand region.
     this_value: core.JSValue,
-    /// `new.target` is undefined for ordinary [[Call]]. Arrow bytecode reads
-    /// its lexical value through the ordinary closure capture installed at
-    /// creation time.
-    new_target: core.JSValue,
     pub inline fn captureSlice(self: InlineTarget) []*core.VarRef {
-        return self.var_refs[0..self.fb.var_refs_len];
+        return self.var_refs[0..self.fb.closureVarCount()];
     }
 };
 
 /// The receiver-independent result of proving that a callable is eligible for
-/// same-Machine bytecode execution. Plain-call handlers may inspect the cached
-/// execution view before binding the wider InlineTarget: the published empty
-/// leaf shape needs only that view, while every other shape materializes the
+/// same-Machine bytecode execution. Plain-call handlers may inspect the final
+/// FunctionBytecode before binding the wider InlineTarget: the published empty
+/// leaf shape needs only that record, while every other shape materializes the
 /// receiver/callable/capture record on demand.
 pub const ResolvedInlineFunction = struct {
     var_refs: [*]*core.VarRef,
     fb: *const bytecode.FunctionBytecode,
-    view: *const bytecode.Bytecode,
+    call_facts: bytecode.CallFacts,
 
     pub inline fn bind(self: ResolvedInlineFunction, receiver: core.JSValue, func: core.JSValue) InlineTarget {
         return .{
             .var_refs = self.var_refs,
             .callable = func,
             .fb = self.fb,
-            .view = self.view,
+            .call_facts = self.call_facts,
             .this_value = receiver,
-            .new_target = core.JSValue.undefinedValue(),
         };
     }
 };
@@ -121,32 +111,32 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_data = function_object.bytecodeFunctionStoragePtr();
     const fb = function_data.function_bytecode orelse return null;
-    std.debug.assert(function_data.captureSlice().len == fb.var_refs_len);
-    if (fb.flags.func_kind != .normal) return null;
-    if (fb.flags.is_class_constructor or fb.flags.is_derived_class_constructor) return null;
+    std.debug.assert(function_data.captureSlice().len == fb.closureVarCount());
+    if (fb.functionKind() != .normal) return null;
+    // Production callable publication proves the exact non-empty FAM layout;
+    // take the three-load code+len hot-tail path instead of rechecking the
+    // optional fixture/legacy shapes on every call.
+    const call_facts = fb.canonicalCallFacts();
+    if (fb.isDerivedClassConstructor()) return null;
+    const code = fb.byteCode();
+    if (code.len == 0 or code[0] == op.check_ctor) return null;
     // Realm gate: qjs reads `ctx = b->realm` from the shared FB. With FB now
     // resident directly in Object.u.func this is one dependent load, without a
     // per-closure realm cache or borrowed-holder registration.
-    const function_global = if (fb.realm_global_header) |realm_header|
-        @as(*core.Object, @fieldParentPtr("header", realm_header))
-    else
-        global;
+    const function_realm = fb.realmContext() orelse return null;
+    const function_global = function_realm.global orelse return null;
     if (function_global != global) return null;
-    // Bytecode-function publication creates this immutable compatibility view
-    // once. qjs executes the FB directly; until zjs does too, a proven function
-    // object makes the cached pointer non-null by construction.
-    std.debug.assert(fb.cached_view != null);
     return .{
         .var_refs = function_data.var_refs,
         .fb = fb,
-        .view = fb.cached_view.?,
+        .call_facts = call_facts,
     };
 }
 
 /// Resolve `func` to an inline-eligible bytecode call target for a call with
 /// receiver `receiver` (`undefined` for plain calls, the property base for
 /// method calls). Mirrors the plain-call leg of
-/// `callValueOrBytecodeClassModeDispatch`; any condition that path
+/// `callValueOrBytecodeDispatch`; any condition that path
 /// special-cases (class constructors, cross-realm calls, and async/generator
 /// kinds) disqualifies the target so the slow
 /// path keeps handling it. Direct eval captures use the ordinary indexed
@@ -161,7 +151,7 @@ pub inline fn resolveInlineTarget(ctx: *core.JSContext, global: *core.Object, re
 }
 
 /// One active inline call level. Entries live in chunked, pointer-stable
-/// storage; `frame`, `stack`, and the frame's execution view are referenced by
+/// storage; `frame`, `stack`, and the frame's FunctionBytecode are referenced by
 /// the dispatch loop and backtrace pc borrows while the level is alive.
 /// Work the caller must finish after an inline callee returns. Ordinary calls
 /// push the result and resume immediately. Proxy `get` validates the trap
@@ -227,7 +217,7 @@ pub const Entry = struct {
         _padding: u3 = 0,
     };
 
-    /// The Entry's sole persistent execution-view source is `frame.function`;
+    /// The Entry's sole persistent FunctionBytecode source is `frame.function`;
     /// `Vm.function` is only a reloadable hot dispatch cache. qjs likewise
     /// dispatches through one `JSFunctionBytecode *b` instead of mirroring it
     /// in an outer frame wrapper.
@@ -390,7 +380,7 @@ pub const Entry = struct {
         self.deinitEmptyLeafInline(ctx);
     }
 
-    /// Return epilogue for a published empty leaf. The bytecode view proves
+    /// Return epilogue for a published empty leaf. The FunctionBytecode proves
     /// this frame has no arguments/local/capture/open-ref windows and cannot
     /// materialize FrameCold through arguments or direct eval — and, via the
     /// static return-balance proof gating publication
@@ -533,15 +523,15 @@ comptime {
 }
 
 /// The mutable execution resources for one active bytecode level. `frame`
-/// owns the authoritative execution view (`frame.function`); the operand
+/// owns the authoritative FunctionBytecode pointer (`frame.function`); the operand
 /// stack and catch slot stay separate only because their storage lifetimes
-/// differ from the frame slab. The struct itself is a borrowed view.
+/// differ from the frame slab. The struct itself is a borrowed bundle.
 pub const ExecutionLevel = struct {
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     catch_target: *?usize,
 
-    pub inline fn function(self: ExecutionLevel) *const bytecode.Bytecode {
+    pub inline fn function(self: ExecutionLevel) *const bytecode.FunctionBytecode {
         return self.frame.function;
     }
 };
@@ -554,6 +544,7 @@ pub const L0State = struct {
     level: ExecutionLevel,
     is_eval_code: bool = false,
     eval_global_var_bindings: bool = false,
+    direct_eval_vars_reach_global: bool = false,
     strict_unresolved_get_var: bool = false,
     generator_state: ?*core.Object = null,
     stop_on_yield: bool = false,
@@ -780,9 +771,15 @@ pub const Machine = struct {
     /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
     /// would redo the chunk multiply for nothing.
     fn pushFrame(self: *Machine, comptime setup_path: FrameSetupPath, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
-        try vm_call.enterInlineCallDepth(self.ctx, global);
+        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         errdefer self.ctx.runtime.call_depth -= 1;
-        const entry = try self.acquireSlot(global);
+        const entry = self.acquireSlot(global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         // Generic calls own an ordinary `.next` continuation immediately.
         // The moved and borrowed-iterator instances are reached only through
         // scoped push helpers, which publish their real action/payload after
@@ -824,21 +821,23 @@ pub const Machine = struct {
     }
 
     /// True when the frame takes the straight-line `setupSimpleInlineEntry` path:
-    /// a sloppy, non-arrow plain call (no receiver, undefined `this` → global)
+    /// a sloppy plain call (no receiver, undefined frame `this` → global)
     /// with simple parameters (no original-args snapshot), no global-var rebinds,
     /// args that can be borrowed in place, and all-cell closure captures
     /// (borrowable as `var_refs`). Each rejected condition is exactly a branch
     /// the lean path elides; method, moved-method, arity-padding, and snapshot
-    /// variants are selected by the outlined fallback. `setupInlineEntry`
-    /// remains authoritative for arrows and non-simple parameters.
+    /// variants are selected by the outlined fallback. Arrow lexical `this`
+    /// remains an ordinary capture cell and does not affect frame eligibility;
+    /// `setupInlineEntry` remains authoritative for non-simple parameters.
     fn isSimpleInlineFrame(target: *const InlineTarget, source: ArgsSource) bool {
-        const function = target.view;
-        // fb-derived half (normal, non-arrow, sloppy, simple params, no
-        // global-var rebinds) is precomputed at view build:
+        const function = target.fb;
+        const execution = target.call_facts.execution;
+        // fb-derived half (normal, sloppy, simple params, no
+        // global-var rebinds) is precomputed during FunctionBytecode finalization:
         // one byte test instead of ~6 scattered FunctionBytecode bool loads
         // (the `ldrb [fb,#…]` cluster that dominated op_call). The remaining
         // checks below depend on the call site, not the bytecode.
-        if (!function.simple_inline_eligible) return false;
+        if (!execution.simple_inline_eligible) return false;
         if (source.metadata.moved) return false; // tail-call reuse keeps the general path
         if (source.metadata.has_receiver) return false;
         if (!target.this_value.isUndefined()) return false;
@@ -874,13 +873,14 @@ pub const Machine = struct {
     /// Keep this call-site-dependent classification in the outlined fallback
     /// so exact-arity `pushFrame` retains its established hot shape.
     fn paddedSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?PaddedSimpleInlineMode {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         if (source.metadata.moved or source.metadata.has_receiver) return null;
         if (!target.this_value.isUndefined()) return null;
         if (source.argCount() >= function.arg_count) return null;
-        if (function.simple_inline_eligible) return .sloppy;
-        if (function.strict_simple_inline_eligible) return .strict;
-        if (function.strict_simple_snapshot_inline_eligible) return .strict_snapshot;
+        if (execution.simple_inline_eligible) return .sloppy;
+        if (execution.strict_simple_inline_eligible) return .strict;
+        if (execution.strict_simple_snapshot_inline_eligible) return .strict_snapshot;
         return null;
     }
 
@@ -891,12 +891,13 @@ pub const Machine = struct {
     /// JS_CallInternal frame and performs sloppy substitution or boxing only
     /// at OP_push_this (quickjs.c:17924-17944).
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         if (!source.metadata.has_receiver) return null;
         if (!target.this_value.same(source.values[0])) return null;
 
-        const snapshot = function.strict_simple_snapshot_inline_eligible;
-        const no_snapshot = function.simple_inline_eligible or function.strict_simple_inline_eligible;
+        const snapshot = execution.strict_simple_snapshot_inline_eligible;
+        const no_snapshot = execution.simple_inline_eligible or execution.strict_simple_inline_eligible;
         if (!snapshot and !no_snapshot) return null;
         const padded = sourceArgCount(source) < function.arg_count;
         return if (!source.metadata.moved)
@@ -920,11 +921,12 @@ pub const Machine = struct {
     /// sloppy substitutes the realm global. A separate precomputed flag and
     /// setup instantiation keep that choice off the established sloppy path.
     fn isStrictSimpleInlineFrame(comptime snapshot_args: bool, target: *const InlineTarget, source: ArgsSource) bool {
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         const eligible = if (snapshot_args)
-            function.strict_simple_snapshot_inline_eligible
+            execution.strict_simple_snapshot_inline_eligible
         else
-            function.strict_simple_inline_eligible;
+            execution.strict_simple_inline_eligible;
         if (!eligible) return false;
         if (source.metadata.moved or source.metadata.has_receiver) return false;
         if (!target.this_value.isUndefined()) return false;
@@ -989,7 +991,7 @@ pub const Machine = struct {
 
     inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        const function = target.view;
+        const function = target.fb;
         entry.catch_target = null;
         // Whole-byte assignment also clears the native-caller ownership bit
         // left by any prior occupant of this reusable Entry slot.
@@ -1196,20 +1198,27 @@ pub const Machine = struct {
         if (method_receiver) {
             std.debug.assert(!source.metadata.moved and source.metadata.has_receiver);
             std.debug.assert(target.this_value.same(source.values[0]));
-            std.debug.assert(source.argCount() >= @as(usize, target.view.arg_count));
+            std.debug.assert(source.argCount() >= @as(usize, target.fb.arg_count));
             if (snapshot_args) {
-                std.debug.assert(target.view.strict_simple_snapshot_inline_eligible);
+                std.debug.assert(target.call_facts.execution.strict_simple_snapshot_inline_eligible);
             } else {
-                std.debug.assert(target.view.simple_inline_eligible or target.view.strict_simple_inline_eligible);
+                std.debug.assert(target.call_facts.execution.simple_inline_eligible or
+                    target.call_facts.execution.strict_simple_inline_eligible);
             }
         } else if (strict_this) {
             std.debug.assert(isStrictSimpleInlineFrame(false, target, source));
         } else {
             std.debug.assert(isSimpleInlineFrame(target, source));
         }
-        try vm_call.enterInlineCallDepth(self.ctx, global);
+        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         errdefer self.ctx.runtime.call_depth -= 1;
-        const entry = try self.acquireSlot(global);
+        const entry = self.acquireSlot(global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
         entry.return_action = .next;
         entry.continuation_payload = 0;
         if (snapshot_args and method_receiver) {
@@ -1244,15 +1253,16 @@ pub const Machine = struct {
         self: *Machine,
         comptime leaf_this: LeafThis,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        assertLeafEligible(leaf_this, function);
+        assertLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(function.arg_count == 0 and function.var_count == 0);
-        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
 
         // The caller already retreated its logical operand top. Until the last
         // infallible transfer below, these slots remain the sole owners and
@@ -1299,7 +1309,8 @@ pub const Machine = struct {
         self: *Machine,
         comptime leaf_this: LeafThis,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
@@ -1307,10 +1318,10 @@ pub const Machine = struct {
         const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        assertExactArgsLeafEligible(leaf_this, function);
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
         std.debug.assert(function.var_count == 0);
-        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
 
         // Same sole-owner contract as the zero-arg constructor, extended over
         // the args window (reverse index order, mirroring cleanupStackSource).
@@ -1359,16 +1370,17 @@ pub const Machine = struct {
         self: *Machine,
         comptime leaf_this: LeafThis,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        assertCaptureLeafEligible(leaf_this, function);
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(function.arg_count == 0 and function.var_count == 0);
-        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
         std.debug.assert(captures.len != 0);
 
         // Same sole-owner contract as the zero-arg constructor: the caller
@@ -1415,7 +1427,8 @@ pub const Machine = struct {
         self: *Machine,
         comptime leaf_this: LeafThis,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
@@ -1423,10 +1436,10 @@ pub const Machine = struct {
         const method_receiver = comptime leaf_this == .receiver;
         const ctx = self.ctx;
         const rt = ctx.runtime;
-        assertPaddedArgsLeafEligible(leaf_this, function);
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(argc < function.arg_count);
         std.debug.assert(function.var_count == 0);
-        std.debug.assert(function.open_var_ref_count == 0);
+        std.debug.assert(function.openVarRefCount() == 0);
 
         // Same sole-owner contract as the exact-args constructor, over the
         // SUPPLIED args window only (reverse index order, mirroring
@@ -1464,50 +1477,51 @@ pub const Machine = struct {
     }
 
     /// Debug-only proof that the comptime `this` arm matches the published
-    /// per-policy eligibility bit and the callee's `this` policy: the sloppy
-    /// arm substitutes the realm global for non-arrow sloppy functions; the
-    /// raw arm preserves undefined for strict functions (the same
-    /// is_strict|runtime_strict disjunction the view publication folds into
-    /// `strict_mode`) and for arrows in either mode. The receiver arm is
-    /// policy-independent: every leaf transfers the raw receiver.
-    inline fn assertLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+    /// per-policy eligibility bit and the callee's frame-`this` policy: the
+    /// sloppy arm substitutes the realm global and the raw arm preserves
+    /// undefined for strict functions (the same is_strict|runtime_strict
+    /// disjunction execution-flag publication folds into `strict_mode`).
+    /// Arrow lexical `this` is a capture cell, independent of this policy.
+    /// The receiver arm is policy-independent: every leaf transfers the raw
+    /// receiver.
+    inline fn assertLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
         switch (comptime leaf_this) {
-            .sloppy_global => std.debug.assert(function.flags.simple_inline_empty_leaf),
-            .raw_undefined => std.debug.assert(function.raw_this_inline_empty_leaf),
-            .receiver => std.debug.assert(function.flags.simple_inline_empty_leaf or
-                function.raw_this_inline_empty_leaf),
+            .sloppy_global => std.debug.assert(execution.simple_inline_empty_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_empty_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_empty_leaf or
+                execution.raw_this_inline_empty_leaf),
         }
         if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
-                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
         }
     }
 
     /// Exact-args twin of `assertLeafEligible` against the O1 policy bytes.
-    inline fn assertExactArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+    inline fn assertExactArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
         switch (comptime leaf_this) {
-            .sloppy_global => std.debug.assert(function.simple_inline_exact_args_leaf),
-            .raw_undefined => std.debug.assert(function.raw_this_inline_exact_args_leaf),
-            .receiver => std.debug.assert(function.simple_inline_exact_args_leaf or
-                function.raw_this_inline_exact_args_leaf),
+            .sloppy_global => std.debug.assert(execution.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_exact_args_leaf or
+                execution.raw_this_inline_exact_args_leaf),
         }
         if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
-                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
         }
     }
 
     /// Capture-leaf twin of `assertLeafEligible` against the O2 fused kind
     /// byte (the sole published eligibility carrier for this family).
-    inline fn assertCaptureLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+    inline fn assertCaptureLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const capture_kind = call_facts.execution.capture_leaf_kind;
         switch (comptime leaf_this) {
-            .sloppy_global => std.debug.assert(function.capture_leaf_kind == .sloppy),
-            .raw_undefined => std.debug.assert(function.capture_leaf_kind == .raw_this),
-            .receiver => std.debug.assert(function.capture_leaf_kind != .none),
+            .sloppy_global => std.debug.assert(capture_kind == .sloppy),
+            .raw_undefined => std.debug.assert(capture_kind == .raw_this),
+            .receiver => std.debug.assert(capture_kind != .none),
         }
         if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
-                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
         }
     }
 
@@ -1516,18 +1530,18 @@ pub const Machine = struct {
     /// published conditions already prove what padding relies on
     /// (`has_simple_parameter_list` excludes default/rest parameter
     /// initializers via `simple_inline_base`, and the leaf body geometry
-    /// excludes `arguments` materialization/rescue), so a missing parameter
+    /// excludes `arguments` materialization), so a missing parameter
     /// slot is exactly the spec's plain `undefined` binding.
-    inline fn assertPaddedArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.Bytecode) void {
+    inline fn assertPaddedArgsLeafEligible(comptime leaf_this: LeafThis, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
         switch (comptime leaf_this) {
-            .sloppy_global => std.debug.assert(function.simple_inline_exact_args_leaf),
-            .raw_undefined => std.debug.assert(function.raw_this_inline_exact_args_leaf),
-            .receiver => std.debug.assert(function.simple_inline_exact_args_leaf or
-                function.raw_this_inline_exact_args_leaf),
+            .sloppy_global => std.debug.assert(execution.simple_inline_exact_args_leaf),
+            .raw_undefined => std.debug.assert(execution.raw_this_inline_exact_args_leaf),
+            .receiver => std.debug.assert(execution.simple_inline_exact_args_leaf or
+                execution.raw_this_inline_exact_args_leaf),
         }
         if (comptime leaf_this != .receiver) {
-            std.debug.assert((function.flags.is_strict or function.flags.runtime_strict or
-                function.flags.is_arrow_function) == (leaf_this == .raw_undefined));
+            std.debug.assert((function.isStrictMode() or function.runtimeStrictMode()) == (leaf_this == .raw_undefined));
         }
     }
 
@@ -1543,14 +1557,14 @@ pub const Machine = struct {
     /// (take + `.owned`; sloppy coercion stays deferred to the this-reading
     /// opcodes); the sloppy plain instantiation keeps the borrowed sloppy
     /// global and the raw plain instantiation preserves undefined —
-    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm and the
-    /// generic constructor's arrow this-preservation.
+    /// mirroring `setupSimpleInlineEntryImpl`'s strict_this arm. Arrow lexical
+    /// `this` remains in its capture cell under either frame policy.
     inline fn finishEmptyLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
@@ -1605,7 +1619,7 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
@@ -1677,7 +1691,7 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
@@ -1746,7 +1760,7 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
@@ -1807,7 +1821,7 @@ pub const Machine = struct {
     /// run after the cold call helpers advanced it past the operand).
     inline fn callerResumePc(self: *const Machine) [*]const u8 {
         const caller_frame: *const frame_mod.Frame = if (self.top) |caller| &caller.frame else self.l0.level.frame;
-        return caller_frame.function.code.ptr + caller_frame.pc;
+        return caller_frame.function.byteCode().ptr + caller_frame.pc;
     }
 
     /// Warm, allocation-free empty-leaf construction. A null result is a pure
@@ -1823,12 +1837,13 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
         resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertLeafEligible(leaf_this, function);
+        assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
         if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 
@@ -1863,14 +1878,15 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
         resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertExactArgsLeafEligible(leaf_this, function);
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
         const ctx = self.ctx;
         if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
@@ -1907,13 +1923,14 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertCaptureLeafEligible(leaf_this, function);
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(captures.len != 0);
         const ctx = self.ctx;
         if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
@@ -1955,14 +1972,15 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
         resume_pc: [*]const u8,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertPaddedArgsLeafEligible(leaf_this, function);
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(argc < function.arg_count);
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
@@ -1996,10 +2014,9 @@ pub const Machine = struct {
     /// resource is released via the errdefers below.
     pub noinline fn setupInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
-        // Point at the pointer-stable per-FB cached view (no copy). Target
-        // resolution declines this same-Machine path if the once-per-FB cache
-        // allocation fails, so general frame setup has no nullable-view arm.
-        const function = target.view;
+        // Point directly at the pointer-stable final FunctionBytecode. Target
+        // resolution and frame setup neither copy nor allocate bytecode state.
+        const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{};
         entry.profile_guard = vm_call.enterCallProfile(rt);
@@ -2019,14 +2036,15 @@ pub const Machine = struct {
         // Keep qjs's raw `this_obj` for method receivers, including sloppy
         // primitives. The established plain-undefined specialization remains
         // allocation-free (strict undefined / sloppy global); observed method
-        // bindings materialize later through OP_push_this/arrow/eval.
-        const fb_strict = target.fb.flags.is_strict_mode or target.fb.flags.runtime_strict_mode;
+        // bindings materialize later through OP_push_this/eval. Arrow lexical
+        // `this` is read from its capture cell, never this frame slot.
+        const fb_strict = target.fb.isStrictMode() or target.fb.runtimeStrictMode();
         const receiver_slot = sourceReceiverSlot(source);
-        // Arrow bytecode reads lexical this through its ordinary closure cell.
-        // Preserve the empty frame binding used before that capture conversion;
+        // Plain calls choose only the strict/sloppy frame policy. Arrow
+        // bytecode reads lexical this through its ordinary closure cell;
         // method/Function.call receiver slots are still transferred below so
         // the ignored value has one clear owner until teardown.
-        const plain_undefined_this = !target.fb.flags.is_arrow_function and receiver_slot == null and target.this_value.isUndefined();
+        const plain_undefined_this = receiver_slot == null and target.this_value.isUndefined();
         const effective_this = if (plain_undefined_this)
             if (fb_strict) core.JSValue.undefinedValue() else global.value()
         else
@@ -2050,15 +2068,13 @@ pub const Machine = struct {
         // these flags, and the frame.deinit errdefer above covers a later
         // failure):
         //   current_function .take -> owns the callable's transferred ref
-        //   new_target .borrow -> not owned
-        //   constructor_this keeps Frame.init's undefined/unowned default
+        //   new_target keeps Frame.init's absent cold-state default
         //   this .borrow, unless taken raw from the receiver slot (method call)
         //   -> then .take/owned. Lazy materialization updates this slot once.
         // `takeSourceSlot` nulls the source slot so the popped stack region
         // never double-frees the value (the leak guard the method-call comment
         // below describes).
         entry.frame.current_function = takeSourceSlot(callable_slot);
-        std.debug.assert(target.new_target.isUndefined());
         if (take_receiver_as_this) {
             entry.frame.this_value = takeSourceSlot(receiver_slot.?);
             entry.frame.ownership.this_value = .owned;
@@ -2084,7 +2100,7 @@ pub const Machine = struct {
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
         // free (the still-live function object owns the cells).
-        const borrow_var_refs = !function.flags.is_global_var and
+        const borrow_var_refs = !function.isGlobalVar() and
             frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
@@ -2154,7 +2170,7 @@ pub const Machine = struct {
             // `frame.current_function`, so the cells outlive the frame.
             entry.frame.var_refs = target.captureSlice();
             entry.frame.ownership.var_refs = .borrowed;
-        } else if (frame_var_refs.len != 0 or function.var_ref_names.len != 0) {
+        } else if (frame_var_refs.len != 0 or function.varRefNamesLen() != 0) {
             try vm_call.initFrameVarRefs(ctx, global, function, &entry.frame, frame_var_refs, true, frame_windows);
         }
     }
@@ -2167,10 +2183,10 @@ pub const Machine = struct {
         if (iterator_record.len != 2) return false;
         if (!target.this_value.same(iterator_record[0])) return false;
         if (!target.callable.same(iterator_record[1])) return false;
-        const function = target.view;
-        return function.simple_inline_eligible or
-            function.strict_simple_inline_eligible or
-            function.strict_simple_snapshot_inline_eligible;
+        const execution = target.call_facts.execution;
+        return execution.simple_inline_eligible or
+            execution.strict_simple_inline_eligible or
+            execution.strict_simple_snapshot_inline_eligible;
     }
 
     /// Zero-argument method prologue for an iterator record borrowed from the
@@ -2181,7 +2197,7 @@ pub const Machine = struct {
     /// perturb their selector or register allocation.
     noinline fn setupBorrowedIteratorEntry(ctx: *core.JSContext, entry: *Entry, target: *const InlineTarget) HostError!void {
         const rt = ctx.runtime;
-        const function = target.view;
+        const function = target.fb;
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
         entry.profile_guard = vm_call.enterCallProfile(rt);
@@ -2273,7 +2289,7 @@ pub const Machine = struct {
         return source.values[args_start..][0..source.argCount()];
     }
 
-    fn canBorrowSourceArgs(function: *const bytecode.Bytecode, source: ArgsSource) bool {
+    fn canBorrowSourceArgs(function: *const bytecode.FunctionBytecode, source: ArgsSource) bool {
         const argc = sourceArgCount(source);
         if (@max(argc, @as(usize, @intCast(function.arg_count))) != argc) return false;
         return !source.metadata.moved;
@@ -2330,11 +2346,11 @@ pub const Machine = struct {
         argc: u16,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        if (target.view.flags.simple_inline_empty_leaf and argc == 0) {
-            return self.pushEmptyLeafCall(.sloppy_global, global, caller_stack, target.view, region_start);
+        if (target.call_facts.execution.simple_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.sloppy_global, global, caller_stack, target.fb, target.call_facts, region_start);
         }
-        if (target.view.raw_this_inline_empty_leaf and argc == 0) {
-            return self.pushEmptyLeafCall(.raw_undefined, global, caller_stack, target.view, region_start);
+        if (target.call_facts.execution.raw_this_inline_empty_leaf and argc == 0) {
+            return self.pushEmptyLeafCall(.raw_undefined, global, caller_stack, target.fb, target.call_facts, region_start);
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
@@ -2360,12 +2376,13 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertLeafEligible(leaf_this, function);
-        return self.pushEmptyLeafFrame(leaf_this, global, function, region_start);
+        assertLeafEligible(leaf_this, function, call_facts);
+        return self.pushEmptyLeafFrame(leaf_this, global, function, call_facts, region_start);
     }
 
     /// Exact-args twin of `pushEmptyLeafCall`: authoritative fallible entry
@@ -2377,14 +2394,15 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertExactArgsLeafEligible(leaf_this, function);
-        return self.pushExactArgsLeafFrame(leaf_this, global, function, captures, region_start, argc);
+        assertExactArgsLeafEligible(leaf_this, function, call_facts);
+        return self.pushExactArgsLeafFrame(leaf_this, global, function, call_facts, captures, region_start, argc);
     }
 
     /// Capture-leaf twin of `pushEmptyLeafCall`: authoritative fallible
@@ -2396,13 +2414,14 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertCaptureLeafEligible(leaf_this, function);
-        return self.pushCaptureLeafFrame(leaf_this, global, function, captures, region_start);
+        assertCaptureLeafEligible(leaf_this, function, call_facts);
+        return self.pushCaptureLeafFrame(leaf_this, global, function, call_facts, captures, region_start);
     }
 
     /// Padded-args twin of `pushExactArgsLeafCall` (Q3): authoritative
@@ -2415,16 +2434,17 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         argc: u16,
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertPaddedArgsLeafEligible(leaf_this, function);
+        assertPaddedArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
-        return self.pushPaddedArgsLeafFrame(leaf_this, global, function, captures, region_start, argc);
+        return self.pushPaddedArgsLeafFrame(leaf_this, global, function, call_facts, captures, region_start, argc);
     }
 
     /// Push a method inline call whose raw source is
@@ -2457,15 +2477,16 @@ pub const Machine = struct {
     ) HostError!*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         const source = ArgsSource.initStack(region_start, argc, true);
-        const function = target.view;
+        const function = target.fb;
+        const execution = target.call_facts.execution;
         // Shared arity gate first: the padded (`argc < arg_count`) siblings
         // fail one comparison and branch straight to the generic selector
         // instead of walking every eligibility byte on their way out.
         if (argc >= function.arg_count) {
-            if (function.simple_inline_eligible) {
+            if (execution.simple_inline_eligible) {
                 return self.pushExactSimpleFrame(false, false, true, global, target, source);
             }
-            if (function.strict_simple_snapshot_inline_eligible) {
+            if (execution.strict_simple_snapshot_inline_eligible) {
                 return self.pushExactSimpleFrame(false, true, true, global, target, source);
             }
         }
@@ -2556,7 +2577,7 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         entry: *Entry,
         global: *core.Object,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
     ) *Entry {
@@ -2601,11 +2622,12 @@ pub const Machine = struct {
         comptime leaf_this: LeafThis,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
         region_start: [*]core.JSValue,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
-        assertLeafEligible(leaf_this, function);
+        assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
         if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
 

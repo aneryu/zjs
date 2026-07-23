@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const build_options = @import("build_options");
 const core = @import("../core/root.zig");
@@ -48,6 +49,7 @@ pub const Plugin = struct {
     }
 
     pub fn install(self: *Plugin, ctx: *core.JSContext, target_value: core.JSValue, options: InstallOptions) !void {
+        try ctx.runtimePtr().requireOwnerThread();
         if (self.consumed) return error.PluginAlreadyConsumed;
         const loaded = self.loaded orelse return error.PluginAlreadyConsumed;
         self.consumed = true;
@@ -66,15 +68,25 @@ const LoadedSource = struct {
 
 const InstalledPlugin = struct {
     runtime: *core.JSRuntime,
-    ref_count: usize = 1,
+    /// Binding records, opaque wrapper payloads, and the install staging owner.
+    owner_ref_count: usize = 1,
+    /// Each registered host class owns one reference through Definition.binding_data.
+    definition_ref_count: usize = 0,
+    /// DSO trampolines/finalizers/tracers and internal unload traversal pins.
+    execution_pin_count: usize = 0,
+    unload_requested: bool = false,
+    host_class_unregistration_started: bool = false,
+    closed: bool = false,
     lib: ?std.DynLib = null,
     owns_lib: bool = false,
     path: []u8,
     descriptor: *const ffi.PluginDescriptor,
     host_classes: []HostClass = &.{},
     prop_names: ?ffi.ResolvedPropNames = null,
+    close_observer: if (builtin.is_test) ?*const fn (*InstalledPlugin) void else void = if (builtin.is_test) null else {},
 
     fn create(rt: *core.JSRuntime, path: []const u8, descriptor: *const ffi.PluginDescriptor, lib: ?std.DynLib) !*InstalledPlugin {
+        try rt.requireOwnerThread();
         const path_copy = try rt.memory.alloc(u8, path.len);
         errdefer rt.memory.free(u8, path_copy);
         @memcpy(path_copy, path);
@@ -90,21 +102,104 @@ const InstalledPlugin = struct {
         return plugin;
     }
 
-    fn retain(self: *InstalledPlugin) void {
-        self.ref_count += 1;
+    fn retain(self: *InstalledPlugin) bool {
+        self.runtime.assertOwnerThread();
+        if (self.unload_requested) return false;
+        self.owner_ref_count += 1;
+        return true;
     }
 
     fn release(self: *InstalledPlugin) void {
-        std.debug.assert(self.ref_count > 0);
-        self.ref_count -= 1;
-        if (self.ref_count != 0) return;
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.owner_ref_count > 0);
+        self.owner_ref_count -= 1;
+        if (self.owner_ref_count != 0) return;
+        self.beginUnload();
+    }
+
+    fn retainDefinition(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(!self.unload_requested);
+        self.definition_ref_count += 1;
+    }
+
+    fn releaseDefinition(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.definition_ref_count > 0);
+        self.definition_ref_count -= 1;
+        self.tryFinalizeUnload();
+    }
+
+    fn classDefinitionFinalizer(ptr: *anyopaque) void {
+        const self: *InstalledPlugin = @ptrCast(@alignCast(ptr));
+        self.releaseDefinition();
+    }
+
+    fn beginExecution(self: *InstalledPlugin) bool {
+        self.runtime.assertOwnerThread();
+        if (self.unload_requested) return false;
+        self.execution_pin_count += 1;
+        return true;
+    }
+
+    fn pinExecutionForExistingOwner(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.owner_ref_count != 0);
+        std.debug.assert(!self.unload_requested);
+        self.execution_pin_count += 1;
+    }
+
+    fn endExecution(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.execution_pin_count > 0);
+        self.execution_pin_count -= 1;
+        self.tryFinalizeUnload();
+    }
+
+    fn beginUnload(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        if (self.unload_requested) return;
+        self.unload_requested = true;
+        self.host_class_unregistration_started = true;
+
+        // Class-slot clearing can recursively release prototypes and complete
+        // class unregistration. Keep the plugin control block alive until the
+        // complete traversal has stopped every realm from creating new wrappers.
+        self.execution_pin_count += 1;
+        var index = self.host_classes.len;
+        while (index > 0) {
+            index -= 1;
+            const host_class = &self.host_classes[index];
+            self.runtime.clearContextClassPrototype(host_class.class_id);
+            self.runtime.classes.unregisterDynamic(host_class.class_id);
+        }
+        self.endExecution();
+    }
+
+    fn tryBeginUnload(self: *InstalledPlugin) core.runtime.RuntimeMutationError!void {
+        try self.runtime.requireOwnerThread();
+        self.beginUnload();
+    }
+
+    fn tryFinalizeUnload(self: *InstalledPlugin) void {
+        self.runtime.assertOwnerThread();
+        if (!self.unload_requested or self.closed) return;
+        if (self.owner_ref_count != 0 or self.definition_ref_count != 0 or self.execution_pin_count != 0) return;
+        std.debug.assert(self.host_class_unregistration_started);
+
+        self.closed = true;
+        if (comptime builtin.is_test) {
+            if (self.close_observer) |observer| observer(self);
+        }
 
         const rt = self.runtime;
         if (self.owns_lib) {
             if (self.lib) |*lib| lib.close();
         }
         if (self.prop_names) |*prop_names| prop_names.deinit();
-        releaseInstalledHostClasses(rt, self);
+        const host_classes = self.host_classes;
+        self.host_classes = &.{};
+        if (host_classes.len != 0) rt.memory.free(HostClass, host_classes);
         rt.memory.free(u8, self.path);
         rt.memory.destroy(InstalledPlugin, self);
     }
@@ -126,11 +221,16 @@ const opaque_host_object_identity = "zjs.runtime.plugin.opaque_host_object.v1";
 const InstalledBinding = struct {
     plugin: *InstalledPlugin,
     descriptor: *const ffi.BindingDescriptor,
+    active_calls: usize = 0,
+    owner_live: bool = true,
 
     fn create(plugin: *InstalledPlugin, descriptor: *const ffi.BindingDescriptor) !*InstalledBinding {
         const rt = plugin.runtime;
         const binding = try rt.memory.create(InstalledBinding);
-        plugin.retain();
+        if (!plugin.retain()) {
+            rt.memory.destroy(InstalledBinding, binding);
+            return error.TypeError;
+        }
         binding.* = .{
             .plugin = plugin,
             .descriptor = descriptor,
@@ -139,6 +239,15 @@ const InstalledBinding = struct {
     }
 
     fn deinit(self: *InstalledBinding) void {
+        std.debug.assert(self.active_calls == 0);
+        if (!self.owner_live) return;
+        self.owner_live = false;
+        self.destroyWithOwnerRelease();
+    }
+
+    fn destroyWithOwnerRelease(self: *InstalledBinding) void {
+        std.debug.assert(!self.owner_live);
+        std.debug.assert(self.active_calls == 0);
         const rt = self.plugin.runtime;
         const plugin = self.plugin;
         rt.memory.destroy(InstalledBinding, self);
@@ -147,11 +256,24 @@ const InstalledBinding = struct {
 
     fn externalFinalizer(ptr: *anyopaque) void {
         const self: *InstalledBinding = @ptrCast(@alignCast(ptr));
-        self.deinit();
+        if (!self.owner_live) return;
+        self.owner_live = false;
+        if (self.active_calls == 0) {
+            self.destroyWithOwnerRelease();
+            return;
+        }
+        // The record owner is gone now, so publish unload and prevent new
+        // wrapper entries immediately. active_calls independently pins this
+        // binding allocation, while execution_pin_count keeps the DSO open.
+        self.plugin.release();
     }
 
     fn call(ptr: *anyopaque, host_call: core.host_function.ExternalCall) anyerror!core.JSValue {
         const self: *InstalledBinding = @ptrCast(@alignCast(ptr));
+        if (!self.owner_live or !self.plugin.beginExecution()) return error.TypeError;
+        self.active_calls += 1;
+        defer self.finishCall();
+
         const trampoline = self.descriptor.call orelse return error.TypeError;
         var frame = ffi.CallFrame{
             .ctx = @ptrCast(host_call.realm),
@@ -174,6 +296,18 @@ const InstalledBinding = struct {
         }
         return errorFromStatus(final_status);
     }
+
+    fn finishCall(self: *InstalledBinding) void {
+        std.debug.assert(self.active_calls > 0);
+        const plugin = self.plugin;
+        self.active_calls -= 1;
+        if (!self.owner_live and self.active_calls == 0) {
+            plugin.runtime.memory.destroy(InstalledBinding, self);
+        }
+        // This must be the last operation: dropping the callback pin may close
+        // the DSO and destroy InstalledPlugin.
+        plugin.endExecution();
+    }
 };
 
 const PreparedBinding = struct {
@@ -194,19 +328,26 @@ const host_services = ffi.HostServices{
 
 threadlocal var service_error_buffer: [256]u8 = undefined;
 
+test "runtime Plugin HostServices reject a null borrowed callback context" {
+    var frame = ffi.CallFrame{};
+    var out = ffi.OpaqueHostObject{};
+
+    try std.testing.expectEqual(ffi.Status.type_error, unwrapOpaqueObject(&frame, core.JSValue.undefinedValue(), ffi.HostTypeId.named("test.NullFrameContext"), &out));
+    try std.testing.expect(out.ptr == null);
+    try std.testing.expect(!out.type_id.isValid());
+}
+
 fn createOpaqueObject(frame: *ffi.CallFrame, object: ffi.OpaqueHostObject, out: *core.JSValue) callconv(.c) ffi.Status {
     out.* = core.JSValue.undefinedValue();
     const binding = bindingFromFrame(frame) orelse return .type_error;
-    const raw_ctx = frame.ctx orelse return .type_error;
-    const ctx: *core.JSContext = @ptrCast(@alignCast(raw_ctx));
+    const ctx = frame.borrowContext() catch return .type_error;
     out.* = createOpaqueObjectValue(ctx, binding.plugin, object) catch |err| return createOpaqueObjectStatus(frame, object, err);
     return .ok;
 }
 
 fn unwrapOpaqueObject(frame: *ffi.CallFrame, value: core.JSValue, expected_type_id: ffi.HostTypeId, out: *ffi.OpaqueHostObject) callconv(.c) ffi.Status {
     out.* = .{};
-    const raw_ctx = frame.ctx orelse return .type_error;
-    const ctx: *core.JSContext = @ptrCast(@alignCast(raw_ctx));
+    const ctx = frame.borrowContext() catch return .type_error;
     out.* = unwrapOpaqueObjectValue(ctx.runtimePtr(), value, expected_type_id) catch |err| return unwrapOpaqueObjectStatus(frame, ctx.runtimePtr(), value, expected_type_id, err);
     return .ok;
 }
@@ -293,6 +434,7 @@ fn tombstoneRecord() core.host_function.ExternalRecord {
 
 fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const u8, source: LoadedSource, options: InstallOptions) !void {
     const rt = ctx.runtimePtr();
+    try rt.requireOwnerThread();
     const descriptor = source.descriptor;
     try ffi.validatePlugin(descriptor);
 
@@ -331,12 +473,9 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
 
     try installPropNames(installed_plugin);
     try installHostClasses(ctx, installed_plugin);
-    var host_classes_committed = false;
-    errdefer if (!host_classes_committed) releaseInstalledHostClasses(rt, installed_plugin);
 
     if (bindings.len == 0) {
         installed_plugin.owns_lib = source.lib != null;
-        host_classes_committed = true;
         staging_plugin_active = false;
         installed_plugin.release();
         return;
@@ -348,7 +487,7 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
     defer destroyOriginalDescriptors(rt, original_descriptors);
 
     for (atoms, 0..) |atom_id, index| {
-        if (target.getOwnProperty(rt, atom_id)) |current| {
+        if (try target.getOwnProperty(rt, atom_id)) |current| {
             original_descriptors[index] = current;
         }
     }
@@ -381,7 +520,6 @@ fn installSource(ctx: *core.JSContext, target_value: core.JSValue, path: []const
     }
 
     installed_plugin.owns_lib = source.lib != null;
-    host_classes_committed = true;
     staging_plugin_active = false;
     staging_active = false;
     installed_plugin.release();
@@ -401,7 +539,7 @@ fn expectPlainTarget(rt: *core.JSRuntime, value: core.JSValue) InstallError!*cor
 
 fn precheckTarget(target: *core.Object, rt: *core.JSRuntime, atoms: []const core.Atom, options: InstallOptions) !void {
     for (atoms) |atom_id| {
-        if (target.getOwnProperty(rt, atom_id)) |current| {
+        if (try target.getOwnProperty(rt, atom_id)) |current| {
             defer current.destroy(rt);
             if (!options.overwrite) return error.PropertyAlreadyExists;
             if (!(current.configurable orelse false)) return error.IncompatibleDescriptor;
@@ -436,15 +574,21 @@ fn installHostClasses(ctx: *core.JSContext, plugin: *InstalledPlugin) !void {
         const class_id = try rt.newClassId(core.class.invalid_class_id);
         var class_registered = false;
         errdefer if (class_registered) rt.classes.unregisterDynamic(class_id);
+        plugin.retainDefinition();
+        var definition_owned_by_record = false;
+        errdefer if (!definition_owned_by_record) plugin.releaseDefinition();
 
         try rt.ensureContextClassPrototypeCapacity(class_id);
         try rt.classes.register(class_id, .{
             .class_name = descriptor.name.slice(),
             .binding_identity = opaque_host_object_identity,
+            .binding_data = @ptrCast(plugin),
+            .binding_data_finalizer = InstalledPlugin.classDefinitionFinalizer,
             .payload_kind = .none,
             .payload_finalizer = opaquePayloadFinalizer,
             .payload_mark = opaquePayloadMark,
         });
+        definition_owned_by_record = true;
         class_registered = true;
 
         const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -460,15 +604,6 @@ fn installHostClasses(ctx: *core.JSContext, plugin: *InstalledPlugin) !void {
         };
         class_registered = false;
         installed_count += 1;
-    }
-}
-
-fn releaseInstalledHostClasses(rt: *core.JSRuntime, plugin: *InstalledPlugin) void {
-    const host_classes = plugin.host_classes;
-    plugin.host_classes = &.{};
-    releaseHostClassEntries(rt, host_classes);
-    if (host_classes.len != 0) {
-        rt.memory.free(HostClass, host_classes);
     }
 }
 
@@ -496,6 +631,9 @@ fn bindingFromFrame(frame: *ffi.CallFrame) ?*InstalledBinding {
 
 fn createOpaqueObjectValue(ctx: *core.JSContext, plugin: *InstalledPlugin, object: ffi.OpaqueHostObject) !core.JSValue {
     if (object.ptr == null or !object.type_id.isValid()) return error.TypeError;
+    if (!plugin.retain()) return error.TypeError;
+    var plugin_owner_pending = true;
+    errdefer if (plugin_owner_pending) plugin.release();
     const host_class = hostClassForType(plugin, object.type_id) orelse return error.UnknownHostObjectType;
     const rt = ctx.runtimePtr();
     const prototype = ctx.classPrototypeObject(host_class.class_id);
@@ -504,13 +642,13 @@ fn createOpaqueObjectValue(ctx: *core.JSContext, plugin: *InstalledPlugin, objec
 
     const payload = try rt.memory.create(OpaqueWrapperPayload);
     errdefer rt.memory.destroy(OpaqueWrapperPayload, payload);
-    plugin.retain();
     payload.* = .{
         .plugin = plugin,
         .descriptor = host_class.descriptor,
         .object = object,
     };
     wrapper.installExternalClassPayload(@ptrCast(payload));
+    plugin_owner_pending = false;
     return wrapper.value();
 }
 
@@ -548,21 +686,29 @@ fn opaquePayloadFinalizer(runtime: *anyopaque, object: *anyopaque, class_payload
     _ = object;
     const rt: *core.JSRuntime = @ptrCast(@alignCast(runtime));
     const payload = opaquePayload(class_payload) orelse return;
+    const plugin = payload.plugin;
+    // The payload owns a plugin reference, so unload cannot have started.
+    // Pin the DSO separately because releasing that last owner below may begin
+    // class unregistration while this callback is still returning through it.
+    plugin.pinExecutionForExistingOwner();
     if (payload.descriptor.owner == .js) {
         if (payload.descriptor.finalizer) |finalizer| {
             finalizer(payload.descriptor.context, payload.object);
         }
     }
-    const plugin = payload.plugin;
     rt.memory.destroy(OpaqueWrapperPayload, payload);
     class_payload.* = null;
     plugin.release();
+    plugin.endExecution();
 }
 
 fn opaquePayloadMark(runtime: *anyopaque, object: *anyopaque, class_payload: *core.class.Payload, visitor: *core.class.PayloadVisitor) void {
     _ = runtime;
     _ = object;
     const payload = opaquePayload(class_payload) orelse return;
+    const plugin = payload.plugin;
+    plugin.pinExecutionForExistingOwner();
+    defer plugin.endExecution();
     const tracer = payload.descriptor.tracer orelse return;
     const Adapter = struct {
         visitor: *core.class.PayloadVisitor,
@@ -591,12 +737,11 @@ fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descrip
     var record_registered = false;
     errdefer if (!record_registered) installed_binding.deinit();
 
-    const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
-    function_object.setNativeFunctionRealm(ctx);
-    errdefer function_object.value().free(rt);
-
     const length = std.math.cast(i32, descriptor.length) orelse return error.BindingLengthOverflow;
-    try defineFunctionMetadata(rt, function_object, descriptor.name.slice(), length);
+    const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, descriptor.name.slice(), length, 2);
+    errdefer function_value.free(rt);
+    const function_object = try core.Object.expect(function_value);
 
     const external_id = try rt.registerExternalHostFunction(.{
         .ptr = @ptrCast(installed_binding),
@@ -607,14 +752,7 @@ fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descrip
 
     function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     function_object.externalHostFunctionIdSlot().* = external_id;
-    return .{ function_object.value(), external_id };
-}
-
-fn defineFunctionMetadata(rt: *core.JSRuntime, function_object: *core.Object, name: []const u8, length: i32) !void {
-    const name_value = (try core.string.String.createAscii(rt, name)).value();
-    defer name_value.free(rt);
-    try function_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-    try function_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(length), false, false, true));
+    return .{ function_value, external_id };
 }
 
 fn rollbackPrepared(rt: *core.JSRuntime, prepared: []PreparedBinding) void {
@@ -725,7 +863,7 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
 fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    return object.getProperty(key);
+    return try object.getProperty(key);
 }
 
 fn expectErrorObjectProperty(rt: *core.JSRuntime, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
@@ -736,6 +874,68 @@ fn expectErrorObjectProperty(rt: *core.JSRuntime, value: core.JSValue, property_
     defer bytes.deinit(rt.memory.allocator);
     try exec.value_ops.appendRawString(rt, &bytes, property_value);
     try std.testing.expectEqualStrings(expected, bytes.items);
+}
+
+test "runtime Plugin rejects foreign install and unload before mutation" {
+    const Impl = struct {
+        fn noop(_: ffi.ZigCall) void {}
+    };
+    const TestPlugin = ffi.Plugin("runtime-owner-thread-test", .{
+        ffi.binding("noop", Impl.noop),
+    });
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    const target_value = target.value();
+    defer target_value.free(rt);
+
+    const descriptor = TestPlugin.descriptor();
+    const installed = try InstalledPlugin.create(rt, "<owner-thread-test>", descriptor, null);
+    var installed_owner_live = true;
+    defer if (installed_owner_live) installed.release();
+
+    const Attempt = struct {
+        ctx: *zjs.JSContext,
+        target: core.JSValue,
+        descriptor: *const ffi.PluginDescriptor,
+        installed: *InstalledPlugin,
+        install_rejected: bool = false,
+        unload_rejected: bool = false,
+
+        fn run(self: *@This()) void {
+            self.install_rejected = if (installDescriptorForTesting(self.ctx, self.target, self.descriptor, .{})) |_| false else |err| err == error.WrongRuntimeThread;
+            self.unload_rejected = if (self.installed.tryBeginUnload()) |_| false else |err| err == error.WrongRuntimeThread;
+        }
+    };
+
+    const noop_atom = try rt.internAtom("noop");
+    defer rt.atoms.free(noop_atom);
+    const memory_before = rt.memory.allocated_bytes;
+    var attempt = Attempt{
+        .ctx = ctx,
+        .target = target_value,
+        .descriptor = descriptor,
+        .installed = installed,
+    };
+    const thread = try std.Thread.spawn(.{}, Attempt.run, .{&attempt});
+    thread.join();
+
+    try std.testing.expect(attempt.install_rejected);
+    try std.testing.expect(attempt.unload_rejected);
+    try std.testing.expectEqual(memory_before, rt.memory.allocated_bytes);
+    try std.testing.expect(!target.hasOwnProperty(noop_atom));
+    try std.testing.expectEqual(@as(usize, 1), installed.owner_ref_count);
+    try std.testing.expectEqual(@as(usize, 0), installed.definition_ref_count);
+    try std.testing.expectEqual(@as(usize, 0), installed.execution_pin_count);
+    try std.testing.expect(!installed.unload_requested);
+    try std.testing.expect(!installed.host_class_unregistration_started);
+    try std.testing.expect(!installed.closed);
+
+    installed_owner_live = false;
+    installed.release();
 }
 
 test "runtime Plugin installs synchronous bindings on an ordinary target" {
@@ -767,33 +967,33 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
 
     const add_atom = try rt.internAtom("add");
     defer rt.atoms.free(add_atom);
-    const add_descriptor = target.getOwnProperty(rt, add_atom) orelse return error.TestExpectedEqual;
+    const add_descriptor = (try target.getOwnProperty(rt, add_atom)) orelse return error.TestExpectedEqual;
     defer add_descriptor.destroy(rt);
     try std.testing.expect(add_descriptor.value.isObject());
     try std.testing.expectEqual(true, add_descriptor.writable.?);
     try std.testing.expectEqual(true, add_descriptor.enumerable.?);
     try std.testing.expectEqual(true, add_descriptor.configurable.?);
 
-    const add_value = target.getProperty(add_atom);
+    const add_value = try target.getProperty(add_atom);
     defer add_value.free(rt);
     try std.testing.expect(add_value.isObject());
     const add_object: *core.Object = @fieldParentPtr("header", add_value.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, add_object.hostFunctionKindSlot().*);
-    const name_value = add_object.getProperty(core.atom.ids.name);
+    const name_value = try add_object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
     var name_bytes = std.ArrayList(u8).empty;
     defer name_bytes.deinit(rt.memory.allocator);
     try exec.value_ops.appendRawString(rt, &name_bytes, name_value);
     try std.testing.expectEqualStrings("add", name_bytes.items);
-    try std.testing.expectEqual(@as(i32, 2), add_object.getProperty(core.atom.ids.length).asInt32().?);
+    try std.testing.expectEqual(@as(i32, 2), (try add_object.getProperty(core.atom.ids.length)).asInt32().?);
 
     const default_length_atom = try rt.internAtom("defaultLength");
     defer rt.atoms.free(default_length_atom);
-    const default_length_value = target.getProperty(default_length_atom);
+    const default_length_value = try target.getProperty(default_length_atom);
     defer default_length_value.free(rt);
     const default_length_object: *core.Object = @fieldParentPtr("header", default_length_value.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, default_length_object.hostFunctionKindSlot().*);
-    try std.testing.expectEqual(@as(i32, 0), default_length_object.getProperty(core.atom.ids.length).asInt32().?);
+    try std.testing.expectEqual(@as(i32, 0), (try default_length_object.getProperty(core.atom.ids.length)).asInt32().?);
 
     const global = try ctx.globalObject();
     try std.testing.expect(!global.hasOwnProperty(add_atom));
@@ -810,6 +1010,81 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     const result = try ctx.eval("native.add(2, 5)", .{});
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
+}
+
+test "runtime Plugin defers last binding release until its trampoline returns" {
+    const State = struct {
+        callback_entered: bool = false,
+        binding_retired: bool = false,
+        new_entries_stopped: bool = false,
+        callback_observed_close: bool = false,
+        close_count: usize = 0,
+        close_saw_drained_pins: bool = false,
+
+        var active: ?*@This() = null;
+
+        fn retire(frame: *ffi.CallFrame) ffi.Status {
+            const self = active orelse return .generic_error;
+            self.callback_entered = true;
+            self.callback_observed_close = self.close_count != 0;
+            const binding: *InstalledBinding = @ptrCast(@alignCast(frame.host_context orelse return .type_error));
+            InstalledBinding.externalFinalizer(@ptrCast(binding));
+            self.binding_retired = true;
+            self.new_entries_stopped = binding.plugin.unload_requested and !binding.plugin.retain();
+            // Retirement removed the last artifact owner, but the active call
+            // pin must keep both InstalledBinding and the DSO alive here.
+            self.callback_observed_close = self.callback_observed_close or self.close_count != 0;
+            return .ok;
+        }
+
+        fn observeClose(plugin: *InstalledPlugin) void {
+            const self = active orelse return;
+            self.close_count += 1;
+            self.close_saw_drained_pins = plugin.closed and
+                plugin.owner_ref_count == 0 and
+                plugin.definition_ref_count == 0 and
+                plugin.execution_pin_count == 0;
+        }
+    };
+    const TestPlugin = ffi.Plugin("runtime-binding-self-retire-test", .{
+        ffi.binding("retire", State.retire),
+    });
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    defer target.value().free(rt);
+
+    var state = State{};
+    State.active = &state;
+    defer State.active = null;
+
+    const descriptor = TestPlugin.descriptor();
+    const binding_descriptors = descriptor.bindingSlice();
+    const plugin = try InstalledPlugin.create(rt, "<binding-self-retire>", descriptor, null);
+    plugin.close_observer = State.observeClose;
+    const binding = try InstalledBinding.create(plugin, &binding_descriptors[0]);
+    defer if (!state.binding_retired) binding.deinit();
+    // Leave the binding record as the only installed artifact owner.
+    plugin.release();
+
+    const result = try InstalledBinding.call(@ptrCast(binding), .{
+        .realm = ctx,
+        .output = null,
+        .func_obj = target,
+        .this_value = core.JSValue.undefinedValue(),
+        .args = &.{},
+    });
+    result.free(rt);
+
+    try std.testing.expect(state.callback_entered);
+    try std.testing.expect(state.binding_retired);
+    try std.testing.expect(state.new_entries_stopped);
+    try std.testing.expect(!state.callback_observed_close);
+    try std.testing.expectEqual(@as(usize, 1), state.close_count);
+    try std.testing.expect(state.close_saw_drained_pins);
 }
 
 fn testFixturePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -951,7 +1226,7 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
     try std.testing.expect(plugin.loaded == null);
     try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx.core, target_value, .{}));
 
-    const sentinel = target.getOwnProperty(rt, sentinel_atom) orelse return error.TestExpectedEqual;
+    const sentinel = (try target.getOwnProperty(rt, sentinel_atom)) orelse return error.TestExpectedEqual;
     defer sentinel.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 17), sentinel.value.asInt32());
     try std.testing.expectEqual(false, sentinel.writable.?);
@@ -1103,11 +1378,11 @@ test "runtime Plugin install ignores inherited binding-name properties" {
 
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
-    const inherited = prototype.getProperty(key);
+    const inherited = try prototype.getProperty(key);
     defer inherited.free(rt);
     try std.testing.expectEqual(@as(i32, 1), inherited.asInt32().?);
 
-    const own = target.getOwnProperty(rt, key) orelse return error.TestExpectedEqual;
+    const own = (try target.getOwnProperty(rt, key)) orelse return error.TestExpectedEqual;
     defer own.destroy(rt);
     try std.testing.expect(own.value.isObject());
 }
@@ -1228,7 +1503,7 @@ test "runtime Plugin overwrite replaces configurable own properties" {
 
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{ .overwrite = true });
 
-    const overwritten = target.getOwnProperty(rt, add_atom).?;
+    const overwritten = (try target.getOwnProperty(rt, add_atom)).?;
     defer overwritten.destroy(rt);
     try std.testing.expect(overwritten.value.isObject());
     try std.testing.expectEqual(true, overwritten.writable.?);
@@ -1262,7 +1537,7 @@ test "runtime Plugin rollback restores overwritten descriptors" {
 
     var atoms = [_]core.Atom{ add_atom, mul_atom };
     var originals = [_]?core.Descriptor{
-        target.getOwnProperty(rt, add_atom).?,
+        (try target.getOwnProperty(rt, add_atom)).?,
         null,
     };
     defer destroyOriginalDescriptors(rt, originals[0..]);
@@ -1272,7 +1547,7 @@ test "runtime Plugin rollback restores overwritten descriptors" {
 
     rollbackDefinedProperties(rt, target, atoms[0..], originals[0..]);
 
-    const restored = target.getOwnProperty(rt, add_atom).?;
+    const restored = (try target.getOwnProperty(rt, add_atom)).?;
     defer restored.destroy(rt);
     try std.testing.expectEqual(@as(?i32, 1), restored.value.asInt32());
     try std.testing.expectEqual(false, restored.writable.?);
@@ -1632,7 +1907,7 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
 
     const fail_atom = try rt.internAtom("fail");
     defer rt.atoms.free(fail_atom);
-    const fail_value = target.getProperty(fail_atom);
+    const fail_value = try target.getProperty(fail_atom);
     defer fail_value.free(rt);
 
     const sentinel = try core.Object.create(rt, core.class.ids.object, null);
@@ -1812,7 +2087,7 @@ test "runtime Plugin out_of_memory status ignores borrowed error messages" {
 
     const fail_atom = try rt.internAtom("fail");
     defer rt.atoms.free(fail_atom);
-    const fail_value = target.getProperty(fail_atom);
+    const fail_value = try target.getProperty(fail_atom);
     defer fail_value.free(rt);
 
     try std.testing.expectError(error.OutOfMemory, exec.call.callValue(ctx.core, null, fail_value, &.{}));
@@ -1822,8 +2097,7 @@ test "runtime Plugin out_of_memory status ignores borrowed error messages" {
 test "runtime Plugin pending_exception preserves an existing pending exception" {
     const Impl = struct {
         fn fail(frame: *ffi.CallFrame) ffi.Status {
-            const raw_ctx = frame.ctx orelse return .type_error;
-            const ctx: *core.JSContext = @ptrCast(@alignCast(raw_ctx));
+            const ctx = frame.borrowContext() catch return .type_error;
             const thrown = (core.string.String.createAscii(ctx.runtimePtr(), "pending from plugin") catch return .out_of_memory).value();
             _ = ctx.throwValue(thrown);
             frame.error_message = ffi.BorrowedBytes.from("must not replace pending exception");
@@ -2249,7 +2523,7 @@ test "runtime Plugin pending opaque wrapper finalizers trace plugin payload root
 
     const make_atom = try rt.internAtom("make");
     defer rt.atoms.free(make_atom);
-    const make_value = target.getProperty(make_atom);
+    const make_value = try target.getProperty(make_atom);
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
@@ -2287,6 +2561,116 @@ test "runtime Plugin pending opaque wrapper finalizers trace plugin payload root
 
     rt.drainDeferredClassPayloadFinalizers();
     try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+}
+
+test "runtime Plugin closes only after queued wrapper callbacks release the class generation" {
+    const State = struct {
+        rt: *core.JSRuntime,
+        ctx: *core.JSContext,
+        class_id: core.ClassId = core.class.invalid_class_id,
+        closed: bool = false,
+        close_count: usize = 0,
+        trace_calls: usize = 0,
+        finalizer_calls: usize = 0,
+        callbacks_after_close: usize = 0,
+        event_sequence: usize = 0,
+        finalizer_order: usize = 0,
+        close_order: usize = 0,
+        close_saw_drained_pins: bool = false,
+        close_saw_class_removed: bool = false,
+        close_saw_slot_cleared: bool = false,
+
+        const type_id = ffi.HostTypeId.named("test.RuntimeOpaqueQueuedClose");
+        var active: ?*@This() = null;
+
+        fn finalize(_: ?*anyopaque, _: ffi.OpaqueHostObject) callconv(.c) void {
+            const self = active orelse return;
+            if (self.closed) self.callbacks_after_close += 1;
+            self.finalizer_calls += 1;
+            self.event_sequence += 1;
+            self.finalizer_order = self.event_sequence;
+        }
+
+        fn trace(_: ?*anyopaque, _: ffi.OpaqueHostObject, _: *ffi.HostTraceVisitor) callconv(.c) void {
+            const self = active orelse return;
+            if (self.closed) self.callbacks_after_close += 1;
+            self.trace_calls += 1;
+        }
+
+        fn noop(call: ffi.ZigCall) void {
+            _ = call;
+        }
+
+        fn observeClose(plugin: *InstalledPlugin) void {
+            const self = active orelse return;
+            self.closed = true;
+            self.close_count += 1;
+            self.event_sequence += 1;
+            self.close_order = self.event_sequence;
+            self.close_saw_drained_pins = plugin.closed and
+                plugin.owner_ref_count == 0 and
+                plugin.definition_ref_count == 0 and
+                plugin.execution_pin_count == 0;
+            self.close_saw_class_removed = !self.rt.classes.isRegistered(self.class_id);
+            self.close_saw_slot_cleared = self.ctx.classPrototypeObject(self.class_id) == null;
+        }
+    };
+    const TestPlugin = ffi.Plugin("runtime-opaque-queued-close-test", .{
+        ffi.hostObject("RuntimeOpaqueQueuedClose", State.type_id, .{
+            .owner = .js,
+            .finalizer = State.finalize,
+            .tracer = State.trace,
+        }),
+        ffi.binding("noop", State.noop),
+    });
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    var state = State{ .rt = rt, .ctx = ctx };
+    State.active = &state;
+    defer State.active = null;
+
+    const plugin = try InstalledPlugin.create(rt, "<opaque-queued-close>", TestPlugin.descriptor(), null);
+    var staging_owner_live = true;
+    defer if (staging_owner_live) plugin.release();
+    plugin.close_observer = State.observeClose;
+    try installHostClasses(ctx, plugin);
+    state.class_id = plugin.host_classes[0].class_id;
+
+    const wrapper = try createOpaqueObjectValue(ctx, plugin, ffi.OpaqueHostObject.from(@ptrCast(&state), State.type_id));
+    plugin.release();
+    staging_owner_live = false;
+    wrapper.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), state.close_count);
+    try std.testing.expect(rt.classes.isRegistered(state.class_id));
+
+    const NoopRootVisitor = struct {
+        fn visitValue(_: *anyopaque, _: *core.JSValue) core.runtime.RootTraceError!void {}
+        fn visitObject(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var visitor_context: u8 = 0;
+    var visitor = core.runtime.RootVisitor{
+        .context = &visitor_context,
+        .visit_value = NoopRootVisitor.visitValue,
+        .visit_object = NoopRootVisitor.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+    try std.testing.expect(state.trace_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), state.close_count);
+
+    rt.drainDeferredClassPayloadFinalizers();
+    try std.testing.expectEqual(@as(usize, 1), state.finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 1), state.close_count);
+    try std.testing.expect(state.finalizer_order < state.close_order);
+    try std.testing.expectEqual(@as(usize, 0), state.callbacks_after_close);
+    try std.testing.expect(state.close_saw_drained_pins);
+    try std.testing.expect(state.close_saw_class_removed);
+    try std.testing.expect(state.close_saw_slot_cleared);
 }
 
 test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
@@ -2330,7 +2714,7 @@ test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
     try installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{});
 
     const make_atom = try rt.internAtom("make");
-    const make_value = target.getProperty(make_atom);
+    const make_value = try target.getProperty(make_atom);
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
@@ -2398,7 +2782,7 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
 
     const make_atom = try rt.internAtom("make");
     defer rt.atoms.free(make_atom);
-    const make_value = target.getProperty(make_atom);
+    const make_value = try target.getProperty(make_atom);
     defer make_value.free(rt);
 
     const wrapper = try exec.call.callValue(ctx.core, null, make_value, &.{});
@@ -2587,7 +2971,7 @@ test "runtime Plugin unwrap rejects opaque wrappers from another runtime" {
 
     const make_atom = try rt_a.internAtom("make");
     defer rt_a.atoms.free(make_atom);
-    const make_value = target_a.getProperty(make_atom);
+    const make_value = try target_a.getProperty(make_atom);
     defer make_value.free(rt_a);
     const wrapper_a = try exec.call.callValue(ctx_a.core, null, make_value, &.{});
     defer wrapper_a.free(rt_a);

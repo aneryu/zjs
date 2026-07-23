@@ -90,31 +90,40 @@ This is a single-context repository. See `docs/agents/domain.md`.
 
 ### Build
 
-- `zig build zjs --summary all`
-- `zig build zjs-dev --summary all` (Debug CLI used by the inner-loop smoke gate)
-- `zig build run-test262 --summary all`
-- `zig build run-test262-dev --summary all` (Debug runner used by `test262-smoke`)
+- `zig build zjs --seed 0 --summary all`
+- `zig build zjs-dev --seed 0 --summary all` (Debug CLI used by the inner-loop smoke gate)
+- `zig build run-test262 --seed 0 --summary all`
+- `zig build run-test262-dev --seed 0 --summary all` (Debug runner used by `test262-smoke`)
+
+Always pass CLI `--seed 0` to one-shot `zig build` commands. Zig 0.16
+randomizes dependency traversal by default; a stable seed prevents unchanged
+builds from cycling through duplicate cache artifacts. The `mise` validation
+tasks below include it.
 
 ### Regression
 
-- `zig build quick-check --summary all` (fast inner-loop gate: build the Debug
-  `zjs-dev` and run CLI smoke fixtures; use while iterating, then add the
+- `zig build test-core --seed 0 --summary all` (example changed-area target;
+  replace `core` with `parser`, `bytecode`, `exec`, `builtins`, `runtime`, or
+  `runner`, and use the narrowest matching target on each focused edit)
+- `mise run quick-check` (Debug CLI integration gate: build `zjs-dev` and run
+  CLI smoke fixtures after a coherent edit, in addition to the direct
   changed-area Zig test or test262 slice)
-- `zig build checkpoint-check --summary all` (medium checkpoint gate: unified
+- `mise run checkpoint-check` (medium checkpoint gate: unified
   Debug tests, Debug CLI smoke, architecture, Debug `test262-smoke`, and
   OOM-cap coverage inside the unified suite; use before handing off non-trivial
   code-bearing changes when full test262 is not yet justified)
-- `zig build test-{core,parser,bytecode,exec,builtins,runtime,runner} --summary all`
-  (explicit changed-area targets; choose the narrowest matching subsystem)
 - `mise run quick-watch` (persistent incremental quick-check loop; stop it
-  before running a checkpoint or production gate)
-- `zig build test --summary all` (Debug full unit/integration suite; during the
-  current large refactor, do NOT run this after every small edit. Prefer
+  before running a checkpoint or production gate; prefer it when several
+  consecutive edits all need CLI smoke feedback)
+- `zig build test --seed 0 --summary all` (Debug full unit/integration suite;
+  during the current large refactor, do NOT run this after every small edit. Prefer
   targeted compile checks, focused unit tests, or changed-area slices while
   iterating, and save the full Debug suite for meaningful checkpoints or before
   handing off substantial code changes)
-- `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
-- `zig build test-altrepr --summary all` (alternate JSValue representation
+- `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` (ReleaseSafe
+  verification; run ONLY once as a final gate before final commits or CI gates
+  to ensure optimized loop safety)
+- `zig build test-altrepr --seed 0 --summary all` (alternate JSValue representation
   guard: runs the suite with the representation opposite the target default.
   REQUIRED whenever a change touches `src/core/value.zig` or
   value-representation semantics; for such changes also run the test262 gate
@@ -122,7 +131,10 @@ This is a single-context repository. See `docs/agents/domain.md`.
   default is the QuickJS-aligned 16-byte payload+tag layout; narrower targets
   default to 8-byte NaN-boxing. The explicit option can select either mode and
   neither may rot.)
-- `zig build test-oom --summary all` (OOM 注入门禁：corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus same-runtime recovery canaries; run at phase-close tier, not per-edit)
+- `zig build test-oom --seed 0 --summary all` (OOM 注入门禁：
+  corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，
+  不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus
+  same-runtime recovery canaries; run at phase-close tier, not per-edit)
 
 - `git diff --check`
 
@@ -134,8 +146,8 @@ semantic compatibility changes, prefer `test262-smoke` plus the relevant `-d` /
 needed:
 
 ```bash
-zig build test262-smoke --summary all
-zig build test262-gate --summary all
+zig build test262-smoke --seed 0 --summary all
+zig build test262-gate --seed 0 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
@@ -157,7 +169,7 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Compare semantic fixes against QuickJS reference behavior and record key
   evidence.
 - During the current large refactor, do not automatically run the full
-  `zig build test --summary all` suite after every edit. Use the cheapest
+  `zig build test --seed 0 --summary all` suite after every edit. Use the cheapest
   validation that proves the changed surface: targeted compile commands,
   changed-area unit tests, runner fixtures, or focused test262 slices. Run the
   full Debug suite at meaningful checkpoints, before broad handoff, or when a
@@ -193,9 +205,9 @@ Missing or invalid arguments should print usage and exit non-zero.
 - The relevant failing case was reproduced and understood.
 - The change is limited to the minimum necessary files.
 - Related docs, tracking notes, or matrices are updated.
-- `zig build test --summary all` at a checkpoint or before handoff when the
+- `zig build test --seed 0 --summary all` at a checkpoint or before handoff when the
   change is code-bearing and broad enough to justify the cost; otherwise record
   the focused validation that covers the change.
-- `zig build test -Doptimize=ReleaseSafe --summary all` (run ONLY once as a final pre-commit/pre-push gate verification).
+- `zig build test -Doptimize=ReleaseSafe --seed 0 --summary all` (run ONLY once as a final pre-commit/pre-push gate verification).
 - `git diff --check` passes.
 - No noisy logs, temporary debug output, or unrelated build noise were added.

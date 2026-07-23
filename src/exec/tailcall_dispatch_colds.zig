@@ -492,7 +492,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.append] = h_append(op.append);
     t[op.copy_data_properties] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            const mask = vm.function.code[vm.frame.pc];
+            const mask = vm.function.byteCode()[vm.frame.pc];
             vm.frame.pc += 1;
             _ = try literal_vm.copyDataProperties(vm.ctx, vm.output, vm.global, vm.stack, mask, vm.function, vm.frame, vm.catch_target);
         }
@@ -727,7 +727,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     }.b);
     t[op.apply_eval] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            _ = try eval_module_vm.applyEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, 0x8000);
+            _ = try eval_module_vm.applyEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, td.directEvalVarsReachGlobal(vm));
         }
     }.b);
     t[op.import] = h(struct {

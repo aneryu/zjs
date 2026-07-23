@@ -16,6 +16,113 @@ const countJobArgs = helpers.countJobArgs;
 const objectFromValue = helpers.objectFromValue;
 const expectActiveSetStrings = helpers.expectActiveSetStrings;
 
+test "native handler realm readers have an explicit observable or synthetic authority" {
+    const Entry = struct {
+        name: []const u8,
+        source: []const u8,
+        synthetic_global_reads: usize,
+        synthetic_globals_reads: usize = 0,
+    };
+    const entries = [_]Entry{
+        .{ .name = "array", .source = @embedFile("../exec/array_builtin_ops.zig"), .synthetic_global_reads = 1 },
+        .{ .name = "atomics", .source = @embedFile("../exec/atomics_ops.zig"), .synthetic_global_reads = 0 },
+        .{ .name = "object", .source = @embedFile("../exec/object_builtin_ops.zig"), .synthetic_global_reads = 1, .synthetic_globals_reads = 1 },
+        .{ .name = "math", .source = @embedFile("../exec/math_ops.zig"), .synthetic_global_reads = 2 },
+        .{ .name = "number", .source = @embedFile("../exec/number_ops.zig"), .synthetic_global_reads = 1 },
+        .{ .name = "uri", .source = @embedFile("../exec/uri_ops.zig"), .synthetic_global_reads = 1 },
+        .{ .name = "promise", .source = @embedFile("../exec/promise_builtin_ops.zig"), .synthetic_global_reads = 0 },
+        .{ .name = "function", .source = @embedFile("../exec/function_ops.zig"), .synthetic_global_reads = 0 },
+        .{ .name = "reflect", .source = @embedFile("../exec/reflect_proxy_ops.zig"), .synthetic_global_reads = 0 },
+        .{ .name = "json", .source = @embedFile("../exec/json_ops.zig"), .synthetic_global_reads = 1 },
+        .{ .name = "string", .source = @embedFile("../exec/string_builtin_ops.zig"), .synthetic_global_reads = 4 },
+        .{ .name = "date", .source = @embedFile("../exec/date_ops.zig"), .synthetic_global_reads = 2 },
+        .{ .name = "collection", .source = @embedFile("../exec/collection_ops.zig"), .synthetic_global_reads = 2, .synthetic_globals_reads = 1 },
+        .{ .name = "regexp", .source = @embedFile("../exec/regexp_ops.zig"), .synthetic_global_reads = 1 },
+    };
+
+    for (entries) |entry| {
+        try std.testing.expect(std.mem.indexOf(u8, entry.source, "callableRealm(host_call)") != null);
+        const globals_reads = std.mem.count(u8, entry.source, "host_call.globals");
+        const global_prefix_reads = std.mem.count(u8, entry.source, "host_call.global");
+        try std.testing.expectEqual(entry.synthetic_globals_reads, globals_reads);
+        try std.testing.expectEqual(entry.synthetic_global_reads, global_prefix_reads - globals_reads);
+        if (entry.synthetic_global_reads != 0 or entry.synthetic_globals_reads != 0) {
+            try std.testing.expect(std.mem.indexOf(u8, entry.source, "host_call.func_obj") != null);
+        }
+        _ = entry.name;
+    }
+
+    const promise_source = @embedFile("../core/promise.zig");
+    const array_source = @embedFile("../exec/array_builtin_ops.zig");
+    const module_graph_source = @embedFile("../exec/module_graph.zig");
+    const raw_data_factory = "core.function.nativeDataFunction(";
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, promise_source, raw_data_factory));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, array_source, raw_data_factory));
+    // W1b3d2 moved dynamic-import scheduling to a typed job payload, so no
+    // scheduler or user-visible path retains the raw callable-data factory.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, module_graph_source, raw_data_factory));
+}
+
+test "dense array writer readers retain their semantic guard class" {
+    const WriterClass = enum {
+        own_overwrite,
+        create_data_property,
+        prewalk_set,
+        already_walked_set,
+        qjs_bulk_set,
+        zjs_bulk_set,
+    };
+    const Reader = struct {
+        class: WriterClass,
+        source: []const u8,
+        needle: []const u8,
+        count: usize,
+    };
+
+    const object_source = @embedFile("../core/object.zig");
+    const runtime_source = @embedFile("../core/runtime.zig");
+    const core_array_source = @embedFile("../core/array.zig");
+    const array_builtin_source = @embedFile("../exec/array_builtin_ops.zig");
+    const array_ops_source = @embedFile("../exec/array_ops.zig");
+    const json_ops_source = @embedFile("../exec/json_ops.zig");
+    const object_ops_source = @embedFile("../exec/object_ops.zig");
+    const string_ops_source = @embedFile("../exec/string_ops.zig");
+    const vm_literal_source = @embedFile("../exec/vm_literal.zig");
+    const readers = [_]Reader{
+        .{ .class = .own_overwrite, .source = array_ops_source, .needle = ".setFastArrayElementDup(rt, index, value)", .count = 2 },
+        .{ .class = .create_data_property, .source = core_array_source, .needle = ".initDenseArrayLiteralValuesAssumingEmpty(rt, values)", .count = 1 },
+        .{ .class = .create_data_property, .source = core_array_source, .needle = ".appendDenseArrayLiteralIndex(rt,", .count = 1 },
+        .{ .class = .create_data_property, .source = array_builtin_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },
+        .{ .class = .create_data_property, .source = array_ops_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 2 },
+        .{ .class = .create_data_property, .source = array_ops_source, .needle = "out.?.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
+        .{ .class = .create_data_property, .source = array_ops_source, .needle = "out.?.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
+        .{ .class = .create_data_property, .source = json_ops_source, .needle = ".appendDenseArrayLiteralIndex(", .count = 3 },
+        .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndex(rt,", .count = 1 },
+        .{ .class = .create_data_property, .source = string_ops_source, .needle = ".appendDenseArrayDefineIndexOwned(rt,", .count = 1 },
+        .{ .class = .create_data_property, .source = string_ops_source, .needle = ".initDenseArrayIndexZeroAssumingEmpty(rt,", .count = 1 },
+        .{ .class = .create_data_property, .source = vm_literal_source, .needle = ".defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
+        .{ .class = .prewalk_set, .source = array_ops_source, .needle = ".appendDenseArrayIndex(rt,", .count = 2 },
+        .{ .class = .prewalk_set, .source = object_ops_source, .needle = ".appendDenseArrayIndex(ctx.runtime,", .count = 1 },
+        .{ .class = .already_walked_set, .source = object_source, .needle = "try self.defineOwnDataPropertyForSetKnownNoOwn(rt, atom_id, new_value);", .count = 1 },
+        .{ .class = .qjs_bulk_set, .source = array_ops_source, .needle = ".appendDenseArrayValues(ctx.runtime,", .count = 1 },
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataPropertyUnchecked(ctx.runtime,", .count = 1 },
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "object.defineDenseArrayDataProperty(ctx.runtime,", .count = 1 },
+        .{ .class = .zjs_bulk_set, .source = array_ops_source, .needle = "arrayPrototypeChainHasNoIndexedProperties(object)", .count = 2 },
+        .{ .class = .zjs_bulk_set, .source = object_source, .needle = "if (!arrayPrototypeChainAllowsBulkIndexedSet(proto))", .count = 3 },
+    };
+    for (readers) |reader| {
+        try std.testing.expectEqual(reader.count, std.mem.count(u8, reader.source, reader.needle));
+        _ = reader.class;
+    }
+
+    // Only the two QuickJS-aligned pre-walk append consumers consult the
+    // direct %Array.prototype% marker. The runtime-wide sticky approximation
+    // is deliberately absent.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, object_source, "if (!self.canExtendFastArray())"));
+    try std.testing.expect(std.mem.indexOf(u8, object_source, "is_std_array_prototype") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime_source, "any_prototype_may_have_indexed_properties") == null);
+}
+
 // ================== builtins_async.zig ==================
 
 test "Engine eval executes allocator-backed wide Math min max calls" {
@@ -444,6 +551,382 @@ test "Array.prototype.push fast path observes inherited indexed setter" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\n3\n3\nundefined\nfalse\n", stream.buffered());
+}
+
+test "array dense writers distinguish own Set holes and CreateDataProperty" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    function hasOwn(object, key) {
+        \\        return Object.prototype.hasOwnProperty.call(object, key);
+        \\    }
+        \\    var payload = { marker: "payload" };
+        \\    var owners = [Array.prototype, Object.prototype];
+        \\    for (var ownerIndex = 0; ownerIndex < owners.length; ownerIndex++) {
+        \\        var owner = owners[ownerIndex];
+        \\        var seen;
+        \\        Object.defineProperty(owner, "1", {
+        \\            set: function (value) { seen = value; },
+        \\            configurable: true
+        \\        });
+        \\        try {
+        \\            var existing = [0, 1];
+        \\            existing[1] = payload;
+        \\            assert.sameValue(seen, undefined);
+        \\            assert.sameValue(existing[1], payload);
+        \\            assert.sameValue(hasOwn(existing, "1"), true);
+        \\            var hole = new Array(2);
+        \\            hole[1] = payload;
+        \\            assert.sameValue(seen, payload);
+        \\            assert.sameValue(hasOwn(hole, "1"), false);
+        \\            assert.sameValue(hole.length, 2);
+        \\            seen = undefined;
+        \\            var defined = new Array(2);
+        \\            Object.defineProperty(defined, "1", {
+        \\                value: payload,
+        \\                writable: true,
+        \\                enumerable: true,
+        \\                configurable: true
+        \\            });
+        \\            assert.sameValue(seen, undefined);
+        \\            assert.sameValue(defined[1], payload);
+        \\            assert.sameValue(hasOwn(defined, "1"), true);
+        \\
+        \\            var literal = [0, payload];
+        \\            var constructed = new Array(0, payload);
+        \\            var fromResult = Array.from([0, payload]);
+        \\            var ofResult = Array.of(0, payload);
+        \\            var mapped = [0, 1].map(function () { return payload; });
+        \\            var created = [literal, constructed, fromResult, ofResult, mapped];
+        \\            for (var createdIndex = 0; createdIndex < created.length; createdIndex++) {
+        \\                assert.sameValue(created[createdIndex][1], payload);
+        \\                assert.sameValue(hasOwn(created[createdIndex], "1"), true);
+        \\            }
+        \\            assert.sameValue(seen, undefined);
+        \\        } finally {
+        \\            delete owner[1];
+        \\        }
+        \\    }
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "push splice fill and unshift preserve prototype and payload semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    function hasOwn(object, key) {
+        \\        return Object.prototype.hasOwnProperty.call(object, key);
+        \\    }
+        \\    function run(owner, payload) {
+        \\        var seen;
+        \\        Object.defineProperty(owner, "1", {
+        \\            set: function (value) { seen = value; },
+        \\            configurable: true
+        \\        });
+        \\        try {
+        \\            var pushed = [10];
+        \\            assert.sameValue(pushed.push(payload), 2);
+        \\            assert.sameValue(seen, payload);
+        \\            assert.sameValue(hasOwn(pushed, "1"), false);
+        \\            assert.sameValue(pushed.length, 2);
+        \\
+        \\            seen = undefined;
+        \\            var spliced = [10];
+        \\            var removed = spliced.splice(1, 0, payload);
+        \\            assert.sameValue(removed.length, 0);
+        \\            assert.sameValue(seen, payload);
+        \\            assert.sameValue(hasOwn(spliced, "1"), false);
+        \\            assert.sameValue(spliced.length, 2);
+        \\
+        \\            seen = undefined;
+        \\            var filled = new Array(2);
+        \\            filled[0] = 10;
+        \\            assert.sameValue(filled.fill(payload, 1, 2), filled);
+        \\            assert.sameValue(seen, payload);
+        \\            assert.sameValue(hasOwn(filled, "1"), false);
+        \\            assert.sameValue(filled.length, 2);
+        \\
+        \\            seen = undefined;
+        \\            var unshifted = [10];
+        \\            assert.sameValue(unshifted.unshift(payload), 2);
+        \\            assert.sameValue(seen, 10);
+        \\            assert.sameValue(unshifted[0], payload);
+        \\            assert.sameValue(hasOwn(unshifted, "1"), false);
+        \\            assert.sameValue(unshifted.length, 2);
+        \\        } finally {
+        \\            delete owner[1];
+        \\        }
+        \\    }
+        \\
+        \\    var owners = [Array.prototype, Object.prototype];
+        \\    var payloads = [{ marker: "object" }, Symbol("symbol payload")];
+        \\    for (var ownerIndex = 0; ownerIndex < owners.length; ownerIndex++) {
+        \\        for (var payloadIndex = 0; payloadIndex < payloads.length; payloadIndex++) {
+        \\            run(owners[ownerIndex], payloads[payloadIndex]);
+        \\        }
+        \\    }
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array indexed setter guards follow the receiver realm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    function hasOwn(object, key) {
+        \\        return Object.prototype.hasOwnProperty.call(object, key);
+        \\    }
+        \\    var other = $262.createRealm().global;
+        \\    var payload = { marker: "cross-realm" };
+        \\    var localSeen;
+        \\    Object.defineProperty(Array.prototype, "1", {
+        \\        set: function (value) { localSeen = value; },
+        \\        configurable: true
+        \\    });
+        \\    try {
+        \\        var foreignClean = other.eval("[10]");
+        \\        assert.sameValue(other.Array.prototype.push.call(foreignClean, payload), 2);
+        \\        assert.sameValue(localSeen, undefined);
+        \\        assert.sameValue(foreignClean[1], payload);
+        \\        assert.sameValue(hasOwn(foreignClean, "1"), true);
+        \\
+        \\        var localPolluted = [10];
+        \\        assert.sameValue(other.Array.prototype.push.call(localPolluted, payload), 2);
+        \\        assert.sameValue(localSeen, payload);
+        \\        assert.sameValue(hasOwn(localPolluted, "1"), false);
+        \\    } finally {
+        \\        delete Array.prototype[1];
+        \\    }
+        \\
+        \\    var foreignSeen;
+        \\    other.Object.defineProperty(other.Object.prototype, "1", {
+        \\        set: function (value) { foreignSeen = value; },
+        \\        configurable: true
+        \\    });
+        \\    try {
+        \\        var localClean = [10];
+        \\        assert.sameValue(Array.prototype.push.call(localClean, payload), 2);
+        \\        assert.sameValue(foreignSeen, undefined);
+        \\        assert.sameValue(localClean[1], payload);
+        \\        assert.sameValue(hasOwn(localClean, "1"), true);
+        \\
+        \\        var foreignPolluted = other.eval("[10]");
+        \\        assert.sameValue(Array.prototype.push.call(foreignPolluted, payload), 2);
+        \\        assert.sameValue(foreignSeen, payload);
+        \\        assert.sameValue(hasOwn(foreignPolluted, "1"), false);
+        \\    } finally {
+        \\        delete other.Object.prototype[1];
+        \\    }
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "array dense append guard distinguishes custom proxy and null prototypes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    function hasOwn(object, key) {
+        \\        return Object.prototype.hasOwnProperty.call(object, key);
+        \\    }
+        \\    var customPayload = { marker: "custom" };
+        \\    var customSeen;
+        \\    var customPrototype = Object.create(Array.prototype);
+        \\    Object.defineProperty(customPrototype, "1", {
+        \\        set: function (value) { customSeen = value; },
+        \\        configurable: true
+        \\    });
+        \\    var customArray = [10];
+        \\    Object.setPrototypeOf(customArray, customPrototype);
+        \\    assert.sameValue(Array.prototype.push.call(customArray, customPayload), 2);
+        \\    assert.sameValue(customSeen, customPayload);
+        \\    assert.sameValue(hasOwn(customArray, "1"), false);
+        \\    var proxyPayload = Symbol("proxy payload");
+        \\    var proxyKeys = [];
+        \\    var proxySeen;
+        \\    var proxyPrototype = new Proxy(Array.prototype, {
+        \\        set: function (target, key, value, receiver) {
+        \\            proxyKeys.push(String(key));
+        \\            proxySeen = value;
+        \\            return Reflect.set(target, key, value, receiver);
+        \\        }
+        \\    });
+        \\    var proxyArray = [10];
+        \\    Object.setPrototypeOf(proxyArray, proxyPrototype);
+        \\    assert.sameValue(Array.prototype.push.call(proxyArray, proxyPayload), 2);
+        \\    assert.sameValue(proxyKeys.join(","), "1");
+        \\    assert.sameValue(proxySeen, proxyPayload);
+        \\    assert.sameValue(proxyArray[1], proxyPayload);
+        \\    assert.sameValue(hasOwn(proxyArray, "1"), true);
+        \\    var nullPayload = { marker: "null" };
+        \\    var nullArray = [10];
+        \\    Object.setPrototypeOf(nullArray, null);
+        \\    assert.sameValue(Array.prototype.push.call(nullArray, nullPayload), 2);
+        \\    assert.sameValue(nullArray[1], nullPayload);
+        \\    assert.sameValue(hasOwn(nullArray, "1"), true);
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "standard Array prototype guard publication and invalidation are realm local" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__arrayGuardOther = $262.createRealm().global;
+        \\globalThis.__arrayGuardPrototypeMutation = $262.createRealm().global;
+        \\globalThis.__arrayGuardFailedPrototypeMutation = $262.createRealm().global;
+        \\globalThis.__arrayGuardOomMutation = $262.createRealm().global;
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const other_key = try js.runtime.internAtom("__arrayGuardOther");
+    defer js.runtime.atoms.free(other_key);
+    const other_value = try global.getProperty(other_key);
+    defer other_value.free(js.runtime);
+    const other_global = try core.Object.expect(other_value);
+    const prototype_mutation_key = try js.runtime.internAtom("__arrayGuardPrototypeMutation");
+    defer js.runtime.atoms.free(prototype_mutation_key);
+    const prototype_mutation_value = try global.getProperty(prototype_mutation_key);
+    defer prototype_mutation_value.free(js.runtime);
+    const prototype_mutation_global = try core.Object.expect(prototype_mutation_value);
+    const failed_prototype_mutation_key = try js.runtime.internAtom("__arrayGuardFailedPrototypeMutation");
+    defer js.runtime.atoms.free(failed_prototype_mutation_key);
+    const failed_prototype_mutation_value = try global.getProperty(failed_prototype_mutation_key);
+    defer failed_prototype_mutation_value.free(js.runtime);
+    const failed_prototype_mutation_global = try core.Object.expect(failed_prototype_mutation_value);
+    const oom_mutation_key = try js.runtime.internAtom("__arrayGuardOomMutation");
+    defer js.runtime.atoms.free(oom_mutation_key);
+    const oom_mutation_value = try global.getProperty(oom_mutation_key);
+    defer oom_mutation_value.free(js.runtime);
+    const oom_mutation_global = try core.Object.expect(oom_mutation_value);
+
+    const local_array_value = global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
+    const other_array_value = other_global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
+    const prototype_mutation_array_value = prototype_mutation_global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
+    const failed_prototype_mutation_array_value = failed_prototype_mutation_global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
+    const oom_mutation_array_value = oom_mutation_global.cachedRealmValue(js.runtime, .array_prototype) orelse return error.TestUnexpectedResult;
+    const oom_mutation_object_value = oom_mutation_global.cachedRealmValue(js.runtime, .object_prototype) orelse return error.TestUnexpectedResult;
+    const local_array = try core.Object.expect(local_array_value);
+    const other_array = try core.Object.expect(other_array_value);
+    const prototype_mutation_array = try core.Object.expect(prototype_mutation_array_value);
+    const failed_prototype_mutation_array = try core.Object.expect(failed_prototype_mutation_array_value);
+    const oom_mutation_array = try core.Object.expect(oom_mutation_array_value);
+    const oom_mutation_object = try core.Object.expect(oom_mutation_object_value);
+    try std.testing.expect(local_array.isStandardArrayPrototype());
+    try std.testing.expect(other_array.isStandardArrayPrototype());
+    try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
+    try std.testing.expect(failed_prototype_mutation_array.isStandardArrayPrototype());
+    try std.testing.expect(oom_mutation_array.isStandardArrayPrototype());
+
+    // Force the property mutation to allocate by sharing the current shape.
+    // Guard invalidation must happen before that allocation and remain sticky
+    // even though the indexed property itself is rolled back on OOM.
+    const pinned_oom_shape = oom_mutation_object.shape_ref;
+    pinned_oom_shape.retain();
+    defer js.runtime.shapes.release(pinned_oom_shape);
+    const index_zero = core.atom.atomFromUInt32(0);
+    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
+    defer js.runtime.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        oom_mutation_object.defineOwnProperty(
+            js.runtime,
+            index_zero,
+            core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        ),
+    );
+    js.runtime.setMemoryLimit(null);
+    try std.testing.expect(!oom_mutation_object.hasOwnProperty(index_zero));
+    try std.testing.expect(!oom_mutation_array.isStandardArrayPrototype());
+    try std.testing.expect(local_array.isStandardArrayPrototype());
+    try std.testing.expect(other_array.isStandardArrayPrototype());
+
+    // QuickJS's realm guard invalidation is deliberately narrower than the
+    // full ArrayIndex grammar: only tagged integer atoms (0...INT32_MAX)
+    // poison the marker. A high index string and a non-canonical numeric name
+    // still update ordinary lookup summaries without disabling dense append.
+    const mutate_other_high_or_named = try js.eval(
+        \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Object.prototype, "2147483648", { value: 1, configurable: true });
+        \\delete __arrayGuardOther.Object.prototype["2147483648"];
+        \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Array.prototype, "2147483648", { value: 1, configurable: true });
+        \\delete __arrayGuardOther.Array.prototype["2147483648"];
+        \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Object.prototype, "01", { value: 1, configurable: true });
+        \\delete __arrayGuardOther.Object.prototype["01"];
+        \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Array.prototype, "named", { value: 1, configurable: true });
+        \\delete __arrayGuardOther.Array.prototype.named;
+        \\var __arrayGuardSymbol = __arrayGuardOther.Symbol("guard");
+        \\__arrayGuardOther.Object.defineProperty(__arrayGuardOther.Array.prototype, __arrayGuardSymbol, { value: 1, configurable: true });
+        \\delete __arrayGuardOther.Array.prototype[__arrayGuardSymbol];
+    );
+    mutate_other_high_or_named.free(js.runtime);
+    try std.testing.expect(other_array.isStandardArrayPrototype());
+
+    const mutate_local = try js.eval(
+        \\Object.defineProperty(Array.prototype, "0", { value: 1, configurable: true });
+        \\delete Array.prototype[0];
+    );
+    mutate_local.free(js.runtime);
+    try std.testing.expect(!local_array.isStandardArrayPrototype());
+    try std.testing.expect(other_array.isStandardArrayPrototype());
+    try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
+
+    const mutate_other = try js.eval(
+        \\__arrayGuardOther.eval("Object.defineProperty(Object.prototype, '0', { value: 2, configurable: true }); delete Object.prototype[0];");
+    );
+    mutate_other.free(js.runtime);
+    try std.testing.expect(!local_array.isStandardArrayPrototype());
+    try std.testing.expect(!other_array.isStandardArrayPrototype());
+    try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
+
+    const retain_same_prototype = try js.eval(
+        \\__arrayGuardPrototypeMutation.Object.setPrototypeOf(
+        \\    __arrayGuardPrototypeMutation.Array.prototype,
+        \\    __arrayGuardPrototypeMutation.Object.getPrototypeOf(__arrayGuardPrototypeMutation.Array.prototype)
+        \\);
+    );
+    retain_same_prototype.free(js.runtime);
+    try std.testing.expect(prototype_mutation_array.isStandardArrayPrototype());
+
+    const reject_prototype_mutation = try js.eval(
+        \\__arrayGuardFailedPrototypeMutation.Object.preventExtensions(__arrayGuardFailedPrototypeMutation.Array.prototype);
+        \\var __arrayGuardMutationRejected = false;
+        \\try {
+        \\    __arrayGuardFailedPrototypeMutation.Object.setPrototypeOf(__arrayGuardFailedPrototypeMutation.Array.prototype, null);
+        \\} catch (error) {
+        \\    __arrayGuardMutationRejected = error.name === "TypeError";
+        \\}
+        \\if (!__arrayGuardMutationRejected) throw new Error("expected cross-realm TypeError");
+    );
+    reject_prototype_mutation.free(js.runtime);
+    try std.testing.expect(failed_prototype_mutation_array.isStandardArrayPrototype());
+
+    const mutate_prototype = try js.eval(
+        \\__arrayGuardPrototypeMutation.Object.setPrototypeOf(__arrayGuardPrototypeMutation.Array.prototype, null);
+    );
+    mutate_prototype.free(js.runtime);
+    try std.testing.expect(!prototype_mutation_array.isStandardArrayPrototype());
 }
 
 test "Array.prototype.push field2 fast path preserves observable guards" {
@@ -2914,6 +3397,93 @@ test "Engine createRealm owns independent intrinsics with realm-local instanceof
     try std.testing.expect(result.isUndefined());
 }
 
+test "cross-realm construction uses class prototype state without observable realm keys" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var R = $262.createRealm().global;
+        \\    function realmKeys(value) {
+        \\        return Object.getOwnPropertyNames(value).filter(function (name) {
+        \\            return name.indexOf("__realm_") === 0;
+        \\        });
+        \\    }
+        \\    var f = R.Function("return Object");
+        \\    assert.sameValue(f(), R.Object);
+        \\    assert.sameValue(Object.getPrototypeOf(f), R.Function.prototype);
+        \\    assert.sameValue(realmKeys(R.Function).length, 0);
+        \\    assert.sameValue(realmKeys(f).length, 0);
+        \\    assert.sameValue(Object.keys(R.Function).filter(function (name) {
+        \\        return name.indexOf("__realm_") === 0;
+        \\    }).length, 0);
+        \\    assert.sameValue(Object.keys(f).filter(function (name) {
+        \\        return name.indexOf("__realm_") === 0;
+        \\    }).length, 0);
+        \\    var fakePrototype = {};
+        \\    Object.defineProperty(R.Function, "__realm_Object_proto", {
+        \\        value: fakePrototype,
+        \\        writable: true,
+        \\        enumerable: true,
+        \\        configurable: true,
+        \\    });
+        \\    var copied = R.Function("return 1");
+        \\    assert.sameValue(Object.prototype.hasOwnProperty.call(copied, "__realm_Object_proto"), false);
+        \\    var gets = 0;
+        \\    var newTarget = new Proxy(copied, {
+        \\        get: function (target, key) {
+        \\            gets++;
+        \\            if (key === "prototype") return 0;
+        \\            return target[key];
+        \\        },
+        \\    });
+        \\    var value = Reflect.construct(Object, [], newTarget);
+        \\    assert.sameValue(gets, 1);
+        \\    assert.sameValue(Object.getPrototypeOf(value), R.Object.prototype);
+        \\    assert.notSameValue(Object.getPrototypeOf(value), fakePrototype);
+        \\    assert.sameValue(R.Function.__realm_Object_proto, fakePrototype);
+        \\})();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Object RegExp and TypedArray use their C function Realm state" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var R = $262.createRealm().global;
+        \\    assert.sameValue(Object.getPrototypeOf(R.Object("x")), R.String.prototype);
+        \\    assert.sameValue(Object.getPrototypeOf(R.Object(1)), R.Number.prototype);
+        \\    assert.sameValue(Object.getPrototypeOf(R.Object(true)), R.Boolean.prototype);
+        \\    assert.sameValue(Object.getPrototypeOf(R.Object(1n)), R.BigInt.prototype);
+        \\    var remoteSymbol = R.Symbol("remote");
+        \\    assert.sameValue(Object.getPrototypeOf(R.Object(remoteSymbol)), R.Symbol.prototype);
+        \\
+        \\    var originalTypeErrorPrototype = R.TypeError.prototype;
+        \\    var sourceGetter = Object.getOwnPropertyDescriptor(R.RegExp.prototype, "source").get;
+        \\    R.TypeError = function ReplacementTypeError() {};
+        \\    var regexpError;
+        \\    try { sourceGetter.call({}); } catch (error) { regexpError = error; }
+        \\    assert.sameValue(Object.getPrototypeOf(regexpError), originalTypeErrorPrototype);
+        \\    assert.notSameValue(Object.getPrototypeOf(regexpError), TypeError.prototype);
+        \\
+        \\    function NewTarget() {}
+        \\    NewTarget.prototype = { marker: "result" };
+        \\    var typed = Reflect.construct(R.Uint8Array, [4], NewTarget);
+        \\    var bufferGetter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(R.Uint8Array.prototype), "buffer").get;
+        \\    var backing = bufferGetter.call(typed);
+        \\    assert.sameValue(Object.getPrototypeOf(typed), NewTarget.prototype);
+        \\    assert.sameValue(Object.getPrototypeOf(backing), R.ArrayBuffer.prototype);
+        \\    assert.notSameValue(Object.getPrototypeOf(backing), ArrayBuffer.prototype);
+        \\})();
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine cross-realm eval keeps global lexical declarations per realm" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -2954,6 +3524,76 @@ test "native builtin records use callee realm for errors and created objects" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "constructor static prototype and accessor handlers keep their callee realm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var other = $262.createRealm().global;
+        \\    try {
+        \\        new other.Array(1.5);
+        \\        throw new Test262Error("expected foreign Array constructor to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.RangeError.prototype);
+        \\        assert.sameValue(error instanceof RangeError, false);
+        \\    }
+        \\    var parse = other.JSON.parse;
+        \\    try {
+        \\        parse("{");
+        \\        throw new Test262Error("expected foreign JSON.parse to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.SyntaxError.prototype);
+        \\        assert.sameValue(error instanceof SyntaxError, false);
+        \\    }
+        \\    var promise = other.Promise.resolve(1);
+        \\    assert.sameValue(Object.getPrototypeOf(promise), other.Promise.prototype);
+        \\    var capability = other.Promise.withResolvers();
+        \\    assert.sameValue(Object.getPrototypeOf(capability.resolve), other.Function.prototype);
+        \\    assert.sameValue(Object.getPrototypeOf(capability.reject), other.Function.prototype);
+        \\    try {
+        \\        other.Reflect.get(null, "x");
+        \\        throw new Test262Error("expected foreign Reflect.get to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.TypeError.prototype);
+        \\        assert.sameValue(error instanceof TypeError, false);
+        \\    }
+        \\    var toFixed = other.Number.prototype.toFixed;
+        \\    try {
+        \\        toFixed.call(1, -1);
+        \\        throw new Test262Error("expected foreign Number.prototype.toFixed to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.RangeError.prototype);
+        \\        assert.sameValue(error instanceof RangeError, false);
+        \\    }
+        \\    var toUpperCase = other.String.prototype.toUpperCase;
+        \\    try {
+        \\        toUpperCase.call(null);
+        \\        throw new Test262Error("expected foreign String.prototype.toUpperCase to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.TypeError.prototype);
+        \\        assert.sameValue(error instanceof TypeError, false);
+        \\    }
+        \\    var sourceGetter = Object.getOwnPropertyDescriptor(other.RegExp.prototype, "source").get;
+        \\    try {
+        \\        sourceGetter.call({});
+        \\        throw new Test262Error("expected foreign RegExp source getter to throw");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), other.TypeError.prototype);
+        \\        assert.sameValue(error instanceof TypeError, false);
+        \\    }
+        \\    var iterator = other.eval("[1].values()");
+        \\    var iteratorPrototype = other.eval("Object.getPrototypeOf([].values())");
+        \\    assert.sameValue(Object.getPrototypeOf(iterator), iteratorPrototype);
+        \\    assert.sameValue(Object.getPrototypeOf(iterator.next), other.Function.prototype);
+        \\    assert.sameValue(Object.prototype.hasOwnProperty.call(iterator, "next"), false);
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "bound and proxy wrappers defer realm switching to the final target" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -2966,6 +3606,12 @@ test "bound and proxy wrappers defer realm switching to the final target" {
         \\    var proxy = new Proxy(other.realmFunction, {});
         \\    assert.sameValue(bound(), other.Array);
         \\    assert.sameValue(proxy(), other.Array);
+        \\    var trapped = new Proxy(other.realmFunction, {
+        \\        apply: function () { return Array; }
+        \\    });
+        \\    var trappedResult = trapped();
+        \\    assert.sameValue(trappedResult, Array);
+        \\    assert.notSameValue(trappedResult, other.Array);
         \\    var revoked = Proxy.revocable(other.realmFunction, {});
         \\    revoked.revoke();
         \\    try {
@@ -2976,6 +3622,137 @@ test "bound and proxy wrappers defer realm switching to the final target" {
         \\        assert.sameValue(error instanceof other.TypeError, false);
         \\    }
         \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Array species compares exact realm intrinsics without skipping wrapper gets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var other = $262.createRealm().global;
+        \\    other.eval("globalThis.NamedArray = function Array(length) { this.length = length; };");
+        \\    function Species(length) { this.length = length; }
+        \\    function identity(value) { return value; }
+        \\
+        \\    var namedGets = 0;
+        \\    Object.defineProperty(other.NamedArray, Symbol.species, {
+        \\        configurable: true,
+        \\        get: function () { namedGets++; return Species; }
+        \\    });
+        \\    var named = [1, 2];
+        \\    named.constructor = other.NamedArray;
+        \\    var namedResult = named.map(identity);
+        \\    assert.sameValue(namedGets, 1);
+        \\    assert.sameValue(Object.getPrototypeOf(namedResult), Species.prototype);
+        \\    assert.sameValue(namedResult.length, 2);
+        \\
+        \\    var foreignIntrinsicGets = 0;
+        \\    Object.defineProperty(other.Array, Symbol.species, {
+        \\        configurable: true,
+        \\        get: function () { foreignIntrinsicGets++; return Species; }
+        \\    });
+        \\    var foreignIntrinsic = [3];
+        \\    foreignIntrinsic.constructor = other.Array;
+        \\    var foreignIntrinsicResult = foreignIntrinsic.map(identity);
+        \\    assert.sameValue(foreignIntrinsicGets, 0);
+        \\    assert.sameValue(Object.getPrototypeOf(foreignIntrinsicResult), Array.prototype);
+        \\
+        \\    var proxyGets = [];
+        \\    var foreignArrayProxy = new Proxy(other.Array, {
+        \\        get: function (target, key, receiver) {
+        \\            proxyGets.push(key === Symbol.species ? "species" : String(key));
+        \\            if (key === Symbol.species) return Species;
+        \\            return Reflect.get(target, key, receiver);
+        \\        }
+        \\    });
+        \\    var proxied = [4];
+        \\    proxied.constructor = foreignArrayProxy;
+        \\    var proxiedResult = proxied.map(identity);
+        \\    assert.sameValue(proxyGets.join(","), "species");
+        \\    assert.sameValue(Object.getPrototypeOf(proxiedResult), Species.prototype);
+        \\
+        \\    var boundGets = 0;
+        \\    var foreignArrayBound = other.Array.bind(null);
+        \\    Object.defineProperty(foreignArrayBound, Symbol.species, {
+        \\        configurable: true,
+        \\        get: function () { boundGets++; return Species; }
+        \\    });
+        \\    var bounded = [5];
+        \\    bounded.constructor = foreignArrayBound;
+        \\    var boundedResult = bounded.map(identity);
+        \\    assert.sameValue(boundGets, 1);
+        \\    assert.sameValue(Object.getPrototypeOf(boundedResult), Species.prototype);
+        \\
+        \\    var revoked = Proxy.revocable(other.Array, {});
+        \\    var revokedInput = [6];
+        \\    revokedInput.constructor = revoked.proxy;
+        \\    revoked.revoke();
+        \\    assert.throws(TypeError, function () { revokedInput.map(identity); });
+        \\
+        \\    var activeGets = 0;
+        \\    var activeHolder = {};
+        \\    Object.defineProperty(activeHolder, Symbol.species, {
+        \\        get: function () { activeGets++; return Array; }
+        \\    });
+        \\    var active = [7];
+        \\    active.constructor = activeHolder;
+        \\    var activeResult = active.map(identity);
+        \\    assert.sameValue(activeGets, 1);
+        \\    assert.sameValue(Object.getPrototypeOf(activeResult), Array.prototype);
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Array species does not confuse a foreign native named Array with the intrinsic" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\globalThis.__arraySpeciesRealmHandle = $262.createRealm();
+        \\globalThis.__arraySpeciesForeignGlobal = __arraySpeciesRealmHandle.global;
+        \\globalThis.__arraySpeciesResultCtor = function Species(length) { this.length = length; };
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const foreign_global_atom = try js.runtime.internAtom("__arraySpeciesForeignGlobal");
+    defer js.runtime.atoms.free(foreign_global_atom);
+    const foreign_global_value = try global.getProperty(foreign_global_atom);
+    defer foreign_global_value.free(js.runtime);
+    const foreign_global = try core.Object.expect(foreign_global_value);
+    const foreign_realm = js.runtime.contextForGlobalIncludingConstructing(foreign_global) orelse return error.TestUnexpectedResult;
+
+    // Before the identity fix this ordinary C_FUNCTION was suppressed solely
+    // because its internal dispatch name happened to be "Array". It owns the
+    // foreign FunctionRealm, but it is not that realm's intrinsic %Array%.
+    const fake_array = try core.function.nativeFunction(foreign_realm, "Array", 1);
+    defer fake_array.free(js.runtime);
+    const fake_array_object = try core.Object.expect(fake_array);
+    const species_ctor_atom = try js.runtime.internAtom("__arraySpeciesResultCtor");
+    defer js.runtime.atoms.free(species_ctor_atom);
+    const species_ctor = try global.getProperty(species_ctor_atom);
+    defer species_ctor.free(js.runtime);
+    const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TestUnexpectedResult;
+    try fake_array_object.defineOwnProperty(js.runtime, species_atom, core.Descriptor.data(species_ctor, true, false, true));
+
+    const fake_array_atom = try js.runtime.internAtom("__arraySpeciesNamedNative");
+    defer js.runtime.atoms.free(fake_array_atom);
+    try global.defineOwnProperty(js.runtime, fake_array_atom, core.Descriptor.data(fake_array, true, false, true));
+
+    const result = try js.eval(
+        \\var input = [1, 2];
+        \\input.constructor = __arraySpeciesNamedNative;
+        \\var output = input.map(function (value) { return value; });
+        \\assert.sameValue(Object.getPrototypeOf(output), __arraySpeciesResultCtor.prototype);
+        \\assert.sameValue(output.length, 2);
     );
     defer result.free(js.runtime);
 
@@ -3516,6 +4293,47 @@ test "Buffer and TypedArray lazy native accessors preserve descriptor semantics"
     try std.testing.expect(result.isUndefined());
 }
 
+test "standard constructors publish final prototype graphs and eager metadata" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function assertDataDescriptor(object, key, value, writable, enumerable, configurable) {
+        \\    var descriptor = Object.getOwnPropertyDescriptor(object, key);
+        \\    assert.sameValue(descriptor.value, value);
+        \\    assert.sameValue(descriptor.writable, writable);
+        \\    assert.sameValue(descriptor.enumerable, enumerable);
+        \\    assert.sameValue(descriptor.configurable, configurable);
+        \\}
+        \\
+        \\var constructors = [
+        \\    [Object, "Object", 1, Function.prototype, null],
+        \\    [Function, "Function", 1, Function.prototype, Object.prototype],
+        \\    [Array, "Array", 1, Function.prototype, Object.prototype],
+        \\    [Error, "Error", 1, Function.prototype, Object.prototype],
+        \\    [TypeError, "TypeError", 1, Error, Error.prototype],
+        \\    [Map, "Map", 0, Function.prototype, Object.prototype],
+        \\    [Int8Array, "Int8Array", 3, TypedArray, TypedArray.prototype]
+        \\];
+        \\for (var entry of constructors) {
+        \\    var constructor = entry[0];
+        \\    assert.sameValue(Object.getPrototypeOf(constructor), entry[3]);
+        \\    assert.sameValue(Object.getPrototypeOf(constructor.prototype), entry[4]);
+        \\    assertDataDescriptor(constructor, "name", entry[1], false, false, true);
+        \\    assertDataDescriptor(constructor, "length", entry[2], false, false, true);
+        \\    assertDataDescriptor(constructor, "prototype", constructor.prototype, false, false, false);
+        \\    assertDataDescriptor(constructor.prototype, "constructor", constructor, true, false, true);
+        \\}
+        \\assert.sameValue(typeof Function.prototype, "function");
+        \\assert.sameValue(Function.prototype.name, "");
+        \\assert.sameValue(Function.prototype.length, 0);
+        \\assert.sameValue(Object.getPrototypeOf(Function.prototype), Object.prototype);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise constructor resolve and reject functions inherit Function.prototype" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3628,6 +4446,36 @@ test "Promise self-resolution rejects with the caller realm TypeError" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("TypeError true true\n", stream.buffered());
+}
+
+test "cross-realm promise resolving data function keeps caller realm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var other = $262.createRealm().global;
+        \\    other.eval(
+        \\        "globalThis.promise = new Promise(function(resolve) { " +
+        \\        "globalThis.resolvePromise = resolve; });"
+        \\    );
+        \\    try {
+        \\        new other.resolvePromise();
+        \\        throw new Test262Error("expected resolving function construction to fail");
+        \\    } catch (error) {
+        \\        assert.sameValue(Object.getPrototypeOf(error), TypeError.prototype);
+        \\        assert.sameValue(error instanceof other.TypeError, false);
+        \\    }
+        \\    other.promise.then(undefined, function(reason) {
+        \\        assert.sameValue(Object.getPrototypeOf(reason), TypeError.prototype);
+        \\        assert.sameValue(reason instanceof other.TypeError, false);
+        \\    });
+        \\    other.resolvePromise(other.promise);
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "Promise.resolve rejects self-resolution from custom capability" {

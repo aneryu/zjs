@@ -38,7 +38,7 @@ fn constructRegExpRecordInNativeScope(
     prototype: ?*core.Object,
     pattern: core.JSValue,
     flags: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const args = [_]core.JSValue{ pattern, flags };
@@ -101,7 +101,7 @@ pub fn qjsRegExpFunctionCall(
     global: *core.Object,
     constructor: ?*core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const input_pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -111,7 +111,7 @@ pub fn qjsRegExpFunctionCall(
         const pattern_constructor = try getValueProperty(ctx, output, global, input_pattern, core.atom.ids.constructor, caller_function, caller_frame);
         defer pattern_constructor.free(ctx.runtime);
         const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
-        const regexp_ctor = global.getProperty(regexp_key);
+        const regexp_ctor = try global.getProperty(regexp_key);
         defer regexp_ctor.free(ctx.runtime);
         if (sameObjectIdentity(pattern_constructor, regexp_ctor)) return input_pattern.dup();
     }
@@ -185,7 +185,7 @@ pub fn qjsRegExpConstructCall(
     constructor: ?*core.Object,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, constructor);
@@ -205,7 +205,7 @@ fn qjsRegExpConstructCallInNativeScope(
     constructor: ?*core.Object,
     new_target: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const input_pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -219,8 +219,9 @@ fn qjsRegExpConstructCallInNativeScope(
         // borrowed-Latin1 fast path produced an identical object for these
         // inputs and is subsumed here now that the construct logic is owned by
         // the record.)
-        const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
-        return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype, input_pattern, input_flags, caller_function, caller_frame);
+        var prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype.object(), input_pattern, input_flags, caller_function, caller_frame);
     }
     const pattern_is_regexp = try isRegExpObservable(ctx, output, global, input_pattern, caller_function, caller_frame);
 
@@ -282,7 +283,8 @@ fn qjsRegExpConstructCallInNativeScope(
         break :blk pattern_flags;
     } else core.JSValue.undefinedValue();
 
-    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
     // Mirrors js_regexp_constructor + js_compile_regexp (quickjs.c:47795-47797 +
     // 47577-47578): the flags operand is ToString'd inside js_compile_regexp —
     // after js_create_from_ctor resolved new.target's prototype — and
@@ -293,7 +295,7 @@ fn qjsRegExpConstructCallInNativeScope(
         owned_flags = string_value;
         flags = string_value;
     }
-    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype, pattern, flags, caller_function, caller_frame);
+    return constructRegExpRecordInNativeScope(ctx, output, global, constructor, prototype.object(), pattern, flags, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpExecMethod(
@@ -302,7 +304,7 @@ pub fn qjsRegExpExecMethod(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const regexp_object = property_ops.expectObject(this_value) catch {
@@ -328,7 +330,7 @@ pub fn qjsRegExpTestMethod(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const receiver_object = property_ops.expectObject(this_value) catch {
@@ -390,14 +392,15 @@ pub fn qjsRegExpCompile(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const regexp_object = property_ops.expectObject(this_value) catch return null;
     if (regexp_object.class_id != core.class.ids.regexp) return null;
-    const expected_prototype = regExpPrototypeFromGlobal(ctx.runtime, global) orelse
+    var expected_prototype = regExpPrototypeFromGlobal(ctx.runtime, global) orelse
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
-    if (regexp_object.getPrototype() != expected_prototype) {
+    defer expected_prototype.deinit(ctx.runtime);
+    if (regexp_object.getPrototype() != expected_prototype.object()) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
     }
 
@@ -468,12 +471,12 @@ pub fn qjsRegExpSpeciesConstructor(
     output: ?*std.Io.Writer,
     global: *core.Object,
     rx: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // JS_SpeciesConstructor(ctx, rx, ctx->regexp_ctor): the default is the
     // realm intrinsic, not the observable and replaceable global binding.
-    const default_constructor = (try regExpConstructorFromGlobal(ctx.runtime, global)).value().dup();
+    const default_constructor = try regExpConstructorFromGlobal(ctx.runtime, global);
     var default_owned = true;
     errdefer if (default_owned) default_constructor.free(ctx.runtime);
 
@@ -506,7 +509,7 @@ pub fn qjsRegExpSpeciesConstructor(
 
 pub fn isDefaultRegExpConstructor(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) bool {
     const regexp_atom = comptime core.atom.predefinedId("RegExp", .string).?;
-    const default_constructor = global.getProperty(regexp_atom);
+    const default_constructor = try global.getProperty(regexp_atom);
     defer default_constructor.free(rt);
     return sameObjectIdentity(default_constructor, value);
 }
@@ -548,7 +551,7 @@ pub fn appendNamedCaptureSubstitution(
     replacement: []const u16,
     index: *usize,
     out: *std.ArrayList(u16),
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (named_captures.isUndefined()) return false;
@@ -576,7 +579,7 @@ pub fn qjsRegExpExecGeneric(
     global: *core.Object,
     rx: core.JSValue,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
@@ -590,7 +593,7 @@ pub fn qjsRegExpExecGeneric(
             // the generic call's defensive eight-slot staging copy is
             // redundant here as well.
             const call_args = [_]core.JSValue{string_value};
-            const result = try call_runtime.callValueOrBytecodeClassModePreRooted(
+            const result = try call_runtime.callValueOrBytecodePreRooted(
                 ctx,
                 output,
                 global,
@@ -599,7 +602,6 @@ pub fn qjsRegExpExecGeneric(
                 &call_args,
                 caller_function,
                 caller_frame,
-                false,
             );
             if (!result.isNull() and !result.isObject()) {
                 result.free(ctx.runtime);
@@ -620,7 +622,7 @@ pub fn qjsRegExpAccessor(
     this_value: core.JSValue,
     getter_value: core.JSValue,
     name: []const u8,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (std.mem.eql(u8, name, "flags")) {
@@ -660,11 +662,13 @@ pub fn qjsRegExpLegacyAccessor(
     function_object: *core.Object,
     method: method_ids.regexp.LegacyAccessorMethod,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const owner_global = function_object.functionRealmGlobalPtr() orelse global;
-    const regexp_ctor = try regExpConstructorFromGlobal(ctx.runtime, owner_global);
+    const owner_global = function_object.nativeFunctionRealmGlobalPtr() orelse global;
+    const regexp_ctor_value = try regExpConstructorFromGlobal(ctx.runtime, owner_global);
+    defer regexp_ctor_value.free(ctx.runtime);
+    const regexp_ctor = objectFromValue(regexp_ctor_value) orelse return error.TypeError;
     const receiver = objectFromValue(this_value) orelse return throwTypeErrorMessage(ctx, owner_global, "RegExp legacy accessor receiver mismatch");
     if (receiver != regexp_ctor) return throwTypeErrorMessage(ctx, owner_global, "RegExp legacy accessor receiver mismatch");
 
@@ -690,15 +694,22 @@ pub fn qjsRegExpLegacyAccessor(
     }
 }
 
-pub fn regExpConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
+/// Returns an owned constructor value. The fallback global lookup can produce
+/// the last reference to a fresh object, so callers must retain the JSValue for
+/// as long as they use its object pointer.
+pub fn regExpConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue {
     if (global.cachedRealmValue(rt, .regexp_constructor)) |stored| {
-        return objectFromValue(stored) orelse error.TypeError;
+        _ = objectFromValue(stored) orelse return error.TypeError;
+        return stored.dup();
     }
     const key = try rt.internAtom("RegExp");
     defer rt.atoms.free(key);
-    const value = global.getProperty(key);
-    defer value.free(rt);
-    return objectFromValue(value) orelse error.TypeError;
+    const value = try global.getProperty(key);
+    if (objectFromValue(value) == null) {
+        value.free(rt);
+        return error.TypeError;
+    }
+    return value;
 }
 
 pub fn regExpLegacySlotValue(rt: *core.JSRuntime, slot: ?core.JSValue) !core.JSValue {
@@ -767,7 +778,7 @@ pub fn getRegExpLastIndexLength(
     global: *core.Object,
     regexp_value: core.JSValue,
     regexp_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
     if (objectFromValue(regexp_value) == regexp_object) {
@@ -787,7 +798,7 @@ pub fn setRegExpLastIndexStrict(
     regexp_value: core.JSValue,
     regexp_object: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (objectFromValue(regexp_value) == regexp_object and regexp_object.regexpLastIndex() != null) {
@@ -810,7 +821,7 @@ pub fn qjsRegExpExecResult(
     regexp_object: *core.Object,
     string_value: core.JSValue,
     use_last_index: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const string_object = string_value.asStringBody() orelse return null;
@@ -855,7 +866,7 @@ pub fn qjsRegExpExecCompiledResult(
     is_sticky: bool,
     has_indices: bool,
     start_index: usize,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
@@ -922,7 +933,7 @@ pub fn isRegExpObservable(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (!value.isObject()) return false;
@@ -967,7 +978,7 @@ pub fn isRegExpLineTerminator(unit: u16) bool {
 }
 
 pub fn regexpLastIndex(rt: *core.JSRuntime, object: *core.Object) usize {
-    const value = object.getProperty(core.atom.ids.lastIndex);
+    const value = (object.regexpLastIndex() orelse return 0).dup();
     defer value.free(rt);
     if (value.asInt32()) |int_value| return if (int_value < 0) 0 else @intCast(int_value);
     if (value.asFloat64()) |float_value| {

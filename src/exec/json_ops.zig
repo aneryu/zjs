@@ -28,6 +28,7 @@ const JsonStringifyError = std.mem.Allocator.Error || error{
 const SimpleJsonError = std.mem.Allocator.Error || error{
     IncompatibleDescriptor,
     InvalidAtom,
+    InvalidClassId,
     InvalidLength,
     NotExtensible,
     ReadOnly,
@@ -90,21 +91,18 @@ fn jsonRawJsonCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
-    if (host_call.global) |raw_global| {
-        const input = if (!value.isString()) input: {
-            const coerced = try string_ops.toStringForAnnexB(host_call.ctx, host_call.output, raw_global, value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
-            defer coerced.free(host_call.ctx.runtime);
-            break :input coerced;
-        } else value;
-        return rawJSON(host_call.ctx.runtime, input) catch |err| switch (err) {
-            error.SyntaxError => exception_ops.throwSyntaxErrorMessage(host_call.ctx, raw_global, "invalid rawJSON string"),
-            error.TypeError => err,
-            else => err,
-        };
-    }
-    return rawJSON(host_call.ctx.runtime, value) catch |err| switch (err) {
-        error.SyntaxError, error.TypeError => err,
+    var owned_input: ?core.JSValue = null;
+    defer if (owned_input) |input| input.free(host_call.ctx.runtime);
+    const input = if (!value.isString()) input: {
+        owned_input = try string_ops.toStringForAnnexB(host_call.ctx, host_call.output, realm.global, value, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
+        break :input owned_input.?;
+    } else value;
+    return rawJSON(host_call.ctx.runtime, input) catch |err| switch (err) {
+        error.SyntaxError => exception_ops.throwSyntaxErrorMessage(host_call.ctx, realm.global, "invalid rawJSON string"),
+        error.TypeError => err,
         else => err,
     };
 }
@@ -117,15 +115,22 @@ fn jsonParseRecordCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
-    if (host_call.global) |global| {
-        if (try qjsJsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
-        return error.TypeError;
-    }
-    const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
-    return parse(ctx.runtime, null, value) catch |err| switch (err) {
-        error.SyntaxError, error.TypeError => err,
-        else => err,
+    // JSON modules reuse the parse record as an algorithmic operation and have
+    // no observable C-function carrier. In that explicit synthetic arm, the
+    // module loader's context/global pair is the realm authority. Ordinary JS
+    // calls must still use the realm owned by their callable.
+    const global = if (host_call.callable_realm) |realm| blk: {
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else blk: {
+        // Only the loader's explicit algorithmic reuse may omit the callable
+        // carrier. Keep an inconsistent observable-call environment from
+        // silently falling back to caller authority.
+        if (host_call.func_obj != null) return error.InvalidBuiltinRegistry;
+        break :blk host_call.global orelse return error.InvalidBuiltinRegistry;
     };
+    if (try qjsJsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
+    return error.TypeError;
 }
 
 fn jsonStringifyRecordCall(
@@ -136,17 +141,10 @@ fn jsonStringifyRecordCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
-    if (host_call.global) |global| {
-        if (try qjsJsonStringifyCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
-        return error.TypeError;
-    }
-    const value = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
-    const replacer = if (host_call.args.len >= 2) host_call.args[1] else core.JSValue.undefinedValue();
-    const space = if (host_call.args.len >= 3) host_call.args[2] else core.JSValue.undefinedValue();
-    return stringify(ctx.runtime, value, replacer, space) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == ctx);
+    if (try qjsJsonStringifyCall(ctx, host_call.output, realm.global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call))) |value| return value;
+    return error.TypeError;
 }
 
 pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValue, space: core.JSValue) !core.JSValue {
@@ -309,6 +307,7 @@ const JsonParseError = std.mem.Allocator.Error || error{
     TypeError,
     IncompatibleDescriptor,
     InvalidAtom,
+    InvalidClassId,
     InvalidLength,
     NotExtensible,
     ReadOnly,
@@ -557,7 +556,7 @@ fn JsonUnitParser(comptime T: type) type {
                         return err;
                     };
                 }
-                try object.defineOwnProperty(self.rt, key_atom, core.Descriptor.data(child, true, true, true));
+                try object.defineJsonParseDataProperty(self.rt, key_atom, child);
                 self.skipWhitespace();
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == '}') {
@@ -611,7 +610,10 @@ fn JsonUnitParser(comptime T: type) type {
                     };
                 }
                 if (!try object.appendDenseArrayLiteralIndex(self.rt, index, child)) {
-                    try object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(child, true, true, true));
+                    // The parser owns this fresh array, so this fallback cannot
+                    // encounter an AUTOINIT property whose builder widens the
+                    // generic define error set.
+                    object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(child, true, true, true)) catch |err| return @errorCast(err);
                 }
                 index += 1;
                 self.skipWhitespace();
@@ -906,7 +908,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         const header = rooted_value.refHeader() orelse return;
         const object_value: *core.Object = @fieldParentPtr("header", header);
         if (object_value.class_id == core.class.ids.raw_json) {
-            raw = object_value.getProperty(core.atom.ids.rawJSON);
+            raw = try object_value.getProperty(core.atom.ids.rawJSON);
             defer raw.free(rt);
             try appendRawString(rt, buffer, raw);
         } else if (isCallableJsonOmittedObject(object_value)) {
@@ -938,7 +940,7 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
             try buffer.append(rt.memory.allocator, '\n');
             try appendIndent(rt, buffer, options.gap, depth + 1);
         }
-        const value = object.getDenseArrayElementValue(index) orelse object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         var rooted_value = value;
         var root_values = [_]core.runtime.ValueRootValue{
@@ -971,7 +973,7 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
     var emitted = false;
     for (keys) |key| {
         if (rt.atoms.isPublicSymbol(key)) continue;
-        const value = object.getOwnDataPropertyValue(key) orelse object.getProperty(key);
+        const value = try object.getOwnDataPropertyValue(key) orelse object.getProperty(key);
         defer value.free(rt);
         var rooted_value = value;
         var root_values = [_]core.runtime.ValueRootValue{
@@ -1099,7 +1101,7 @@ const SimpleJsonParser = struct {
         }
     }
 
-    fn parseArray(self: *SimpleJsonParser) !core.JSValue {
+    fn parseArray(self: *SimpleJsonParser) SimpleJsonError!core.JSValue {
         self.expectByte('[') catch return error.UnsupportedSimpleJson;
         const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
         var object_value = object.value();
@@ -1135,7 +1137,10 @@ const SimpleJsonParser = struct {
             self.rt.active_value_roots = &item_root_frame;
             defer self.rt.active_value_roots = item_root_frame.previous;
             if (!(try object.appendDenseArrayLiteralIndex(self.rt, index, item_value))) {
-                try object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(item_value, true, true, true));
+                // The parser owns this fresh array, so this fallback cannot
+                // encounter an AUTOINIT property whose builder widens the
+                // generic define error set.
+                object.defineOwnProperty(self.rt, core.atom.atomFromUInt32(index), core.Descriptor.data(item_value, true, true, true)) catch |err| return @errorCast(err);
             }
             index += 1;
             self.skipWhitespace();
@@ -1344,22 +1349,13 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
 }
 
 fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8) ?*core.Object {
+    _ = rt;
     const global_object = global orelse return null;
     const key = core.atom.predefinedId(name, .string) orelse return null;
     if (global_object.getOwnDataObjectBorrowed(key)) |ctor_object| {
         if (ctor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     }
-    const ctor = global_object.getProperty(key);
-    defer ctor.free(rt);
-    if (!ctor.isObject()) return null;
-    const header = ctor.refHeader() orelse return null;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
-    const proto = object.getProperty(core.atom.ids.prototype);
-    defer proto.free(rt);
-    if (!proto.isObject()) return null;
-    const proto_header = proto.refHeader() orelse return null;
-    return @fieldParentPtr("header", proto_header);
+    return null;
 }
 
 fn objectInStack(stack: []const *core.Object, object: *core.Object) bool {
@@ -1373,8 +1369,29 @@ fn isCallableJsonOmittedObject(object: *core.Object) bool {
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure or
-        object.class_id == core.class.ids.bytecode_function or
+        core.class.isBytecodeFunctionClass(object.class_id) or
         object.class_id == core.class.ids.bound_function;
+}
+
+test "JSON callable omission recognizes every bytecode function class" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        const function_object = try core.Object.create(rt, class_id, null);
+        defer function_object.value().free(rt);
+        try std.testing.expect(isCallableJsonOmittedObject(function_object));
+    }
+
+    const plain_object = try core.Object.create(rt, core.class.ids.object, null);
+    defer plain_object.value().free(rt);
+    try std.testing.expect(!isCallableJsonOmittedObject(plain_object));
 }
 
 fn isArrayObject(value: core.JSValue) bool {
@@ -1408,7 +1425,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
     }
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        const item = object.getProperty(core.atom.atomFromUInt32(index));
+        const item = try object.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
         var rooted_item = item;
         var item_roots = [_]core.runtime.ValueRootValue{
@@ -1781,19 +1798,13 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var input = core.JSValue.functionBytecode(&fb.header);
     var input_alive = true;
@@ -2124,19 +2135,13 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var value = core.JSValue.functionBytecode(&fb.header);
     var value_alive = true;
@@ -2692,7 +2697,7 @@ pub fn qjsJsonAppendValue(
         return error.TypeError;
     } else if (object_ops.objectFromValue(rooted_value)) |object| {
         if (object.class_id == core.class.ids.raw_json) {
-            raw = object.getProperty(core.atom.ids.rawJSON);
+            raw = try object.getProperty(core.atom.ids.rawJSON);
             defer {
                 const owned_raw = raw;
                 raw = core.JSValue.undefinedValue();

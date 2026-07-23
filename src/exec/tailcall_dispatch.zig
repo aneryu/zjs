@@ -65,7 +65,7 @@ fn readInt(comptime T: type, bytes: [*]const u8) T {
 // ===========================================================================
 
 pub const Outcome = enum(u32) {
-    /// return / return_undef / return_async / fall-off produced `vm.return_value`.
+    /// return / return_undef / return_async produced `vm.return_value`.
     returned,
     /// Uncaught error: re-raise `vm.pending_error`.
     threw,
@@ -85,23 +85,23 @@ pub const Outcome = enum(u32) {
 
 pub const Vm = struct {
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     machine: *inline_calls.Machine,
     output: ?*std.Io.Writer,
 
-    /// `function.code.ptr`, cached so pc<->frame.pc derivation (publish/syncPc/
+    /// `function.byteCode().ptr`, cached so pc<->frame.pc derivation (publish/syncPc/
     /// reloadPc/coldNext) and jump-target arithmetic avoid re-loading the slice
     /// through `function`. Still hot: every cold op's publish and every jump
     /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
     /// RETIRED one-past-end mirror (F3): the hot `next` fall-off bounds check —
-    /// its only hot reader — is gone (jump-aware epilogues + the `code[len]`
-    /// op.return sentinel guarantee every dispatch lands on a real opcode), and
+    /// its only hot reader — is gone (explicit parser epilogues plus finalize's
+    /// reachable-falloff validation guarantee every dispatch lands on an opcode), and
     /// the two cold readers (op_for_of_next operand peek, `next`'s Debug
-    /// assert) derive the bound from the authoritative `vm.function.code`. No
+    /// assert) derive the bound from the authoritative `vm.function.byteCode()`. No
     /// reader ⇒ every per-boundary publication (enterEntry / popAndResume /
     /// reloadTop / reloadAfterPop / runTC init) is a dead store, deleted.
     /// Field kept ONLY to preserve the measured Vm layout (same rationale as
@@ -239,17 +239,13 @@ inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Ha
 /// Computed-goto: tail-call the handler for the opcode at `pc[0]`. No fall-off
 /// bounds check (qjs-aligned: emission guarantees every reachable path ends in
 /// a terminator op, and jump-aware epilogues terminate branch-to-end paths).
-/// `pc == code_end` is still legal and intentional: eval/script completion
-/// falls off the last op onto the trailing `op.return` sentinel at
-/// `code[len]` (FunctionBytecode block / setCode / ensureTrailingReturnSentinel
-/// all plant it), which returns the completion riding the stack top. Past
-/// `code_end` would be an emission-invariant violation — Debug asserts it
-/// (derived from `vm.function.code`; the retired `vm.code_end` mirror is gone).
+/// Reaching or passing `code_end` is an emission-invariant violation — Debug asserts it
+/// (derived from `vm.function.byteCode()`; the retired `vm.code_end` mirror is gone).
 /// `callconv(.c)` + non-inline so its `always_tail` to a handler matches signatures
 /// (the driver calls it as a normal entry; handlers tail-chain via `coldNext`).
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
-        std.debug.assert(@intFromPtr(pc) <= @intFromPtr(vm.function.code.ptr + vm.function.code.len));
+        std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
     return @call(.always_tail, dispatch_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -258,8 +254,9 @@ fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(
 // The comptime generators below collapse the ~150 cold arms to one-liner bodies.
 // ===========================================================================
 
-/// After a cold helper ran (frame.pc advanced, Stack mutated), re-dispatch
-/// at the next opcode — or fall off the end (implicit return of the stack top).
+/// After a cold helper ran (frame.pc advanced, Stack mutated), re-dispatch at
+/// the next opcode. The bound check is a fixture/corruption guard; production
+/// bytecode has already proved that no reachable edge falls off the end.
 /// Generator/eval stop-boundary (`stop_before_pc`): when frame.pc reaches the
 /// generator body start, suspend (save state) and return — the param-init phase
 /// runs `[0, generator_body_pc)` then stops. Mirrors zjs_vm.zig:921's stopBeforePc.
@@ -279,20 +276,8 @@ inline fn maybeStop(vm: *Vm, out: *Outcome) bool {
     return false;
 }
 
-/// End-of-code fall-through: the implicit completion value is the stack top.
-/// MUST dup (stack.peek) — the value stays on the stack and is freed at frame
-/// teardown, so returning the RAW slot hands the caller a to-be-freed value
-/// (use-after-free → heap corruption surfacing as a garbage callee in a later
-/// op.call). Mirrors dispatchLoop's stack.peek() + finishFunctionReturn
-/// (zjs_vm.zig:916-917 L0-break path and :2616-2617 post-loop).
-inline fn falloffReturn(vm: *Vm) Outcome {
-    const fallthrough_value = vm.stack.peek() orelse JSValue.undefinedValue();
-    vm.return_value = control_vm.finishFunctionReturn(vm.ctx, vm.frame, fallthrough_value) catch |e| return vm.fail(e);
-    return .returned;
-}
-
 inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
-    if (vm.frame.pc >= vm.function.code.len) return falloffReturn(vm);
+    if (vm.frame.pc >= vm.function.byteCode().len) return vm.fail(error.InvalidBytecode);
     var stop_out: Outcome = undefined;
     if (maybeStop(vm, &stop_out)) return stop_out;
     // A cold helper may have GROWN a heap stack (eval/generator/cold-call),
@@ -341,8 +326,11 @@ pub inline fn isEvalCode(vm: *Vm) bool {
 pub inline fn evalGlobalVarBindings(vm: *Vm) bool {
     return if (vm.machine.depth == 0) vm.machine.l0.eval_global_var_bindings else false;
 }
+pub inline fn directEvalVarsReachGlobal(vm: *Vm) bool {
+    return if (vm.machine.depth == 0) vm.machine.l0.direct_eval_vars_reach_global else false;
+}
 pub inline fn strictUnresolvedGetVar(vm: *Vm) bool {
-    return if (vm.machine.depth == 0) vm.machine.l0.strict_unresolved_get_var else (vm.function.flags.is_strict or vm.function.flags.runtime_strict);
+    return if (vm.machine.depth == 0) vm.machine.l0.strict_unresolved_get_var else (vm.function.isStrictMode() or vm.function.runtimeStrictMode());
 }
 
 inline fn evIsEval(vm: *Vm) bool {
@@ -370,8 +358,6 @@ fn op_invalid(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) cal
 // ===========================================================================
 
 const vm_property_locals = @import("vm_property_locals.zig");
-
-const eval_class_field_initializer_flag: u16 = 0x8000;
 
 // ---- SPECIAL handlers (call / return / tail / drop / throw / eval / generator) ----
 
@@ -432,16 +418,10 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     // `machine.top`, quickjs.c:17870). This is reloadTop's depth>0 arm for a
     // fresh frame, shared by every same-Machine call-entry path.
     //
-    // `code_ptr` is the callee's first pc, read from the FB-resident
-    // `fb.byte_code` (qjs `pc = b->byte_code_buf`, quickjs.c:17872) instead of
-    // the `frame.function.code.ptr` view field. The two are identical by
-    // construction — `makeBytecodeView` sets `.code = fb.byteCode()` and the
-    // finalized FB's byte_code is immutable until deinit — but the FB copy is
-    // one dependent load closer to the callable: [obj+40]→fb→byte_code versus
-    // [obj+40]→fb→cached_view→code.ptr. The callee's first opcode fetch
-    // (ldrb → table load → br) gates on this pointer, so shortening its feed
-    // chain by one L1 level is the entry-side twin of the R2 resume record.
-    std.debug.assert(code_ptr == entry.frame.function.code.ptr);
+    // `code_ptr` is the callee's first pc, read directly from the shared FB
+    // (qjs `pc = b->byte_code_buf`, quickjs.c:17872). The frame stores that same
+    // FB pointer, so the entry assertion guards the direct dispatch chain.
+    std.debug.assert(code_ptr == entry.frame.function.byteCode().ptr);
     vm.function = entry.frame.function;
     vm.frame = &entry.frame;
     vm.stack = &entry.stack;
@@ -489,7 +469,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry, target.fb.byte_code);
+    return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -502,8 +482,8 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 /// `[receiver, callable]`; the receiver becomes the frame's owned raw `this`.
 /// Plain instantiations split on the callee's strict mode: sloppy borrows the
 /// realm global, strict preserves undefined.
-inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, region_start)) {
+inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -520,8 +500,8 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// split; the miss constructor keeps first-use Entry allocation, chunk
 /// switching, heap fallback, OOM, and stack-overflow recovery out of the
 /// fixed handler body.
-inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, captures, region_start, argc)) {
+inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -543,8 +523,8 @@ const EmptyLeafMiss = union(enum) {
     recovered,
 };
 
-noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue) EmptyLeafMiss {
-    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, region_start) catch |err| {
+noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue) EmptyLeafMiss {
+    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
     };
@@ -552,8 +532,8 @@ noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm
 }
 
 /// Handler-side adapter for the outline warm constructor above.
-inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = switch (warmExactArgsLeafOutline(leaf_this, vm, function, captures, region_start, argc, resume_pc)) {
+inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = switch (warmExactArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -580,8 +560,8 @@ inline fn paddedLeafRegionHasCapacity(stack: *const stack_mod.Stack, region_star
 /// Handler-side adapter for the padded-args outline warm constructor (Q3).
 /// EVERY padded arm rides one bl into the outline body — no handler
 /// instance gains a new inline constructor (see `warmPaddedArgsLeafOutline`).
-inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = switch (warmPaddedArgsLeafOutline(leaf_this, vm, function, captures, region_start, argc, resume_pc)) {
+inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = switch (warmPaddedArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -597,8 +577,8 @@ inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls
 /// of duplicating the warm fixed-call0 body in another large opcode instance;
 /// the caller has already published the post-operand frame.pc, which the
 /// constructor captures as the resume record.
-inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, region_start) catch |err| {
+inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
@@ -614,8 +594,8 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
 /// shared discrimination head on the established sloppy method arm; one bl
 /// into the authoritative constructor still beats the generic three-deep
 /// chain, and the resume record and return epilogue are identical from there.
-inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
+inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
@@ -629,8 +609,8 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// zero-arg captured callees on OP_call0. Same warm/miss split as the
 /// established zero-arg adapter; the warm constructor adds only the borrowed
 /// capture binding (two frame stores off the already-resolved closure record).
-inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, captures, region_start)) {
+inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -643,8 +623,8 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
 
 /// Handler-side adapter for the outline warm capture-leaf constructor (the
 /// non-pivot sloppy plain twin; see `warmCaptureLeafOutline`).
-inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
-    const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, captures, region_start, resume_pc)) {
+inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+    const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -660,8 +640,8 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
 /// zero-arg raw method arm's rationale: a warm inline body here would be
 /// instruction-near-identical to the pivot one and could tail-merge back
 /// into a shared discrimination head on the established arms.
-inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
-    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
+    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
@@ -694,7 +674,7 @@ inline fn pushMovedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry, target.fb.byte_code);
+    return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
 /// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
@@ -720,7 +700,7 @@ inline fn pushBorrowedIteratorAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry, target.fb.byte_code);
+    return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
@@ -790,7 +770,7 @@ inline fn pushForwardedAndEnter(
     if (vm.poller.active) {
         vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
     }
-    return enterEntry(vm, entry, target.fb.byte_code);
+    return enterEntry(vm, entry, target.fb.byteCode().ptr);
 }
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
@@ -957,13 +937,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             // exactly like reloadAfterPop's entry arm.
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.code.ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.code.ptr;
+            vm.code_base = caller_function.byteCode().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -1013,13 +993,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.code.ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.code.ptr;
+            vm.code_base = caller_function.byteCode().ptr;
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = value;
             caller.stack.setTopPtr(resume_sp + 1);
@@ -1046,13 +1026,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            const resume_pc = caller_function.code.ptr + caller.frame.pc;
+            const resume_pc = caller_function.byteCode().ptr + caller.frame.pc;
             const resume_sp = caller.stack.topPtr();
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.code.ptr;
+            vm.code_base = caller_function.byteCode().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: the retired target slot
             // at the caller's operand top is dead (its value transferred into
@@ -1108,7 +1088,7 @@ fn op_return(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64)
     // union, no memory phi) into popAndResume.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.flags.is_derived_class_constructor);
+    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     // qjs moves the result out of the operand region before the done: cleanup
     // with the check-free `ret_val = *--sp` (quickjs.c:18266). Valid `return`
     // bytecode always has one result; valueless returns use `return_undef`.
@@ -1145,7 +1125,7 @@ fn op_return_undef(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) ali
     // `ret_val = JS_UNDEFINED; goto done;`, check-free and infallible.
     if (vm.machine.depth == 0)
         return @call(.always_tail, op_return_undef_cold, .{ pc, sp, vb, vm });
-    std.debug.assert(!vm.frame.function.flags.is_derived_class_constructor);
+    std.debug.assert(!vm.frame.function.isDerivedClassConstructor());
     vm.syncSp(sp);
     return popAndResume(vm, JSValue.undefinedValue());
 }
@@ -1196,11 +1176,12 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 const func = region_start[0];
                 if (inline_calls.resolveInlineFunction(vm.global, func)) |resolved| {
                     vm.stack.setTopPtr(region_start);
-                    if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
+                    const execution = resolved.call_facts.execution;
+                    if (argc == 0 and execution.simple_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                            return pushWarmEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 1, resolved.fb.byteCode().ptr);
                         }
-                        return pushEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+                        return pushEmptyLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, region_start, resolved.fb.byteCode().ptr);
                     }
                     // Raw-`this` twin of the sloppy leaf arm above: strict
                     // plain functions and arrows (either mode — arrow
@@ -1217,11 +1198,11 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     // in place of the realm-global load — distinct bodies, so
                     // the two arms cannot tail-merge into a shared
                     // discrimination head.
-                    if (argc == 0 and resolved.view.raw_this_inline_empty_leaf) {
+                    if (argc == 0 and execution.raw_this_inline_empty_leaf) {
                         if (comptime argc_source == .zero) {
-                            return pushWarmEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.view, region_start, pc + 1, resolved.fb.byte_code);
+                            return pushWarmEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 1, resolved.fb.byteCode().ptr);
                         }
-                        return pushEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+                        return pushEmptyLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, region_start, resolved.fb.byteCode().ptr);
                     }
                     // O2 capture-leaf arms: zero-arg callees whose only frame
                     // window is the inherited capture array (`() => this.x`
@@ -1236,21 +1217,21 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                     // warm constructor so a second inline body cannot
                     // re-register the neighboring established warm arms.
                     if (argc == 0) {
-                        const capture_kind = resolved.view.capture_leaf_kind;
+                        const capture_kind = execution.capture_leaf_kind;
                         if (capture_kind != .none) {
-                            const captures = resolved.var_refs[0..resolved.fb.var_refs_len];
+                            const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
                             if (comptime argc_source == .zero) {
                                 if (capture_kind == .raw_this) {
-                                    return pushWarmCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.view, captures, region_start, pc + 1, resolved.fb.byte_code);
+                                    return pushWarmCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
                                 }
-                                return pushWarmOutlineCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.view, captures, region_start, pc + 1, resolved.fb.byte_code);
+                                return pushWarmOutlineCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
                             }
                             // Dynamic-argc plain calls: authoritative outline,
                             // mirroring the established zero-arg arm above.
                             if (capture_kind == .raw_this) {
-                                return pushCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.view, captures, region_start, resolved.fb.byte_code);
+                                return pushCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
                             }
-                            return pushCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.view, captures, region_start, resolved.fb.byte_code);
+                            return pushCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
                         }
                     }
                     // O1 exact-args leaf arms — fixed nonzero arity only (the
@@ -1273,13 +1254,13 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         .operand, .zero => false,
                     };
                     if (wire_exact_args_leaf) {
-                        const leaf_kind = resolved.view.exact_args_leaf_kind;
+                        const leaf_kind = execution.exact_args_leaf_kind;
                         if (leaf_kind != .none) {
-                            if (argc == resolved.view.arg_count) {
+                            if (argc == resolved.fb.arg_count) {
                                 if (leaf_kind == .sloppy) {
-                                    return pushWarmExactArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                                    return pushWarmExactArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                                 }
-                                return pushWarmOutlineExactArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                                return pushWarmOutlineExactArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                             }
                         }
                     }
@@ -1302,14 +1283,14 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                         .operand => false,
                     };
                     if (wire_padded_args_leaf) {
-                        const padded_kind = resolved.view.exact_args_leaf_kind;
-                        if (padded_kind != .none and argc < resolved.view.arg_count and
-                            paddedLeafRegionHasCapacity(vm.stack, region_start, false, resolved.view.arg_count))
+                        const padded_kind = execution.exact_args_leaf_kind;
+                        if (padded_kind != .none and argc < resolved.fb.arg_count and
+                            paddedLeafRegionHasCapacity(vm.stack, region_start, false, resolved.fb.arg_count))
                         {
                             if (padded_kind == .sloppy) {
-                                return pushWarmOutlinePaddedArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                                return pushWarmOutlinePaddedArgsLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                             }
-                            return pushWarmOutlinePaddedArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 1, resolved.fb.byte_code);
+                            return pushWarmOutlinePaddedArgsLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 1, resolved.fb.byteCode().ptr);
                         }
                     }
                     const target = resolved.bind(JSValue.undefinedValue(), func);
@@ -1364,14 +1345,15 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
             vm.frame.pc += 2;
             vm.stack.setTopPtr(region_start);
+            const execution = resolved.call_facts.execution;
             // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
             // published leaf skips InlineTarget freight and the three-deep
             // pushFrame/fallback/setup constructor chain. The receiver rides
             // into the frame's owned raw `this` (identical ownership to the
             // general method arm); `pc + 3` (opcode + 2-byte argc operand) is
             // the register-resident twin of the frame.pc advance above.
-            if (argc == 0 and resolved.view.flags.simple_inline_empty_leaf) {
-                return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, pc + 3, resolved.fb.byte_code);
+            if (argc == 0 and execution.simple_inline_empty_leaf) {
+                return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 3, resolved.fb.byteCode().ptr);
             }
             // Strict methods and arrow-valued properties share the
             // policy-independent receiver arm (the raw receiver transfers
@@ -1384,8 +1366,8 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // bl still beats the retired pushFrame(.generic) three-deep
             // chain, and the empty-leaf resume record and return epilogue are
             // identical from there.
-            if (argc == 0 and resolved.view.raw_this_inline_empty_leaf) {
-                return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.view, region_start, resolved.fb.byte_code);
+            if (argc == 0 and execution.raw_this_inline_empty_leaf) {
+                return pushEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, resolved.fb.byteCode().ptr);
             }
             // O2 capture-leaf method twin: `recv.cb()` where cb is a zero-arg
             // closure/arrow over captured state. The receiver arm is
@@ -1394,8 +1376,8 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // authoritative constructor mirrors the raw zero-arg method arm
             // above; the kind byte is tested only after both established
             // zero-arg bits missed.
-            if (argc == 0 and resolved.view.capture_leaf_kind != .none) {
-                return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, resolved.fb.byte_code);
+            if (argc == 0 and execution.capture_leaf_kind != .none) {
+                return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, resolved.fb.byteCode().ptr);
             }
             // O1 exact-args method arms: `recv.m(x)` on a published exact-args
             // leaf. The receiver arm is policy-independent (raw receiver
@@ -1404,13 +1386,13 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // tail-merge into a shared discrimination head with the first.
             // Fused kind byte first (one-load leaf-miss), arity second (see
             // the opCall arm).
-            const leaf_kind = resolved.view.exact_args_leaf_kind;
+            const leaf_kind = execution.exact_args_leaf_kind;
             if (leaf_kind != .none) {
-                if (argc == resolved.view.arg_count) {
+                if (argc == resolved.fb.arg_count) {
                     if (leaf_kind == .sloppy) {
-                        return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 3, resolved.fb.byte_code);
+                        return pushWarmExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
                     }
-                    return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, resolved.fb.byte_code);
+                    return pushExactArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
                 }
                 // Q3 padded method sibling: `recv.one()` with
                 // `function one(value)`. The receiver arm is
@@ -1420,10 +1402,10 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // modes without adding a third warm inline body to this
                 // handler. Capacity compare mirrors the plain arm; a miss
                 // keeps the established full-price padded constructor.
-                if (argc < resolved.view.arg_count and
-                    paddedLeafRegionHasCapacity(vm.stack, region_start, true, resolved.view.arg_count))
+                if (argc < resolved.fb.arg_count and
+                    paddedLeafRegionHasCapacity(vm.stack, region_start, true, resolved.fb.arg_count))
                 {
-                    return pushWarmOutlinePaddedArgsLeafAndEnter(.receiver, vb, vm, resolved.view, resolved.var_refs[0..resolved.fb.var_refs_len], region_start, argc, pc + 3, resolved.fb.byte_code);
+                    return pushWarmOutlinePaddedArgsLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
                 }
             }
             const target = resolved.bind(receiver, method);
@@ -1448,14 +1430,14 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                 // resolved view; a warm-miss (first-use chunk, arena chunk
                 // boundary, stack limit) changes nothing — restore the
                 // operand top and take the authoritative path below.
-                if (argc <= 1 and target.view.flags.simple_inline_empty_leaf and this_arg.isUndefined()) {
+                if (argc <= 1 and target.call_facts.execution.simple_inline_empty_leaf and this_arg.isUndefined()) {
                     vm.stack.setTopPtr(region_start);
-                    if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.view, region_start)) |entry| {
+                    if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
                         if (vm.poller.active) {
                             vm.poller.poll(vm.ctx.runtime) catch |err| return vm.fail(err);
                         }
-                        return enterEntry(vm, entry, target.fb.byte_code);
+                        return enterEntry(vm, entry, target.fb.byteCode().ptr);
                     }
                     vm.stack.setTopPtr(sp);
                 }
@@ -1485,9 +1467,9 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
 fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
     // Defensive operand-existence peek for hand-built bytecode ending in this
-    // opcode; derives the bound from the authoritative `vm.function.code` (the
+    // opcode; derives the bound from the authoritative `vm.function.byteCode()` (the
     // per-frame `vm.code_end` mirror is retired — see the Vm field).
-    if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.code.ptr + vm.function.code.len)) {
+    if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len)) {
         const depth = pc[1];
         if (iter_vm.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
             const receiver = vm.stack.values[iterator_index];
@@ -1534,7 +1516,7 @@ fn op_tail_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm)
 }
 fn op_eval(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     vm.publish(pc, sp);
-    switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, eval_class_field_initializer_flag, vm.machine.depth > 0) catch |e| return vm.fail(e)) {
+    switch (eval_module_vm.directEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, directEvalVarsReachGlobal(vm), vm.machine.depth > 0) catch |e| return vm.fail(e)) {
         .done, .continue_loop => return coldNext(vb, vm),
         .tail_inline => |request| {
             vm.tail_request = request;
@@ -1841,10 +1823,10 @@ fn opBinaryFloat(comptime kind: BinOp) Handler {
 
 /// Direct dispatch to the handler for the opcode at `npc[0]`, skipping the
 /// `b next` indirection. With the fall-off bounds check retired from `next`
-/// (jump-aware epilogues + the `code[len]` op.return sentinel guarantee every
-/// dispatch lands on a real opcode), `cont` and `next` are semantically
-/// identical; `next` additionally Debug-asserts `pc <= code_end` and remains
-/// the driver/jump entry point.
+/// (explicit epilogues plus finalize validation guarantee every dispatch lands
+/// on a real opcode), `cont` and `next` are semantically identical; `next`
+/// additionally Debug-asserts `pc < code_end` and remains the driver/jump entry
+/// point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
@@ -1999,7 +1981,7 @@ pub fn op_set_loc_uninitialized(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 /// opcode is also emitted for AnnexB block-function var copies that overwrite).
 pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    if (vm.function.flags.is_derived_class_constructor) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    if (vm.function.isDerivedClassConstructor()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
     const value = (sp - 1)[0];
     value_slot.replaceOwned(vm.ctx.runtime, &var_buf[idx], value);
@@ -2372,7 +2354,7 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         return pushAndEnter(var_buf, vm, &target, region_start, 0, .method, false);
     }
     vm.stack.setTopPtr(sp);
-    const value = call_runtime.callValueOrBytecodeClassModePreRooted(
+    const value = call_runtime.callValueOrBytecodePreRooted(
         vm.ctx,
         vm.output,
         vm.global,
@@ -2381,7 +2363,6 @@ inline fn op_get_property_cached_getter(comptime pc_advance: usize, pc: [*]const
         &.{},
         vm.function,
         vm.frame,
-        false,
     ) catch |err| {
         vm.stack.setLen(operand_len - 2);
         getter.free(vm.ctx.runtime);
@@ -2824,9 +2805,9 @@ pub fn op_swap(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) ca
 
 // Control flow (8-bit displacement). The displacement is relative to the operand
 // byte (pc+1), matching dispatchLoop's `operand_pc = reg_ip - code.ptr`. Branch
-// targets never exceed code_end: the jump-aware epilogues terminate every
-// branch-to-end path with a real return op, and `pc == code_end` reads the
-// trailing op.return sentinel — so no bounds test is needed here. When an interrupt
+// targets never reach code_end: the jump-aware epilogues terminate every
+// branch-to-end path with a real return op, and finalize rejects reachable
+// falloff — so no bounds test is needed here. When an interrupt
 // handler is installed, the conditional fast paths route to their cold handlers;
 // those consume the condition, update the pc, and then poll in the same order as
 // QuickJS OP_if_{true,false}{,8}.
@@ -3059,17 +3040,15 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
         // inline (leaf loads only): one outlined bl here would grow a
         // prologue on the WHOLE handler and tax the initialized hit leg
         // (measured +5.4% cyc on a top-level global-var loop). Every other
-        // outcome (lexical TDZ throw, `arguments` rescue, runtime_strict
-        // lexical preference, missing-binding ReferenceError vs
+        // outcome (lexical TDZ throw, runtime_strict lexical preference,
+        // missing-binding ReferenceError vs
         // get_var_undef undefined, accessor/proto-chain reads) keeps the
         // exact cold waterfall (vm_property_globals.getVar), which starts
         // with this same own-data probe.
         const function = vm.function;
-        if (idx < function.closure_var.len) {
-            const cv = function.closure_var[idx];
-            if (!cv.isLexical() and cv.var_name != core.atom.ids.arguments and
-                !function.flags.runtime_strict)
-            {
+        if (idx < function.closureVar().len) {
+            const cv = function.closureVar()[idx];
+            if (!cv.isLexical() and !function.runtimeStrictMode()) {
                 const global = vm.global;
                 if (!global.hasExoticMethods()) {
                     // Private frameless twin of Object.findProperty + the
@@ -3149,8 +3128,8 @@ const cold_table: [256]Handler = colds.buildTable(specials, false);
 // cost the untouched inline-control loop +2.4% cycles at bit-identical
 // instruction counts (BTB/fetch aliasing).
 /// Exact-args twin of `pushEmptyLeafMiss`.
-noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16) EmptyLeafMiss {
-    const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
+noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16) EmptyLeafMiss {
+    const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
     };
@@ -3165,9 +3144,9 @@ noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm:
 /// warm body still deletes the InlineTarget freight and the three-deep
 /// constructor chain for strict callees, mirroring the zero-arg method arm's
 /// warm/outline split rationale.
-noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, argc, resume_pc) orelse {
-        const slow = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
+noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+        const slow = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
         };
@@ -3180,8 +3159,8 @@ noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, 
 // O1 bodies above (inserting new outline bodies mid-cluster shifted every
 // subsequent handler address; see the note before pushExactArgsLeafMiss).
 /// Capture-leaf twin of `pushEmptyLeafMiss`.
-noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue) EmptyLeafMiss {
-    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue) EmptyLeafMiss {
+    const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return .recovered;
     };
@@ -3195,9 +3174,9 @@ noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *
 /// bodies (the O1 measurement: a second inline body cost closure-two-arg
 /// +1.3% cyc from spilled freight stores). One bl into this warm body still
 /// deletes the InlineTarget freight and the three-deep constructor chain.
-noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, resume_pc) orelse {
-        const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start) catch |err| {
+noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse {
+        const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
         };
@@ -3222,9 +3201,9 @@ noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm
 /// epilogue. A warm miss falls to the authoritative constructor for
 /// first-use Entry allocation, chunk switching, heap fallback, OOM, and
 /// stack-overflow recovery.
-noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.Bytecode, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, captures, region_start, argc, resume_pc) orelse {
-        const slow = vm.machine.pushPaddedArgsLeafCall(leaf_this, vm.global, vm.stack, function, captures, region_start, argc) catch |err| {
+noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
+    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+        const slow = vm.machine.pushPaddedArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
         };
@@ -3255,7 +3234,7 @@ const property_tail_table = [10]Handler{
 fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) void {
     vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
     vm.function = vm.frame.function;
-    vm.code_base = vm.function.code.ptr;
+    vm.code_base = vm.function.byteCode().ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
@@ -3289,7 +3268,7 @@ inline fn reloadAfterPop(
         if (vm.machine.l0.stop_before_pc != null) vm.local_fast_blocked = true;
     }
     vm.function = vm.frame.function;
-    vm.code_base = vm.function.code.ptr;
+    vm.code_base = vm.function.byteCode().ptr;
     pc.* = vm.code_base + vm.frame.pc;
     sp.* = vm.stack.topPtr();
     var_buf.* = vm.frame.locals.ptr;

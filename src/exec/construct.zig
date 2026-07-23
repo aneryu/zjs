@@ -61,24 +61,23 @@ pub fn ordinaryObject(rt: *core.JSRuntime) !*core.Object {
 
 pub fn functionObject(ctx: *core.RealmContext, name: core.Atom) !core.JSValue {
     const rt = ctx.runtimePtr();
-    const function = try core.Object.create(rt, core.class.ids.c_function, null);
-    function.setNativeFunctionRealm(ctx);
-    errdefer function.value().free(rt);
+    const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    const realm_global = ctx.global orelse return error.InvalidBuiltinRegistry;
+    const object_proto_value = realm_global.cachedRealmValue(rt, .object_prototype) orelse return error.InvalidBuiltinRegistry;
+    const object_proto = try core.Object.expect(object_proto_value);
+    const function_name = rt.atoms.name(name) orelse "";
+    const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, function_name, 0, 3);
+    errdefer function_value.free(rt);
+    const function = try core.Object.expect(function_value);
 
-    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    const prototype = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, object_proto, 1);
     const prototype_value = prototype.value();
     defer prototype_value.free(rt);
 
+    try prototype.defineOwnPropertyAssumingNew(rt, core.atom.ids.constructor, core.Descriptor.data(function_value, true, false, true));
     try function.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
 
-    if (rt.atoms.name(name)) |function_name| {
-        const name_string = try core.string.String.createUtf8(rt, function_name);
-        const name_value = name_string.value();
-        defer name_value.free(rt);
-        try function.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-    }
-
-    return function.value();
+    return function_value;
 }
 
 pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
@@ -104,20 +103,28 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
     defer rt.active_value_roots = root_frame.previous;
 
     const constructor = try expectConstructor(rooted_callee);
+    var owned_prototype_value: ?core.JSValue = null;
+    defer if (owned_prototype_value) |value| value.free(rt);
     const prototype = constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse object: {
-        const prototype_value = constructor.getProperty(core.atom.ids.prototype);
-        defer prototype_value.free(rt);
-        if (!prototype_value.isObject()) break :object null;
-        const header = prototype_value.refHeader() orelse break :object null;
+        const prototype_value = try constructor.getProperty(core.atom.ids.prototype);
+        if (!prototype_value.isObject()) {
+            prototype_value.free(rt);
+            break :object null;
+        }
+        const header = prototype_value.refHeader() orelse {
+            prototype_value.free(rt);
+            break :object null;
+        };
+        owned_prototype_value = prototype_value;
         break :object @as(*core.Object, @fieldParentPtr("header", header));
     };
 
     if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != 0) {
         const kind = constructor.typedArrayKind();
-        return constructTypedArrayValue(rt, prototype, .{
+        return constructTypedArrayValue(rt, constructor, prototype, .{
             .size = constructor.typedArrayElementSize(),
             .kind = kind,
-        }, rooted_args, activeGlobalObject(rt, globals) catch null);
+        }, rooted_args);
     }
     // Builtin constructors whose record is table-dispatched (they carry a
     // native builtin id and declare a constructor record in their
@@ -134,13 +141,15 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
     if (try constructorName(rt, constructor)) |name| {
         defer rt.memory.allocator.free(name);
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return constructCollectionValue(ctx, kind, prototype, rooted_args, globals);
-        if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt, constructor);
+        if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt);
         if (std.mem.eql(u8, name, "Object")) return objectConstructorValue(ctx, rooted_args, constructor);
-        if (std.mem.eql(u8, name, "Array")) return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, constructor, array_construct_ref, prototype, rooted_args, null, null)) orelse error.TypeError;
+        if (std.mem.eql(u8, name, "Array") and constructor.arrayBuiltinMarker() == .constructor) {
+            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, constructor, array_construct_ref, prototype, rooted_args, null, null)) orelse error.TypeError;
+        }
         if (std.mem.eql(u8, name, "Iterator")) return error.TypeError;
         if (std.mem.eql(u8, name, "Symbol")) return error.TypeError;
         if (std.mem.eql(u8, name, "DOMException")) return constructDOMExceptionObject(rt, prototype, rooted_args);
-        if (std.mem.eql(u8, name, "Promise")) return core.promise.constructWithPrototype(rt, prototype);
+        if (std.mem.eql(u8, name, "Promise")) return core.promise.constructWithPrototype(ctx, prototype);
         if (std.mem.eql(u8, name, "BigInt")) return error.TypeError;
         if (std.mem.eql(u8, name, "TypedArray")) return error.TypeError;
         if (std.mem.eql(u8, name, "Proxy")) {
@@ -162,12 +171,12 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         }
         if (std.mem.eql(u8, name, "FinalizationRegistry")) {
             if (rooted_args.len < 1 or !isCallableObject(rooted_args[0])) return error.TypeError;
-            return constructFinalizationRegistry(rt, rooted_args[0], prototype);
+            return constructFinalizationRegistry(ctx, rooted_args[0], prototype);
         }
         if (std.mem.eql(u8, name, "WeakRef")) return constructWeakRef(rt, rooted_args, prototype);
         if (std.mem.eql(u8, name, "DataView")) return core.typed_array.dataViewConstruct(rt, rooted_args, prototype);
         if (typedArrayElement(name)) |element| {
-            return constructTypedArrayValue(rt, prototype, element, rooted_args, activeGlobalObject(rt, globals) catch null);
+            return constructTypedArrayValue(rt, constructor, prototype, element, rooted_args);
         }
         if (std.mem.eql(u8, name, "Number")) {
             if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
@@ -204,6 +213,15 @@ test "constructValue fallback roots callee while defining constructor property" 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
+    const object_proto = try core.Object.create(rt, core.class.ids.object, null);
+    const object_proto_slot = try global.cachedRealmValueSlot(rt, .object_prototype);
+    try global.setOptionalValueSlot(rt, object_proto_slot, object_proto.value());
+
     const name = try rt.internAtom("FallbackConstructor");
     defer rt.atoms.free(name);
     const constructor = try functionObject(ctx, name);
@@ -225,12 +243,12 @@ test "constructValue fallback roots callee while defining constructor property" 
 
     const constructor_key = try rt.internAtom("constructor");
     defer rt.atoms.free(constructor_key);
-    const stored_constructor = instance.getProperty(constructor_key);
+    const stored_constructor = try instance.getProperty(constructor_key);
     defer stored_constructor.free(rt);
     try std.testing.expect(stored_constructor.same(constructor));
 
     const stored_constructor_object = try expectObject(stored_constructor);
-    const marker = stored_constructor_object.getProperty(marker_key);
+    const marker = try stored_constructor_object.getProperty(marker_key);
     defer marker.free(rt);
     try std.testing.expect(marker.same(try rt.symbolValue(marker_atom)));
     try std.testing.expect(rt.atoms.name(marker_atom) != null);
@@ -241,7 +259,9 @@ test "constructValue fallback roots callee while defining constructor property" 
     constructor_alive = false;
 }
 
-pub fn constructTypedArrayValue(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, args: []const core.JSValue, global: ?*core.Object) !core.JSValue {
+pub fn constructTypedArrayValue(rt: *core.JSRuntime, constructor: *core.Object, prototype: ?*core.Object, element: TypedArrayElement, args: []const core.JSValue) !core.JSValue {
+    const realm = constructor.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+    const array_buffer_prototype = realm.classPrototypeObject(core.class.ids.array_buffer) orelse return error.InvalidBuiltinRegistry;
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
     defer rooted_args_buffer.deinit(rt);
     const rooted_args = rooted_args_buffer.values;
@@ -258,15 +278,15 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, prototype: ?*core.Object, e
     const buffer = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.int32(0);
     if (buffer.isObject()) {
         const source = try expectObject(buffer);
-        if (source.isArray()) return constructTypedArrayArrayInput(rt, prototype, element, source, global);
-        if (core.object.isTypedArrayObject(source)) return constructTypedArrayTypedArrayInput(rt, prototype, element, source, global);
-        if (source.class_id != core.class.ids.array_buffer and source.class_id != core.class.ids.shared_array_buffer) return constructTypedArrayArrayLikeInput(rt, prototype, element, source, global);
+        if (source.isArray()) return constructTypedArrayArrayInput(rt, prototype, array_buffer_prototype, element, source);
+        if (core.object.isTypedArrayObject(source)) return constructTypedArrayTypedArrayInput(rt, prototype, array_buffer_prototype, element, source);
+        if (source.class_id != core.class.ids.array_buffer and source.class_id != core.class.ids.shared_array_buffer) return constructTypedArrayArrayLikeInput(rt, prototype, array_buffer_prototype, element, source);
         return core.typed_array.typedArrayConstructWithOptions(rt, element.size, element.kind, buffer, rooted_args, prototype);
     }
     const element_count = buffer.asInt32() orelse return error.TypeError;
     if (element_count < 0) return error.RangeError;
     const byte_length = try std.math.mul(i32, element_count, @intCast(element.size));
-    const backing_buffer = try createTypedArrayBackingBuffer(rt, prototype, global, byte_length);
+    const backing_buffer = try createTypedArrayBackingBuffer(rt, array_buffer_prototype, byte_length);
     var backing_buffer_owned = true;
     errdefer if (backing_buffer_owned) backing_buffer.free(rt);
     const backing_buffer_object = expectObject(backing_buffer) catch return error.TypeError;
@@ -323,7 +343,7 @@ test "constructErrorObject roots direct symbol message while creating error" {
     try std.testing.expect(rt.atoms.name(message_atom) != null);
     const message_key = try rt.internAtom("message");
     defer rt.atoms.free(message_key);
-    const message_value = object.getProperty(message_key);
+    const message_value = try object.getProperty(message_key);
     defer message_value.free(rt);
     try expectStringValue(rt, "Symbol(gc-construct-error-message-symbol)", message_value);
 
@@ -392,12 +412,12 @@ test "constructDOMExceptionObject roots direct symbol args while creating error"
     try std.testing.expect(rt.atoms.name(name_atom) != null);
     const message_key = try rt.internAtom("message");
     defer rt.atoms.free(message_key);
-    const message_value = object.getProperty(message_key);
+    const message_value = try object.getProperty(message_key);
     defer message_value.free(rt);
     try expectStringValue(rt, "Symbol(gc-dom-exception-message-symbol)", message_value);
     const name_key = try rt.internAtom("name");
     defer rt.atoms.free(name_key);
-    const name_value = object.getProperty(name_key);
+    const name_value = try object.getProperty(name_key);
     defer name_value.free(rt);
     try expectStringValue(rt, "Symbol(gc-dom-exception-name-symbol)", name_value);
 
@@ -495,10 +515,10 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
         const options = try expectObject(rooted_args[2]);
         const cause_key = try rt.internAtom("cause");
         defer rt.atoms.free(cause_key);
-        cause_val = options.getProperty(cause_key);
+        cause_val = try options.getProperty(cause_key);
         var has_cause = !cause_val.isUndefined();
         if (!has_cause) {
-            if (options.getOwnProperty(rt, cause_key)) |desc| {
+            if (try options.getOwnProperty(rt, cause_key)) |desc| {
                 desc.destroy(rt);
                 has_cause = true;
             }
@@ -513,7 +533,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 
     var index: u32 = 0;
     while (index < errors_source.arrayLength()) : (index += 1) {
-        copied_error_val = errors_source.getProperty(core.atom.atomFromUInt32(index));
+        copied_error_val = try errors_source.getProperty(core.atom.atomFromUInt32(index));
         try errors_array.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(copied_error_val, true, true, true));
         copied_error_val.free(rt);
         copied_error_val = core.JSValue.undefinedValue();
@@ -557,8 +577,9 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
     return instance.value();
 }
 
-fn constructFinalizationRegistry(rt: *core.JSRuntime, cleanup_callback: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    const instance = try core.Object.create(rt, core.class.ids.finalization_registry, prototype);
+fn constructFinalizationRegistry(ctx: *core.JSContext, cleanup_callback: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    const rt = ctx.runtime;
+    const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype);
     errdefer core.Object.destroyFromHeader(rt, &instance.header);
     try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
     return instance.value();
@@ -664,32 +685,32 @@ pub fn objectConstructorValue(ctx: *core.JSContext, args: []const core.JSValue, 
         if (value.isObject()) return value.dup();
         if (!value.isNull() and !value.isUndefined()) {
             if (value.isString()) {
-                return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, primitivePrototypeFromObjectConstructor(constructor, .string), &.{value}, null, null)) orelse error.TypeError;
+                return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, try primitivePrototypeFromObjectConstructor(constructor, core.class.ids.string), &.{value}, null, null)) orelse error.TypeError;
             }
             if (value.isNumber()) {
-                return constructPrimitiveWrapper(rt, core.class.ids.number, primitivePrototypeFromObjectConstructor(constructor, .number), value);
+                return constructPrimitiveWrapper(rt, core.class.ids.number, try primitivePrototypeFromObjectConstructor(constructor, core.class.ids.number), value);
             }
             if (value.asBool() != null) {
-                return constructPrimitiveWrapper(rt, core.class.ids.boolean, primitivePrototypeFromObjectConstructor(constructor, .boolean), value);
+                return constructPrimitiveWrapper(rt, core.class.ids.boolean, try primitivePrototypeFromObjectConstructor(constructor, core.class.ids.boolean), value);
             }
             if (value.isBigInt()) {
-                return constructPrimitiveWrapper(rt, core.class.ids.big_int, primitivePrototypeFromObjectConstructor(constructor, .bigint), value);
+                return constructPrimitiveWrapper(rt, core.class.ids.big_int, try primitivePrototypeFromObjectConstructor(constructor, core.class.ids.big_int), value);
             }
             if (value.isSymbol()) {
-                return constructPrimitiveWrapper(rt, core.class.ids.symbol, primitivePrototypeFromObjectConstructor(constructor, .symbol), value);
+                return constructPrimitiveWrapper(rt, core.class.ids.symbol, try primitivePrototypeFromObjectConstructor(constructor, core.class.ids.symbol), value);
             }
         }
     }
-    const object_prototype = constructor.getProperty(core.atom.ids.prototype);
+    const object_prototype = try constructor.getProperty(core.atom.ids.prototype);
     defer object_prototype.free(rt);
     const prototype = if (object_prototype.isObject()) expectObject(object_prototype) catch null else null;
     const object = try core.Object.create(rt, core.class.ids.object, prototype);
     return object.value();
 }
 
-fn primitivePrototypeFromObjectConstructor(constructor: *core.Object, slot: core.object.PrimitivePrototypeSlot) ?*core.Object {
-    const proto_value = constructor.functionPrimitivePrototype(slot) orelse return null;
-    return expectObject(proto_value) catch null;
+fn primitivePrototypeFromObjectConstructor(constructor: *core.Object, class_id: core.ClassId) !*core.Object {
+    const realm = constructor.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+    return realm.classPrototypeObject(class_id) orelse error.InvalidBuiltinRegistry;
 }
 
 pub const TypedArrayElement = core.typed_array_names.Element;
@@ -698,7 +719,7 @@ pub fn typedArrayElement(name: []const u8) ?TypedArrayElement {
     return core.typed_array_names.element(name);
 }
 
-fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, source: *core.Object, global: ?*core.Object) !core.JSValue {
+fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, array_buffer_prototype: *core.Object, element: TypedArrayElement, source: *core.Object) !core.JSValue {
     const byte_length = try std.math.mul(u32, source.arrayLength(), element.size);
     var backing_buffer = core.JSValue.undefinedValue();
     var object_value = core.JSValue.undefinedValue();
@@ -722,13 +743,13 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
     defer value.free(rt);
     defer coerced.free(rt);
 
-    backing_buffer = try createTypedArrayBackingBuffer(rt, prototype, global, @intCast(byte_length));
+    backing_buffer = try createTypedArrayBackingBuffer(rt, array_buffer_prototype, @intCast(byte_length));
     object_value = try core.typed_array.typedArrayConstructWithOptions(rt, element.size, element.kind, backing_buffer, &.{backing_buffer}, prototype);
     const object = try expectObject(object_value);
 
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        value = source.getProperty(core.atom.atomFromUInt32(index));
+        value = try source.getProperty(core.atom.atomFromUInt32(index));
         coerced = try typedArraySourceValue(rt, value);
         _ = try core.typed_array.typedArraySetIndex(rt, object, index, coerced);
 
@@ -740,7 +761,7 @@ fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, 
     return object_value.dup();
 }
 
-fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, source: *core.Object, global: ?*core.Object) !core.JSValue {
+fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, array_buffer_prototype: *core.Object, element: TypedArrayElement, source: *core.Object) !core.JSValue {
     if (try core.object.typedArrayDetached(source)) return error.TypeError;
     if (try core.object.typedArrayOutOfBounds(source)) {
         const buffer_value = source.typedArrayBuffer() orelse return error.TypeError;
@@ -769,7 +790,7 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
     defer object_value.free(rt);
     defer value.free(rt);
 
-    backing_buffer = try createTypedArrayBackingBuffer(rt, prototype, global, @intCast(byte_length));
+    backing_buffer = try createTypedArrayBackingBuffer(rt, array_buffer_prototype, @intCast(byte_length));
     object_value = try core.typed_array.typedArrayConstructWithOptions(rt, element.size, element.kind, backing_buffer, &.{backing_buffer}, prototype);
     const object = try expectObject(object_value);
 
@@ -784,8 +805,8 @@ fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Obj
     return object_value.dup();
 }
 
-fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, source: *core.Object, global: ?*core.Object) !core.JSValue {
-    const length_value = source.getProperty(core.atom.ids.length);
+fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Object, array_buffer_prototype: *core.Object, element: TypedArrayElement, source: *core.Object) !core.JSValue {
+    const length_value = try source.getProperty(core.atom.ids.length);
     defer length_value.free(rt);
     const length_i32 = length_value.asInt32() orelse 0;
     if (length_i32 < 0) return error.RangeError;
@@ -813,13 +834,13 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
     defer value.free(rt);
     defer coerced.free(rt);
 
-    backing_buffer = try createTypedArrayBackingBuffer(rt, prototype, global, @intCast(byte_length));
+    backing_buffer = try createTypedArrayBackingBuffer(rt, array_buffer_prototype, @intCast(byte_length));
     object_value = try core.typed_array.typedArrayConstructWithOptions(rt, element.size, element.kind, backing_buffer, &.{backing_buffer}, prototype);
     const object = try expectObject(object_value);
 
     var index: u32 = 0;
     while (index < length) : (index += 1) {
-        value = source.getProperty(core.atom.atomFromUInt32(index));
+        value = try source.getProperty(core.atom.atomFromUInt32(index));
         coerced = try typedArraySourceValue(rt, value);
         _ = try core.typed_array.typedArraySetIndex(rt, object, index, coerced);
 
@@ -831,32 +852,8 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
     return object_value.dup();
 }
 
-fn createTypedArrayBackingBuffer(rt: *core.JSRuntime, prototype: ?*core.Object, global: ?*core.Object, byte_length: i32) !core.JSValue {
-    return core.typed_array.arrayBufferConstructLength(rt, @intCast(byte_length), null, typedArrayArrayBufferPrototype(rt, prototype, global));
-}
-
-fn typedArrayArrayBufferPrototype(rt: *core.JSRuntime, prototype: ?*core.Object, global: ?*core.Object) ?*core.Object {
-    if (arrayBufferPrototypeFromTypedArrayPrototype(prototype)) |buffer_prototype| return buffer_prototype;
-    const global_object = global orelse return null;
-    const ctor_key = core.atom.predefinedId("ArrayBuffer", .string) orelse return null;
-    const ctor_value = global_object.getProperty(ctor_key);
-    defer ctor_value.free(rt);
-    if (!ctor_value.isObject()) return null;
-    const ctor_object = expectObject(ctor_value) catch return null;
-    const prototype_value = ctor_object.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(rt);
-    if (!prototype_value.isObject()) return null;
-    return expectObject(prototype_value) catch return null;
-}
-
-fn arrayBufferPrototypeFromTypedArrayPrototype(prototype: ?*core.Object) ?*core.Object {
-    var current = prototype orelse return null;
-    while (true) {
-        if (current.typedArrayArrayBufferPrototype()) |proto_value| {
-            if (expectObject(proto_value) catch null) |buffer_prototype| return buffer_prototype;
-        }
-        current = current.getPrototype() orelse return null;
-    }
+fn createTypedArrayBackingBuffer(rt: *core.JSRuntime, array_buffer_prototype: *core.Object, byte_length: i32) !core.JSValue {
+    return core.typed_array.arrayBufferConstructLength(rt, @intCast(byte_length), null, array_buffer_prototype);
 }
 
 fn activeGlobalObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !?*core.Object {
@@ -884,32 +881,8 @@ fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.J
     }
 }
 
-fn constructFunctionValue(rt: *core.JSRuntime, constructor: *core.Object) !core.JSValue {
-    const out = try closure_mod.create(rt, 13, 0, 0, 0);
-    errdefer out.free(rt);
-    const realm_keys = [_][]const u8{
-        "__realm_Object_proto",
-        "__realm_Number_proto",
-        "__realm_Boolean_proto",
-        "__realm_Array_proto",
-        "__realm_Iterator_proto",
-        "__realm_Map_proto",
-        "__realm_Set_proto",
-        "__realm_WeakMap_proto",
-        "__realm_WeakSet_proto",
-        "__realm_RegExp_proto",
-    };
-    const function_object = try expectObject(out);
-    for (realm_keys) |key_name| {
-        const realm_proto_key = try rt.internAtom(key_name);
-        defer rt.atoms.free(realm_proto_key);
-        const realm_proto_value = constructor.getProperty(realm_proto_key);
-        defer realm_proto_value.free(rt);
-        if (!realm_proto_value.isUndefined()) {
-            try function_object.defineOwnProperty(rt, realm_proto_key, core.Descriptor.data(realm_proto_value, true, false, true));
-        }
-    }
-    return out;
+fn constructFunctionValue(rt: *core.JSRuntime) !core.JSValue {
+    return closure_mod.create(rt, 13, 0, 0, 0);
 }
 
 fn constructCollectionValue(
@@ -937,14 +910,14 @@ fn constructCollectionValue(
     }
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        const entry_value = source.getProperty(core.atom.atomFromUInt32(index));
+        const entry_value = try source.getProperty(core.atom.atomFromUInt32(index));
         defer entry_value.free(rt);
         if (kind == 1 or kind == 3) {
             const entry = try expectObject(entry_value);
             if (!entry.isArray()) return error.TypeError;
-            const key = entry.getProperty(core.atom.atomFromUInt32(0));
+            const key = try entry.getProperty(core.atom.atomFromUInt32(0));
             defer key.free(rt);
-            const value = entry.getProperty(core.atom.atomFromUInt32(1));
+            const value = try entry.getProperty(core.atom.atomFromUInt32(1));
             defer value.free(rt);
             var set_args = [_]core.JSValue{ key, value };
             if (isNativeCollectionAdder(rt, adder, adder_name)) {
@@ -981,7 +954,9 @@ pub fn constructCollectionClosure(
     if (encoded < 0) return error.TypeError;
     const collection_kind: u32 = @intCast(@divTrunc(encoded, 10));
     const arg_mode: i32 = @mod(encoded, 10);
-    const prototype = try collectionPrototypeFromGlobals(rt, collection_kind, globals);
+    const prototype_value = try collectionPrototypeValueFromGlobals(rt, collection_kind, globals);
+    defer prototype_value.free(rt);
+    const prototype = if (prototype_value.isObject()) try expectObject(prototype_value) else null;
 
     var args: []core.JSValue = &.{};
     var arg_storage: [1]core.JSValue = undefined;
@@ -1004,7 +979,7 @@ pub fn constructCollectionClosure(
     return constructCollectionValue(ctx, collection_kind, prototype, args, globals);
 }
 
-fn collectionPrototypeFromGlobals(rt: *core.JSRuntime, kind: u32, globals: []globals_mod.Slot) !?*core.Object {
+fn collectionPrototypeValueFromGlobals(rt: *core.JSRuntime, kind: u32, globals: []globals_mod.Slot) !core.JSValue {
     const name = collectionName(kind) orelse return error.TypeError;
     var constructor_value = try globals_mod.getByName(rt, globals, name);
     if (constructor_value.isUndefined()) {
@@ -1013,10 +988,10 @@ fn collectionPrototypeFromGlobals(rt: *core.JSRuntime, kind: u32, globals: []glo
     }
     defer constructor_value.free(rt);
     const constructor = try expectObject(constructor_value);
-    const prototype_value = constructor.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(rt);
-    if (!prototype_value.isObject()) return null;
-    return try expectObject(prototype_value);
+    const prototype_value = try constructor.getProperty(core.atom.ids.prototype);
+    if (prototype_value.isObject()) return prototype_value;
+    prototype_value.free(rt);
+    return core.JSValue.nullValue();
 }
 
 fn globalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
@@ -1025,7 +1000,7 @@ fn globalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: 
     const global = try expectObject(global_value);
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    return global.getProperty(key);
+    return try global.getProperty(key);
 }
 
 fn constructCollectionFromIterator(
@@ -1040,7 +1015,7 @@ fn constructCollectionFromIterator(
     const rt = ctx.runtime;
     const iterable = try expectObject(iterable_value);
     const iterator_method_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    const iterator_method = iterable.getProperty(iterator_method_key);
+    const iterator_method = try iterable.getProperty(iterator_method_key);
     defer iterator_method.free(rt);
     if (iterator_method.isUndefined() or iterator_method.isNull()) return error.TypeError;
     if (!isCallableObject(iterator_method)) return error.TypeError;
@@ -1051,7 +1026,7 @@ fn constructCollectionFromIterator(
 
     const next_key = try rt.internAtom("next");
     defer rt.atoms.free(next_key);
-    const next_method = iterator.getProperty(next_key);
+    const next_method = try iterator.getProperty(next_key);
     defer next_method.free(rt);
     if (!isCallableObject(next_method)) return error.TypeError;
 
@@ -1130,7 +1105,7 @@ fn closeIterator(ctx: *core.JSContext, iterator: *core.Object, globals: []global
     const rt = ctx.runtime;
     const return_key = try rt.internAtom("return");
     defer rt.atoms.free(return_key);
-    const return_method = iterator.getProperty(return_key);
+    const return_method = try iterator.getProperty(return_key);
     defer return_method.free(rt);
     if (!isCallableObject(return_method)) return;
     const out = callClosureWithThis(ctx, return_method, iterator.value(), &.{}, globals) catch return;
@@ -1141,7 +1116,7 @@ fn getPropertyWithGetter(ctx: *core.JSContext, object: *core.Object, key: core.A
     const rt = ctx.runtime;
     var cursor: ?*core.Object = object;
     while (cursor) |current_object| {
-        if (current_object.getOwnProperty(rt, key)) |desc| {
+        if (try current_object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -1204,7 +1179,7 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
             dispatch_name.free(rt);
         }
     }
-    const name_value = function_object.getProperty(core.atom.ids.name);
+    const name_value = try function_object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) {
         name_value.free(rt);
         return error.TypeError;
@@ -1230,7 +1205,7 @@ fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []con
     defer rt.atoms.free(key);
     var cursor: ?*core.Object = collection;
     while (cursor) |object| {
-        if (object.getOwnProperty(rt, key)) |desc| {
+        if (try object.getOwnProperty(rt, key)) |desc| {
             defer desc.destroy(rt);
             if (desc.kind == .accessor) {
                 if (desc.getter.isUndefined()) return core.JSValue.undefinedValue();
@@ -1284,20 +1259,83 @@ fn isCallableObject(value: core.JSValue) bool {
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
         object.class_id == core.class.ids.c_closure or
-        object.class_id == core.class.ids.bytecode_function or
+        core.class.isBytecodeFunctionClass(object.class_id) or
         object.class_id == core.class.ids.bound_function;
+}
+
+fn isConstructibleBytecodeFunctionObject(object: *const core.Object) bool {
+    return switch (object.class_id) {
+        core.class.ids.bytecode_function => if (object.bytecodeFunctionStoragePtrConst().function_bytecode) |fb|
+            fb.hasPrototype() and fb.functionKind() == .normal
+        else
+            false,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+        => false,
+        else => false,
+    };
 }
 
 fn expectConstructor(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);
+    if (core.class.isBytecodeFunctionClass(object.class_id)) {
+        if (!isConstructibleBytecodeFunctionObject(object)) return error.TypeError;
+        return object;
+    }
     if (object.class_id != core.class.ids.c_function and
-        object.class_id != core.class.ids.bytecode_function and
         object.class_id != core.class.ids.bound_function and
         object.class_id != core.class.ids.c_closure)
     {
         return error.TypeError;
     }
     return object;
+}
+
+test "legacy constructor gate follows four-class bytecode constructability" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Case = struct {
+        class_id: core.ClassId,
+        func_kind: core.function_bytecode.FunctionKind,
+        has_prototype: bool,
+        expected_constructor: bool,
+    };
+    const Fixture = struct {
+        fn create(runtime: *core.JSRuntime, case: Case) !*core.Object {
+            const object = try core.Object.create(runtime, case.class_id, null);
+            errdefer object.value().free(runtime);
+
+            const fb = try core.FunctionBytecode.createFixture(runtime, .{ .flags = .{
+                .func_kind = case.func_kind,
+                .has_prototype = case.has_prototype,
+            } });
+            fb.publishFixtureNoFail(runtime);
+            try object.setFunctionBytecodeValue(runtime, core.JSValue.functionBytecode(&fb.header));
+            return object;
+        }
+    };
+    const cases = [_]Case{
+        .{ .class_id = core.class.ids.bytecode_function, .func_kind = .normal, .has_prototype = true, .expected_constructor = true },
+        // Canonical arrows are ordinary-kind bytecode functions without a
+        // prototype; a prototype-bearing arrow fixture is not a valid state.
+        .{ .class_id = core.class.ids.bytecode_function, .func_kind = .normal, .has_prototype = false, .expected_constructor = false },
+        .{ .class_id = core.class.ids.generator_function, .func_kind = .generator, .has_prototype = true, .expected_constructor = false },
+        .{ .class_id = core.class.ids.async_function, .func_kind = .async, .has_prototype = false, .expected_constructor = false },
+        .{ .class_id = core.class.ids.async_generator_function, .func_kind = .async_generator, .has_prototype = true, .expected_constructor = false },
+    };
+
+    for (cases) |case| {
+        const function_object = try Fixture.create(rt, case);
+        defer function_object.value().free(rt);
+        try std.testing.expect(isCallableObject(function_object.value()));
+        if (case.expected_constructor) {
+            try std.testing.expectEqual(function_object, try expectConstructor(function_object.value()));
+        } else {
+            try std.testing.expectError(error.TypeError, expectConstructor(function_object.value()));
+        }
+    }
 }

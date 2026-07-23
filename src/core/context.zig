@@ -2,6 +2,7 @@ const std = @import("std");
 
 const atom = @import("atom.zig");
 const class = @import("class.zig");
+const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const Object = object_mod.Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
@@ -95,6 +96,8 @@ pub const DynamicImportError = error{
     DiskQuota,
     DivisionByZero,
     DuplicateClass,
+    DerivedConstructorReturn,
+    DerivedThisUninitialized,
     EvalError,
     FileBusy,
     FileLocksUnsupported,
@@ -209,8 +212,6 @@ pub const DynamicImportCallback = *const fn (
 pub const ContextOptions = struct {
     stack_size: ?usize = null,
     track_unhandled_rejections: bool = false,
-    dynamic_import_callback: ?DynamicImportCallback = null,
-    dynamic_import_userdata: ?*anyopaque = null,
 };
 
 pub const Options = ContextOptions;
@@ -386,37 +387,26 @@ pub const HostEventLoop = struct {
     }
 };
 
-pub const PendingPromiseJob = struct {
-    sequence: u64 = 0,
-    value: JSValue = JSValue.undefinedValue(),
-    value_symbol_rooted: bool = false,
-    realm: RealmRef = .{},
+const class_prototype_inline_capacity: usize = class.ids.init_count;
 
-    pub fn init(ctx: *JSContext, sequence: u64, value: JSValue) !PendingPromiseJob {
-        var job = PendingPromiseJob{
-            .sequence = sequence,
-            .value = value.dup(),
-            .realm = RealmRef.retain(ctx),
-        };
-        errdefer job.value.free(ctx.runtime);
-        errdefer job.realm.deinit();
-        job.value_symbol_rooted = try ctx.runtime.registerExternalValueSymbolRoot(value);
-        return job;
-    }
-
-    pub fn deinit(self: PendingPromiseJob, rt: *JSRuntime) void {
-        if (self.value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.value);
-        self.value.free(rt);
-        var realm = self.realm;
-        realm.deinit();
-    }
-
-    pub fn traceRoots(self: *PendingPromiseJob, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.value);
-    }
+/// QuickJS `JSErrorEnum` subset whose intrinsic prototypes live in
+/// `JSContext.native_error_proto[]`. These are realm state, independent of the
+/// mutable constructor bindings on the global object.
+pub const NativeErrorKind = enum(u8) {
+    error_,
+    eval_error,
+    range_error,
+    reference_error,
+    syntax_error,
+    type_error,
+    uri_error,
+    internal_error,
+    aggregate_error,
+    suppressed_error,
+    count,
 };
 
-const class_prototype_inline_capacity: usize = class.ids.init_count;
+const native_error_kind_count: usize = @intFromEnum(NativeErrorKind.count);
 
 pub const RealmPublicationState = enum {
     constructing,
@@ -460,6 +450,9 @@ pub const JSContext = struct {
     construction_next: ?*JSContext = null,
     publication_state: RealmPublicationState = .constructing,
     construction_complete: bool = false,
+    /// Realm-local module map. Every linked record's list base-ref is an owned
+    /// Context -> ModuleRecord GC edge; record addresses stay stable.
+    modules: module.Registry,
     /// Not-yet-handled rejected promises, in rejection order. Mirrors the qjs
     /// CLI host tracker list (js_std_promise_rejection_tracker's
     /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
@@ -475,6 +468,7 @@ pub const JSContext = struct {
     track_unhandled_rejections: bool = false,
     class_prototypes: []JSValue = &.{},
     class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
+    native_error_prototypes: [native_error_kind_count]JSValue = @splat(JSValue.nullValue()),
     cached_function_proto: ?*Object = null,
     cached_promise_proto: ?*Object = null,
     cached_values: [@intFromEnum(object_mod.RealmValueSlot.count)]?JSValue = @splat(null),
@@ -485,7 +479,6 @@ pub const JSContext = struct {
     mapped_arguments_shape: ?*shape.Shape = null,
     regexp_shape: ?*shape.Shape = null,
     regexp_result_shape: ?*shape.Shape = null,
-    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
     regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
     random_state: u64 = 0x1234_5678_9abc_def0,
     preallocated_oom_error: ?JSValue = null,
@@ -502,8 +495,6 @@ pub const JSContext = struct {
     /// Direct-eval syntax only evaluates as direct eval when the resolved
     /// callee is this object; otherwise OP_eval falls back to an ordinary call.
     eval_function: JSValue = JSValue.nullValue(),
-    dynamic_import_callback: ?DynamicImportCallback = null,
-    dynamic_import_userdata: ?*anyopaque = null,
     host_event_loop: ?HostEventLoop = null,
 
     /// Returns an owned context. Caller must release it with `destroy`.
@@ -523,6 +514,7 @@ pub const JSContext = struct {
     }
 
     fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*JSContext {
+        try rt.requireOwnerThread();
         const ctx = try rt.createRuntime(JSContext);
         var initialized = false;
         errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(JSContext, ctx);
@@ -538,8 +530,7 @@ pub const JSContext = struct {
             .header = .{},
             .runtime = rt,
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .dynamic_import_callback = options.dynamic_import_callback,
-            .dynamic_import_userdata = options.dynamic_import_userdata,
+            .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
         };
         const initial_len = rt.classes.records.len;
@@ -557,6 +548,7 @@ pub const JSContext = struct {
     }
 
     pub fn publishLive(self: *JSContext) !void {
+        self.runtime.assertOwnerThread();
         switch (self.publication_state) {
             .live => return,
             .constructing => {},
@@ -571,11 +563,25 @@ pub const JSContext = struct {
         self.runtime.linkContext(self);
     }
 
+    /// Checked publication boundary for embedders that cannot statically prove
+    /// the Runtime owner thread. Engine bootstrap uses the asserting form above
+    /// so this contract error does not widen JavaScript execution errors.
+    pub fn publishLiveChecked(self: *JSContext) !void {
+        try self.runtime.requireOwnerThread();
+        return self.publishLive();
+    }
+
     pub fn finishConstruction(self: *JSContext) !void {
+        self.runtime.assertOwnerThread();
         if (self.publication_state == .live) return;
         if (self.publication_state != .constructing) return error.InvalidBuiltinRegistry;
         self.construction_complete = true;
         try self.publishLive();
+    }
+
+    pub fn finishConstructionChecked(self: *JSContext) !void {
+        try self.runtime.requireOwnerThread();
+        return self.finishConstruction();
     }
 
     pub fn publicationState(self: *const JSContext) RealmPublicationState {
@@ -648,6 +654,7 @@ pub const JSContext = struct {
     }
 
     pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
+        self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) {
             var next_len = if (self.class_prototypes.len == 0) @as(usize, 1) else self.class_prototypes.len + self.class_prototypes.len / 2;
@@ -678,6 +685,7 @@ pub const JSContext = struct {
     }
 
     pub fn clearClassPrototype(self: *JSContext, class_id: class.ClassId) void {
+        self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return;
         const old = self.class_prototypes[index];
@@ -689,6 +697,24 @@ pub const JSContext = struct {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return null;
         const value = self.class_prototypes[index];
+        if (!value.isObject()) return null;
+        const header = value.refHeader() orelse return null;
+        if (header.meta().kind != .object) return null;
+        return @fieldParentPtr("header", header);
+    }
+
+    pub fn setNativeErrorPrototype(self: *JSContext, kind: NativeErrorKind, prototype: *Object) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(kind != .count);
+        const slot = &self.native_error_prototypes[@intFromEnum(kind)];
+        const old = slot.*;
+        slot.* = prototype.value().dup();
+        old.free(self.runtime);
+    }
+
+    pub fn nativeErrorPrototypeObject(self: *JSContext, kind: NativeErrorKind) ?*Object {
+        if (kind == .count) return null;
+        const value = self.native_error_prototypes[@intFromEnum(kind)];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
         if (header.meta().kind != .object) return null;
@@ -755,8 +781,56 @@ pub const JSContext = struct {
         self.runtime.shapes.release(owned);
     }
 
+    fn clearIntrinsicBootstrapValues(self: *JSContext) void {
+        const rt = self.runtime;
+        const old_eval = self.eval_function;
+        self.eval_function = JSValue.nullValue();
+        old_eval.free(rt);
+        if (self.cached_function_proto) |prototype| prototype.value().free(rt);
+        self.cached_function_proto = null;
+        if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
+        self.cached_promise_proto = null;
+        for (&self.cached_values) |*slot| {
+            if (slot.*) |value| value.free(rt);
+            slot.* = null;
+        }
+        for (&self.native_error_prototypes) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(rt);
+        }
+        self.releaseInitialShape(&self.array_shape);
+        self.releaseInitialShape(&self.arguments_shape);
+        self.releaseInitialShape(&self.mapped_arguments_shape);
+        self.releaseInitialShape(&self.regexp_shape);
+        self.releaseInitialShape(&self.regexp_result_shape);
+        if (self.preallocated_oom_error) |value| value.free(rt);
+        self.preallocated_oom_error = null;
+    }
+
+    /// Roll back only the Realm-owned state published by intrinsic/global
+    /// bootstrap. The candidate global remains associated while this runs so
+    /// native-function Realm lookups stay valid during recursive release.
+    /// Dynamic class prototype slots belong to embedders and survive a retry;
+    /// the standard prefix is rebuilt with the next candidate global.
+    pub fn rollbackIntrinsicBootstrap(self: *JSContext) void {
+        self.runtime.assertOwnerThread();
+        std.debug.assert(self.publication_state != .finalizing);
+        std.debug.assert(self.lexicals == null);
+        std.debug.assert(self.regexp_legacy_statics == null);
+        self.clearIntrinsicBootstrapValues();
+        const builtin_count = @min(self.class_prototypes.len, @as(usize, @intCast(class.ids.init_count)));
+        for (self.class_prototypes[0..builtin_count]) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(self.runtime);
+        }
+        if (self.publication_state == .constructing) self.construction_complete = false;
+    }
+
     fn deinitResources(self: *JSContext) void {
         const rt = self.runtime;
+        rt.assertOwnerThread();
         switch (self.publication_state) {
             .constructing => rt.unlinkConstructingContext(self),
             .live => {
@@ -766,53 +840,40 @@ pub const JSContext = struct {
             .finalizing => unreachable,
         }
         self.publication_state = .finalizing;
+        // Drop Realm -> ModuleRecord base refs before releasing globals and
+        // intrinsics: module records may themselves own values in this Realm.
+        self.modules.deinit(rt);
         self.host_event_loop = null;
         self.clearUnhandledRejection();
-        const old_eval = self.eval_function;
-        self.eval_function = JSValue.nullValue();
         const old_lexicals = self.lexicals;
         self.lexicals = null;
         const old_global = self.global;
         self.global = null;
-        old_eval.free(rt);
         if (old_lexicals) |lexicals| lexicals.value().free(rt);
         if (old_global) |global| global.value().free(rt);
-        if (self.cached_function_proto) |prototype| prototype.value().free(rt);
-        self.cached_function_proto = null;
-        if (self.cached_promise_proto) |prototype| prototype.value().free(rt);
-        self.cached_promise_proto = null;
-        for (&self.cached_values) |*slot| {
-            if (slot.*) |value| value.free(rt);
-            slot.* = null;
-        }
-        self.releaseInitialShape(&self.array_shape);
-        self.releaseInitialShape(&self.arguments_shape);
-        self.releaseInitialShape(&self.mapped_arguments_shape);
-        self.releaseInitialShape(&self.regexp_shape);
-        self.releaseInitialShape(&self.regexp_result_shape);
-        if (self.shared_lazy_native_functions) |cache| {
-            for (cache) |*slot| {
-                if (slot.*) |value| value.free(rt);
-                slot.* = null;
-            }
-            rt.destroyRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue, cache);
-            self.shared_lazy_native_functions = null;
-        }
+        self.clearIntrinsicBootstrapValues();
         if (self.regexp_legacy_statics) |legacy| {
             legacy.destroy(rt);
             rt.destroyRuntime(object_mod.RegExpLegacyStatics, legacy);
             self.regexp_legacy_statics = null;
         }
-        if (self.preallocated_oom_error) |value| value.free(rt);
-        self.preallocated_oom_error = null;
         self.deinitClassPrototypeSlots();
     }
 
     pub fn destroy(self: *JSContext) void {
+        self.runtime.assertOwnerThread();
+        gc.release(self.runtime, &self.header);
+    }
+
+    /// Checked release entry for hosts that cannot statically guarantee the
+    /// Runtime owner thread. A wrong-thread call does not decrement the Realm.
+    pub fn tryDestroy(self: *JSContext) runtime_mod.RuntimeMutationError!void {
+        try self.runtime.requireOwnerThread();
         gc.release(self.runtime, &self.header);
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
+        rt.assertOwnerThread();
         const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
         if (rt.gc.phase == .remove_cycles) {
@@ -823,6 +884,7 @@ pub const JSContext = struct {
     }
 
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, header: *gc.Header) void {
+        rt.assertOwnerThread();
         const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
         rt.destroyRuntime(JSContext, self);
     }
@@ -852,6 +914,7 @@ pub const JSContext = struct {
         try visitor.value(&self.eval_function);
         if (self.preallocated_oom_error) |*value| try visitor.value(value);
         try visitor.values(self.class_prototypes);
+        try visitor.values(&self.native_error_prototypes);
         if (self.cached_function_proto) |prototype| {
             var rooted: ?*Object = prototype;
             try visitor.optionalObject(&rooted);
@@ -863,9 +926,6 @@ pub const JSContext = struct {
             self.cached_promise_proto = rooted;
         }
         for (&self.cached_values) |*slot| if (slot.*) |*value| try visitor.value(value);
-        if (self.shared_lazy_native_functions) |cache| {
-            for (cache) |*slot| if (slot.*) |*value| try visitor.value(value);
-        }
         if (self.regexp_legacy_statics) |legacy| {
             if (legacy.input) |*value| try visitor.value(value);
             if (legacy.last_match) |*value| try visitor.value(value);
@@ -885,7 +945,8 @@ pub const JSContext = struct {
     /// runtime context-list link is deliberately absent: it is membership, not
     /// ownership.
     pub fn traceChildEdgesNoFail(self: *JSContext, visitor: anytype) void {
-        if (self.publication_state != .live) return;
+        if (self.publication_state == .finalizing) return;
+        self.modules.traceChildEdgesNoFail(visitor);
         for (self.unhandled_rejections) |*entry| {
             visitor.visitValue(&entry.promise);
             visitor.visitValue(&entry.reason);
@@ -893,6 +954,7 @@ pub const JSContext = struct {
         visitor.visitValue(&self.eval_function);
         if (self.preallocated_oom_error) |*value| visitor.visitValue(value);
         for (self.class_prototypes) |*prototype| visitor.visitValue(prototype);
+        for (&self.native_error_prototypes) |*prototype| visitor.visitValue(prototype);
         visitor.visitObject(&self.cached_function_proto);
         visitor.visitObject(&self.cached_promise_proto);
         if (self.array_shape) |owned| visitor.visitShape(owned);
@@ -901,9 +963,6 @@ pub const JSContext = struct {
         if (self.regexp_shape) |owned| visitor.visitShape(owned);
         if (self.regexp_result_shape) |owned| visitor.visitShape(owned);
         for (&self.cached_values) |*slot| if (slot.*) |*value| visitor.visitValue(value);
-        if (self.shared_lazy_native_functions) |cache| {
-            for (cache) |*slot| if (slot.*) |*value| visitor.visitValue(value);
-        }
         if (self.regexp_legacy_statics) |legacy| {
             if (legacy.input) |*value| visitor.visitValue(value);
             if (legacy.last_match) |*value| visitor.visitValue(value);
@@ -930,43 +989,6 @@ pub const JSContext = struct {
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         const self: *JSContext = @ptrCast(@alignCast(context));
         try self.traceRoots(visitor);
-    }
-
-    pub fn ensurePendingPromiseJobCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.runtime.pending_promise_jobs_capacity >= min_capacity) return;
-        var next_capacity = if (self.runtime.pending_promise_jobs_capacity == 0) @as(usize, 4) else self.runtime.pending_promise_jobs_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.runtime.memory.alloc(PendingPromiseJob, next_capacity);
-        errdefer self.runtime.memory.free(PendingPromiseJob, next);
-        const old_jobs = self.runtime.pending_promise_jobs;
-        const old_capacity = self.runtime.pending_promise_jobs_capacity;
-        @memcpy(next[0..old_jobs.len], old_jobs);
-        self.runtime.pending_promise_jobs = next[0..old_jobs.len];
-        self.runtime.pending_promise_jobs_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.runtime.memory.free(PendingPromiseJob, old_jobs.ptr[0..old_capacity]);
-        }
-    }
-
-    pub fn peekPendingPromiseJobSequence(self: JSContext) ?u64 {
-        if (self.runtime.pending_promise_jobs.len == 0) return null;
-        return self.runtime.pending_promise_jobs[0].sequence;
-    }
-
-    pub fn takePendingPromiseJob(self: *JSContext) ?PendingPromiseJob {
-        if (self.runtime.pending_promise_jobs.len == 0) return null;
-        const job = self.runtime.pending_promise_jobs[0];
-        const old_len = self.runtime.pending_promise_jobs.len;
-        if (old_len == 1) {
-            const old_jobs = self.runtime.pending_promise_jobs.ptr[0..self.runtime.pending_promise_jobs_capacity];
-            self.runtime.pending_promise_jobs = &.{};
-            self.runtime.pending_promise_jobs_capacity = 0;
-            self.runtime.memory.free(PendingPromiseJob, old_jobs);
-            return job;
-        }
-        @memmove(self.runtime.pending_promise_jobs[0 .. old_len - 1], self.runtime.pending_promise_jobs[1..old_len]);
-        self.runtime.pending_promise_jobs = self.runtime.pending_promise_jobs.ptr[0 .. old_len - 1];
-        return job;
     }
 
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {

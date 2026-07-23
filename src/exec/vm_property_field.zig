@@ -88,15 +88,15 @@ fn sameBindingGetPut(get: BindingGet, put: BindingPut) bool {
     return get.idx == put.idx and get.is_var_ref == put.is_var_ref;
 }
 
-fn decodeRegExpMatchGet(function: *const bytecode.Bytecode, pc: usize) ?RegExpMatchGet {
-    const code = function.code;
+fn decodeRegExpMatchGet(function: *const bytecode.FunctionBytecode, pc: usize) ?RegExpMatchGet {
+    const code = function.byteCode();
     if (decodeBindingGet(code, pc)) |get| return .{ .binding = get };
     if (decodeGlobalDataGet(function, pc)) |get| return .{ .global = get };
     return null;
 }
 
-fn decodeRegExpMatchPut(function: *const bytecode.Bytecode, pc: usize) ?RegExpMatchPut {
-    const code = function.code;
+fn decodeRegExpMatchPut(function: *const bytecode.FunctionBytecode, pc: usize) ?RegExpMatchPut {
+    const code = function.byteCode();
     if (decodeBindingPut(code, pc)) |put| return .{ .binding = put };
     if (decodeGlobalPut(function, pc)) |put| return .{ .global = put };
     return null;
@@ -134,7 +134,7 @@ pub fn toPropKey(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) !void {
     const value = try stack.pop();
@@ -149,7 +149,7 @@ pub noinline fn toPropKeyVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
@@ -165,13 +165,13 @@ pub noinline fn setName(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     opc: u8,
 ) !void {
     switch (opc) {
         op.set_name => {
-            const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+            const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
             frame.pc += 4;
             if (stack.len() == 0) return error.StackUnderflow;
             const value = try stackValueFromTop(stack, 0);
@@ -207,7 +207,7 @@ pub noinline fn inOrInstanceof(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
@@ -228,13 +228,13 @@ pub noinline fn field(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,
 ) !Step {
     const site_pc = frame.pc - 1;
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     switch (opc) {
         op.get_field => {
@@ -507,13 +507,7 @@ inline fn typedArrayShapePropertyForFastPath(
             }
             break :accessor .{ .getter = getter };
         },
-        .auto_init => auto_init: {
-            const info = core.property.autoInitAt(rt, holder.prop_values[index].slot.auto_init).*;
-            if (info.kind == .native_accessor and typedArrayNativeAccessorIdMatches(info.native_builtin_id, expected_id)) {
-                break :auto_init typedArrayIntrinsicNamedValue(rt, receiver, atom_id);
-            }
-            break :auto_init null;
-        },
+        .auto_init => null,
         .var_ref => null,
     };
 }
@@ -759,7 +753,7 @@ pub noinline fn arrayElement(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     opc: u8,

@@ -345,7 +345,7 @@ pub fn toStringForAnnexB(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // qjs `JS_ToString` on a symbol throws TypeError "cannot convert symbol to
@@ -375,7 +375,7 @@ pub fn toStringCheckObject(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (value.isNull() or value.isUndefined())
@@ -388,7 +388,7 @@ pub fn toPrimitiveForString(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!value.isObject()) return value.dup();
@@ -418,7 +418,7 @@ pub fn toOrdinaryPrimitiveString(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", caller_function, caller_frame)) |primitive| return primitive;
@@ -432,7 +432,7 @@ pub fn qjsStringFunctionCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len == 0) return value_ops.createStringValue(ctx.runtime, "");
@@ -461,7 +461,7 @@ pub fn qjsStringConstructWithPrototype(
     global: *core.Object,
     prototype: ?*core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const string_value = if (args.len == 0)
@@ -478,7 +478,7 @@ pub fn qjsStringConcat(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) {
@@ -544,7 +544,7 @@ fn qjsStringConcatSlow(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
@@ -592,7 +592,7 @@ pub fn qjsStringReplace(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return qjsStringReplaceCore(ctx, output, global, this_value, args, false, caller_function, caller_frame);
@@ -614,7 +614,7 @@ noinline fn qjsStringReplaceCore(
     this_value: core.JSValue,
     args: []const core.JSValue,
     is_replace_all: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
@@ -798,7 +798,7 @@ pub fn callStringReplaceMethod(
     this_value: core.JSValue,
     search_value: core.JSValue,
     replace_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!search_value.isObject()) return null;
@@ -865,7 +865,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     var emitted: usize = 0;
     while (index < length) : (index += 1) {
         if (index > std.math.maxInt(u32)) break;
-        const site_value = sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+        const site_value = try sites.getProperty(core.atom.atomFromUInt32(@intCast(index)));
         defer site_value.free(ctx.runtime);
         const site = objectFromValue(site_value) orelse continue;
         if (!site.isCallSite()) continue;
@@ -924,7 +924,7 @@ pub fn qjsStringRaw(
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const template_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -990,7 +990,7 @@ pub fn qjsStringFromCodePointArray(
     defer units.deinit(ctx.runtime.memory.allocator);
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        const value = array.getProperty(core.atom.atomFromUInt32(index));
+        const value = try array.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(ctx.runtime);
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
         defer primitive.free(ctx.runtime);
@@ -1143,21 +1143,12 @@ pub fn qjsRegExpAutoInitBuiltinMatches(info: core.property.AutoInit, expected_id
     return native_ref.domain == .regexp and native_ref.id == expected_id;
 }
 
-/// Like `qjsRegExpAutoInitBuiltinMatches` but for a lazily-installed native
-/// accessor (the RegExp.prototype flag getters live as `.native_accessor`
-/// auto-init descriptors whose getter native-builtin id is `native_builtin_id`).
-pub fn qjsRegExpAutoInitAccessorBuiltinMatches(info: core.property.AutoInit, expected_id: u32) bool {
-    if (info.kind != .native_accessor) return false;
-    const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return false;
-    return native_ref.domain == .regexp and native_ref.id == expected_id;
-}
-
 pub fn qjsRegExpToString(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1204,7 +1195,7 @@ pub fn qjsRegExpSymbolSearch(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1220,7 +1211,7 @@ pub fn qjsRegExpSymbolMatch(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1236,7 +1227,7 @@ pub fn qjsRegExpSymbolMatchAll(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1286,7 +1277,7 @@ pub fn qjsStringMatchAll(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
@@ -1343,7 +1334,7 @@ pub fn qjsRegExpSymbolReplace(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1360,7 +1351,7 @@ pub fn qjsRegExpSymbolSplit(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
@@ -1400,7 +1391,7 @@ pub fn qjsRegExpSplitFlags(
     output: ?*std.Io.Writer,
     global: *core.Object,
     rx: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const flags_string = try getRegExpFlagsString(ctx, output, global, rx, caller_function, caller_frame);
@@ -1431,7 +1422,7 @@ pub fn qjsRegExpSymbolSplitGeneric(
     string_value: core.JSValue,
     limit: u32,
     unicode_matching: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // `string_value` is already the result of ToString. Borrow its flat body
@@ -1520,7 +1511,7 @@ pub fn qjsRegExpSymbolSearchGeneric(
     global: *core.Object,
     rx: core.JSValue,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const previous = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
@@ -1550,7 +1541,7 @@ pub fn qjsRegExpSymbolMatchGeneric(
     global: *core.Object,
     rx: core.JSValue,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const flags_string = try getRegExpFlagsString(ctx, output, global, rx, caller_function, caller_frame);
@@ -1616,7 +1607,7 @@ pub fn qjsRegExpSymbolReplaceGeneric(
     rx: core.JSValue,
     string_value: core.JSValue,
     replace_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const functional_replace = isCallableValue(replace_value);
@@ -1726,7 +1717,7 @@ pub fn qjsRegExpReplaceFast(
     rx: core.JSValue,
     string_value: core.JSValue,
     replacement_string: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rx_object = objectFromValue(rx) orelse return null;
@@ -1842,7 +1833,7 @@ pub fn qjsRegExpSymbolReplaceLiteral(
     replacement_string: core.JSValue,
     is_global: bool,
     full_unicode: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var source_units = std.ArrayList(u16).empty;
@@ -1904,7 +1895,7 @@ pub fn captureReplaceLiteralMatch(
     global: *core.Object,
     result: core.JSValue,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !ReplaceLiteralMatch {
     errdefer result.free(ctx.runtime);
@@ -1969,7 +1960,7 @@ pub fn getRegExpFlagsStringForReplace(
     output: ?*std.Io.Writer,
     global: *core.Object,
     rx: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return getRegExpFlagsString(ctx, output, global, rx, caller_function, caller_frame);
@@ -1980,7 +1971,7 @@ pub fn getRegExpFlagsString(
     output: ?*std.Io.Writer,
     global: *core.Object,
     rx: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const flags_atom = comptime core.atom.predefinedId("flags", .string).?;
@@ -1995,7 +1986,7 @@ pub fn captureReplaceMatch(
     global: *core.Object,
     result: core.JSValue,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !ReplaceMatch {
     errdefer result.free(ctx.runtime);
@@ -2068,7 +2059,7 @@ pub fn callReplaceFunction(
     replacer: core.JSValue,
     match: ReplaceMatch,
     string_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const extra: usize = if (match.groups.isUndefined()) 2 else 3;
@@ -2092,7 +2083,7 @@ pub fn getSubstitutionString(
     match: ReplaceMatch,
     string_value: core.JSValue,
     replacement_string: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const named_captures = if (match.groups.isUndefined())
@@ -2445,7 +2436,7 @@ pub fn qjsStringTrim(
     global: *core.Object,
     this_value: core.JSValue,
     method_id: u32,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
@@ -2460,7 +2451,7 @@ pub fn qjsStringPrototypeMethod(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // The RegExp-coupled methods (search/match/split/replaceAll/matchAll) start
@@ -2554,7 +2545,7 @@ pub fn qjsStringSearchPositionMethod(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
@@ -2595,7 +2586,7 @@ pub fn isRegExpForStringSearch(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     return isRegExpObservable(ctx, output, global, value, caller_function, caller_frame);
@@ -2607,7 +2598,7 @@ pub fn qjsStringReplaceAll(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return qjsStringReplaceCore(ctx, output, global, this_value, args, true, caller_function, caller_frame);
@@ -2619,7 +2610,7 @@ pub fn qjsStringSearch(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
@@ -2636,7 +2627,7 @@ pub fn qjsStringIterator(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
@@ -2665,7 +2656,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     const iterator_method = try core.function.nativeFunction(ctx, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
-    if (!iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
+    if (!try iterator_function.addIteratorIdentityFunction(ctx.runtime)) return error.TypeError;
     const iterator_atom = (comptime core.atom.predefinedId("Symbol.iterator", .symbol)) orelse return error.TypeError;
     try object.defineOwnProperty(ctx.runtime, iterator_atom, core.Descriptor.data(iterator_method, true, false, true));
 
@@ -2683,7 +2674,7 @@ pub fn qjsStringMatch(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
@@ -2704,11 +2695,11 @@ pub fn qjsStringRegExpCreateAndInvoke(
     string_value: core.JSValue,
     regexp: core.JSValue,
     symbol_name: []const u8,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const regexp_key = comptime core.atom.predefinedId("RegExp", .string).?;
-    const constructor = global.getProperty(regexp_key);
+    const constructor = try global.getProperty(regexp_key);
     defer constructor.free(ctx.runtime);
     const rx = try qjsRegExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{regexp}, caller_function, caller_frame);
     defer rx.free(ctx.runtime);
@@ -2727,7 +2718,7 @@ pub fn callStringWellKnownMethod(
     this_value: core.JSValue,
     candidate: core.JSValue,
     symbol_name: []const u8,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (candidate.isUndefined() or candidate.isNull()) return null;
@@ -2747,7 +2738,7 @@ pub fn qjsStringSplit(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // js_string_split (quickjs.c:46133): nullish receiver -> "cannot convert to object".
@@ -3663,7 +3654,7 @@ pub fn qjsBigIntPrototypeToString(
     global: *core.Object,
     primitive: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = caller_function;
@@ -3780,7 +3771,7 @@ pub fn qjsErrorToStringCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(this_value) orelse return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
@@ -3825,7 +3816,7 @@ pub fn toStringBytesForSymbol(
     output: ?*std.Io.Writer,
     global: *core.Object,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) ![]u8 {
     if (value.isSymbol()) return error.TypeError;
@@ -3851,7 +3842,7 @@ pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expecte
 pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSValue, expected_name: []const u8) !bool {
     if (!thrown_value.isObject()) return false;
     const thrown_object = property_ops.expectObject(thrown_value) catch return false;
-    const ctor_value = thrown_object.getProperty(core.atom.ids.constructor);
+    const ctor_value = try thrown_object.getProperty(core.atom.ids.constructor);
     defer ctor_value.free(rt);
     if (ctor_value.isObject()) {
         const ctor = property_ops.expectObject(ctor_value) catch null;
@@ -3861,7 +3852,7 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
             if (std.mem.eql(u8, name, expected_name)) return true;
         }
     }
-    const name_value = thrown_object.getProperty(core.atom.ids.name);
+    const name_value = try thrown_object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
     if (!name_value.isString()) return false;
     var name_bytes = std.ArrayList(u8).empty;
@@ -3917,7 +3908,7 @@ pub fn qjsArraySearchCall(
         };
         const method_atom = try ctx.runtime.internAtom(name);
         defer ctx.runtime.atoms.free(method_atom);
-        const array_method = array_proto.getProperty(method_atom);
+        const array_method = try array_proto.getProperty(method_atom);
         defer array_method.free(ctx.runtime);
         if (objectFromValue(array_method) != function_object and !is_typed_array) return null;
     }
@@ -4036,7 +4027,7 @@ pub fn qjsArrayConcatCall(
     receiver: core.JSValue,
     func: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const function_object = callableObjectFromValue(func) orelse return null;
@@ -4070,7 +4061,7 @@ pub fn concatAppendValue(
     out: *core.Object,
     next_index: *usize,
     value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const max_safe_length: usize = 9007199254740991;
@@ -4111,14 +4102,14 @@ pub fn concatSpreadLengthValue(
     global: *core.Object,
     value: core.JSValue,
     object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const dynamic = try getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
     errdefer dynamic.free(ctx.runtime);
     if (!core.object.isTypedArrayObject(object) or object.typedArrayFixedLength() == null) return dynamic;
     if (try core.object.typedArrayOutOfBounds(object)) return dynamic;
-    const own = object.getOwnProperty(ctx.runtime, core.atom.ids.length) orelse return dynamic;
+    const own = (try object.getOwnProperty(ctx.runtime, core.atom.ids.length)) orelse return dynamic;
     defer own.destroy(ctx.runtime);
     if (own.kind != .data or !own.value.isNumber() or !dynamic.isNumber()) return dynamic;
     const own_number = value_ops.numberValue(own.value) orelse return dynamic;
@@ -4136,7 +4127,7 @@ pub fn isConcatSpreadable(
     global: *core.Object,
     value: core.JSValue,
     object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     const spreadable_atom = (comptime core.atom.predefinedId("Symbol.isConcatSpreadable", .symbol)) orelse return arraySpeciesOriginalIsArray(object);
@@ -4198,7 +4189,7 @@ pub fn qjsRegExpStringIteratorNext(
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const iterator = property_ops.expectObject(receiver) catch return null;
@@ -4275,7 +4266,7 @@ pub fn getFastStringPrimitiveDataProperty(
     if (proto.hasExoticMethods()) return null;
     var slow = false;
     if (proto.findOwnDataValueFast(atom_id, &slow)) |value| return value.dup();
-    if (slow) return ownDataOrAutoInitPropertyValue(proto, atom_id);
+    if (slow) return try ownDataOrAutoInitPropertyValue(proto, atom_id);
     return null;
 }
 
@@ -4346,7 +4337,7 @@ pub fn qjsArrayToStringCall(
     global: *core.Object,
     this_value: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_string))) {
@@ -4371,7 +4362,7 @@ pub fn qjsArrayToLocaleStringCall(
     global: *core.Object,
     this_value: core.JSValue,
     function_object: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (!isArrayPrototypeRecord(function_object, @intFromEnum(method_ids.array.PrototypeMethod.to_locale_string))) {
@@ -4426,7 +4417,7 @@ pub fn qjsObjectToLocaleStringCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const to_string_key = try ctx.runtime.internAtom("toString");
@@ -4441,7 +4432,7 @@ pub fn qjsObjectToStringCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isUndefined()) return try qjsObjectTagString(ctx.runtime, "Undefined");
@@ -4456,7 +4447,7 @@ pub fn qjsObjectToStringIntrinsic(
     output: ?*std.Io.Writer,
     global: *core.Object,
     object_value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const object = try property_ops.expectObject(object_value);
@@ -4494,12 +4485,18 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         return "Object";
     }
     if (object.isArray()) return "Array";
+    if (core.class.isBytecodeFunctionClass(object.class_id)) {
+        return switch (object.class_id) {
+            core.class.ids.bytecode_function => bytecodeFunctionObjectTag(object),
+            core.class.ids.generator_function => "GeneratorFunction",
+            core.class.ids.async_function => "AsyncFunction",
+            core.class.ids.async_generator_function => "AsyncGeneratorFunction",
+            else => unreachable,
+        };
+    }
     return switch (object.class_id) {
         core.class.ids.arguments, core.class.ids.mapped_arguments => "Arguments",
         core.class.ids.error_ => "Error",
-        core.class.ids.generator_function => "GeneratorFunction",
-        core.class.ids.async_function => "AsyncFunction",
-        core.class.ids.bytecode_function => bytecodeFunctionObjectTag(object),
         core.class.ids.c_function,
         core.class.ids.bound_function,
         core.class.ids.c_function_data,
@@ -4513,6 +4510,29 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         core.class.ids.array_buffer => "ArrayBuffer",
         else => "Object",
     };
+}
+
+test "default object tag distinguishes bytecode function classes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    const expected_tags = [_][]const u8{
+        "Function",
+        "GeneratorFunction",
+        "AsyncFunction",
+        "AsyncGeneratorFunction",
+    };
+    for (class_ids, expected_tags) |class_id, expected_tag| {
+        const function_object = try core.Object.create(rt, class_id, null);
+        defer function_object.value().free(rt);
+        try std.testing.expectEqualStrings(expected_tag, try defaultObjectToStringTag(function_object));
+    }
 }
 
 pub fn objectIsArrayForToString(object: *core.Object) !bool {
@@ -4700,7 +4720,7 @@ pub fn qjsStringPad(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
@@ -4762,7 +4782,7 @@ pub fn qjsStringNormalize(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
@@ -4802,7 +4822,7 @@ pub fn qjsStringLocaleCompare(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
@@ -4851,7 +4871,7 @@ pub fn qjsStringNumericArgsMethod(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
@@ -4971,7 +4991,7 @@ pub fn qjsStringHtmlMethod(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
@@ -5009,7 +5029,7 @@ fn qjsStringCreateHtml(
     has_attr: bool,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var out = std.ArrayList(u16).empty;

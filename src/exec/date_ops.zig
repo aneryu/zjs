@@ -123,7 +123,7 @@ pub fn qjsDateSetYear(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const object = object_ops.objectFromValue(this_value) orelse return null;
@@ -142,7 +142,7 @@ pub fn qjsDateSetTime(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const object = object_ops.objectFromValue(this_value) orelse return null;
@@ -160,7 +160,7 @@ pub fn qjsDateStaticCall(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     _ = this_value;
@@ -183,7 +183,7 @@ pub fn qjsDateCapturedSetterCall(
     this_value: core.JSValue,
     method_id: u32,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (method_id < 25 or method_id > 31) return null;
@@ -223,7 +223,7 @@ pub fn qjsDateToJsonCall(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     _ = args;
@@ -296,7 +296,7 @@ pub fn qjsDateToPrimitiveCall(
     global: *core.Object,
     this_value: core.JSValue,
     args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!this_value.isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
@@ -326,7 +326,7 @@ fn qjsDateOrdinaryToPrimitive(
     global: *core.Object,
     receiver: core.JSValue,
     string_first: bool,
-    caller_function: ?*const bytecode.Bytecode,
+    caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (string_first) {
@@ -488,6 +488,11 @@ fn dateCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
+    const callable_global: ?*core.Object = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global;
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
@@ -522,11 +527,11 @@ fn dateCall(
     }
 
     if (id == @intFromEnum(PrototypeMethod.to_primitive)) {
-        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         return qjsDateToPrimitiveCall(ctx, output, active_global, host_call.this_value, args, caller_function, caller_frame);
     }
     if (id == @intFromEnum(StaticMethod.utc)) {
-        const active_global = host_call.global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         var coerced_args: [7]core.JSValue = undefined;
         var coerced_len: usize = 0;
         defer {
@@ -544,18 +549,18 @@ fn dateCall(
         // js_Date_parse (quickjs.c:55907) ToString-coerces its argument (never
         // a TypeError arity/type gate); the coercion runs in VM context so a
         // user `toString`/`Symbol.toPrimitive` executes with the caller frame.
-        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
         defer string_value.free(ctx.runtime);
         return core.JSValue.float64(try parseDateString(ctx.runtime, string_value));
     }
     if (decodeExtendedPrototypeMethodId(id)) |method_id| {
-        const active_global = host_call.global orelse realmGlobalFor(ctx, host_call.func_obj) orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         return dateExtendedPrototypeCall(ctx, output, active_global, host_call.this_value, method_id, args);
     }
     if (decodePrototypeMethodId(id)) |method_id| {
-        const active_global = host_call.global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.TypeError;
         return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
@@ -634,13 +639,6 @@ fn dateExtendedPrototypeCall(
         error.TypeError => return vm_exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
         else => err,
     };
-}
-
-fn realmGlobalFor(ctx: *core.JSContext, func_obj: ?*core.Object) ?*core.Object {
-    if (func_obj) |obj| {
-        if (object_ops.objectRealmGlobal(obj)) |realm_global| return realm_global;
-    }
-    return ctx.global;
 }
 
 // Pure name->id mapping relocated to engine core (`core/host_function.zig`,

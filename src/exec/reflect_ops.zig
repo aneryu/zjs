@@ -32,17 +32,14 @@ const array_construct_ref = core.function.NativeBuiltinRef{
 // Shared call-runtime helpers that stay with the dispatcher in exec/call.zig.
 const activeGlobalObject = call.activeGlobalObject;
 const callValueWithThisGlobalsAndGlobal = call.callValueWithThisGlobalsAndGlobal;
-const constructorPrototype = call.constructorPrototype;
 const defineObjectProperty = call.defineObjectProperty;
 const descriptorFromObject = call.descriptorFromObject;
-const expectCallableObject = call.expectCallableObject;
 const expectObjectArg = call.expectObjectArg;
 const functionPrototypeFromGlobal = call.functionPrototypeFromGlobal;
 const getValueProperty = call.getValueProperty;
 const isCallableObjectValue = call.isCallableObjectValue;
 const nativeFunctionName = call.nativeFunctionName;
 const primitiveWrapper = call.primitiveWrapper;
-const realmPrototypeKey = call.realmPrototypeKey;
 const thisObject = call.thisObject;
 
 pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
@@ -67,23 +64,26 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             var construct_args = ReflectConstructArguments{};
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, proto_name, new_target, args[0]);
-            if (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, native_ref, prototype, construct_args.values, null, null)) |value| return value;
+            var prototype = try reflectConstructPrototype(ctx, proto_name, new_target);
+            defer prototype.deinit(rt);
+            if (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, native_ref, prototype.object(), construct_args.values, null, null)) |value| return value;
         }
     }
     if (target_name) |name| {
-        if (std.mem.eql(u8, name, "Array")) {
+        if (std.mem.eql(u8, name, "Array") and target.arrayBuiltinMarker() == .constructor) {
             if (args.len < 2) return error.TypeError;
             var construct_args = ReflectConstructArguments{};
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, array_construct_ref, prototype, construct_args.values, null, null)) orelse error.TypeError;
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, array_construct_ref, prototype.object(), construct_args.values, null, null)) orelse error.TypeError;
         }
         if (std.mem.eql(u8, name, "Iterator")) {
             if (new_target.sameValue(args[0])) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const instance = try core.Object.create(rt, core.class.ids.object, prototype);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            const instance = try core.Object.create(rt, core.class.ids.object, prototype.object());
             errdefer core.Object.destroyFromHeader(rt, &instance.header);
             return instance.value();
         }
@@ -100,8 +100,9 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
                 }
                 break :blk value_ops.numberToValue(try value_ops.toIntegerOrInfinity(rt, construct_args.values[0]));
             } else core.JSValue.int32(0);
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return primitiveWrapper(ctx, core.class.ids.number, primitive, prototype);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            return primitiveWrapper(ctx, core.class.ids.number, primitive, prototype.object());
         }
         if (std.mem.eql(u8, name, "FinalizationRegistry")) {
             var construct_args = ReflectConstructArguments{};
@@ -109,8 +110,9 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             defer construct_args.deinit();
             const cleanup_callback = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
             if (!isCallableObjectValue(cleanup_callback)) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const instance = try core.Object.create(rt, core.class.ids.finalization_registry, prototype);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            const instance = try core.Object.createFinalizationRegistry(rt, ctx, prototype.object());
             errdefer core.Object.destroyFromHeader(rt, &instance.header);
             try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
             return instance.value();
@@ -121,35 +123,38 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             defer construct_args.deinit();
             const target_value = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
             if (!core.symbol.canBeHeldWeakly(rt, target_value)) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return construct_mod.weakRefWithPrototype(rt, target_value, prototype);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            return construct_mod.weakRefWithPrototype(rt, target_value, prototype.object());
         }
         if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| {
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
             const construct_id = core.host_function.builtin_method_id_lookup.collection.constructIdForKind(kind) orelse return error.TypeError;
             const collection_construct_ref = core.function.NativeBuiltinRef{ .domain = .collection, .id = construct_id };
-            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, collection_construct_ref, prototype, &.{}, null, null)) orelse error.TypeError;
+            return (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, collection_construct_ref, prototype.object(), &.{}, null, null)) orelse error.TypeError;
         }
         if (construct_mod.typedArrayElement(name)) |element| {
             var construct_args = ReflectConstructArguments{};
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const global_object = try activeGlobalObject(rt, null, globals);
-            return construct_mod.constructTypedArrayValue(rt, prototype, element, construct_args.values, global_object);
+            var prototype = try reflectConstructPrototype(ctx, name, new_target);
+            defer prototype.deinit(rt);
+            return construct_mod.constructTypedArrayValue(rt, target, prototype.object(), element, construct_args.values);
         }
     }
 
     {
-        const prototype = try reflectConstructPrototype(rt, target_name orelse "Object", new_target, args[0]);
-        const instance = try core.Object.create(rt, core.class.ids.object, prototype);
+        var prototype = try reflectConstructPrototype(ctx, target_name orelse "Object", new_target);
+        defer prototype.deinit(rt);
+        const instance = try core.Object.create(rt, core.class.ids.object, prototype.object());
         errdefer core.Object.destroyFromHeader(rt, &instance.header);
         return instance.value();
     }
 }
 
-/// Map a decoded native-builtin id to the realm-prototype-key name used by
-/// `reflectConstructPrototype`, for the construct-capable records `Reflect
+/// Map a decoded native-builtin id to the intrinsic instance class name used
+/// by `reflectConstructPrototype`, for the construct-capable records `Reflect
 /// .construct` routes through the table. Returns null for ids that are not
 /// table-dispatched construct records here, so they fall through to the
 /// name cascade / ordinary-instance fallback below.
@@ -211,7 +216,7 @@ fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]cor
     }
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        out[index] = object.getProperty(core.atom.atomFromUInt32(index));
+        out[index] = try object.getProperty(core.atom.atomFromUInt32(index));
         initialized += 1;
         rooted_out = out[0..initialized];
     }
@@ -251,39 +256,23 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     };
 }
 
-fn reflectConstructPrototype(rt: *core.JSRuntime, target_name: []const u8, new_target: core.JSValue, target: core.JSValue) !?*core.Object {
-    if (thisObject(new_target)) |new_target_object| {
-        const prototype_value = new_target_object.getProperty(core.atom.ids.prototype);
-        defer prototype_value.free(rt);
-        if (prototype_value.isObject()) {
-            const header = prototype_value.refHeader() orelse return null;
-            return @fieldParentPtr("header", header);
-        }
-        var realm_source = new_target_object;
-        while (true) {
-            if (realm_source.class_id == core.class.ids.bound_function) {
-                realm_source = boundFunctionTargetObject(realm_source) orelse break;
-                continue;
-            }
-            if (realm_source.proxyTarget()) |target_value| {
-                realm_source = thisObject(target_value) orelse break;
-                continue;
-            }
-            break;
-        }
-        const realm_key = try realmPrototypeKey(rt, target_name);
-        defer rt.memory.allocator.free(realm_key);
-        const realm_proto_key = try rt.internAtom(realm_key);
-        defer rt.atoms.free(realm_proto_key);
-        const realm_proto_value = realm_source.getProperty(realm_proto_key);
-        defer realm_proto_value.free(rt);
-        if (realm_proto_value.isObject()) {
-            const header = realm_proto_value.refHeader() orelse return null;
-            return @fieldParentPtr("header", header);
-        }
+fn reflectConstructPrototype(ctx: *core.JSContext, target_name: []const u8, new_target: core.JSValue) !object_ops.OwnedPrototype {
+    const rt = ctx.runtime;
+    const new_target_object = thisObject(new_target) orelse return error.TypeError;
+    const prototype_value = try new_target_object.getProperty(core.atom.ids.prototype);
+    if (prototype_value.isObject()) return .{ .value = prototype_value };
+    prototype_value.free(rt);
+
+    const fallback_realm = try call_runtime.functionRealmContext(ctx, new_target);
+    if (object_ops.constructorClassPrototypeId(target_name)) |class_id| {
+        return object_ops.OwnedPrototype.fromObject(fallback_realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
     }
-    const target_object = expectCallableObject(target) orelse return null;
-    return constructorPrototype(rt, target_object);
+
+    // Native Error subclasses use the separate realm native-error prototype
+    // family. Until that family is migrated, isolate its intrinsic lookup here
+    // without exposing or consulting any hidden realm property.
+    const fallback_global = fallback_realm.global orelse return error.InvalidBuiltinRegistry;
+    return object_ops.OwnedPrototype.fromObject(object_ops.constructorPrototypeFromGlobal(rt, fallback_global, target_name));
 }
 
 pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
@@ -319,19 +308,13 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     proxy.value().free(rt);
     // QuickJS `js_proxy_revocable` uses JS_NewCFunctionData: the revoker is a
     // captured-data callable and therefore executes in its caller's realm.
-    const revoke = try core.function.nativeDataFunction(rt, "revoke", 0);
+    const function_proto = functionPrototypeFromGlobal(rt, realm_global) orelse return error.InvalidBuiltinRegistry;
+    const revoke = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 0);
     defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
     // Data carriers deliberately do not populate the true-C-function record
     // cache; dispatch decodes this stable id in the final caller-data arm.
     revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
-    const empty_name = try core.string.String.createAscii(rt, "");
-    const empty_name_value = empty_name.value();
-    defer empty_name_value.free(rt);
-    try revoke_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name_value, false, false, true));
-    if (functionPrototypeFromGlobal(rt, realm_global)) |function_proto| {
-        try revoke_object.setPrototype(rt, function_proto);
-    }
     try revoke_object.setOptionalValueSlot(rt, try revoke_object.functionProxyRevokeTargetSlot(rt), proxy.value().dup());
     try defineObjectProperty(rt, object, "revoke", revoke);
     return object.value();
@@ -410,7 +393,7 @@ fn proxyReflectHasProperty(
         // Bare-runtime fallback (no realm global): keep the raw target reads;
         // the VM path below mirrors js_proxy_has's exotic-dispatching reads.
         if (trap_result) return true;
-        if (target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
+        if (try target.getOwnProperty(ctx.runtime, atom_id)) |desc| {
             defer desc.destroy(ctx.runtime);
             if (desc.configurable == false or !target.isExtensible()) return error.TypeError;
         }
@@ -458,7 +441,7 @@ pub fn reflectGet(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue
     const object = try expectObjectArg(args[0]);
     const key = try property_ops.propertyKeyAtom(rt, args[1]);
     defer rt.atoms.free(key);
-    return object.getProperty(key);
+    return try object.getProperty(key);
 }
 
 pub fn reflectSet(
@@ -484,11 +467,6 @@ pub fn reflectSet(
         else => return err,
     };
     return core.JSValue.boolean(true);
-}
-
-fn boundFunctionTargetObject(object: *core.Object) ?*core.Object {
-    const target = object.boundTarget() orelse return null;
-    return thisObject(target);
 }
 
 fn isBuiltinConstructorName(name: []const u8) bool {

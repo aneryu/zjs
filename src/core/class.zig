@@ -9,6 +9,7 @@ comptime {
 
 pub const ClassId = u16;
 pub const invalid_class_id: ClassId = 0;
+pub const MutationError = error{WrongRuntimeThread};
 
 /// QuickJS class identities are process-global: a runtime owns the class
 /// definition registered at an id, while the id itself belongs to the caller
@@ -240,14 +241,95 @@ pub const Record = struct {
     }
 };
 
+/// Mutable lifetime state lives beside the immutable class definition. A
+/// `Record *` is only a transient table view: growing `Table.records` may move
+/// every record, while this state is always reacquired by class id.
+const RegistrationState = struct {
+    generation: u64 = 0,
+    construction_pins: usize = 0,
+    live_object_pins: usize = 0,
+    callback_pins: usize = 0,
+    unregister_pending: bool = false,
+
+    fn isPinned(self: RegistrationState) bool {
+        return self.construction_pins != 0 or self.live_object_pins != 0 or self.callback_pins != 0;
+    }
+};
+
 pub const Table = struct {
+    pub const DefinitionPlan = struct {
+        generation: u64 = 0,
+        payload_kind: PayloadKind = .none,
+        inline_payload_size: u32 = 0,
+        inline_payload_align: u16 = 1,
+        has_payload_finalizer: bool = false,
+        has_exotic: bool = false,
+    };
+
+    /// Pins a dynamic definition while object construction may allocate,
+    /// collect, or invoke a reentrant host hook. It stores no pointer into a
+    /// movable table buffer.
+    pub const Construction = struct {
+        table: *Table,
+        class_id: ClassId,
+        definition: DefinitionPlan,
+        dynamic_pin_active: bool,
+
+        /// Transfer the construction pin to the initialized object immediately
+        /// before publishing it to the GC registry.
+        pub fn publishObject(self: *Construction) void {
+            self.table.assertOwnerThread();
+            if (!self.dynamic_pin_active) return;
+            const state = &self.table.registration_states[self.class_id];
+            // The construction pin makes unregister defer record removal. Other
+            // class registrations may still move the table, so reacquire by id
+            // and validate the generation before publication.
+            const record_view = self.table.recordPtr(self.class_id) orelse unreachable;
+            std.debug.assert(state.generation == self.definition.generation);
+            std.debug.assert(record_view.id == self.class_id);
+            std.debug.assert(state.construction_pins != 0);
+            state.construction_pins -= 1;
+            state.live_object_pins += 1;
+            self.dynamic_pin_active = false;
+        }
+
+        /// Release an unpublished construction view. Callers declare this
+        /// before their prepared-resource errdefers so pending unregister only
+        /// completes after those resources have unwound.
+        pub fn abort(self: *Construction) void {
+            self.table.assertOwnerThread();
+            if (!self.dynamic_pin_active) return;
+            const state = &self.table.registration_states[self.class_id];
+            std.debug.assert(state.generation == self.definition.generation);
+            std.debug.assert(state.construction_pins != 0);
+            state.construction_pins -= 1;
+            self.dynamic_pin_active = false;
+            self.table.completePendingUnregister(self.class_id);
+        }
+    };
+
+    /// Function pointers copied into a deferred payload-finalizer node. The
+    /// callback pin owns the definition until the callback returns.
+    pub const DeferredPayloadCallbacks = struct {
+        generation: u64,
+        finalizer: PayloadFinalizer,
+        mark: ?PayloadMark,
+    };
+
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
+    owner_thread_id: std.Thread.Id,
     records: []Record = &.{},
     records_inline: [ids.init_count]Record = @splat(.{}),
+    registration_states: []RegistrationState = &.{},
+    registration_states_inline: [ids.init_count]RegistrationState = @splat(.{}),
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
-        var table = Table{ .memory = account, .atoms = atoms };
+        var table = Table{
+            .memory = account,
+            .atoms = atoms,
+            .owner_thread_id = std.Thread.getCurrentId(),
+        };
         errdefer table.deinit();
         try table.ensureCapacity(ids.init_count);
         try table.registerStandardClasses();
@@ -255,9 +337,15 @@ pub const Table = struct {
     }
 
     pub fn initInPlace(self: *Table, account: *memory.MemoryAccount, atoms: *atom.AtomTable) !void {
-        self.* = .{ .memory = account, .atoms = atoms };
+        self.* = .{
+            .memory = account,
+            .atoms = atoms,
+            .owner_thread_id = std.Thread.getCurrentId(),
+        };
         self.records = self.records_inline[0..ids.init_count];
+        self.registration_states = self.registration_states_inline[0..ids.init_count];
         @memset(self.records, .{});
+        @memset(self.registration_states, .{});
         errdefer self.deinit();
         try self.registerStandardClasses();
     }
@@ -275,36 +363,166 @@ pub const Table = struct {
         return self.records.ptr == self.records_inline[0..].ptr;
     }
 
+    fn usingInlineRegistrationStates(self: *const Table) bool {
+        return self.registration_states.ptr == self.registration_states_inline[0..].ptr;
+    }
+
+    pub fn isOwnerThread(self: *const Table) bool {
+        return self.owner_thread_id == std.Thread.getCurrentId();
+    }
+
+    pub fn requireOwnerThread(self: *const Table) MutationError!void {
+        if (!self.isOwnerThread()) return error.WrongRuntimeThread;
+    }
+
+    pub fn assertOwnerThread(self: *const Table) void {
+        if (!self.isOwnerThread()) @panic("class table mutation from non-owner Runtime thread");
+    }
+
     pub fn deinit(self: *Table) void {
+        self.assertOwnerThread();
         const records = self.records;
         const using_inline = self.usingInlineRecords();
+        const registration_states = self.registration_states;
+        const using_inline_states = self.usingInlineRegistrationStates();
         self.records = &.{};
+        self.registration_states = &.{};
         for (records) |rec| {
             if (rec.isRegistered()) {
                 rec.finalizeBindingData();
                 self.atoms.free(rec.class_name);
             }
         }
+        for (registration_states) |state| std.debug.assert(!state.isPinned());
         if (using_inline) {
             @memset(records, .{});
         } else if (records.len != 0) {
             self.memory.free(Record, records);
         }
+        if (using_inline_states) {
+            @memset(registration_states, .{});
+        } else if (registration_states.len != 0) {
+            self.memory.free(RegistrationState, registration_states);
+        }
     }
 
     pub fn register(self: *Table, id: ClassId, def: Definition) !void {
+        try self.requireOwnerThread();
         const name_atom = try self.atoms.internString(def.class_name);
         defer self.atoms.free(name_atom);
         try self.registerAtom(id, name_atom, def);
     }
 
     pub fn unregisterDynamic(self: *Table, id: ClassId) void {
+        self.assertOwnerThread();
+        self.unregisterDynamicOwned(id);
+    }
+
+    /// Checked unregistration for embedding boundaries. Rejection happens
+    /// before the pending bit or class record is touched.
+    pub fn tryUnregisterDynamic(self: *Table, id: ClassId) MutationError!void {
+        try self.requireOwnerThread();
+        self.unregisterDynamicOwned(id);
+    }
+
+    fn unregisterDynamicOwned(self: *Table, id: ClassId) void {
         if (id < ids.init_count or id >= self.records.len) return;
-        const rec = self.records[id];
-        if (!rec.isRegistered()) return;
-        rec.finalizeBindingData();
-        self.atoms.free(rec.class_name);
-        self.records[id] = .{};
+        if (!self.records[id].isRegistered()) return;
+        self.registration_states[id].unregister_pending = true;
+        self.completePendingUnregister(id);
+    }
+
+    /// Snapshot the immutable scalars required during construction and pin a
+    /// dynamic definition. Standard definitions are runtime-lifetime and avoid
+    /// the counter traffic entirely.
+    pub fn beginConstruction(self: *Table, id: ClassId) error{InvalidClassId}!Construction {
+        self.assertOwnerThread();
+        if (id < ids.init_count) {
+            const generation = if (id < self.registration_states.len) self.registration_states[id].generation else 0;
+            return .{
+                .table = self,
+                .class_id = id,
+                .definition = definitionPlan(self.recordPtr(id), id, generation),
+                .dynamic_pin_active = false,
+            };
+        }
+        if (id >= self.records.len or !self.records[id].isRegistered()) return error.InvalidClassId;
+        const definition_view = self.recordPtr(id).?;
+        const state = &self.registration_states[id];
+        // Once removal is published, only constructions that already own this
+        // generation may finish. A later Object.create must not indefinitely
+        // extend a retired definition's lifetime.
+        if (state.unregister_pending) return error.InvalidClassId;
+        // An in-flight construction may finish from the exact pinned
+        // generation even after unregister was requested. Later unregister
+        // completion waits for the resulting live-object pin.
+        state.construction_pins += 1;
+        return .{
+            .table = self,
+            .class_id = id,
+            .definition = definitionPlan(definition_view, id, state.generation),
+            .dynamic_pin_active = true,
+        };
+    }
+
+    /// Reacquire the immutable destruction scalars for an object without
+    /// retaining a pointer across cleanup or finalizer callbacks.
+    pub fn destructionPlan(self: *const Table, id: ClassId) ?DefinitionPlan {
+        if (id < ids.init_count) {
+            const generation = if (id < self.registration_states.len) self.registration_states[id].generation else 0;
+            return definitionPlan(self.recordPtr(id), id, generation);
+        }
+        if (id >= self.records.len) return null;
+        const state = self.registration_states[id];
+        if (state.live_object_pins == 0) return null;
+        return definitionPlan(self.recordPtr(id) orelse return null, id, state.generation);
+    }
+
+    /// Release a dynamic object's definition pin only after its allocation is
+    /// gone (including weak-husk and cycle pass-B lifetimes).
+    pub fn releaseObjectDefinition(self: *Table, id: ClassId, generation: u64) void {
+        self.assertOwnerThread();
+        if (id < ids.init_count) return;
+        std.debug.assert(id < self.registration_states.len);
+        const state = &self.registration_states[id];
+        std.debug.assert(state.generation == generation);
+        std.debug.assert(state.live_object_pins != 0);
+        state.live_object_pins -= 1;
+        self.completePendingUnregister(id);
+    }
+
+    /// Copy the callbacks for a deferred node and retain the definition from
+    /// enqueue until callback completion.
+    pub fn pinDeferredPayloadCallbacks(self: *Table, id: ClassId, generation: u64) ?DeferredPayloadCallbacks {
+        self.assertOwnerThread();
+        const definition_view = self.recordPtr(id) orelse return null;
+        const finalizer = definition_view.payload_finalizer orelse return null;
+        if (id >= ids.init_count) {
+            const state = &self.registration_states[id];
+            if (state.generation != generation or state.live_object_pins == 0) return null;
+            state.callback_pins += 1;
+        }
+        return .{
+            .generation = generation,
+            .finalizer = finalizer,
+            .mark = definition_view.payload_mark,
+        };
+    }
+
+    pub fn releaseDeferredPayloadCallbacks(self: *Table, id: ClassId, generation: u64) void {
+        self.assertOwnerThread();
+        if (id < ids.init_count) return;
+        std.debug.assert(id < self.registration_states.len);
+        const state = &self.registration_states[id];
+        std.debug.assert(state.generation == generation);
+        std.debug.assert(state.callback_pins != 0);
+        state.callback_pins -= 1;
+        self.completePendingUnregister(id);
+    }
+
+    pub fn unregisterPending(self: *const Table, id: ClassId) bool {
+        if (id >= self.registration_states.len) return false;
+        return self.registration_states[id].unregister_pending;
     }
 
     pub fn isRegistered(self: Table, id: ClassId) bool {
@@ -313,6 +531,7 @@ pub const Table = struct {
     }
 
     pub fn className(self: *Table, id: ClassId) ?atom.Atom {
+        self.assertOwnerThread();
         if (!self.isRegistered(id)) return null;
         return self.atoms.dup(self.records[id].class_name);
     }
@@ -342,16 +561,16 @@ pub const Table = struct {
         return rec;
     }
 
-    /// Pointer-only view of a class record for hot paths (object creation).
+    /// Pointer-only view of a class record for no-GC/no-allocation/no-callback
+    /// windows.
     /// qjs `JS_NewObjectFromShape` reads `ctx->rt->class_array[class_id]` fields
     /// in place (`.exotic`, ...) — it never materializes the whole `JSClass` on
     /// the stack. Mirror that: return `*const Record` so callers touch just the
     /// fields they need (payload_kind / payload_finalizer / exotic) via scalar
-    /// loads instead of an 88B by-value SIMD block copy. The record table is
-    /// static once classes are registered; the pointer is only used transiently
-    /// within the caller (never stored across a class-registration point), so it
-    /// is stable and safe. Returns null for unregistered / out-of-range ids
-    /// exactly like `record`.
+    /// loads instead of an 88B by-value SIMD block copy. Dynamic registration
+    /// may move the complete table and unregister may clear a record, so this
+    /// pointer is not a stable handle. Spanning callers use the scalar plan plus
+    /// generation/pin APIs above.
     pub fn recordPtr(self: *const Table, id: ClassId) ?*const Record {
         if (id >= self.records.len) return null;
         const rec = &self.records[id];
@@ -359,47 +578,76 @@ pub const Table = struct {
         return rec;
     }
 
-    pub fn runFinalizer(self: *const Table, id: ClassId) bool {
-        const rec = self.record(id) orelse return false;
-        const finalizer = rec.finalizer orelse return false;
+    pub fn runFinalizer(self: *Table, id: ClassId) bool {
+        self.assertOwnerThread();
+        const generation = self.pinCallback(id) orelse return false;
+        defer self.releaseCallback(id, generation);
+        const finalizer = (self.recordPtr(id) orelse return false).finalizer orelse return false;
         finalizer();
         return true;
     }
 
     pub fn runPayloadFinalizerForTest(
-        self: *const Table,
+        self: *Table,
         id: ClassId,
         runtime: *anyopaque,
         object: *anyopaque,
         payload: *Payload,
     ) bool {
+        self.assertOwnerThread();
         if (!builtin.is_test) @compileError("runPayloadFinalizerForTest is only available in tests");
-        const rec = self.record(id) orelse return false;
-        const finalizer = rec.payload_finalizer orelse return false;
+        const generation = self.pinCallback(id) orelse return false;
+        defer self.releaseCallback(id, generation);
+        const finalizer = (self.recordPtr(id) orelse return false).payload_finalizer orelse return false;
+        finalizer(runtime, object, payload);
+        return true;
+    }
+
+    pub fn runPayloadFinalizer(
+        self: *Table,
+        id: ClassId,
+        expected_generation: u64,
+        runtime: *anyopaque,
+        object: *anyopaque,
+        payload: *Payload,
+    ) bool {
+        self.assertOwnerThread();
+        const generation = self.pinCallback(id) orelse return false;
+        defer self.releaseCallback(id, generation);
+        if (id >= ids.init_count and generation != expected_generation) return false;
+        const finalizer = (self.recordPtr(id) orelse return false).payload_finalizer orelse return false;
         finalizer(runtime, object, payload);
         return true;
     }
 
     pub fn markPayload(
-        self: *const Table,
+        self: *Table,
         id: ClassId,
         runtime: *anyopaque,
         object: *anyopaque,
         payload: *Payload,
         visitor: *PayloadVisitor,
     ) bool {
-        const rec = self.record(id) orelse return false;
-        const mark = rec.payload_mark orelse return false;
+        self.assertOwnerThread();
+        const generation = self.pinCallback(id) orelse return false;
+        defer self.releaseCallback(id, generation);
+        const mark = (self.recordPtr(id) orelse return false).payload_mark orelse return false;
         mark(runtime, object, payload, visitor);
         return true;
     }
 
     fn registerAtom(self: *Table, id: ClassId, name_atom: atom.Atom, def: Definition) !void {
+        try self.requireOwnerThread();
         if (id == invalid_class_id) return error.InvalidClassId;
         // `ClassId` is already u16, so 65535 is QuickJS's final legal id.
         // Widen before adding one to avoid wrapping the capacity bound.
         try self.ensureCapacity(@as(usize, id) + 1);
         if (self.records[id].isRegistered()) return error.DuplicateClass;
+        const state = &self.registration_states[id];
+        std.debug.assert(!state.isPinned());
+        std.debug.assert(!state.unregister_pending);
+        state.generation +%= 1;
+        if (state.generation == 0) state.generation = 1;
         self.records[id] = .{
             .id = id,
             .class_name = self.atoms.dup(name_atom),
@@ -419,22 +667,83 @@ pub const Table = struct {
     }
 
     fn ensureCapacity(self: *Table, needed: usize) !void {
+        try self.requireOwnerThread();
         if (needed <= self.records.len) return;
         var new_len = if (self.records.len == 0) @as(usize, ids.init_count) else self.records.len + self.records.len / 2;
         if (new_len < needed) new_len = needed;
 
         const next = try self.memory.alloc(Record, new_len);
         errdefer self.memory.free(Record, next);
+        const next_states = try self.memory.alloc(RegistrationState, new_len);
+        errdefer self.memory.free(RegistrationState, next_states);
         @memset(next, .{});
+        @memset(next_states, .{});
         const old_records = self.records;
+        const old_states = self.registration_states;
         if (old_records.len != 0) @memcpy(next[0..old_records.len], old_records);
+        if (old_states.len != 0) @memcpy(next_states[0..old_states.len], old_states);
         const old_using_inline = self.usingInlineRecords();
+        const old_states_using_inline = self.usingInlineRegistrationStates();
         self.records = next;
+        self.registration_states = next_states;
         if (old_using_inline) {
             @memset(old_records, .{});
         } else if (old_records.len != 0) {
             self.memory.free(Record, old_records);
         }
+        if (old_states_using_inline) {
+            @memset(old_states, .{});
+        } else if (old_states.len != 0) {
+            self.memory.free(RegistrationState, old_states);
+        }
+    }
+
+    fn definitionPlan(definition_view: ?*const Record, id: ClassId, generation: u64) DefinitionPlan {
+        if (definition_view) |registered| {
+            return .{
+                .generation = generation,
+                .payload_kind = registered.payload_kind,
+                .inline_payload_size = registered.inline_payload_size,
+                .inline_payload_align = registered.inline_payload_align,
+                .has_payload_finalizer = registered.payload_finalizer != null,
+                .has_exotic = registered.has_exotic or registered.exotic_methods != null,
+            };
+        }
+        return .{
+            .generation = generation,
+            .payload_kind = standardPayloadKind(id),
+        };
+    }
+
+    fn pinCallback(self: *Table, id: ClassId) ?u64 {
+        _ = self.recordPtr(id) orelse return null;
+        if (id < ids.init_count) return self.registration_states[id].generation;
+        const state = &self.registration_states[id];
+        state.callback_pins += 1;
+        return state.generation;
+    }
+
+    fn releaseCallback(self: *Table, id: ClassId, generation: u64) void {
+        if (id < ids.init_count) return;
+        const state = &self.registration_states[id];
+        std.debug.assert(state.generation == generation);
+        std.debug.assert(state.callback_pins != 0);
+        state.callback_pins -= 1;
+        self.completePendingUnregister(id);
+    }
+
+    fn completePendingUnregister(self: *Table, id: ClassId) void {
+        if (id < ids.init_count or id >= self.records.len) return;
+        const state = &self.registration_states[id];
+        if (!state.unregister_pending or state.isPinned()) return;
+        const old_definition = self.records[id];
+        std.debug.assert(old_definition.isRegistered());
+        self.records[id] = .{};
+        state.unregister_pending = false;
+        // Publish the empty slot before invoking/freeing definition-owned data:
+        // reentrant registration never observes a half-cleared old definition.
+        old_definition.finalizeBindingData();
+        self.atoms.free(old_definition.class_name);
     }
 };
 

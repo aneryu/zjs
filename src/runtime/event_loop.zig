@@ -90,7 +90,6 @@ pub const EventLoop = struct {
     }
 
     pub fn runUntilIdle(self: *EventLoop) !RunResult {
-        self.context.runtime.job_queue.runAll();
         const global = try self.context.globalObject();
         exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
             if (!self.context.hasException() and !self.context.hasUnhandledRejection()) return err;
@@ -229,6 +228,12 @@ pub const EventLoop = struct {
         }
         if (next_delay != std.math.maxInt(u64)) {
             const sleep_ms: i64 = @intCast(@min(next_delay, @as(u64, @intCast(std.math.maxInt(i64)))));
+            const deadline = std.Io.Timestamp.now(hostTimerIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(sleep_ms));
+            // A foreign waitAsync notification cannot wake libc.poll or a
+            // blind timer sleep. Wait on the Runtime completion event instead
+            // whenever such a node exists; the helper also shortens this wait
+            // to the earliest waitAsync deadline.
+            if (exec.call_runtime.waitForAtomicsHostSignalUntil(rt, deadline, false)) return true;
             std.Io.sleep(hostTimerIo(), std.Io.Duration.fromMilliseconds(sleep_ms), .awake) catch {};
             return true;
         }
@@ -322,8 +327,9 @@ pub const EventLoop = struct {
         }
         if (count == 0) return false;
         var timeout_ms: c_int = 0;
-        const has_pending_jobs = (ctx.peekPendingPromiseJobSequence() != null or rt.peekPendingFinalizationJobSequence() != null);
-        if (!has_pending_jobs) {
+        const has_pending_jobs = rt.job_queue.jobs.len != 0;
+        const has_pending_host_completion = exec.call_runtime.atomicsRuntimeHasPendingAsyncWaiters(rt);
+        if (!has_pending_jobs and !has_pending_host_completion) {
             if (self.timers.len == 0) {
                 timeout_ms = -1;
             } else {
@@ -941,22 +947,17 @@ test "EventLoop roots one-shot function bytecode timer callback after dequeue" {
     var loop = EventLoop.init(ctx, .{});
     defer loop.deinit();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.flags.func_kind = .generator;
-    core.gc.retain(&global.header);
-    fb.realm_global_header = &global.header;
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(zjs.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = ctx.core,
+        .flags = .{ .func_kind = .generator },
+        .cpool_count = 1,
+    });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var callback = zjs.JSValue.functionBytecode(&fb.header);
     var callback_alive = true;

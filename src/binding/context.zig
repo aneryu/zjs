@@ -182,18 +182,6 @@ pub const JSContext = struct {
         self.core.updateBacktraceLocation(pc, line_num, col_num);
     }
 
-    pub fn ensurePendingPromiseJobCapacity(self: *JSContext, min_capacity: usize) !void {
-        try self.core.ensurePendingPromiseJobCapacity(min_capacity);
-    }
-
-    pub fn peekPendingPromiseJobSequence(self: JSContext) ?u64 {
-        return self.core.peekPendingPromiseJobSequence();
-    }
-
-    pub fn takePendingPromiseJob(self: *JSContext) ?core.PendingPromiseJob {
-        return self.core.takePendingPromiseJob();
-    }
-
     pub fn defineDataProperty(
         self: *JSContext,
         target: JSValue,
@@ -416,7 +404,7 @@ pub const JSContext = struct {
     }
 
     pub fn realmGlobal(self: *JSContext, realm: JSValue) !JSValue {
-        return self.getProperty(realm, "global");
+        return try self.getProperty(realm, "global");
     }
 
     pub fn realmGlobalObject(self: *JSContext, realm: JSValue) !*Object {
@@ -521,7 +509,6 @@ pub const JSContext = struct {
     }
 
     pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {
-        self.core.runtime.job_queue.runAll();
         const global_object = try self.globalObject();
         exec.zjs_vm.drainPendingPromiseJobs(self.core, output, global_object) catch |err| {
             if (self.hasException() or self.hasUnhandledRejection()) return;
@@ -557,26 +544,34 @@ pub const JSContext = struct {
         options: core.ExternalFunctionOptions,
     ) !JSValue {
         const rt = self.core.runtime;
+        const realm_global = options.realm_global orelse try self.globalObject();
+        const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
+        const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
+        const function_capacity: usize = 2 + @as(usize, @intFromBool(options.with_prototype));
+        const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, function_capacity);
+        errdefer function_value.free(rt);
+
+        const function_object = try Object.expect(function_value);
+        if (options.with_prototype) {
+            const object_proto_value = realm_global.cachedRealmValue(rt, .object_prototype) orelse return error.InvalidEngineState;
+            const object_proto = try Object.expect(object_proto_value);
+            const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, 1);
+            const prototype_value = prototype.value();
+            defer prototype_value.free(rt);
+            try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(function_value, true, false, true));
+            try function_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype_value, true, false, false));
+        }
+
+        // Publish the host record only after the complete JS-visible function
+        // graph exists. A later allocation failure must not leave an
+        // unreachable registered callback behind.
         const id = try rt.registerExternalHostFunction(.{
             .ptr = ptr,
             .call = call,
             .finalizer = finalizer,
         });
-
-        const realm_global = options.realm_global orelse try self.globalObject();
-        const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
-        const function_value = try core.function.nativeFunction(realm, name, length);
-        errdefer function_value.free(rt);
-
-        const function_object = try Object.expect(function_value);
         function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
         function_object.externalHostFunctionIdSlot().* = id;
-        if (options.with_prototype) {
-            const prototype = try Object.create(rt, class.ids.object, null);
-            const prototype_value = prototype.value();
-            defer prototype_value.free(rt);
-            try function_object.defineOwnProperty(rt, atom.ids.prototype, Descriptor.data(prototype_value, true, true, true));
-        }
 
         return function_value;
     }
@@ -627,7 +622,7 @@ pub const JSContext = struct {
 fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    const val = obj.getProperty(key);
+    const val = try obj.getProperty(key);
     defer val.free(rt);
     if (!val.isString()) return null;
 

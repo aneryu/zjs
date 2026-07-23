@@ -63,35 +63,35 @@ pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, gen
 // Hot return-path passthrough: a non-derived-ctor frame returns the value verbatim.
 // Inlined so the per-return arm pays no call (it was ~1% of fib as a separate fn).
 pub inline fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
-    if (!frame.function.flags.is_derived_class_constructor) return value;
+    if (!frame.function.isDerivedClassConstructor()) return value;
     if (value.isObject()) return value;
     defer value.free(ctx.runtime);
-    if (!value.isUndefined()) return error.TypeError;
-    if (adapterValueIsUninitialized(frame.this_value)) return error.ReferenceError;
+    if (!value.isUndefined()) return error.DerivedConstructorReturn;
+    if (adapterValueIsUninitialized(frame.this_value)) return error.DerivedThisUninitialized;
     return adapterValueDup(frame.this_value);
 }
 
-pub fn jump32(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
+pub fn jump32(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) void {
     const operand_pc = frame.pc;
-    const diff = readInt(i32, function.code[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn jump16(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
+pub fn jump16(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) void {
     const operand_pc = frame.pc;
-    const diff = readInt(i16, function.code[frame.pc..][0..2]);
+    const diff = readInt(i16, function.byteCode()[frame.pc..][0..2]);
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn jump8(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
+pub fn jump8(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) void {
     const operand_pc = frame.pc;
-    const diff: i8 = @bitCast(function.code[frame.pc]);
+    const diff: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
-    const diff = readInt(i32, function.code[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
@@ -101,9 +101,9 @@ pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const 
     }
 }
 
-pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
-    const diff: i8 = @bitCast(function.code[frame.pc]);
+    const diff: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc += 1;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
@@ -144,8 +144,8 @@ pub noinline fn throwTop(
     return error.JSException;
 }
 
-pub fn throwError(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) ThrowError {
-    const error_type = function.code[frame.pc + 4];
+pub fn throwError(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) ThrowError {
+    const error_type = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     return switch (error_type) {
         1 => error.SyntaxError,
@@ -205,13 +205,13 @@ pub noinline fn throwErrorVm(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
 ) !ThrowResult {
-    const atom_id = std.mem.readInt(u32, function.code[frame.pc..][0..4], .little);
-    const error_type = function.code[frame.pc + 4];
+    const atom_id = std.mem.readInt(u32, function.byteCode()[frame.pc..][0..4], .little);
+    const error_type = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     const error_value = try createThrowErrorValue(ctx, global, atom_id, error_type);
     _ = ctx.throwValue(error_value);
@@ -226,31 +226,31 @@ pub noinline fn throwErrorVm(
     };
 }
 
-pub noinline fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
+pub noinline fn catchTarget(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack, catch_target: *?usize) !void {
     const operand_pc = frame.pc;
-    const diff = readInt(i32, function.code[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const previous_target: i32 = if (catch_target.*) |target| @intCast(target) else -1;
     catch_target.* = relativePc(operand_pc, diff);
     try stack.pushOwned(core.JSValue.catchOffset(previous_target));
 }
 
-pub fn gosub(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
+pub fn gosub(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
     const operand_pc = frame.pc;
-    const diff = readInt(i32, function.code[frame.pc..][0..4]);
+    const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     const return_pc = frame.pc + 4;
     if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
     try stack.pushOwned(core.JSValue.int32(@intCast(return_pc)));
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn ret(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
+pub fn ret(ctx: *core.JSContext, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
     const target = try stack.pop();
     defer target.free(ctx.runtime);
     const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
     if (pc_i32 < 0) return error.InvalidBytecode;
     const pc: usize = @intCast(pc_i32);
-    if (pc >= function.code.len) return error.InvalidBytecode;
+    if (pc >= function.byteCode().len) return error.InvalidBytecode;
     frame.pc = pc;
 }
 

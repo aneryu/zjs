@@ -19,26 +19,26 @@ pub const DropResult = union(enum) {
 
 pub const Step = enum { done, continue_loop };
 
-pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i32, function.code[frame.pc..][0..4]);
+pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const value = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
 
-pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i32, function.code[frame.pc..][0..4]);
+pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const value = readInt(i32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     stack.pushOwnedAssumeCapacity(core.JSValue.shortBigInt(value));
 }
 
-pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i16, function.code[frame.pc..][0..2]);
+pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const value = readInt(i16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
 
-pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const value: i8 = @bitCast(function.code[frame.pc]);
+pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const value: i8 = @bitCast(function.byteCode()[frame.pc]);
     frame.pc += 1;
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
@@ -47,13 +47,13 @@ pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {
     try stack.pushOwned(core.JSValue.int32(value));
 }
 
-pub fn pushSmallIntMaybeFuse(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, value: i32) !void {
+pub fn pushSmallIntMaybeFuse(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, value: i32) !void {
     try pushImmediateInt32MaybeFuse(stack, function, frame, value);
 }
 
 fn pushImmediateInt32MaybeFuse(
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     value: i32,
 ) !void {
@@ -79,37 +79,41 @@ pub fn pushBoolean(stack: *stack_mod.Stack, value: bool) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value));
 }
 
-pub noinline fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
-    const index = readInt(u32, function.code[frame.pc..][0..4]);
+    const index = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
-    const value = function.constants.get(index) orelse return error.TypeError;
+    const value = function.constantAt(index) orelse return error.TypeError;
     defer value.free(ctx.runtime);
     stack.pushAssumeCapacity(value);
 }
 
-pub noinline fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub noinline fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
-    const index = function.code[frame.pc];
+    const index = function.byteCode()[frame.pc];
     frame.pc += 1;
-    const value = function.constants.get(index) orelse return error.TypeError;
+    const value = function.constantAt(index) orelse return error.TypeError;
     defer value.free(ctx.runtime);
     stack.pushAssumeCapacity(value);
 }
 
-pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const atom_id = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     errdefer value.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(value);
 }
 
-pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
+    const template_atom = readInt(u32, function.byteCode()[frame.pc..][0..4]);
     frame.pc += 4;
-    const effective_atom = remapPrivateAtomFromFrame(ctx.runtime, frame, atom_id);
-    const value = try ctx.runtime.symbolValue(effective_atom);
+    const name = ctx.runtime.atoms.name(template_atom) orelse return error.InvalidAtom;
+    const value = value: {
+        const fresh_atom = try ctx.runtime.atoms.newSymbol(name, .private);
+        errdefer ctx.runtime.atoms.free(fresh_atom);
+        break :value try ctx.runtime.takeSymbolValue(fresh_atom);
+    };
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
@@ -538,7 +542,7 @@ fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_id != core.class.ids.bytecode_function) return null;
+    if (!core.class.isBytecodeFunctionClass(object.class_id)) return null;
     return object;
 }
 
@@ -546,24 +550,6 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
-}
-
-fn remapPrivateAtomFromObject(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) core.Atom {
-    if (rt.atoms.kind(atom_id) != .private) return atom_id;
-    for (object.privateRemapFrom(), 0..) |old_atom, idx| {
-        if (old_atom == atom_id) return object.privateRemapTo()[idx];
-    }
-    return atom_id;
-}
-
-fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, frame: ?*frame_mod.Frame, atom_id: core.Atom) core.Atom {
-    if (rt.atoms.kind(atom_id) != .private) return atom_id;
-    const current_frame = frame orelse return atom_id;
-    const function_object = objectFromValue(current_frame.current_function) orelse return atom_id;
-    const function_atom = remapPrivateAtomFromObject(rt, function_object, atom_id);
-    if (function_atom != atom_id) return function_atom;
-    const home_object = function_object.functionHomeObject() orelse return atom_id;
-    return remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 
 fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
@@ -593,7 +579,39 @@ fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
 
-test "push private symbol does not retain transient private atom" {
+fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) usize {
+    var count: usize = 0;
+    for (0..rt.atoms.entries.len) |index| {
+        const atom_id: core.Atom = @intCast(core.atom.first_dynamic_atom + index);
+        if (rt.atoms.kind(atom_id) != .private) continue;
+        const name = rt.atoms.name(atom_id) orelse continue;
+        if (std.mem.eql(u8, name, expected_name)) count += 1;
+    }
+    return count;
+}
+
+test "function object lookup recognizes every bytecode function class" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        const function_object = try core.Object.create(rt, class_id, null);
+        defer function_object.value().free(rt);
+        try std.testing.expectEqual(function_object, functionObjectFromValue(function_object.value()).?);
+    }
+
+    const plain_object = try core.Object.create(rt, core.class.ids.object, null);
+    defer plain_object.value().free(rt);
+    try std.testing.expect(functionObjectFromValue(plain_object.value()) == null);
+}
+
+test "push private symbol creates a fresh runtime atom per execution" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
@@ -601,28 +619,53 @@ test "push private symbol does not retain transient private atom" {
 
     const function_name = try rt.internAtom("pushPrivateSymbolNoRetain");
     defer rt.atoms.free(function_name);
-    const private_name = try rt.atoms.newSymbol("pushPrivateSymbolNoRetainName", .private);
-    var private_name_released = false;
-    defer if (!private_name_released) rt.atoms.free(private_name);
+    const template_name = "pushPrivateSymbolNoRetainName";
+    const template_atom = try rt.atoms.newSymbol(template_name, .private);
+    var template_atom_released = false;
+    defer if (!template_atom_released) rt.atoms.free(template_atom);
+    const template_ref_count = rt.atoms.refCount(template_atom).?;
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     var code: [4]u8 = undefined;
-    std.mem.writeInt(u32, &code, private_name, .little);
+    std.mem.writeInt(u32, &code, template_atom, .little);
     try function.setCode(&code);
 
-    var frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
     var stack = stack_mod.Stack.init(&rt.memory, 8);
     defer stack.deinit(rt);
 
-    try pushPrivateSymbol(ctx, &stack, &function, &frame);
-    const value = try stack.pop();
-    try std.testing.expectEqual(private_name, value.asSymbolAtom().?);
-    value.free(rt);
+    try pushPrivateSymbol(ctx, &stack, execution_function, &frame);
+    frame.pc = 0;
+    try pushPrivateSymbol(ctx, &stack, execution_function, &frame);
 
-    rt.atoms.free(private_name);
-    private_name_released = true;
-    try std.testing.expect(rt.atoms.name(private_name) == null);
+    var first_atom: core.Atom = undefined;
+    var second_atom: core.Atom = undefined;
+    {
+        const second_value = try stack.pop();
+        defer second_value.free(rt);
+        const first_value = try stack.pop();
+        defer first_value.free(rt);
+        first_atom = first_value.asSymbolAtom().?;
+        second_atom = second_value.asSymbolAtom().?;
+
+        try std.testing.expect(first_atom != template_atom);
+        try std.testing.expect(second_atom != template_atom);
+        try std.testing.expect(first_atom != second_atom);
+        try std.testing.expectEqualStrings(template_name, rt.atoms.name(first_atom).?);
+        try std.testing.expectEqualStrings(template_name, rt.atoms.name(second_atom).?);
+        try std.testing.expectEqual(template_ref_count, rt.atoms.refCount(template_atom).?);
+        try std.testing.expectEqual(@as(usize, 3), countLivePrivateAtomsNamed(rt, template_name));
+    }
+
+    try std.testing.expect(rt.atoms.name(first_atom) == null);
+    try std.testing.expect(rt.atoms.name(second_atom) == null);
+    try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
+    rt.atoms.free(template_atom);
+    template_atom_released = true;
+    try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
 test "stack rearrange opcodes validate depth before mutating stack" {
@@ -654,23 +697,89 @@ test "push private symbol stack failure does not retain transient private atom" 
 
     const function_name = try rt.internAtom("pushPrivateSymbolStackFailure");
     defer rt.atoms.free(function_name);
-    const private_name = try rt.atoms.newSymbol("pushPrivateSymbolStackFailureName", .private);
-    var private_name_released = false;
-    defer if (!private_name_released) rt.atoms.free(private_name);
+    const template_name = "pushPrivateSymbolStackFailureName";
+    const template_atom = try rt.atoms.newSymbol(template_name, .private);
+    var template_atom_released = false;
+    defer if (!template_atom_released) rt.atoms.free(template_atom);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
     var code: [4]u8 = undefined;
-    std.mem.writeInt(u32, &code, private_name, .little);
+    std.mem.writeInt(u32, &code, template_atom, .little);
     try function.setCode(&code);
 
-    var frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
     var stack = stack_mod.Stack.init(&rt.memory, 0);
     defer stack.deinit(rt);
 
-    try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, &function, &frame));
+    const calibration_atom = try rt.atoms.newSymbol(template_name, .private);
+    rt.atoms.free(calibration_atom);
+    const allocated_before = rt.memory.allocated_bytes;
+    try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
+    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
-    rt.atoms.free(private_name);
-    private_name_released = true;
-    try std.testing.expect(rt.atoms.name(private_name) == null);
+    rt.atoms.free(template_atom);
+    template_atom_released = true;
+    try std.testing.expect(rt.atoms.name(template_atom) == null);
+}
+
+test "push private symbol releases fresh atom on allocation failure" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const function_name = try rt.internAtom("pushPrivateSymbolAllocationFailure");
+    defer rt.atoms.free(function_name);
+    const template_name = "pushPrivateSymbolAllocationFailureName";
+    const template_atom = try rt.atoms.newSymbol(template_name, .private);
+    defer rt.atoms.free(template_atom);
+
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
+    defer function.deinit(rt);
+    var code: [4]u8 = undefined;
+    std.mem.writeInt(u32, &code, template_atom, .little);
+    try function.setCode(&code);
+
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
+    var stack = stack_mod.Stack.init(&rt.memory, 1);
+    defer stack.deinit(rt);
+    defer rt.setMemoryLimit(null);
+
+    // Warm one recyclable atom-table slot and measure the exact transient
+    // description allocation. The following limit then admits newSymbol but
+    // rejects the first symbol-body allocation in takeSymbolValue.
+    const calibration_atom = try rt.atoms.newSymbol(template_name, .private);
+    const allocated_with_atom = rt.memory.allocated_bytes;
+    rt.atoms.free(calibration_atom);
+    const allocated_before = rt.memory.allocated_bytes;
+    try std.testing.expect(allocated_with_atom > allocated_before);
+    const atom_allocation_bytes = allocated_with_atom - allocated_before;
+    try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
+
+    rt.setMemoryLimit(allocated_before);
+    try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
+
+    frame.pc = 0;
+    rt.setMemoryLimit(allocated_before + atom_allocation_bytes);
+    try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
+
+    frame.pc = 0;
+    try pushPrivateSymbol(ctx, &stack, execution_function, &frame);
+    const recovered = try stack.pop();
+    defer recovered.free(rt);
+    const recovered_atom = recovered.asSymbolAtom().?;
+    try std.testing.expect(recovered_atom != template_atom);
+    try std.testing.expectEqualStrings(template_name, rt.atoms.name(recovered_atom).?);
 }

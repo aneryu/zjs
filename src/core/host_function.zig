@@ -17,8 +17,6 @@ pub const ids = struct {
 pub const InternalCallableTag = enum(u8) {
     none = 0,
     promise_resolving = 1,
-    promise_thenable_job = 2,
-    promise_reaction_job = 3,
     promise_capability_executor = 4,
     promise_combinator_element = 5,
     promise_finally_callback = 6,
@@ -34,9 +32,6 @@ pub const InternalCallableTag = enum(u8) {
     array_from_async_continuation = 13,
 
     /// QuickJS C_FUNCTION_DATA-style closures consume the caller's realm.
-    /// The two promise job records deliberately remain true C functions for
-    /// now: their enqueue-realm ownership is part of the later job-carrier
-    /// normalization, not this caller-data split.
     pub fn usesCallerRealm(self: InternalCallableTag) bool {
         return switch (self) {
             .promise_resolving,
@@ -51,8 +46,6 @@ pub const InternalCallableTag = enum(u8) {
             .array_from_async_continuation,
             => true,
             .none,
-            .promise_thenable_job,
-            .promise_reaction_job,
             .throw_type_error_intrinsic,
             => false,
         };

@@ -21,7 +21,7 @@ const AppendStringError = error{
     TypeError,
     InvalidRadix,
     NoSpaceLeft,
-};
+} || core.context.DynamicImportError;
 
 const TrimMode = enum { start, end, both };
 
@@ -277,12 +277,18 @@ fn stringCaseCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const to_lower = host_call.magic == @intFromEnum(PrototypeMethod.to_lower_case);
-    if (host_call.global == null) {
-        if (host_call.func_obj != null or host_call.is_constructor) return error.TypeError;
+    if (host_call.func_obj == null and host_call.global == null) {
+        if (host_call.is_constructor) return error.TypeError;
+        // Explicit algorithmic reuse after the caller has already reduced the
+        // receiver to the pure Unicode case body.
         return unicodeCaseReceiver(host_call.ctx.runtime, host_call.this_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
     }
 
-    const global = host_call.global orelse return error.TypeError;
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     const string_value = try string_ops.toStringCheckObject(
@@ -353,7 +359,11 @@ fn stringCall(
         return methodCall(ctx.runtime, this_value, method_id, args) catch |err| return @as(HostError, @errorCast(err));
     }
 
-    const active_global = host_call.global orelse return error.TypeError;
+    const active_global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
     return switch (id) {
         @intFromEnum(ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
         @intFromEnum(StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
@@ -1837,19 +1847,13 @@ test "string iteratorResult roots direct function bytecode value while creating 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -1866,7 +1870,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     {
-        const stored = iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
+        const stored = try iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
         defer stored.free(rt);
         try std.testing.expect(stored.same(result_value));
     }
@@ -1884,6 +1888,7 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    ctx.cached_function_proto = try core.Object.create(rt, core.class.ids.object, null);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -1911,9 +1916,9 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     const split_value = try splitReceiver(rt, text, &.{separator});
     defer split_value.free(rt);
     const split_object = try expectObject(split_value);
-    const split_first = split_object.getProperty(core.atom.atomFromUInt32(0));
+    const split_first = try split_object.getProperty(core.atom.atomFromUInt32(0));
     defer split_first.free(rt);
-    const split_second = split_object.getProperty(core.atom.atomFromUInt32(1));
+    const split_second = try split_object.getProperty(core.atom.atomFromUInt32(1));
     defer split_second.free(rt);
     try std.testing.expect((stringValueFromReceiver(split_first) orelse return error.TypeError).eqlBytes("a"));
     try std.testing.expect((stringValueFromReceiver(split_second) orelse return error.TypeError).eqlBytes("a"));
@@ -1923,12 +1928,12 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     const match_value = try match(rt, "ababa", &.{needle});
     defer match_value.free(rt);
     const match_object = try expectObject(match_value);
-    const match_item = match_object.getProperty(core.atom.atomFromUInt32(0));
+    const match_item = try match_object.getProperty(core.atom.atomFromUInt32(0));
     defer match_item.free(rt);
     try std.testing.expect((stringValueFromReceiver(match_item) orelse return error.TypeError).eqlBytes("ba"));
     const input_key = try rt.internAtom("input");
     defer rt.atoms.free(input_key);
-    const input_value = match_object.getProperty(input_key);
+    const input_value = try match_object.getProperty(input_key);
     defer input_value.free(rt);
     try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
 }
@@ -2049,7 +2054,7 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
-        const value = object.getProperty(core.atom.atomFromUInt32(index));
+        const value = try object.getProperty(core.atom.atomFromUInt32(index));
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }

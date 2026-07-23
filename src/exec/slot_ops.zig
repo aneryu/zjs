@@ -150,7 +150,7 @@ pub fn execGetVarRef(
 pub fn execGetVarRefMaybeTdz(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     idx: u16,
@@ -184,7 +184,7 @@ pub fn execGetVarRefMaybeTdz(
             }
         }
         if (call_runtime.closureVarIsNonLexicalGlobalSentinel(function, idx)) {
-            const value = global.getProperty(atom_id);
+            const value = try global.getProperty(atom_id);
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
             return false;
@@ -204,7 +204,13 @@ pub fn execGetVarRefMaybeTdz(
             }
             return error.ReferenceError;
         }
-        const err = throwTdzReference(ctx);
+        // Captured derived `this` uses ordinary get_var_ref_check in QuickJS,
+        // so it remains catchable in the current (callee) realm while keeping
+        // the constructor-specific message.
+        const err = if (idx < function.varRefNamesLen() and function.varRefName(idx) == core.atom.ids.this_) blk: {
+            _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
+            unreachable;
+        } else throwTdzReference(ctx);
         if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return true;
         }
@@ -216,7 +222,7 @@ pub fn execGetVarRefMaybeTdz(
 
 pub fn execPutVarRef(
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
@@ -247,13 +253,13 @@ pub fn execPutVarRef(
             return throwTdzReference(ctx);
         }
     }
-    const capture_is_function_name = idx < function.closure_var.len and
-        function.closure_var[idx].varKind() == .function_name;
-    const capture_is_const = idx < function.closure_var.len and
-        function.closure_var[idx].isConst();
+    const capture_is_function_name = idx < function.closureVar().len and
+        function.closureVar()[idx].varKind() == .function_name;
+    const capture_is_const = idx < function.closureVar().len and
+        function.closureVar()[idx].isConst();
     if (cell.varRefIsFunctionNameSlot().* or capture_is_function_name) {
         value.free(ctx.runtime);
-        if (function.flags.is_strict) return error.TypeError;
+        if (function.isStrictMode()) return error.TypeError;
         return;
     }
     if ((cell.varRefIsConstSlot().* or capture_is_const) and !constVarRefWriteAllowed(cell, opc)) {

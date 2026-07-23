@@ -3493,7 +3493,6 @@ pub const parser_core = struct {
 
     const Atom = atom_module.Atom;
 
-    const eval_class_field_initializer_flag: u16 = 0x8000;
     const atom_this: Atom = atom_module.ids.this_;
     const atom_new_target: Atom = atom_module.ids.new_target;
     const atom_this_active_func: Atom = atom_module.ids.this_active_func;
@@ -3724,6 +3723,12 @@ pub const parser_core = struct {
         last_token_line_num: u32 = 1,
         last_token_col_num: u32 = 1,
         last_opcode_source_offset: ?u32 = null,
+        /// Scoped attribution for statement opcodes emitted after their
+        /// operand expression has advanced the lexer. QuickJS emits one
+        /// OP_line_num at the statement keyword before lowering the complete
+        /// return/throw sequence; keeping the override here gives every
+        /// synthesized opcode in that sequence the same source authority.
+        opcode_source_override: ?SourcePosition = null,
         /// Block environment stack for break/continue/finally tracking.
         top_break: ?*BlockEnv = null,
         /// Current scope level (for lexical declarations).
@@ -3891,25 +3896,22 @@ pub const parser_core = struct {
         using_block_frames: std.ArrayList(UsingBlockFrame) = .empty,
         class_private_elements: std.ArrayList(ClassPrivateElement) = .empty,
         class_private_bound_names: std.ArrayList(Atom) = .empty,
-        class_public_instance_fields: std.ArrayList(Atom) = .empty,
-        class_static_deferred_code: std.ArrayList(u8) = .empty,
-        class_static_deferred_atoms: std.ArrayList(Atom) = .empty,
         class_fields_init_child_index: ?u16 = null,
-        // Var index (into cur_func().vars) of the CURRENT class's
-        // `<class_fields_init>` binding; saved/restored around nested
-        // parseClass so constructor capture never resolves to a nested
-        // class's atom-120 var (qjs resolves it per class scope,
-        // quickjs.c:25702 + emit_class_field_init quickjs.c:25185).
-        class_fields_init_var_idx: ?u16 = null,
-        class_field_initializer_depth: u32 = 0,
-        class_static_field_this_atom: ?Atom = null,
+        class_static_init_child_index: ?u16 = null,
+        class_instance_private_brand_needed: bool = false,
+        class_static_private_brand_needed: bool = false,
 
-        pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!State {
+        fn initRootEmitter(
+            lex: *lexer_mod.Lexer,
+            function: *bytecode_function.Bytecode,
+            emit_root_to_function_def: bool,
+        ) Error!State {
             var state = State{
                 .lex = lex,
                 .function = function,
                 .token = undefined,
                 .function_def = function_def_mod.FunctionDef.init(function.memory, function.atoms, function.name),
+                .emit_to_function_def = emit_root_to_function_def,
             };
             errdefer state.function_def.deinitInitFailure();
             state.function_def.atoms.replace(&state.function_def.script_or_module, function.script_or_module);
@@ -3918,7 +3920,6 @@ pub const parser_core = struct {
             // A standalone ParseState represents a script/eval-program root,
             // matching JS_Eval's non-direct defaults in QuickJS. Production
             // compile_entry overwrites these facts for direct eval/module.
-            state.function_def.var_environment = .global;
             state.function_def.has_this_binding = true;
             state.function_def.arguments_allowed = true;
             // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0
@@ -3936,6 +3937,10 @@ pub const parser_core = struct {
             return state;
         }
 
+        pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!State {
+            return initRootEmitter(lex, function, false);
+        }
+
         /// Initialize a parser state that may emit runtime-owned constants.
         /// QuickJS's `JSParseState` always carries its `JSContext`; zjs keeps
         /// the runtime-less initializer for low-level parser-only tests, while
@@ -3947,6 +3952,20 @@ pub const parser_core = struct {
             function: *bytecode_function.Bytecode,
         ) Error!State {
             var state = try init(lex, function);
+            state.runtime = rt;
+            return state;
+        }
+
+        /// Production ordinary script/eval roots emit into their real
+        /// FunctionDef from the first body-scope marker onward. This lets the
+        /// root take the exact same recursive finalizer as every child instead
+        /// of first constructing a mutable Bytecode twin.
+        pub fn initCanonicalRootWithRuntime(
+            rt: *core.JSRuntime,
+            lex: *lexer_mod.Lexer,
+            function: *bytecode_function.Bytecode,
+        ) Error!State {
+            var state = try initRootEmitter(lex, function, true);
             state.runtime = rt;
             return state;
         }
@@ -3999,11 +4018,6 @@ pub const parser_core = struct {
             self.class_private_elements.deinit(self.function.memory.allocator);
             self.truncateClassPrivateBoundNames(0);
             self.class_private_bound_names.deinit(self.function.memory.allocator);
-            self.truncateClassPublicInstanceFields(0);
-            self.class_public_instance_fields.deinit(self.function.memory.allocator);
-            self.truncateClassStaticDeferred(0, 0);
-            self.class_static_deferred_code.deinit(self.function.memory.allocator);
-            self.class_static_deferred_atoms.deinit(self.function.memory.allocator);
             self.function_def.deinit(rt);
         }
 
@@ -4560,12 +4574,13 @@ pub const parser_core = struct {
         }
 
         /// Mirror the tail of `js_parse_program` (`quickjs.c:31459`):
-        /// after the last statement is parsed, emit
-        /// `scope_get_var <ret>` so the eval result sits on the stack
-        /// for `vm.run` to return. No-op when not in eval mode.
+        /// after the last statement is parsed, load `<ret>` and terminate the
+        /// body with an explicit value-return. No-op when completion capture is
+        /// disabled.
         pub fn finalizeEvalReturn(self: *State) Error!void {
             if (self.eval_ret_idx < 0) return;
             try self.emitEvalRetGet();
+            try self.emitOp(opcode.op.@"return");
         }
 
         /// Mirror QuickJS `set_eval_ret_undefined` (`quickjs.c:28219-28226`):
@@ -4624,11 +4639,7 @@ pub const parser_core = struct {
             source_end: usize,
         ) Error!void {
             if (source_end <= source_start or source_start > self.lex.source.len or source_end > self.lex.source.len) return;
-            const owned = try self.function.memory.alloc(u8, source_end - source_start);
-            @memcpy(owned, self.lex.source[source_start..source_end]);
-            const old = fd.source_text;
-            fd.source_text = owned;
-            if (old) |existing| self.function.memory.free(u8, @constCast(existing));
+            try fd.replaceSourceText(self.lex.source[source_start..source_end]);
         }
 
         fn setChildFunctionSourceByCpoolIndex(
@@ -4849,23 +4860,6 @@ pub const parser_core = struct {
                 self.function.atoms.free(self.class_private_bound_names.items[i]);
             }
             self.class_private_bound_names.shrinkRetainingCapacity(len);
-        }
-
-        fn truncateClassPublicInstanceFields(self: *State, len: usize) void {
-            var i = len;
-            while (i < self.class_public_instance_fields.items.len) : (i += 1) {
-                self.function.atoms.free(self.class_public_instance_fields.items[i]);
-            }
-            self.class_public_instance_fields.shrinkRetainingCapacity(len);
-        }
-
-        fn truncateClassStaticDeferred(self: *State, code_len: usize, atom_len: usize) void {
-            var i = atom_len;
-            while (i < self.class_static_deferred_atoms.items.len) : (i += 1) {
-                self.function.atoms.free(self.class_static_deferred_atoms.items[i]);
-            }
-            self.class_static_deferred_atoms.shrinkRetainingCapacity(atom_len);
-            self.class_static_deferred_code.shrinkRetainingCapacity(code_len);
         }
 
         /// Expect a semicolon, applying ASI rules. Returns true if a semicolon
@@ -5222,7 +5216,6 @@ pub const parser_core = struct {
         fn markDirectEvalCall(self: *State) Error!void {
             const fd = self.cur_func();
             fd.has_eval_call = true;
-            if (!self.emit_to_function_def) self.function.flags.has_eval_call = true;
         }
 
         fn emitOp(self: *State, op_id: u8) Error!void {
@@ -5316,6 +5309,7 @@ pub const parser_core = struct {
         }
 
         fn currentSourcePosition(self: *State) SourcePosition {
+            if (self.opcode_source_override) |source| return source;
             const loc_line = if (self.last_token_line_num >= self.token.line_num) self.last_token_line_num else self.token.line_num;
             const loc_col = if (loc_line == self.last_token_line_num) self.last_token_col_num else self.token.col_num;
             return .{ .line_num = loc_line, .col_num = loc_col };
@@ -5536,27 +5530,6 @@ pub const parser_core = struct {
             }
         }
 
-        fn emitScopeMakeRef(self: *State, atom_id: Atom) Error!void {
-            try self.ensureClosureVar(atom_id);
-            if (self.emit_phase1_temp) {
-                const snapshot = self.takeEmissionSnapshot();
-                errdefer self.rollbackEmission(snapshot);
-                if (self.emit_to_function_def) {
-                    try self.cur_func().appendAtomOperand(atom_id);
-                } else {
-                    try self.function.retainAtomOperand(atom_id);
-                }
-                var bytes: [11]u8 = undefined;
-                bytes[0] = opcode.op.scope_make_ref;
-                std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
-                std.mem.writeInt(u32, bytes[5..9], 0, .little);
-                std.mem.writeInt(u16, bytes[9..11], @intCast(self.scope_level), .little);
-                try self.appendBytes(&bytes);
-            } else {
-                try self.emitOpAtom(opcode.op.make_var_ref, atom_id);
-            }
-        }
-
         fn emitScopeGetVarUndef(self: *State, atom_id: Atom) Error!void {
             try self.ensureClosureVar(atom_id);
             if (self.emit_phase1_temp) {
@@ -5590,16 +5563,17 @@ pub const parser_core = struct {
 
         fn emitThisValue(self: *State) Error!void {
             if (self.emit_to_function_def and self.cur_func().has_this_binding) {
-                if (self.cur_func().is_derived_class_constructor) {
-                    try self.emitScopeGetVarCheckThis(atom_this);
-                } else {
-                    try self.emitScopeGetVar(atom_this);
-                }
-            } else if (self.emit_to_function_def and self.cur_func().func_type == .arrow) {
-                // Arrows have no own ThisBinding. Match qjs by resolving the
-                // nearest non-arrow function's hidden `this` local through the
-                // ordinary closure chain instead of carrying a per-function-
-                // object lexical-this side slot into every call.
+                // Explicit `this` reads use the ordinary lexical check and
+                // therefore create a TDZ ReferenceError in the constructor's
+                // own realm. The caller-realm checkthis opcode is reserved for
+                // the synthetic derived-return fallback in emitReturnValue.
+                try self.emitScopeGetVar(atom_this);
+            } else if (self.emit_to_function_def and
+                (self.cur_func().func_type == .arrow or self.cur_func().func_type == .class_static_init))
+            {
+                // Arrows and class static blocks have no own ThisBinding.
+                // Resolve the nearest lexical owner's hidden `this` local
+                // through the ordinary closure chain.
                 try self.emitScopeGetVar(atom_this);
             } else {
                 try self.emitOp(opcode.op.push_this);
@@ -6500,6 +6474,7 @@ pub const parser_core = struct {
     const LValueOpcode = enum {
         scope_var,
         field,
+        private_field,
         array_element,
         super_value,
         ref_value,
@@ -6599,6 +6574,10 @@ pub const parser_core = struct {
                 emitBorrowedAtomU16OpAssumeCapacity(s, opcode.op.scope_get_var, lvalue.name, lvalue.scope);
             },
             .field => emitBorrowedAtomOpAssumeCapacity(s, opcode.op.get_field2, lvalue.name),
+            .private_field => {
+                std.debug.assert(s.emit_phase1_temp);
+                emitBorrowedAtomU16OpAssumeCapacity(s, opcode.op.scope_get_private_field2, lvalue.name, lvalue.scope);
+            },
             .array_element => emitOpNoSourceAssumeCapacity(s, opcode.op.get_array_el3),
             .super_value => {
                 emitOpNoSourceAssumeCapacity(s, opcode.op.to_propkey);
@@ -6672,6 +6651,26 @@ pub const parser_core = struct {
                 s.truncateCode(pos) catch unreachable;
                 lvalue = .{ .opcode = .field, .name = owned_name, .owns_name = true, .depth = 1 };
             },
+            opcode.op.scope_get_private_field => {
+                getter_size = 7;
+                if (!s.emit_phase1_temp or pos + getter_size != code.len) return Error.InvalidAssignmentTarget;
+                const name: Atom = std.mem.readInt(u32, code[pos + 1 ..][0..4], .little);
+                const scope = std.mem.readInt(u16, code[pos + 5 ..][0..2], .little);
+                if (s.currentAtomOperandLen() == 0 or s.currentAtomOperands()[s.currentAtomOperandLen() - 1] != name) {
+                    return Error.UnexpectedToken;
+                }
+                replacement_size = if (keep) getter_size else 0;
+                try s.reserveEmission(replacement_size -| getter_size, 0);
+                const owned_name = s.takeLastAtomOperand() catch unreachable;
+                s.truncateCode(pos) catch unreachable;
+                lvalue = .{
+                    .opcode = .private_field,
+                    .scope = scope,
+                    .name = owned_name,
+                    .owns_name = true,
+                    .depth = 1,
+                };
+            },
             opcode.op.get_array_el => {
                 getter_size = 1;
                 if (pos + getter_size != code.len) return Error.InvalidAssignmentTarget;
@@ -6702,7 +6701,7 @@ pub const parser_core = struct {
                 .keep_top => opcode.op.dup,
                 .no_keep, .no_keep_depth, .keep_second, .no_keep_bottom => null,
             },
-            .field => switch (mode) {
+            .field, .private_field => switch (mode) {
                 .no_keep, .no_keep_depth => null,
                 .keep_top => opcode.op.insert2,
                 .keep_second => opcode.op.perm3,
@@ -6726,16 +6725,18 @@ pub const parser_core = struct {
         const setter_size: usize = switch (lvalue.opcode) {
             .scope_var => 7,
             .field => 5,
+            .private_field => 7,
             .array_element, .ref_value, .super_value => 1,
         };
         const atom_count: usize = switch (lvalue.opcode) {
-            .scope_var, .field => 1,
+            .scope_var, .field, .private_field => 1,
             .array_element, .ref_value, .super_value => 0,
         };
 
         switch (lvalue.opcode) {
             .scope_var => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
             .field => if (!lvalue.owns_name) return Error.InvalidAssignmentTarget,
+            .private_field => if (!s.emit_phase1_temp or !lvalue.owns_name) return Error.InvalidAssignmentTarget,
             .ref_value => {
                 if (!lvalue.owns_name) return Error.InvalidAssignmentTarget;
                 const offset = lvalue.label_offset orelse return Error.UnexpectedToken;
@@ -6776,6 +6777,15 @@ pub const parser_core = struct {
                 var bytes: [5]u8 = undefined;
                 bytes[0] = opcode.op.put_field;
                 std.mem.writeInt(u32, bytes[1..5], lvalue.name, .little);
+                s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
+            },
+            .private_field => {
+                s.appendOwnedAtomOperandAssumeCapacity(lvalue.name);
+                lvalue.owns_name = false;
+                var bytes: [7]u8 = undefined;
+                bytes[0] = opcode.op.scope_put_private_field;
+                std.mem.writeInt(u32, bytes[1..5], lvalue.name, .little);
+                std.mem.writeInt(u16, bytes[5..7], lvalue.scope, .little);
                 s.emitOpcodeBytesNoSourceAssumeCapacity(&bytes);
             },
             .array_element => emitOpNoSourceAssumeCapacity(s, opcode.op.put_array_el),
@@ -6901,12 +6911,10 @@ pub const parser_core = struct {
 
     fn argumentsIdentifierIsForbidden(s: *State) bool {
         // QuickJS parses every field initializer in a synthetic method whose
-        // FunctionDef has arguments_allowed=false (quickjs.c:36472). zjs does
-        // that for instance fields, while static-field bytecode is temporarily
-        // emitted in the enclosing FunctionDef and carries
-        // class_field_initializer_depth as its grammar environment. Arrows
-        // deliberately preserve that depth, matching QuickJS inheritance.
-        return s.class_field_initializer_depth > 0 or !s.cur_func().arguments_allowed;
+        // FunctionDef has arguments_allowed=false (quickjs.c:36472). Both
+        // instance and static initializers now use that real function
+        // boundary, and arrows inherit its entry contract.
+        return !s.cur_func().arguments_allowed;
     }
 
     fn atomListContains(list: []const Atom, atom_id: Atom) bool {
@@ -7382,17 +7390,11 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.nip);
     }
 
-    /// Emit `this` for a super-property receiver. In inline static-field
-    /// initializer code (`class_static_field_this_atom` set, including
-    /// arrows nested in the initializer) `this` is the constructor held in
-    /// the static-field temp var — the same remap parsePrimary TOK_THIS
-    /// applies.
+    /// Emit `this` for a super-property receiver. Synthetic field initializer
+    /// methods own a normal receiver binding; nested arrows/static blocks
+    /// resolve it through the ordinary closure chain.
     fn emitSuperThis(s: *State) Error!void {
-        if (s.class_static_field_this_atom) |this_atom| {
-            try s.emitScopeGetVar(this_atom);
-            return;
-        }
-        if (s.emit_to_function_def and s.cur_func().func_type != .class_static_init) {
+        if (s.emit_to_function_def) {
             // QuickJS emits the same scope lookup in methods and nested
             // arrows; resolve_pseudo_var decides whether this is an owner
             // local or a closure over the nearest ThisBinding.
@@ -7402,27 +7404,15 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.push_this);
     }
 
-    /// Emit the `[this, home_object]` pair a super property reference
-    /// consumes. Normally `push_this ; special_object 4` (frame home
-    /// object); in inline static-field initializer code both are the
-    /// constructor held in the static-field temp var. qjs compiles static
-    /// field initializers into a fields-init function (emit_class_init_start
-    /// quickjs.c:25223, static field body quickjs.c:25533-25550) whose home
-    /// object IS the constructor (emit_class_init_end OP_set_home_object
-    /// quickjs.c:25258-25271, called with the ctor on the stack and as
-    /// `this`, quickjs.c:25737-25743), so super.x there resolves against
-    /// the constructor; the temp var holds that same constructor value at
-    /// class-definition time.
+    /// Emit the `[this, home_object]` pair consumed by a super property
+    /// reference. FunctionDef-backed methods use ordinary pseudo-variable
+    /// resolution; legacy root fragments use the frame special-object opcode.
     fn emitSuperThisAndHomeObject(s: *State) Error!void {
         try emitSuperThis(s);
-        if (s.class_static_field_this_atom) |this_atom| {
-            try s.emitScopeGetVar(this_atom);
-            return;
-        }
-        if (s.emit_to_function_def and s.cur_func().func_type != .class_static_init) {
+        if (s.emit_to_function_def) {
             try s.emitScopeGetVar(atom_home_object);
         } else {
-            try s.emitOpU8(opcode.op.special_object, 4);
+            try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.home_object);
         }
     }
 
@@ -7681,6 +7671,13 @@ pub const parser_core = struct {
                 code[pos] = opcode.op.get_field2;
                 return .{ .kind = .method, .optional_drop_count = 2 };
             },
+            opcode.op.scope_get_private_field => {
+                if (!s.emit_phase1_temp or pos + 7 != code.len) {
+                    return .{ .kind = .plain, .optional_drop_count = 1 };
+                }
+                code[pos] = opcode.op.scope_get_private_field2;
+                return .{ .kind = .method, .optional_drop_count = 2 };
+            },
             opcode.op.get_array_el => {
                 if (pos + 1 != code.len) return .{ .kind = .plain, .optional_drop_count = 1 };
                 code[pos] = opcode.op.get_array_el2;
@@ -7728,8 +7725,7 @@ pub const parser_core = struct {
                 .plain => try s.emitOpU16NoSource(opcode.op.call, argc),
                 .method => try s.emitOpU16NoSource(opcode.op.call_method, argc),
                 .direct_eval => {
-                    var eval_scope: u16 = @intCast(s.scope_level);
-                    if (s.class_field_initializer_depth > 0) eval_scope |= eval_class_field_initializer_flag;
+                    const eval_scope: u16 = @intCast(s.scope_level);
                     try s.emitOpU32NoSource(opcode.op.eval, @as(u32, argc) | (@as(u32, eval_scope) << 16));
                 },
             },
@@ -7744,8 +7740,7 @@ pub const parser_core = struct {
                     try s.emitOpU16NoSource(opcode.op.apply, 0);
                 },
                 .direct_eval => {
-                    var eval_scope: u16 = @intCast(s.scope_level);
-                    if (s.class_field_initializer_depth > 0) eval_scope |= eval_class_field_initializer_flag;
+                    const eval_scope: u16 = @intCast(s.scope_level);
                     try s.emitOpU16NoSource(opcode.op.apply_eval, eval_scope);
                 },
             },
@@ -7834,11 +7829,12 @@ pub const parser_core = struct {
         // Handle super() constructor calls after member chain.
         if (was_super and optional_chain_label == null and s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
             if (!s.allow_super_call) return Error.UnexpectedToken;
+            const call_source = SourceLoc{ .line = s.token.line_num, .col = s.token.col_num };
             const active_func_idx = s.cur_func().this_active_func_var_idx;
             const new_target_idx = s.cur_func().new_target_var_idx;
             const this_idx = s.cur_func().this_var_idx;
             if (active_func_idx < 0 or new_target_idx < 0 or this_idx < 0) {
-                try emitCapturedSuperConstructorCall(s, flags, null);
+                try emitCapturedSuperConstructorCall(s, flags, call_source);
                 s.last_was_super = false;
                 return;
             }
@@ -7850,18 +7846,12 @@ pub const parser_core = struct {
             try s.emitOpU16(opcode.op.get_loc, @intCast(new_target_idx));
             const shape = try parseCallArgs(s, flags);
             switch (shape) {
-                .direct => |argc| try s.emitOpU16(opcode.op.call_constructor, argc),
-                .applied => try s.emitOpU16(opcode.op.apply, 1),
+                .direct => |argc| try s.emitOpU16At(opcode.op.call_constructor, argc, call_source.line, call_source.col),
+                .applied => try s.emitOpU16At(opcode.op.apply, 1, call_source.line, call_source.col),
             }
             try s.emitOp(opcode.op.dup);
             try s.emitOpU16(opcode.op.put_loc_check_init, @intCast(this_idx));
-            try s.emitOpU16(opcode.op.get_var_ref_check, 0);
-            try s.emitOp(opcode.op.dup);
-            try s.emitOpU8(opcode.op.if_false8, 8);
-            try s.emitOpU16(opcode.op.get_loc_check, @intCast(this_idx));
-            try s.emitOp(opcode.op.swap);
-            try s.emitOpU16(opcode.op.call_method, 0);
-            try s.emitOp(opcode.op.drop);
+            try emitClassFieldInitCall(s);
             if (s.in_constructor and s.class_has_extends) {
                 if (s.current_parameter_properties) |props| {
                     for (props.items) |prop_atom| {
@@ -7907,13 +7897,7 @@ pub const parser_core = struct {
         }
         try s.emitOp(opcode.op.dup);
         try s.emitScopePutVarInit(atom_this);
-        try s.emitScopeGetVar(atom_class_fields_init);
-        try s.emitOp(opcode.op.dup);
-        try s.emitOpU8(opcode.op.if_false8, 8);
-        try s.emitScopeGetVar(atom_this);
-        try s.emitOp(opcode.op.swap);
-        try s.emitOpU16(opcode.op.call_method, 0);
-        try s.emitOp(opcode.op.drop);
+        try emitClassFieldInitCall(s);
         if (s.in_constructor and s.class_has_extends) {
             if (s.current_parameter_properties) |props| {
                 for (props.items) |prop_atom| {
@@ -7923,6 +7907,21 @@ pub const parser_core = struct {
                 }
             }
         }
+    }
+
+    /// Initialize the current class's instance elements from the lexical
+    /// `<class_fields_init>` closure. Both names stay as phase-1 scope
+    /// operands so a direct constructor uses locals while an arrow containing
+    /// `super()` receives the ordinary threaded captures.
+    fn emitClassFieldInitCall(s: *State) Error!void {
+        try s.emitScopeGetVar(atom_class_fields_init);
+        try s.emitOp(opcode.op.dup);
+        const skip_call = try emitForwardJump(s, opcode.op.if_false);
+        try s.emitScopeGetVar(atom_this);
+        try s.emitOp(opcode.op.swap);
+        try s.emitOpU16(opcode.op.call_method, 0);
+        try patchForwardJump(s, skip_call);
+        try s.emitOp(opcode.op.drop);
     }
 
     fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
@@ -7963,13 +7962,13 @@ pub const parser_core = struct {
             try parseNewCalleeMemberAccess(s, flags);
         }
         if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+            const call_line = s.token.line_num;
+            const call_col = s.token.col_num;
             try s.emitOp(opcode.op.dup);
-            const callee_line = s.last_token_line_num;
-            const callee_col = s.last_token_col_num;
             const shape = try parseCallArgs(s, flags);
             s.last_anonymous_function_expr = false;
             switch (shape) {
-                .direct => |argc| try s.emitOpU16At(opcode.op.call_constructor, argc, callee_line, callee_col),
+                .direct => |argc| try s.emitOpU16At(opcode.op.call_constructor, argc, call_line, call_col),
                 .applied => {
                     // `new X(...args)`. Stack here: [func, func(dup =
                     // new.target), array]. QuickJS FUNC_CALL_NEW emits
@@ -7981,13 +7980,15 @@ pub const parser_core = struct {
                     // off-balancing the verifier depth (StackMismatch at any
                     // merge point: try/catch bookkeeping, loop back-edges).
                     try s.emitOp(opcode.op.perm3);
-                    try s.emitOpU16At(opcode.op.apply, 1, callee_line, callee_col); // 1 = is_new
+                    try s.emitOpU16At(opcode.op.apply, 1, call_line, call_col); // 1 = is_new
                 },
             }
         } else {
             // `new X` (no args) is equivalent to `new X()`.
+            const call_line = s.token.line_num;
+            const call_col = s.token.col_num;
             try s.emitOp(opcode.op.dup);
-            try s.emitOpU16At(opcode.op.call_constructor, 0, s.last_token_line_num, s.last_token_col_num);
+            try s.emitOpU16At(opcode.op.call_constructor, 0, call_line, call_col);
         }
     }
 
@@ -7996,7 +7997,8 @@ pub const parser_core = struct {
             const k = s.peekKind();
             if (k == @as(tok.TokenKind, @intCast('.'))) {
                 try s.advance();
-                const name = if (s.peekKind() == tok.TOK_IDENT)
+                const private_name = s.peekKind() == tok.TOK_PRIVATE_NAME;
+                const raw_name = if (s.peekKind() == tok.TOK_IDENT or private_name)
                     s.token.payload.ident.atom
                 else if (tok.isKeyword(s.peekKind()))
                     tok.keywordAtom(s.peekKind())
@@ -8006,10 +8008,21 @@ pub const parser_core = struct {
                     @as(Atom, 25)
                 else
                     return Error.UnexpectedToken;
+                if (private_name and !s.in_class) return Error.UnexpectedToken;
+                const private_atom = if (private_name) try privateNameAtom(s, raw_name) else null;
+                defer if (private_atom) |atom_id| s.function.atoms.free(atom_id);
+                if (private_atom) |atom_id| {
+                    if (!classPrivateNameIsBound(s, atom_id)) return Error.UnexpectedToken;
+                }
+                const name = private_atom orelse raw_name;
                 const retained_name = s.function.atoms.dup(name);
                 defer s.function.atoms.free(retained_name);
                 try s.advance();
-                try s.emitOpAtom(opcode.op.get_field, retained_name);
+                if (private_name) {
+                    try s.emitOpAtomU16(opcode.op.scope_get_private_field, retained_name, @intCast(s.scope_level));
+                } else {
+                    try s.emitOpAtom(opcode.op.get_field, retained_name);
+                }
             } else if (k == @as(tok.TokenKind, @intCast('['))) {
                 try s.advance();
                 try parseExpr(s);
@@ -8064,6 +8077,8 @@ pub const parser_core = struct {
                     try s.emitOp(opcode.op.get_super);
                     try s.emitOpAtom(opcode.op.push_atom_value, retained_name);
                     try s.emitOp(opcode.op.get_super_value);
+                } else if (private_name) {
+                    try s.emitOpAtomU16(opcode.op.scope_get_private_field, retained_name, @intCast(s.scope_level));
                 } else {
                     try s.emitOpAtom(opcode.op.get_field, retained_name);
                 }
@@ -8109,7 +8124,11 @@ pub const parser_core = struct {
                     const retained_name = s.function.atoms.dup(name);
                     defer s.function.atoms.free(retained_name);
                     try s.advance();
-                    try s.emitOpAtom(opcode.op.get_field, retained_name);
+                    if (private_name) {
+                        try s.emitOpAtomU16(opcode.op.scope_get_private_field, retained_name, @intCast(s.scope_level));
+                    } else {
+                        try s.emitOpAtom(opcode.op.get_field, retained_name);
+                    }
                 } else {
                     return Error.UnexpectedToken;
                 }
@@ -8165,13 +8184,7 @@ pub const parser_core = struct {
                     }
                     try s.emitOp(opcode.op.dup);
                     try s.emitOpU16(opcode.op.put_loc_check_init, @intCast(this_idx));
-                    try s.emitOpU16(opcode.op.get_var_ref_check, 0);
-                    try s.emitOp(opcode.op.dup);
-                    try s.emitOpU8(opcode.op.if_false8, 8);
-                    try s.emitOpU16(opcode.op.get_loc_check, @intCast(this_idx));
-                    try s.emitOp(opcode.op.swap);
-                    try s.emitOpU16(opcode.op.call_method, 0);
-                    try s.emitOp(opcode.op.drop);
+                    try emitClassFieldInitCall(s);
                     continue;
                 }
                 const prepared = try prepareCallReference(s, .normal, false);
@@ -8426,11 +8439,7 @@ pub const parser_core = struct {
                 try s.advance();
             },
             tok.TOK_THIS => {
-                if (s.class_static_field_this_atom) |this_atom| {
-                    try s.emitScopeGetVar(this_atom);
-                } else {
-                    try s.emitThisValue();
-                }
+                try s.emitThisValue();
                 try s.advance();
                 s.last_was_super = false;
             },
@@ -8453,7 +8462,7 @@ pub const parser_core = struct {
                         return Error.UnexpectedToken;
                     }
                     try s.advance();
-                    try s.emitOpU8(opcode.op.special_object, 4);
+                    try s.emitOpU8(opcode.op.special_object, opcode.special_object_subtype.import_meta);
                     s.last_was_super = false;
                     return;
                 }
@@ -10859,16 +10868,34 @@ pub const parser_core = struct {
             },
             tok.TOK_RETURN => {
                 if (s.is_eval or s.return_depth == 0) return Error.UnexpectedToken;
+                const statement_source = SourcePosition{
+                    .line_num = s.token.line_num,
+                    .col_num = s.token.col_num,
+                };
                 try s.advance();
                 const has_expr = s.peekKind() != ';' and s.peekKind() != '}' and !s.gotLineTerminator();
                 if (has_expr) try parseExpr(s);
+                const return_snapshot = s.takeEmissionSnapshot();
+                errdefer s.rollbackEmission(return_snapshot);
+                const updated_source_loc = try reattributeReturnTailCallSource(s, has_expr, statement_source);
+                errdefer if (updated_source_loc) |updated| restoreSourceLoc(s, updated);
+                const saved_source_override = s.opcode_source_override;
+                s.opcode_source_override = statement_source;
+                defer s.opcode_source_override = saved_source_override;
                 try emitParsedReturn(s, has_expr);
                 _ = try s.expectSemicolon();
             },
             tok.TOK_THROW => {
+                const statement_source = SourcePosition{
+                    .line_num = s.token.line_num,
+                    .col_num = s.token.col_num,
+                };
                 try s.advance();
                 if (s.gotLineTerminator()) return Error.UnexpectedToken;
                 try parseExpr(s);
+                const saved_source_override = s.opcode_source_override;
+                s.opcode_source_override = statement_source;
+                defer s.opcode_source_override = saved_source_override;
                 try s.emitOp(opcode.op.throw);
                 _ = try s.expectSemicolon();
             },
@@ -11854,6 +11881,66 @@ pub const parser_core = struct {
     /// Complete a return after its optional expression has been parsed exactly
     /// once. Async-generator explicit values await before any cleanup, matching
     /// QuickJS emit_return.
+    const UpdatedSourceLoc = struct {
+        index: usize,
+        previous: bytecode.pipeline_pc2line.SourceLocSlot,
+    };
+
+    fn restoreSourceLoc(s: *State, updated: UpdatedSourceLoc) void {
+        const slots = if (s.emit_to_function_def)
+            s.cur_func().source_loc_slots
+        else
+            s.function.source_loc_slots;
+        std.debug.assert(updated.index < slots.len);
+        slots[updated.index] = updated.previous;
+    }
+
+    fn reattributeReturnTailCallSource(s: *State, has_expr: bool, source: SourcePosition) Error!?UpdatedSourceLoc {
+        if (!has_expr or s.in_async or s.in_generator or (s.in_constructor and s.class_has_extends)) return null;
+        if (s.return_finally_frames.items.len != 0 or
+            s.finally_body_control_frames.items.len != 0 or
+            s.top_break != null or
+            s.active_catch_marker_depth != 0)
+        {
+            return null;
+        }
+
+        // QuickJS resolve_labels recognizes `call[method] ; OP_line_num ;
+        // return`, attributes the call/tail-call PC to the return keyword, and
+        // only then shortens the opcode. zjs intentionally keeps ordinary
+        // calls, but its diagnostic PC must retain the same source mapping.
+        const last_opcode_pos = s.cur_func().last_opcode_pos;
+        if (last_opcode_pos < 0) return null;
+        const pc_index: usize = @intCast(last_opcode_pos);
+        const pc: u32 = @intCast(pc_index);
+        const code = s.currentCode();
+        if (pc_index >= code.len) return null;
+        const op_id = code[pc_index];
+        if (op_id != opcode.op.call and op_id != opcode.op.call_method) return null;
+
+        const slots = if (s.emit_to_function_def)
+            s.cur_func().source_loc_slots
+        else
+            s.function.source_loc_slots;
+        var index = slots.len;
+        while (index != 0) {
+            index -= 1;
+            if (slots[index].pc < pc) break;
+            if (slots[index].pc == pc) {
+                const previous = slots[index];
+                slots[index].line_num = @intCast(source.line_num);
+                slots[index].col_num = @intCast(source.col_num);
+                return .{ .index = index, .previous = previous };
+            }
+        }
+        if (s.emit_to_function_def) {
+            try s.cur_func().appendSourceLoc(pc, @intCast(source.line_num), @intCast(source.col_num));
+        } else {
+            try s.function.appendSourceLoc(pc, @intCast(source.line_num), @intCast(source.col_num));
+        }
+        return null;
+    }
+
     fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
         const needs_value = has_expr or
             s.in_async or
@@ -12270,8 +12357,8 @@ pub const parser_core = struct {
                         // get_lvalue decide whether a with-scope reference is
                         // required. This keeps declaration assignment on the
                         // same descriptor and exact label target as ordinary
-                        // assignment instead of publishing an unpatched
-                        // scope_make_ref and asking the resolver to scan ahead.
+                        // assignment; no unpatched scope_make_ref is exposed
+                        // to the resolver.
                         try s.emitScopeGetVar(atom_id);
                         declaration_lvalue = try getLValue(s, false);
                     }
@@ -13231,8 +13318,6 @@ pub const parser_core = struct {
         const saved_allow_super_call = s.allow_super_call;
         const saved_new_target_allowed = s.new_target_allowed;
         const saved_function_expr_name_binding = s.function_expr_name_binding;
-        const saved_class_field_initializer_depth = s.class_field_initializer_depth;
-        const saved_class_static_field_this_atom = s.class_static_field_this_atom;
         const saved_in_constructor = s.in_constructor;
         s.in_constructor = func_kind == .class_constructor or func_kind == .derived_class_constructor;
         defer s.in_constructor = saved_in_constructor;
@@ -13255,23 +13340,20 @@ pub const parser_core = struct {
         };
         const saved_return_finally = if (capture_child) enterReturnFinallyFunctionBoundary(s) else null;
         defer if (saved_return_finally) |*saved| leaveReturnFinallyFunctionBoundary(s, saved);
-        if (func_kind != .arrow) s.class_field_initializer_depth = 0;
-        if (func_kind != .arrow) s.class_static_field_this_atom = null;
-        defer s.class_field_initializer_depth = saved_class_field_initializer_depth;
-        defer s.class_static_field_this_atom = saved_class_static_field_this_atom;
         s.function_expr_name_binding = switch (func_kind) {
             .normal, .async, .generator, .async_generator => if (!s.pending_function_is_decl) s.pending_function_name else null,
             else => null,
         };
         defer s.function_expr_name_binding = saved_function_expr_name_binding;
-        // QuickJS copies super capabilities only into arrows. An ordinary
-        // nested function starts a new grammar environment even when its
-        // parent is a method/derived constructor.
+        // QuickJS copies the enclosing super capability into arrows and class
+        // static blocks. A static block is a lexical child of the method-like
+        // static initializer: it has no home object of its own, but may read
+        // the initializer's home object for `super` property access.
         const function_has_home_object = is_method_params or switch (func_kind) {
-            .method, .get, .set, .class_constructor, .derived_class_constructor, .class_static_block => true,
+            .method, .get, .set, .class_constructor, .derived_class_constructor => true,
             else => false,
         };
-        const function_allows_super = if (func_kind == .arrow)
+        const function_allows_super = if (func_kind == .arrow or func_kind == .class_static_block)
             saved_allow_super
         else
             function_has_home_object;
@@ -13341,27 +13423,9 @@ pub const parser_core = struct {
                 .arrow, .async, .method, .get, .set, .class_static_block => false,
                 else => true,
             };
-            if (func_kind == .class_static_block) {
-                child_fd.need_home_object = true;
-            }
             _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
             if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
                 child_fd.is_derived_class_constructor = func_kind == .derived_class_constructor;
-                // Capture THIS class's `<class_fields_init>` var via the index
-                // recorded by parseClass, not by-name findVar (newest-first
-                // findVar picks a nested heritage class's atom-120 var).
-                // Mirrors qjs per-class-scope resolution of
-                // JS_ATOM_class_fields_init (quickjs.c:25702 + 25185).
-                const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
-                child_fd.parent_class_fields_init_var_idx = fields_init_var_idx;
-                _ = try child_fd.addClosureVar(.{
-                    .closure_type = .local,
-                    .is_lexical = true,
-                    .is_const = true,
-                    .var_kind = .normal,
-                    .var_idx = fields_init_var_idx,
-                    .var_name = atom_class_fields_init,
-                });
             }
             if (!s.pending_function_is_decl) {
                 if (s.pending_function_name != null) {
@@ -13608,6 +13672,9 @@ pub const parser_core = struct {
         if (capture_child and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
             try s.emitOp(opcode.op.check_ctor);
         }
+        if (capture_child and func_kind == .class_constructor) {
+            try emitClassFieldInitCall(s);
+        }
 
         var parameters = try parseFunctionParameters(s, func_kind, capture_child);
         defer parameters.deinit(s);
@@ -13742,7 +13809,6 @@ pub const parser_core = struct {
                     .local => function_decl_plan.annex_b_var_idx = try s.ensureFunctionScopeVar(name),
                 }
             }
-            try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
             try parent_fd.addChild(child_ptr);
             child_moved = true;
             s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
@@ -14196,7 +14262,6 @@ pub const parser_core = struct {
             s.new_target_allowed = saved_new_target_allowed;
             const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
             child_ptr.parent_cpool_idx = child_cpool_idx;
-            try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
             try parent_fd.addChild(child_ptr);
             child_moved = true;
             s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
@@ -15213,6 +15278,7 @@ pub const parser_core = struct {
                 defer s.function.atoms.free(private_atom);
                 if (atomNameEquals(s, private_atom, "#constructor")) return Error.UnexpectedToken;
                 try registerClassPrivateElement(s, private_atom, if (is_getter) .getter else .setter);
+                try preparePrivateAccessorBinding(s, private_atom, is_getter);
                 try s.advance();
                 if (s.peekKind() != '(') {
                     return Error.UnexpectedToken;
@@ -15220,8 +15286,17 @@ pub const parser_core = struct {
                 // Parse parameters with proper function kind for private getter/setter
                 const kind: ParseFunctionKind = if (is_getter) .get else .set;
                 try parseClassElementFunction(s, kind, element_source_start);
+                try markPrivateBrandNeeded(s);
                 if (s.is_static) try s.emitOp(opcode.op.perm3);
-                try s.emitOpAtomU8(opcode.op.define_method, private_atom, if (is_getter) 1 else 2);
+                try s.emitOp(opcode.op.set_home_object);
+                if (is_getter) {
+                    try s.emitScopePutVarInit(private_atom);
+                } else {
+                    const setter_atom = try privateSetterAtom(s, private_atom);
+                    defer s.function.atoms.free(setter_atom);
+                    _ = try addPrivateClassBinding(s, setter_atom, .private_setter);
+                    try s.emitScopePutVarInit(setter_atom);
+                }
                 if (s.is_static) try s.emitOp(opcode.op.swap);
             } else if (s.peekKind() == '[') {
                 try emitClassComputedMethod(s, if (is_getter) .get else .set, if (is_getter) 1 else 2, element_source_start);
@@ -15255,29 +15330,32 @@ pub const parser_core = struct {
                 // Private method
                 try registerClassPrivateElement(s, private_atom, .method);
                 try parseClassElementFunction(s, method_kind_override orelse .method, element_source_start);
+                _ = try addPrivateClassBinding(s, private_atom, .private_method);
+                try markPrivateBrandNeeded(s);
                 if (s.is_static) try s.emitOp(opcode.op.perm3);
-                try s.emitOpAtomU8(opcode.op.define_method, private_atom, 0);
+                try s.emitOp(opcode.op.set_home_object);
+                try s.emitOpAtom(opcode.op.set_name, private_atom);
+                try s.emitScopePutVarInit(private_atom);
                 if (s.is_static) try s.emitOp(opcode.op.swap);
                 if (s.peekKind() == ';') try s.advance();
                 return;
             } else if (s.peekKind() == '=') {
                 // Private field with initializer
                 try registerClassPrivateElement(s, private_atom, .field);
+                try addPrivateClassFieldBinding(s, private_atom);
                 try s.advance();
                 if (s.is_static) {
-                    try emitStaticPublicFieldInitializer(s, private_atom);
+                    try emitStaticFieldInitializer(s, private_atom, true, false, true);
                 } else {
-                    try emitInstancePublicFieldInitializer(s, private_atom, true);
+                    try emitInstanceFieldInitializer(s, private_atom, true, true);
                 }
             } else {
                 try registerClassPrivateElement(s, private_atom, .field);
+                try addPrivateClassFieldBinding(s, private_atom);
                 if (s.is_static) {
-                    try s.emitOp(opcode.op.swap);
-                    try s.emitOp(opcode.op.undefined);
-                    try s.emitOpAtom(opcode.op.define_field, private_atom);
-                    try s.emitOp(opcode.op.swap);
+                    try emitStaticFieldInitializer(s, private_atom, true, false, false);
                 } else {
-                    try emitInstancePublicFieldInitializer(s, private_atom, false);
+                    try emitInstanceFieldInitializer(s, private_atom, false, true);
                 }
             }
             _ = try s.expectSemicolon();
@@ -15341,9 +15419,9 @@ pub const parser_core = struct {
                 if (isForbiddenPublicFieldName(s, prop_atom)) return Error.UnexpectedToken;
                 try s.advance();
                 if (s.is_static) {
-                    try emitStaticPublicFieldInitializer(s, prop_atom);
+                    try emitStaticFieldInitializer(s, prop_atom, false, false, true);
                 } else {
-                    try emitInstancePublicFieldInitializer(s, prop_atom, true);
+                    try emitInstanceFieldInitializer(s, prop_atom, true, false);
                 }
                 _ = try s.expectSemicolon();
             } else if (s.peekKind() == ';') {
@@ -15406,6 +15484,64 @@ pub const parser_core = struct {
         });
     }
 
+    /// QuickJS `add_private_class_field`: every private element is represented
+    /// by a lexical const VarDef. Only the parser-time row retains the static
+    /// discriminator used to validate getter/setter pairing.
+    fn addPrivateClassBinding(s: *State, atom_id: Atom, kind: function_def_mod.VarKind) Error!u16 {
+        const idx = try s.addScopeVar(atom_id, kind, true, true);
+        if (idx < 0 or @as(usize, @intCast(idx)) >= s.cur_func().vars.len) return Error.UnexpectedToken;
+        s.cur_func().vars[@intCast(idx)].is_static_private = s.is_static;
+        return @intCast(idx);
+    }
+
+    fn addPrivateClassFieldBinding(s: *State, atom_id: Atom) Error!void {
+        _ = try addPrivateClassBinding(s, atom_id, .private_field);
+        try s.emitOpAtom(opcode.op.private_symbol, atom_id);
+        try s.emitScopePutVarInit(atom_id);
+    }
+
+    fn preparePrivateAccessorBinding(s: *State, atom_id: Atom, is_getter: bool) Error!void {
+        if (findCurrentScopeVar(s, atom_id)) |idx| {
+            const vd = &s.cur_func().vars[idx];
+            if (vd.is_static_private != s.is_static) return Error.UnexpectedToken;
+            const expected: function_def_mod.VarKind = if (is_getter) .private_setter else .private_getter;
+            if (vd.var_kind != expected) return Error.UnexpectedToken;
+            vd.var_kind = .private_getter_setter;
+            return;
+        }
+        _ = try addPrivateClassBinding(s, atom_id, if (is_getter) .private_getter else .private_setter);
+    }
+
+    fn privateSetterAtom(s: *State, private_atom: Atom) Error!Atom {
+        const name = s.function.atoms.name(private_atom) orelse return Error.InvalidIdentifier;
+        const suffix = "<set>";
+        const bytes = try s.function.memory.alloc(u8, name.len + suffix.len);
+        defer s.function.memory.free(u8, bytes);
+        @memcpy(bytes[0..name.len], name);
+        @memcpy(bytes[name.len..], suffix);
+        return s.function.atoms.newSymbol(bytes, .private);
+    }
+
+    fn markPrivateBrandNeeded(s: *State) Error!void {
+        if (s.is_static) {
+            s.class_static_private_brand_needed = true;
+            return;
+        }
+        s.class_instance_private_brand_needed = true;
+        const child_index = try ensureClassFieldsInitFunction(s);
+        const parent = s.cur_func();
+        if (child_index >= parent.child_list.len) return Error.UnexpectedToken;
+        const init_fd = parent.child_list[child_index];
+        if (init_fd.byte_code.len == 0) return Error.UnexpectedToken;
+        switch (init_fd.byte_code[0]) {
+            opcode.op.push_false => init_fd.byte_code[0] = opcode.op.push_true,
+            // Multiple private methods/accessors share the same initializer
+            // prologue. Patching it is deliberately idempotent.
+            opcode.op.push_true => {},
+            else => return Error.UnexpectedToken,
+        }
+    }
+
     fn isForbiddenPublicFieldName(s: *State, atom_id: Atom) bool {
         if (!s.is_static) return atom_id == atom_module.ids.constructor;
         return atom_id == atom_module.ids.constructor or atom_id == atom_module.ids.prototype;
@@ -15430,49 +15566,110 @@ pub const parser_core = struct {
             ((s.lex.is_module or s.in_async or s.in_class_static_block) and atomNameEquals(s, atom_id, "await"));
     }
 
-    fn emitStaticPublicFieldInitializer(s: *State, atom_id: Atom) Error!void {
-        const this_atom = try classStaticBlockThisTempAtom(s);
-        defer s.function.atoms.free(this_atom);
-        _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
+    fn emitStaticFieldInitializer(
+        s: *State,
+        atom_id: Atom,
+        is_private: bool,
+        is_computed: bool,
+        has_initializer: bool,
+    ) Error!void {
+        const child_index = try ensureClassStaticInitFunction(s);
+        const parent_fd = s.cur_func();
+        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        const init_fd = parent_fd.child_list[child_index];
 
-        try s.emitOp(opcode.op.swap);
-        try s.emitOp(opcode.op.dup);
-        try s.emitScopePutVarInit(this_atom);
-
-        const saved_static_field_this_atom = s.class_static_field_this_atom;
-        const saved_new_target_allowed = s.new_target_allowed;
+        const saved_emit_to_function_def = s.emit_to_function_def;
+        const saved_last_opcode_source_offset = s.last_opcode_source_offset;
+        const saved_scope_level = s.scope_level;
+        const saved_is_strict = s.is_strict;
+        const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_allow_super = s.allow_super;
-        s.class_static_field_this_atom = this_atom;
-        s.new_target_allowed = true;
-        s.allow_super = true;
-        defer s.class_static_field_this_atom = saved_static_field_this_atom;
-        defer s.new_target_allowed = saved_new_target_allowed;
-        defer s.allow_super = saved_allow_super;
+        const saved_allow_super_call = s.allow_super_call;
+        const saved_new_target_allowed = s.new_target_allowed;
+        const saved_in_constructor = s.in_constructor;
+        const saved_last_anonymous_function_expr = s.last_anonymous_function_expr;
+        const saved_last_function_child_index = s.last_function_child_index;
 
-        s.class_field_initializer_depth += 1;
-        defer s.class_field_initializer_depth -= 1;
-        try parseExpr(s);
-        try s.emitOp(opcode.op.set_home_object);
-        if (s.last_anonymous_function_expr) {
-            try s.emitOpAtom(opcode.op.set_name, atom_id);
-            s.last_anonymous_function_expr = false;
+        try s.pushFunction(init_fd);
+        s.emit_to_function_def = true;
+        s.last_opcode_source_offset = null;
+        s.scope_level = 0;
+        s.is_strict = true;
+        s.lex.is_strict_mode = true;
+        s.allow_super = true;
+        s.allow_super_call = false;
+        s.new_target_allowed = true;
+        s.in_constructor = false;
+        s.last_anonymous_function_expr = false;
+        errdefer {
+            _ = s.popFunction();
+            s.emit_to_function_def = saved_emit_to_function_def;
+            s.last_opcode_source_offset = saved_last_opcode_source_offset;
+            s.scope_level = saved_scope_level;
+            s.is_strict = saved_is_strict;
+            s.lex.is_strict_mode = saved_lex_is_strict;
+            s.allow_super = saved_allow_super;
+            s.allow_super_call = saved_allow_super_call;
+            s.new_target_allowed = saved_new_target_allowed;
+            s.in_constructor = saved_in_constructor;
+            s.last_anonymous_function_expr = saved_last_anonymous_function_expr;
+            s.last_function_child_index = saved_last_function_child_index;
         }
-        try s.emitOpAtom(opcode.op.define_field, atom_id);
-        try s.emitOp(opcode.op.swap);
+
+        try s.emitScopeGetVar(atom_this);
+        if (is_private or is_computed) try s.emitScopeGetVar(atom_id);
+        if (has_initializer) {
+            try parseAssignExpr(s);
+            if (s.last_anonymous_function_expr) {
+                if (is_computed) {
+                    try s.emitOp(opcode.op.set_name_computed);
+                } else {
+                    try s.emitOpAtom(opcode.op.set_name, atom_id);
+                }
+                s.last_anonymous_function_expr = false;
+            }
+        } else {
+            try s.emitOp(opcode.op.undefined);
+        }
+        if (is_private) {
+            try s.emitOp(opcode.op.define_private_field);
+            try s.emitOp(opcode.op.drop);
+        } else if (is_computed) {
+            try s.emitOp(opcode.op.define_array_el);
+            try s.emitOp(opcode.op.drop);
+        } else {
+            try s.emitOpAtom(opcode.op.define_field, atom_id);
+            try s.emitOp(opcode.op.drop);
+        }
+
+        _ = s.popFunction();
+        s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
+        s.scope_level = saved_scope_level;
+        s.is_strict = saved_is_strict;
+        s.lex.is_strict_mode = saved_lex_is_strict;
+        s.allow_super = saved_allow_super;
+        s.allow_super_call = saved_allow_super_call;
+        s.new_target_allowed = saved_new_target_allowed;
+        s.in_constructor = saved_in_constructor;
+        s.last_anonymous_function_expr = saved_last_anonymous_function_expr;
+        s.last_function_child_index = saved_last_function_child_index;
     }
 
     fn emitPublicFieldNoInitializer(s: *State, atom_id: Atom) Error!void {
         if (s.is_static) {
-            try s.emitOp(opcode.op.swap);
-            try s.emitOp(opcode.op.undefined);
-            try s.emitOpAtom(opcode.op.define_field, atom_id);
-            try s.emitOp(opcode.op.swap);
+            try emitStaticFieldInitializer(s, atom_id, false, false, false);
             return;
         }
-        try emitInstancePublicFieldInitializer(s, atom_id, false);
+        try emitInstanceFieldInitializer(s, atom_id, false, false);
     }
 
-    fn emitInstancePublicFieldInitializer(s: *State, atom_id: Atom, has_initializer: bool) Error!void {
+    fn emitInstanceFieldInitializer(
+        s: *State,
+        atom_id: Atom,
+        has_initializer: bool,
+        is_private: bool,
+    ) Error!void {
         const child_index = try ensureClassFieldsInitFunction(s);
         const parent_fd = s.cur_func();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
@@ -15517,9 +15714,8 @@ pub const parser_core = struct {
         }
 
         try s.emitOp(opcode.op.push_this);
+        if (is_private) try s.emitScopeGetVar(atom_id);
         if (has_initializer) {
-            s.class_field_initializer_depth += 1;
-            defer s.class_field_initializer_depth -= 1;
             try parseAssignExpr(s);
             if (s.last_anonymous_function_expr) {
                 try s.emitOpAtom(opcode.op.set_name, atom_id);
@@ -15528,7 +15724,11 @@ pub const parser_core = struct {
         } else {
             try s.emitOp(opcode.op.undefined);
         }
-        try s.emitOpAtom(opcode.op.define_field, atom_id);
+        if (is_private) {
+            try s.emitOp(opcode.op.define_private_field);
+        } else {
+            try s.emitOpAtom(opcode.op.define_field, atom_id);
+        }
         try s.emitOp(opcode.op.drop);
 
         _ = s.popFunction();
@@ -15547,7 +15747,19 @@ pub const parser_core = struct {
 
     fn ensureClassFieldsInitFunction(s: *State) Error!usize {
         if (s.class_fields_init_child_index) |child_index| return child_index;
+        const child_index = try createClassFieldsInitFunction(s, true);
+        s.class_fields_init_child_index = @intCast(child_index);
+        return child_index;
+    }
 
+    fn ensureClassStaticInitFunction(s: *State) Error!usize {
+        if (s.class_static_init_child_index) |child_index| return child_index;
+        const child_index = try createClassFieldsInitFunction(s, false);
+        s.class_static_init_child_index = @intCast(child_index);
+        return child_index;
+    }
+
+    fn createClassFieldsInitFunction(s: *State, include_instance_brand_prologue: bool) Error!usize {
         const parent_fd = s.cur_func();
         const child_fd = try s.function.memory.create(function_def_mod.FunctionDef);
         child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, atom_class_fields_init);
@@ -15569,18 +15781,47 @@ pub const parser_core = struct {
         child_fd.has_this_binding = true;
         child_fd.new_target_allowed = true;
         child_fd.super_allowed = true;
+        child_fd.arguments_allowed = false;
         _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
+        if (include_instance_brand_prologue) {
+            // QJS emits a dormant instance-brand prologue for every instance
+            // initializer child and patches only the first opcode when a
+            // private method or accessor appears. Static initialization brands
+            // the constructor before invoking its separate child.
+            var brand_prefix: [15]u8 = undefined;
+            brand_prefix[0] = opcode.op.push_false;
+            brand_prefix[1] = opcode.op.if_false;
+            // Keep this as a phase-1 absolute target. Resolving home_object may
+            // shrink the following scope opcode, and resolve_variables remaps
+            // this target before resolve_labels picks the final short branch.
+            std.mem.writeInt(u32, brand_prefix[2..6], brand_prefix.len, .little);
+            brand_prefix[6] = opcode.op.push_this;
+            brand_prefix[7] = opcode.op.scope_get_var;
+            std.mem.writeInt(u32, brand_prefix[8..12], atom_module.ids.home_object, .little);
+            std.mem.writeInt(u16, brand_prefix[12..14], 0, .little);
+            brand_prefix[14] = opcode.op.add_brand;
+            try child_fd.appendByteCode(&brand_prefix);
+            try child_fd.appendAtomOperand(atom_module.ids.home_object);
+        }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_fd.parent_cpool_idx = cpool_idx;
         try parent_fd.addChild(child_fd);
         child_moved = true;
         const child_index: u16 = @intCast(parent_fd.child_list.len - 1);
-        s.class_fields_init_child_index = child_index;
         return child_index;
     }
 
     fn finishClassFieldsInitFunction(s: *State) Error!void {
         const child_index = s.class_fields_init_child_index orelse return;
+        try finishClassInitFunction(s, child_index);
+    }
+
+    fn finishClassStaticInitFunction(s: *State) Error!void {
+        const child_index = s.class_static_init_child_index orelse return;
+        try finishClassInitFunction(s, child_index);
+    }
+
+    fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
         const parent_fd = s.cur_func();
         if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
         const init_fd = parent_fd.child_list[child_index];
@@ -15591,59 +15832,6 @@ pub const parser_core = struct {
         };
         if (!needs_return) return;
         try init_fd.appendByteCode(&.{opcode.op.return_undef});
-    }
-
-    fn attachClassFieldsInitToConstructor(
-        s: *State,
-        constructor_cpool_idx: u16,
-    ) Error!void {
-        const init_child_index = s.class_fields_init_child_index orelse return;
-        const parent_fd = s.cur_func();
-        if (init_child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
-        const init_cpool_idx = parent_fd.child_list[init_child_index].parent_cpool_idx;
-        if (init_cpool_idx < 0) return Error.UnexpectedToken;
-        for (parent_fd.child_list) |child| {
-            if (child.parent_cpool_idx != @as(i32, @intCast(constructor_cpool_idx))) continue;
-            child.class_fields_init_cpool_idx = init_cpool_idx;
-            return;
-        }
-        return Error.UnexpectedToken;
-    }
-
-    fn registerClassPublicInstanceField(s: *State, atom_id: Atom) Error!void {
-        try appendRetainedAtom(&s.class_public_instance_fields, s.function.memory.allocator, s.function.atoms, atom_id);
-    }
-
-    fn attachClassPublicInstanceFieldsToConstructor(
-        s: *State,
-        cpool_idx: u16,
-        field_start: usize,
-    ) Error!void {
-        if (field_start >= s.class_public_instance_fields.items.len) return;
-        for (s.cur_func().child_list) |child| {
-            if (child.parent_cpool_idx != @as(i32, @intCast(cpool_idx))) continue;
-            for (s.class_public_instance_fields.items[field_start..]) |atom_id| {
-                try child.appendClassInstanceField(atom_id);
-            }
-            return;
-        }
-        return Error.UnexpectedToken;
-    }
-
-    fn attachClassDeclaredPrivateNamesToConstructor(
-        s: *State,
-        cpool_idx: u16,
-        element_start: usize,
-    ) Error!void {
-        if (element_start >= s.class_private_elements.items.len) return;
-        for (s.cur_func().child_list) |child| {
-            if (child.parent_cpool_idx != @as(i32, @intCast(cpool_idx))) continue;
-            for (s.class_private_elements.items[element_start..]) |entry| {
-                try child.appendClassPrivateName(entry.atom);
-            }
-            return;
-        }
-        return Error.UnexpectedToken;
     }
 
     fn registerClassPrivateBoundName(s: *State, atom_id: Atom) Error!void {
@@ -15726,13 +15914,6 @@ pub const parser_core = struct {
         return s.function.atoms.internString(temp_name);
     }
 
-    fn classStaticBlockThisTempAtom(s: *State) Error!Atom {
-        const temp_name = try std.fmt.allocPrint(s.function.memory.allocator, "__class_static_this_{d}", .{s.with_scope_id});
-        defer s.function.memory.allocator.free(temp_name);
-        s.with_scope_id += 1;
-        return s.function.atoms.internString(temp_name);
-    }
-
     fn parseClassElementFunction(s: *State, kind: ParseFunctionKind, source_start: usize) Error!void {
         const saved_parameter_properties = s.current_parameter_properties;
         if (kind == .class_constructor or kind == .derived_class_constructor) {
@@ -15776,30 +15957,6 @@ pub const parser_core = struct {
             s.parsing_method_params = saved_parsing_method_params;
         }
         try parseFunctionParamsAndBody(s, kind, source_start);
-        try attachClassPrivateBoundNamesToLastFunction(s);
-    }
-
-    fn attachClassPrivateBoundNamesToLastFunction(s: *State) Error!void {
-        const child_index = s.last_function_child_index orelse return;
-        if (child_index >= s.cur_func().child_list.len) return;
-        const child = s.cur_func().child_list[child_index];
-        try attachVisibleClassPrivateBoundNamesToFunction(s, child);
-    }
-
-    fn attachVisibleClassPrivateBoundNamesToFunction(s: *State, child: *function_def_mod.FunctionDef) Error!void {
-        for (s.class_private_bound_names.items) |atom_id| {
-            try child.appendPrivateBoundName(atom_id);
-        }
-    }
-
-    fn attachClassPrivateBoundNamesToChildren(s: *State, child_start: usize) Error!void {
-        var child_index = child_start;
-        while (child_index < s.cur_func().child_list.len) : (child_index += 1) {
-            const child = s.cur_func().child_list[child_index];
-            for (s.class_private_bound_names.items) |atom_id| {
-                try child.appendPrivateBoundName(atom_id);
-            }
-        }
     }
 
     fn parseClassComputedName(s: *State) Error!void {
@@ -15807,36 +15964,6 @@ pub const parser_core = struct {
         try parseAssignExpr2(s, ParseFlags.default);
         try s.emitOp(opcode.op.to_propkey);
         try expectPunct(s, ']');
-    }
-
-    fn deferCurrentCodeToClassStatic(s: *State, code_start: usize, atom_start: usize) Error!void {
-        const code = s.currentCode();
-        const atoms = s.currentAtomOperands();
-        if (code_start > code.len or atom_start > atoms.len) return Error.UnexpectedToken;
-        const moved_len = code.len - code_start;
-        if (moved_len != 0) {
-            const moved = try s.function.memory.alloc(u8, moved_len);
-            defer s.function.memory.free(u8, moved);
-            @memcpy(moved, code[code_start..]);
-            try rebaseMovedBytecodeLabels(moved, atoms[atom_start..], code_start, s.class_static_deferred_code.items.len);
-            try s.class_static_deferred_code.appendSlice(s.function.memory.allocator, moved);
-        }
-        for (atoms[atom_start..]) |atom_id| {
-            try appendRetainedAtom(&s.class_static_deferred_atoms, s.function.memory.allocator, s.function.atoms, atom_id);
-        }
-        try s.truncateCode(code_start);
-        try s.truncateAtomOperands(atom_start);
-    }
-
-    fn appendClassStaticDeferred(s: *State, code_start: usize, atom_start: usize) Error!void {
-        if (code_start > s.class_static_deferred_code.items.len or atom_start > s.class_static_deferred_atoms.items.len) return Error.UnexpectedToken;
-        if (code_start == s.class_static_deferred_code.items.len) return;
-        try s.appendMovedCodeWithAtoms(
-            s.class_static_deferred_code.items[code_start..],
-            s.class_static_deferred_atoms.items[atom_start..],
-            code_start,
-        );
-        s.truncateClassStaticDeferred(code_start, atom_start);
     }
 
     fn emitStaticClassComputedElement(s: *State, kind: ParseFunctionKind, source_start: usize) Error!void {
@@ -15856,45 +15983,12 @@ pub const parser_core = struct {
         try s.emitScopePutVarInit(key_atom);
         try s.emitOp(opcode.op.swap);
 
-        const deferred_code_start = s.currentCodeLen();
-        const deferred_atom_start = s.currentAtomOperandLen();
-        try s.emitOp(opcode.op.swap);
-        try s.emitScopeGetVar(key_atom);
         if (s.peekKind() == '=') {
             try s.advance();
-            const this_atom = try classStaticBlockThisTempAtom(s);
-            defer s.function.atoms.free(this_atom);
-            _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
-            try s.emitOp(opcode.op.swap);
-            try s.emitOp(opcode.op.dup);
-            try s.emitScopePutVarInit(this_atom);
-            try s.emitOp(opcode.op.swap);
-
-            const saved_static_field_this_atom = s.class_static_field_this_atom;
-            const saved_new_target_allowed = s.new_target_allowed;
-            const saved_allow_super = s.allow_super;
-            s.class_static_field_this_atom = this_atom;
-            s.new_target_allowed = true;
-            s.allow_super = true;
-            defer s.class_static_field_this_atom = saved_static_field_this_atom;
-            defer s.new_target_allowed = saved_new_target_allowed;
-            defer s.allow_super = saved_allow_super;
-
-            s.class_field_initializer_depth += 1;
-            defer s.class_field_initializer_depth -= 1;
-            try parseExpr(s);
-            try s.emitOp(opcode.op.set_home_object);
-            if (s.last_anonymous_function_expr) {
-                try s.emitOp(opcode.op.set_name_computed);
-                s.last_anonymous_function_expr = false;
-            }
+            try emitStaticFieldInitializer(s, key_atom, false, true, true);
         } else {
-            try s.emitOp(opcode.op.undefined);
+            try emitStaticFieldInitializer(s, key_atom, false, true, false);
         }
-        try s.emitOp(opcode.op.define_array_el);
-        try s.emitOp(opcode.op.drop);
-        try s.emitOp(opcode.op.swap);
-        try deferCurrentCodeToClassStatic(s, deferred_code_start, deferred_atom_start);
         _ = try s.expectSemicolon();
     }
 
@@ -15945,8 +16039,6 @@ pub const parser_core = struct {
         try s.emitOp(opcode.op.push_this);
         try s.emitScopeGetVar(key_atom);
         if (has_initializer) {
-            s.class_field_initializer_depth += 1;
-            defer s.class_field_initializer_depth -= 1;
             try parseAssignExpr(s);
             if (s.last_anonymous_function_expr) {
                 try s.emitOp(opcode.op.set_name_computed);
@@ -16005,43 +16097,84 @@ pub const parser_core = struct {
     }
 
     fn emitClassStaticBlock(s: *State) Error!void {
-        const this_atom = try classStaticBlockThisTempAtom(s);
-        defer s.function.atoms.free(this_atom);
-        _ = try s.addScopeVar(this_atom, .class_static_this, true, true);
+        const child_index = try ensureClassStaticInitFunction(s);
+        const parent_fd = s.cur_func();
+        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        const init_fd = parent_fd.child_list[child_index];
 
-        try s.emitOp(opcode.op.swap);
-        try s.emitOp(opcode.op.dup);
-        try s.emitScopePutVarInit(this_atom);
-        try s.emitOp(opcode.op.swap);
-
+        const saved_emit_to_function_def = s.emit_to_function_def;
+        const saved_last_opcode_source_offset = s.last_opcode_source_offset;
+        const saved_scope_level = s.scope_level;
         const saved_pending_name = s.pending_function_name;
         const saved_pending_decl = s.pending_function_is_decl;
         const saved_is_strict = s.is_strict;
         const saved_lex_is_strict = s.lex.is_strict_mode;
         const saved_static_block = s.in_class_static_block;
         const saved_is_static = s.is_static;
+        const saved_allow_super = s.allow_super;
+        const saved_allow_super_call = s.allow_super_call;
+        const saved_new_target_allowed = s.new_target_allowed;
+        const saved_in_constructor = s.in_constructor;
+        const saved_last_anonymous_function_expr = s.last_anonymous_function_expr;
+        const saved_last_function_child_index = s.last_function_child_index;
+
+        try s.pushFunction(init_fd);
+        s.emit_to_function_def = true;
+        s.last_opcode_source_offset = null;
+        s.scope_level = 0;
         s.pending_function_name = null;
         s.pending_function_is_decl = false;
         s.is_strict = true;
         s.lex.is_strict_mode = true;
         s.in_class_static_block = true;
         s.is_static = false;
-        defer {
+        s.allow_super = true;
+        s.allow_super_call = false;
+        s.new_target_allowed = true;
+        s.in_constructor = false;
+        s.last_anonymous_function_expr = false;
+        errdefer {
+            _ = s.popFunction();
+            s.emit_to_function_def = saved_emit_to_function_def;
+            s.last_opcode_source_offset = saved_last_opcode_source_offset;
+            s.scope_level = saved_scope_level;
             s.pending_function_name = saved_pending_name;
             s.pending_function_is_decl = saved_pending_decl;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
             s.in_class_static_block = saved_static_block;
             s.is_static = saved_is_static;
+            s.allow_super = saved_allow_super;
+            s.allow_super_call = saved_allow_super_call;
+            s.new_target_allowed = saved_new_target_allowed;
+            s.in_constructor = saved_in_constructor;
+            s.last_anonymous_function_expr = saved_last_anonymous_function_expr;
+            s.last_function_child_index = saved_last_function_child_index;
         }
 
         try parseFunctionParamsAndBody(s, .class_static_block, null);
-        try attachClassPrivateBoundNamesToLastFunction(s);
-        try s.emitScopeGetVar(this_atom);
+        s.last_anonymous_function_expr = false;
+        try s.emitScopeGetVar(atom_this);
         try s.emitOp(opcode.op.swap);
-        try s.emitOp(opcode.op.set_home_object);
         try s.emitOpU16(opcode.op.call_method, 0);
         try s.emitOp(opcode.op.drop);
+
+        _ = s.popFunction();
+        s.emit_to_function_def = saved_emit_to_function_def;
+        s.last_opcode_source_offset = saved_last_opcode_source_offset;
+        s.scope_level = saved_scope_level;
+        s.pending_function_name = saved_pending_name;
+        s.pending_function_is_decl = saved_pending_decl;
+        s.is_strict = saved_is_strict;
+        s.lex.is_strict_mode = saved_lex_is_strict;
+        s.in_class_static_block = saved_static_block;
+        s.is_static = saved_is_static;
+        s.allow_super = saved_allow_super;
+        s.allow_super_call = saved_allow_super_call;
+        s.new_target_allowed = saved_new_target_allowed;
+        s.in_constructor = saved_in_constructor;
+        s.last_anonymous_function_expr = saved_last_anonymous_function_expr;
+        s.last_function_child_index = saved_last_function_child_index;
     }
 
     /// Parse class body
@@ -16156,6 +16289,43 @@ pub const parser_core = struct {
         try s.emitOpU16(opcode.op.put_loc_check_init, fields_init_local_idx);
     }
 
+    fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error!void {
+        const child_index = class_static_init_child_index orelse return;
+        const parent_fd = s.cur_func();
+        if (child_index >= parent_fd.child_list.len) return Error.UnexpectedToken;
+        const cpool_idx = parent_fd.child_list[child_index].parent_cpool_idx;
+        if (cpool_idx < 0) return Error.UnexpectedToken;
+
+        // The class constructor is the sole stack value here. Duplicate it as
+        // the call receiver/home object, then invoke the lexical static
+        // initializer immediately. Mirrors quickjs.c:25735-25744.
+        try s.emitOp(opcode.op.dup);
+        try s.emitFClosure(@intCast(cpool_idx));
+        try s.emitOp(opcode.op.set_home_object);
+        try s.emitOpU16(opcode.op.call_method, 0);
+        try s.emitOp(opcode.op.drop);
+    }
+
+    /// The class stack is `[constructor, prototype]`. Private instance members
+    /// use the prototype as their home object, so pre-create its brand before
+    /// user code can make the prototype non-extensible. Static members brand
+    /// the constructor itself. Both sequences preserve the class stack.
+    fn emitClassPrivateBrands(s: *State, instance_needed: bool, static_needed: bool) Error!void {
+        if (instance_needed) {
+            try s.emitOp(opcode.op.dup);
+            try s.emitOp(opcode.op.null);
+            try s.emitOp(opcode.op.swap);
+            try s.emitOp(opcode.op.add_brand);
+        }
+        if (static_needed) {
+            try s.emitOp(opcode.op.swap);
+            try s.emitOp(opcode.op.dup);
+            try s.emitOp(opcode.op.dup);
+            try s.emitOp(opcode.op.add_brand);
+            try s.emitOp(opcode.op.swap);
+        }
+    }
+
     fn emitClassDefineOperands(s: *State, cpool_idx: u16) Error!void {
         try s.emitOpU32(opcode.op.push_const, cpool_idx);
     }
@@ -16196,11 +16366,10 @@ pub const parser_core = struct {
         const saved_class_constructor_cpool_idx = s.class_constructor_cpool_idx;
         const saved_class_private_elements_len = s.class_private_elements.items.len;
         const saved_class_private_bound_names_len = s.class_private_bound_names.items.len;
-        const saved_class_public_instance_fields_len = s.class_public_instance_fields.items.len;
-        const saved_class_static_deferred_code_len = s.class_static_deferred_code.items.len;
-        const saved_class_static_deferred_atom_len = s.class_static_deferred_atoms.items.len;
         const saved_class_fields_init_child_index = s.class_fields_init_child_index;
-        const saved_class_fields_init_var_idx = s.class_fields_init_var_idx;
+        const saved_class_static_init_child_index = s.class_static_init_child_index;
+        const saved_class_instance_private_brand_needed = s.class_instance_private_brand_needed;
+        const saved_class_static_private_brand_needed = s.class_static_private_brand_needed;
         var class_outer_scope_pushed = false;
         var class_private_scope_pushed = false;
         var class_name_local_idx: ?u16 = null;
@@ -16209,10 +16378,10 @@ pub const parser_core = struct {
             if (class_outer_scope_pushed) s.popScopeIdentity();
             s.truncateClassPrivateElements(saved_class_private_elements_len);
             s.truncateClassPrivateBoundNames(saved_class_private_bound_names_len);
-            s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
-            s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
             s.class_fields_init_child_index = saved_class_fields_init_child_index;
-            s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
+            s.class_static_init_child_index = saved_class_static_init_child_index;
+            s.class_instance_private_brand_needed = saved_class_instance_private_brand_needed;
+            s.class_static_private_brand_needed = saved_class_static_private_brand_needed;
             s.is_static = saved_is_static;
             s.is_strict = saved_is_strict;
             s.lex.is_strict_mode = saved_lex_is_strict;
@@ -16233,6 +16402,9 @@ pub const parser_core = struct {
         s.class_static_name_seen = false;
         s.class_constructor_cpool_idx = null;
         s.class_fields_init_child_index = null;
+        s.class_static_init_child_index = null;
+        s.class_instance_private_brand_needed = false;
+        s.class_static_private_brand_needed = false;
         // QuickJS creates the class-name scope even for an anonymous class.
         // The binding itself is appended only after heritage parsing, but the
         // completed scope chain still makes a named class TDZ-visible there.
@@ -16254,19 +16426,16 @@ pub const parser_core = struct {
             else => unreachable,
         };
         s.cur_func().vars[class_fields_init_local_idx.?].tdz_emitted_at_decl = true;
-        s.class_fields_init_var_idx = class_fields_init_local_idx;
 
         // Parse class body. Constructor parsing records a child FunctionDef;
         // class definition bytecode references that child through push_const /
         // define_class instead of the normal fclosure expression path.
-        const child_count_before_class = s.cur_func().child_list.len;
         const class_emit_start = s.currentCodeLen();
         const class_atom_start = s.currentAtomOperandLen();
         try parseClassBodyAfterOpen(s);
         const class_source_end = s.last_token_end_offset;
         try finishClassFieldsInitFunction(s);
-        try attachClassPrivateBoundNamesToChildren(s, child_count_before_class);
-        try appendClassStaticDeferred(s, saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
+        try finishClassStaticInitFunction(s);
         const runtime_code = s.currentCode()[class_emit_start..];
         const saved_runtime_code = try s.function.memory.alloc(u8, runtime_code.len);
         defer s.function.memory.free(u8, saved_runtime_code);
@@ -16295,10 +16464,10 @@ pub const parser_core = struct {
         }
         try s.setChildFunctionSourceByCpoolIndex(class_constructor_cpool_idx, class_source_start, class_source_end);
         const class_has_extends = s.class_has_extends;
-        try attachClassPublicInstanceFieldsToConstructor(s, class_constructor_cpool_idx, saved_class_public_instance_fields_len);
-        try attachClassDeclaredPrivateNamesToConstructor(s, class_constructor_cpool_idx, saved_class_private_elements_len);
-        try attachClassFieldsInitToConstructor(s, class_constructor_cpool_idx);
         const parsed_class_fields_init_child_index = s.class_fields_init_child_index;
+        const parsed_class_static_init_child_index = s.class_static_init_child_index;
+        const class_instance_private_brand_needed = s.class_instance_private_brand_needed;
+        const class_static_private_brand_needed = s.class_static_private_brand_needed;
 
         s.in_class = saved_in_class;
         s.is_static = saved_is_static;
@@ -16310,10 +16479,10 @@ pub const parser_core = struct {
         s.class_constructor_cpool_idx = saved_class_constructor_cpool_idx;
         s.truncateClassPrivateElements(saved_class_private_elements_len);
         s.truncateClassPrivateBoundNames(saved_class_private_bound_names_len);
-        s.truncateClassPublicInstanceFields(saved_class_public_instance_fields_len);
-        s.truncateClassStaticDeferred(saved_class_static_deferred_code_len, saved_class_static_deferred_atom_len);
         s.class_fields_init_child_index = saved_class_fields_init_child_index;
-        s.class_fields_init_var_idx = saved_class_fields_init_var_idx;
+        s.class_static_init_child_index = saved_class_static_init_child_index;
+        s.class_instance_private_brand_needed = saved_class_instance_private_brand_needed;
+        s.class_static_private_brand_needed = saved_class_static_private_brand_needed;
 
         const name_atom = class_name orelse s.function.name;
         if (is_decl) {
@@ -16337,10 +16506,12 @@ pub const parser_core = struct {
             try emitClassDefineOperands(s, class_constructor_cpool_idx);
             try s.emitOpAtomU8(opcode.op.define_class, name_atom, if (class_has_extends) 1 else 0);
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
+            try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
             const fields_idx = class_fields_init_local_idx orelse return Error.UnexpectedToken;
             try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
             try s.emitOp(opcode.op.drop);
+            try emitClassStaticInitCall(s, parsed_class_static_init_child_index);
             // Parsing restores the outer scope identity before emitting this
             // deferred class runtime sequence so the declaration binding is
             // defined in its containing scope. Keep the runtime exits at the
@@ -16375,14 +16546,37 @@ pub const parser_core = struct {
             try s.emitOpAtomU8(opcode.op.define_class, expr_name_atom, if (class_has_extends) 1 else 0);
             if (class_fields_init_local_idx) |fields_idx| try emitClassFieldsInitLocalInitFromClassStack(s, fields_idx, parsed_class_fields_init_child_index);
             if (class_name_local_idx) |local_idx| try emitClassLocalInitFromClassStack(s, local_idx);
+            try emitClassPrivateBrands(s, class_instance_private_brand_needed, class_static_private_brand_needed);
             try s.appendMovedCodeWithAtoms(saved_runtime_code, saved_runtime_atoms, class_emit_start);
             try s.emitOp(opcode.op.drop);
+            try emitClassStaticInitCall(s, parsed_class_static_init_child_index);
             // Like QuickJS js_parse_class, leave both inner class scopes only
             // after their deferred initialization and static runtime work.
             try s.emitLeaveScope(class_private_scope_level);
             try s.emitLeaveScope(class_outer_scope_level);
             s.last_anonymous_function_expr = class_name == null and s.pending_function_name == null and !class_static_name_seen;
         }
+    }
+
+    fn appendClassFieldInitCallToFunctionDef(
+        fd: *function_def_mod.FunctionDef,
+        this_idx: u16,
+    ) Error!void {
+        var code: [18]u8 = undefined;
+        code[0] = opcode.op.scope_get_var;
+        std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
+        std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
+        code[7] = opcode.op.dup;
+        code[8] = opcode.op.if_false8;
+        code[9] = 8;
+        code[10] = opcode.op.get_loc_check;
+        std.mem.writeInt(u16, code[11..13], this_idx, .little);
+        code[13] = opcode.op.swap;
+        code[14] = opcode.op.call_method;
+        std.mem.writeInt(u16, code[15..17], 0, .little);
+        code[17] = opcode.op.drop;
+        try fd.appendAtomOperand(atom_class_fields_init);
+        try fd.appendByteCode(&code);
     }
 
     fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
@@ -16416,62 +16610,36 @@ pub const parser_core = struct {
         const body_scope = child_fd.appendScope(0) catch return error.OutOfMemory;
         child_fd.body_scope = body_scope;
         child_fd.scope_level = body_scope;
+        // Pinned qjs default base constructors enter through OP_check_ctor.
+        // Default derived constructors use OP_init_ctor below, whose handler
+        // performs the new.target gate while initializing derived state.
+        if (!s.class_has_extends) {
+            try child_fd.appendByteCode(&.{opcode.op.check_ctor});
+        }
         var body_marker: [3]u8 = undefined;
         body_marker[0] = opcode.op.enter_scope;
         std.mem.writeInt(u16, body_marker[1..3], @intCast(body_scope), .little);
         try child_fd.appendByteCode(&body_marker);
-        _ = child_fd.ensureThisBinding() catch return error.OutOfMemory;
-        // The constructor closes over THIS class's `<class_fields_init>` var.
-        // Resolve through the parse-state index recorded by parseClass instead
-        // of a by-name findVar: a nested class expression (e.g. in the extends
-        // clause) adds a second atom-120 var to the same enclosing function,
-        // and newest-first findVar would capture the inner class's slot.
-        // Mirrors qjs, where JS_ATOM_class_fields_init is defined in the
-        // class's own scope (define_var, quickjs.c:25702) and the constructor
-        // resolves it lexically (emit_class_field_init, quickjs.c:25185).
-        const fields_init_var_idx = s.class_fields_init_var_idx orelse return Error.UnexpectedToken;
-        child_fd.parent_class_fields_init_var_idx = fields_init_var_idx;
-        _ = try child_fd.addClosureVar(.{
-            .closure_type = .local,
-            .is_lexical = true,
-            .is_const = true,
-            .var_kind = .normal,
-            .var_idx = fields_init_var_idx,
-            .var_name = atom_class_fields_init,
-        });
+        const this_idx_i32 = child_fd.ensureThisBinding() catch return error.OutOfMemory;
+        if (this_idx_i32 < 0 or this_idx_i32 > std.math.maxInt(u16)) return Error.UnexpectedToken;
+        const this_idx: u16 = @intCast(this_idx_i32);
         if (s.class_has_extends) {
             try child_fd.appendByteCode(&.{
                 opcode.op.init_ctor,
                 opcode.op.put_loc_check_init,
-                0,
-                0,
-                opcode.op.get_var_ref_check,
-                0,
-                0,
-                opcode.op.dup,
-                opcode.op.if_false8,
-                8,
+                @truncate(this_idx),
+                @truncate(this_idx >> 8),
+            });
+            try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+            try child_fd.appendByteCode(&.{
                 opcode.op.get_loc_check,
-                0,
-                0,
-                opcode.op.swap,
-                opcode.op.call_method,
-                0,
-                0,
-                opcode.op.drop,
-                opcode.op.get_loc_check,
-                0,
-                0,
+                @truncate(this_idx),
+                @truncate(this_idx >> 8),
                 opcode.op.@"return",
             });
         } else {
-            // The synthetic default-constructor entry is currently handled by
-            // zjs's constructor trampoline; unlike parsed constructors it
-            // cannot run OP_check_ctor a second time here.
+            try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
             try child_fd.appendByteCode(&.{opcode.op.return_undef});
-        }
-        for (s.class_private_bound_names.items) |atom_id| {
-            try child_fd.appendPrivateBoundName(atom_id);
         }
         const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_fd.parent_cpool_idx = cpool_idx;
@@ -17083,6 +17251,7 @@ pub const compile_entry = struct {
 
     const atom = @import("core/atom.zig");
     const JSRuntime = @import("core/runtime.zig").JSRuntime;
+    const JSValue = @import("core/value.zig").JSValue;
     const bytecode = @import("bytecode.zig");
     const unicode = @import("libs/unicode.zig");
     const lexer_mod = lexer;
@@ -17105,20 +17274,184 @@ pub const compile_entry = struct {
         syntax_error_guard,
     };
 
+    /// Exactly one successful root artifact. Ordinary script/direct/indirect
+    /// eval use the canonical GC-owned FunctionBytecode; modules retain their
+    /// explicitly named legacy mutable root until module linking moves in W1e.
+    const RootArtifactImpl = union(enum) {
+        none,
+        function_bytecode: *bytecode.FunctionBytecode,
+        legacy_module: bytecode.Bytecode,
+    };
+
     const ResultImpl = struct {
         runtime: *JSRuntime,
-        function: bytecode.Bytecode,
+        artifact: RootArtifactImpl = .none,
         mode: ModeImpl,
         parse_path: CompilePathImpl = .normal,
         features: std.EnumSet(FeatureImpl) = .initEmpty(),
         syntax_error: ?diagnostics_mod.SyntaxError = null,
         direct_eval: bool = false,
-        arena: std.heap.ArenaAllocator,
+        /// Only the legacy module root may retain parser-arena storage. A
+        /// canonical FunctionBytecode has copied/moved every live artifact and
+        /// releases the parse arena before compile returns.
+        arena: ?std.heap.ArenaAllocator = null,
 
         pub fn deinit(self: *ResultImpl) void {
             if (self.syntax_error) |*err| err.deinit();
-            self.function.deinit(self.runtime);
-            self.arena.deinit();
+            switch (self.artifact) {
+                .none => {},
+                .function_bytecode => |fb| JSValue.functionBytecode(&fb.header).free(self.runtime),
+                .legacy_module => |owned| {
+                    var function = owned;
+                    function.deinit(self.runtime);
+                },
+            }
+            self.artifact = .none;
+            if (self.arena) |*arena| arena.deinit();
+            self.arena = null;
+        }
+
+        pub fn functionBytecode(self: *const ResultImpl) ?*const bytecode.FunctionBytecode {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb,
+                else => null,
+            };
+        }
+
+        /// Move the sole canonical ordinary root artifact out of this result.
+        /// The returned FunctionBytecode value is owned by the caller and the
+        /// Result becomes empty, so `deinit` cannot release a second reference.
+        /// This is the producer-side ownership transfer consumed by root
+        /// js_closure2; borrowed inspection remains available through
+        /// `functionBytecode`.
+        pub fn takeFunctionBytecodeValue(self: *ResultImpl) ?JSValue {
+            const fb = switch (self.artifact) {
+                .function_bytecode => |owned| owned,
+                else => return null,
+            };
+            self.artifact = .none;
+            return JSValue.functionBytecode(&fb.header);
+        }
+
+        pub fn byteCode(self: *const ResultImpl) []const u8 {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.byteCode(),
+                .legacy_module => |function| function.code,
+                .none => &.{},
+            };
+        }
+
+        pub fn constants(self: *const ResultImpl) []const JSValue {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.cpoolSlice(),
+                .legacy_module => |function| function.constants.values,
+                .none => &.{},
+            };
+        }
+
+        pub fn closureVars(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeClosureVar {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.closureVar(),
+                .legacy_module => |function| function.closure_var,
+                .none => &.{},
+            };
+        }
+
+        pub fn varDefs(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeVarDef {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.varDefs(),
+                .legacy_module => |function| function.vardefs,
+                .none => &.{},
+            };
+        }
+
+        pub fn openVarRefCount(self: *const ResultImpl) u16 {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.openVarRefCount(),
+                .legacy_module => |function| function.open_var_ref_count,
+                .none => 0,
+            };
+        }
+
+        pub fn filenameAtom(self: *const ResultImpl) atom.Atom {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.filenameAtom(),
+                .legacy_module => |function| function.filename,
+                .none => atom.null_atom,
+            };
+        }
+
+        pub fn scriptOrModuleAtom(self: *const ResultImpl) atom.Atom {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.scriptOrModule(),
+                .legacy_module => |function| function.script_or_module,
+                .none => atom.null_atom,
+            };
+        }
+
+        pub fn entryContract(self: *const ResultImpl) bytecode.EntryContract {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| blk: {
+                    break :blk .{
+                        .new_target_allowed = fb.newTargetAllowed(),
+                        .super_call_allowed = fb.superCallAllowed(),
+                        .super_allowed = fb.superAllowed(),
+                        .arguments_allowed = fb.argumentsAllowed(),
+                    };
+                },
+                .legacy_module => |function| function.entry_contract,
+                .none => .{},
+            };
+        }
+
+        pub fn isStrict(self: *const ResultImpl) bool {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.isStrictMode(),
+                .legacy_module => |function| function.flags.is_strict,
+                .none => false,
+            };
+        }
+
+        pub fn isGlobalVar(self: *const ResultImpl) bool {
+            return switch (self.artifact) {
+                .none => false,
+                else => switch (self.mode) {
+                    .script, .module => true,
+                    .eval_direct, .eval_indirect => !self.isStrict(),
+                },
+            };
+        }
+
+        pub fn isDirectOrIndirectEval(self: *const ResultImpl) bool {
+            return switch (self.artifact) {
+                .function_bytecode => |fb| fb.isDirectOrIndirectEval(),
+                .legacy_module => |function| function.isDirectOrIndirectEval(),
+                .none => false,
+            };
+        }
+
+        pub fn isModule(self: *const ResultImpl) bool {
+            return self.mode == .module;
+        }
+
+        pub fn moduleRecord(self: *ResultImpl) ?*bytecode.module.Record {
+            const function = self.legacyModule() orelse return null;
+            if (function.module_record) |*record| return record;
+            return null;
+        }
+
+        pub fn legacyModule(self: *ResultImpl) ?*bytecode.Bytecode {
+            return switch (self.artifact) {
+                .legacy_module => &self.artifact.legacy_module,
+                else => null,
+            };
+        }
+
+        pub fn legacyModuleConst(self: *const ResultImpl) ?*const bytecode.Bytecode {
+            return switch (self.artifact) {
+                .legacy_module => &self.artifact.legacy_module,
+                else => null,
+            };
         }
 
         pub fn hasFeature(self: ResultImpl, feature: FeatureImpl) bool {
@@ -17143,33 +17476,74 @@ pub const compile_entry = struct {
         script_or_module: ?atom.Atom = null,
         source_kind: SourceKindImpl = .auto,
         strict: bool = false,
-        runtime_strict: bool = false,
         return_completion: bool = false,
         eval_global_var_bindings: bool = false,
         eval_in_parameter_initializer: bool = false,
-        eval_in_class_field_initializer: bool = false,
         eval_allows_new_target: bool = false,
         eval_allows_super_call: bool = false,
         eval_allows_super_property: bool = false,
         eval_arguments_allowed: bool = false,
-        eval_class_static_field_this_atom: ?atom.Atom = null,
-        eval_private_bound_names: []const atom.Atom = &.{},
         eval_annex_b_blocked_function_names: []const atom.Atom = &.{},
         eval_closure_seed: []const EvalClosureSeedImpl = &.{},
     };
 
-    fn rootVarEnvironment(mode: ModeImpl, strict: bool, eval_global_var_bindings: bool) bytecode.VarEnvironment {
-        return switch (mode) {
-            .script => .global,
-            .module => .module,
-            .eval_direct => if (!strict and eval_global_var_bindings) .global else .local,
-            .eval_indirect => if (!strict) .global else .local,
+    fn isPrivateEvalClosureKind(kind: bytecode.function_def.VarKind) bool {
+        return switch (kind) {
+            .private_field,
+            .private_method,
+            .private_getter,
+            .private_setter,
+            .private_getter_setter,
+            => true,
+            else => false,
         };
     }
 
-    pub fn compile(rt: *JSRuntime, source: []const u8, options: OptionsImpl) !ResultImpl {
+    fn isPrivateSetterCompanion(atoms: *const atom.AtomTable, seed: EvalClosureSeedImpl) bool {
+        if (seed.var_kind != .private_setter) return false;
+        const name = atoms.name(seed.var_name) orelse return false;
+        return std.mem.endsWith(u8, name, "<set>");
+    }
+
+    fn restoreDirectEvalPrivateBoundNames(
+        rt: *JSRuntime,
+        state: *parser_impl.ParseState,
+        seeds: []const EvalClosureSeedImpl,
+    ) !void {
+        var restored_any = false;
+        // Runtime closure lookup is nearest-first, while parser private-name
+        // lookup walks this list from its tail. Reverse once to preserve the
+        // same shadowing order without a second metadata carrier.
+        var index = seeds.len;
+        while (index > 0) {
+            index -= 1;
+            const seed = seeds[index];
+            if (!isPrivateEvalClosureKind(seed.var_kind) or isPrivateSetterCompanion(&rt.atoms, seed)) continue;
+
+            var already_restored = false;
+            for (state.class_private_bound_names.items) |existing| {
+                if (existing == seed.var_name) {
+                    already_restored = true;
+                    break;
+                }
+            }
+            if (already_restored) continue;
+
+            const retained = rt.atoms.dup(seed.var_name);
+            state.class_private_bound_names.append(rt.memory.allocator, retained) catch |err| {
+                rt.atoms.free(retained);
+                return err;
+            };
+            restored_any = true;
+        }
+        if (restored_any) state.in_class = true;
+    }
+
+    pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
+        const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
-        errdefer arena.deinit();
+        var arena_owned = true;
+        errdefer if (arena_owned) arena.deinit();
 
         const original_allocator = rt.memory.allocator;
         rt.memory.allocator = arena.allocator();
@@ -17202,12 +17576,9 @@ pub const compile_entry = struct {
             if (try lexer_mod.findUnsupportedTypeScriptSyntax(rt.memory.allocator, source)) |unsupported| {
                 var result = ResultImpl{
                     .runtime = rt,
-                    .function = function,
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
-                    .arena = undefined,
                 };
-                function_owned = false;
                 result.syntax_error = try diagnostics_mod.SyntaxError.create(
                     &rt.memory,
                     &rt.atoms,
@@ -17220,46 +17591,53 @@ pub const compile_entry = struct {
                     unsupported.message,
                 );
                 result.parse_path = .syntax_error_guard;
-                result.arena = arena;
+                function.deinit(rt);
+                function_owned = false;
+                arena.deinit();
+                arena_owned = false;
                 return result;
             }
         }
 
         var features = std.EnumSet(FeatureImpl).initEmpty();
 
-        compileQjsProgram(rt, filename_atom, source, options, &function, &features) catch |err| switch (err) {
+        const canonical_root = compileQjsProgram(rt, filename_atom, source, options, compile_context, &function, &features) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
                 var result = ResultImpl{
                     .runtime = rt,
-                    .function = function,
                     .mode = options.mode,
                     .direct_eval = options.mode == .eval_direct,
-                    .arena = undefined,
                 };
+                try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
+                function.deinit(rt);
                 function_owned = false;
-                // From here `result.function` owns the partial bytecode; if the
-                // guard itself fails (e.g. OOM while rescanning), release it
-                // explicitly - the `function_owned` errdefer no longer covers it
-                // (found by test-oom injection).
-                setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err)) catch |fallback_err| {
-                    result.function.deinit(rt);
-                    return fallback_err;
-                };
-                result.arena = arena;
+                arena.deinit();
+                arena_owned = false;
                 return result;
             },
         };
 
         var result = ResultImpl{
             .runtime = rt,
-            .function = function,
             .mode = options.mode,
             .direct_eval = options.mode == .eval_direct,
             .features = features,
-            .arena = arena,
         };
-        function_owned = false;
+        if (options.mode == .module) {
+            if (canonical_root != null) return error.InvalidBytecode;
+            result.artifact = .{ .legacy_module = function };
+            result.arena = arena;
+            function_owned = false;
+            arena_owned = false;
+        } else {
+            const root = canonical_root orelse return error.InvalidBytecode;
+            result.artifact = .{ .function_bytecode = root };
+            function.deinit(rt);
+            function_owned = false;
+            arena.deinit();
+            arena_owned = false;
+        }
         result.parse_path = .normal;
         return result;
     }
@@ -17269,9 +17647,10 @@ pub const compile_entry = struct {
         filename_atom: atom.Atom,
         source: []const u8,
         options: OptionsImpl,
+        compile_context: bytecode.CompileContext,
         function: *bytecode.Bytecode,
         features: *std.EnumSet(FeatureImpl),
-    ) !void {
+    ) !?*bytecode.FunctionBytecode {
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
         defer lex.deinit();
@@ -17280,7 +17659,10 @@ pub const compile_entry = struct {
         if (lexer_mod.shouldStrip(options.source_kind, options.filename)) {
             try lex.enableTypeScript();
         }
-        var state = try parser_core.ParseState.initWithRuntime(rt, &lex, function);
+        var state = if (options.mode == .module)
+            try parser_core.ParseState.initWithRuntime(rt, &lex, function)
+        else
+            try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
         defer state.deinit(rt);
         state.is_strict = options.mode == .module or effective_strict;
         // QuickJS creates the root program FunctionDef as eval bytecode for all
@@ -17294,7 +17676,6 @@ pub const compile_entry = struct {
             .script, .module => true,
             .eval_direct, .eval_indirect => !effective_strict,
         };
-        state.function_def.var_environment = rootVarEnvironment(options.mode, effective_strict, options.eval_global_var_bindings);
         state.function_def.is_strict_mode = options.mode == .module or effective_strict;
         state.function_def.is_indirect_eval = options.mode == .eval_indirect;
         state.function_def.has_arguments_binding = false;
@@ -17313,7 +17694,6 @@ pub const compile_entry = struct {
         state.function_def.super_call_allowed = options.eval_allows_super_call;
         state.allow_super = options.eval_allows_super_property;
         state.function_def.super_allowed = options.eval_allows_super_property;
-        state.class_static_field_this_atom = options.eval_class_static_field_this_atom;
         state.eval_annex_b_blocked_function_names = options.eval_annex_b_blocked_function_names;
         for (options.eval_closure_seed) |seed| {
             _ = try state.function_def.addClosureVar(.{
@@ -17325,17 +17705,8 @@ pub const compile_entry = struct {
                 .var_name = seed.var_name,
             });
         }
-        if (options.eval_private_bound_names.len != 0) {
-            state.in_class = true;
-            for (options.eval_private_bound_names) |atom_id| {
-                try state.function_def.appendPrivateBoundName(atom_id);
-                const retained = rt.atoms.dup(atom_id);
-                errdefer rt.atoms.free(retained);
-                try state.class_private_bound_names.append(rt.memory.allocator, retained);
-            }
-        }
-        if (options.eval_in_class_field_initializer) {
-            state.class_field_initializer_depth = 1;
+        if (options.mode == .eval_direct) {
+            try restoreDirectEvalPrivateBoundNames(rt, &state, options.eval_closure_seed);
         }
         if (options.mode == .module) {
             state.in_async = true;
@@ -17363,7 +17734,6 @@ pub const compile_entry = struct {
             .script, .module => true,
             .eval_direct, .eval_indirect => !parsed_strict,
         };
-        state.function_def.var_environment = rootVarEnvironment(options.mode, parsed_strict, options.eval_global_var_bindings);
         state.eval_global_var_bindings = (options.eval_global_var_bindings or options.mode == .eval_indirect) and
             !((options.mode == .eval_direct or options.mode == .eval_indirect) and parsed_strict);
         function.flags.is_strict = parsed_strict;
@@ -17376,11 +17746,9 @@ pub const compile_entry = struct {
         }
 
         if (return_completion) {
-            // Eval/script-completion form: `scope_get_var <ret>` is the last
-            // op, the completion rides the operand stack off the end, and the
-            // trailing `op.return` sentinel (FunctionBytecode / setCode)
-            // returns it. Statement-level jumps patched before this final get
-            // land ON it, never past it — no terminator needed.
+            // Eval/script-completion form ends in `get_loc <ret>; return`.
+            // Statement-level jumps patched before this epilogue land on the
+            // completion load, so every reachable path terminates explicitly.
             try state.finalizeEvalReturn();
         } else {
             // Jump-aware terminator decision mirroring the function epilogues:
@@ -17396,13 +17764,33 @@ pub const compile_entry = struct {
             if (needs_return) try state.emitReturnUndefined();
         }
 
-        try bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, rt);
+        const canonical_root: ?*bytecode.FunctionBytecode = if (options.mode == .module) blk: {
+            try bytecode.pipeline.finalize.runWithFunctionDefRuntime(function, &state.function_def, compile_context);
+            break :blk null;
+        } else blk: {
+            // Parsing intentionally redirects the operation allocator to the
+            // short-lived arena. Finalization may use that facade for scratch
+            // lists, but the published FB must be built under the runtime's
+            // stable allocation policy. FunctionDef buffers and FB storage use
+            // MemoryAccount ownership directly; this scoped switch additionally
+            // prevents a future finalizer helper from accidentally retaining an
+            // arena-backed allocation. Restore it before State.deinit so parser
+            // scratch still unwinds under the allocator that created it.
+            const parse_allocator = rt.memory.allocator;
+            rt.memory.allocator = compile_context.artifactAllocator();
+            defer rt.memory.allocator = parse_allocator;
+            const root_slice = try bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context);
+            break :blk &root_slice[0];
+        };
         features.* = state.features;
-        function.flags.is_strict = function.flags.is_strict or state.function_def.is_strict_mode;
-        function.flags.is_global_var = state.function_def.is_global_var;
-        function.flags.is_module = options.mode == .module;
-        function.flags.is_direct_or_indirect_eval = state.function_def.is_direct_eval or state.function_def.is_indirect_eval;
+        if (options.mode == .module) {
+            function.flags.is_strict = function.flags.is_strict or state.function_def.is_strict_mode;
+            function.flags.is_global_var = state.function_def.is_global_var;
+            function.flags.is_module = true;
+            function.flags.is_direct_or_indirect_eval = false;
+        }
         _ = filename_atom;
+        return canonical_root;
     }
 
     fn setFallbackSyntaxError(
@@ -17527,8 +17915,11 @@ pub const compile_entry = struct {
     pub const Mode = ModeImpl;
     pub const CompilePath = CompilePathImpl;
     pub const Result = ResultImpl;
+    pub const RootArtifact = RootArtifactImpl;
     pub const Options = OptionsImpl;
     pub const EvalClosureSeed = EvalClosureSeedImpl;
+    pub const CompileContext = bytecode.CompileContext;
+    pub const CompilePolicy = bytecode.CompilePolicy;
 };
 pub const Lexer = lexer.Lexer;
 pub const Token = token.Token;
@@ -17540,6 +17931,9 @@ pub const SourceKind = compile_entry.SourceKind;
 pub const Feature = parser_core.Feature;
 pub const CompilePath = compile_entry.CompilePath;
 pub const Result = compile_entry.Result;
+pub const RootArtifact = compile_entry.RootArtifact;
 pub const Options = compile_entry.Options;
 pub const EvalClosureSeed = compile_entry.EvalClosureSeed;
+pub const CompileContext = compile_entry.CompileContext;
+pub const CompilePolicy = compile_entry.CompilePolicy;
 pub const compile = compile_entry.compile;

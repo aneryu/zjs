@@ -19,6 +19,42 @@ const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 
+test "eval lazily materializes a bare core context global before root closure construction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    helpers.registerStandardGlobalsBare(rt);
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    try std.testing.expect(ctx.global == null);
+
+    var wrapper = zjs.JSContext.borrowCore(ctx);
+    const result = try wrapper.eval("'lazy-global-ok'", .{});
+    defer result.free(rt);
+    try helpers.expectStringValueBytes(result, "lazy-global-ok");
+    try std.testing.expect(ctx.global != null);
+}
+
+const CrossRealmNativeProbe = struct {
+    seen_realm: ?*core.RealmContext = null,
+    seen_global: ?*core.Object = null,
+};
+
+fn crossRealmNativeProbe(ptr: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
+    const probe: *CrossRealmNativeProbe = @ptrCast(@alignCast(ptr));
+    const global = call.realm.global orelse return error.InvalidBuiltinRegistry;
+    probe.seen_realm = call.realm;
+    probe.seen_global = global;
+
+    const key = try call.realm.runtime.internAtom("__native_realm_mutation");
+    defer call.realm.runtime.atoms.free(key);
+    try global.defineOwnProperty(
+        call.realm.runtime,
+        key,
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+    return error.TypeError;
+}
+
 fn localIndexNamed(rt: *core.JSRuntime, function: *const bytecode.FunctionBytecode, name: []const u8) ?usize {
     for (function.varDefs(), 0..) |vd, idx| {
         const bytes = rt.atoms.name(vd.var_name) orelse continue;
@@ -38,11 +74,41 @@ fn globalFunctionBytecode(js: *helpers.TestEngine, name: []const u8) !*const byt
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const name_atom = try js.runtime.internAtom(name);
     defer js.runtime.atoms.free(name_atom);
-    const function_value = global.getProperty(name_atom);
+    const function_value = try global.getProperty(name_atom);
     defer function_value.free(js.runtime);
     const function_object = try property_ops.expectObject(function_value);
     const stored_bytecode = function_object.functionBytecode() orelse return error.InvalidFunctionBytecode;
     return engine.exec.call_runtime.functionBytecodeFromValue(stored_bytecode) orelse error.InvalidFunctionBytecode;
+}
+
+fn fixtureFlagsFromFunction(function: *const bytecode.FunctionBytecode) bytecode.FunctionBytecode.Flags {
+    return .{
+        .is_strict_mode = function.isStrictMode(),
+        .runtime_strict_mode = function.runtimeStrictMode(),
+        .has_prototype = function.hasPrototype(),
+        .has_simple_parameter_list = function.hasSimpleParameterList(),
+        .is_derived_class_constructor = function.isDerivedClassConstructor(),
+        .need_home_object = function.needHomeObject(),
+        .func_kind = function.functionKind(),
+        .new_target_allowed = function.newTargetAllowed(),
+        .super_call_allowed = function.superCallAllowed(),
+        .super_allowed = function.superAllowed(),
+        .arguments_allowed = function.argumentsAllowed(),
+        .is_direct_or_indirect_eval = function.isDirectOrIndirectEval(),
+    };
+}
+
+fn createOversizedLeafFixture(
+    rt: *core.JSRuntime,
+    source: *const bytecode.FunctionBytecode,
+) !*bytecode.FunctionBytecode {
+    const fixture = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .realm = source.realmContext(),
+        .flags = fixtureFlagsFromFunction(source),
+        .stack_size = core.VmStackArena.chunk_slots,
+    });
+    fixture.setExecutionFlags(source.executionFlags());
+    return fixture;
 }
 
 fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
@@ -58,26 +124,37 @@ fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
     return count;
 }
 
-fn expectSingleDerivedThisArrowCapture(function: *const bytecode.FunctionBytecode) !void {
+fn expectSingleDerivedThisClosureCapture(function: *const bytecode.FunctionBytecode) !void {
     const this_idx = derivedThisLocalIndex(function) orelse return error.InvalidFunctionBytecode;
     const this_vardef = function.varDefs()[this_idx];
     try std.testing.expect(this_vardef.isCaptured());
-    try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 1), function.openVarRefCount());
     try std.testing.expectEqual(@as(u16, 0), this_vardef.var_ref_idx);
     try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(function.byteCode(), op.close_loc));
 
-    var arrow: ?*const bytecode.FunctionBytecode = null;
-    var arrow_count: usize = 0;
+    var capturing_function: ?*const bytecode.FunctionBytecode = null;
+    var capturing_function_count: usize = 0;
     for (function.cpoolSlice()) |constant| {
         const child = engine.exec.call_runtime.functionBytecodeFromValue(constant) orelse continue;
-        if (!child.flags.is_arrow_function) continue;
-        arrow = child;
-        arrow_count += 1;
+        var captures_derived_this = false;
+        for (child.closureVar()) |capture| {
+            captures_derived_this = captures_derived_this or
+                (capture.var_name == core.atom.ids.this_ and
+                    capture.closureType() == .local and
+                    capture.var_idx == @as(u16, @intCast(this_idx)));
+        }
+        if (!captures_derived_this) continue;
+        capturing_function = child;
+        capturing_function_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), arrow_count);
+    try std.testing.expectEqual(@as(usize, 1), capturing_function_count);
+
+    const closure = capturing_function.?;
+    try std.testing.expectEqual(function_def.FunctionKind.normal, closure.functionKind());
+    try std.testing.expect(!closure.hasPrototype());
 
     var this_capture_count: usize = 0;
-    for (arrow.?.closureVar()) |capture| {
+    for (closure.closureVar()) |capture| {
         if (capture.var_name != core.atom.ids.this_) continue;
         this_capture_count += 1;
         try std.testing.expectEqual(function_def.ClosureType.local, capture.closureType());
@@ -100,7 +177,9 @@ test "var-ref growth promotes borrowed captures to owned cells" {
     const captured = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
     defer captured.freeCell(rt);
     var captures = [_]*core.VarRef{captured};
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.var_refs = &captures;
     exec_frame.ownership.var_refs = .borrowed;
@@ -141,7 +220,9 @@ test "global declaration construction rebinds duplicate carriers one slot at a t
         refs[1].freeCell(rt);
     }
     const second_placeholder = refs[1];
-    var frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
     defer frame.deinit(&rt.memory, rt);
     frame.var_refs = &refs;
     frame.ownership.var_refs = .borrowed;
@@ -149,7 +230,7 @@ test "global declaration construction rebinds duplicate carriers one slot at a t
     try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
         ctx,
         global,
-        &function,
+        execution_function,
         &frame,
         0,
         binding_name,
@@ -162,7 +243,7 @@ test "global declaration construction rebinds duplicate carriers one slot at a t
     try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
         ctx,
         global,
-        &function,
+        execution_function,
         &frame,
         1,
         binding_name,
@@ -170,6 +251,96 @@ test "global declaration construction rebinds duplicate carriers one slot at a t
         false,
     ));
     try std.testing.expectEqual(refs[0], refs[1]);
+}
+
+test "ordinary global closure selector preserves QuickJS cell waterfall and owner metadata" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    try js.ensureTest262GlobalsInstalled();
+    const rt = js.runtime;
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const lexical_name = try rt.internAtom("__selectorLexicalWins");
+    defer rt.atoms.free(lexical_name);
+    const lexical_value = try engine.exec.call_runtime.ensureGlobalLexicalCell(ctx, global, lexical_name, false);
+    defer lexical_value.free(rt);
+    const object_value = (try engine.exec.call_runtime.ensureGlobalObjectVarRefCell(
+        ctx,
+        global,
+        lexical_name,
+        false,
+        false,
+    )) orelse return error.TestExpectedEqual;
+    defer object_value.free(rt);
+    const lexical_selected = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, lexical_name);
+    defer lexical_selected.free(rt);
+    try std.testing.expectEqual(core.VarRef.fromValue(lexical_value).?, core.VarRef.fromValue(lexical_selected).?);
+    try std.testing.expect(core.VarRef.fromValue(object_value).? != core.VarRef.fromValue(lexical_selected).?);
+
+    const varref_name = try rt.internAtom("__selectorGlobalVarRef");
+    defer rt.atoms.free(varref_name);
+    const global_varref = (try engine.exec.call_runtime.ensureGlobalObjectVarRefCell(
+        ctx,
+        global,
+        varref_name,
+        false,
+        false,
+    )) orelse return error.TestExpectedEqual;
+    defer global_varref.free(rt);
+    const global_selected = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, varref_name);
+    defer global_selected.free(rt);
+    try std.testing.expectEqual(core.VarRef.fromValue(global_varref).?, core.VarRef.fromValue(global_selected).?);
+
+    const data_name = try rt.internAtom("__selectorDataParks");
+    defer rt.atoms.free(data_name);
+    try global.defineOwnProperty(rt, data_name, core.Descriptor.data(core.JSValue.int32(41), true, true, true));
+    const parked_first = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, data_name);
+    defer parked_first.free(rt);
+    const parked_cell = core.VarRef.fromValue(parked_first) orelse return error.TestExpectedEqual;
+    try std.testing.expect(parked_cell.varRefValue().isUninitialized());
+    parked_cell.is_lexical = true;
+    parked_cell.varRefIsConstSlot().* = true;
+    parked_cell.varRefIsFunctionNameSlot().* = true;
+    const parked_second = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, data_name);
+    defer parked_second.free(rt);
+    try std.testing.expectEqual(parked_cell, core.VarRef.fromValue(parked_second).?);
+    try std.testing.expect(parked_cell.is_lexical);
+    try std.testing.expect(parked_cell.varRefIsConstSlot().*);
+    try std.testing.expect(parked_cell.varRefIsFunctionNameSlot().*);
+
+    const accessor_setup = try js.eval(
+        \\globalThis.__selectorAccessorReads = 0;
+        \\Object.defineProperty(globalThis, "__selectorAccessor", {
+        \\    configurable: true,
+        \\    get: function () { __selectorAccessorReads++; return 1; }
+        \\});
+    );
+    defer accessor_setup.free(rt);
+    const accessor_name = try rt.internAtom("__selectorAccessor");
+    defer rt.atoms.free(accessor_name);
+    const accessor_selected = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, accessor_name);
+    defer accessor_selected.free(rt);
+    const accessor_check = try js.eval("assert.sameValue(__selectorAccessorReads, 0);");
+    defer accessor_check.free(rt);
+
+    const auto_name = try rt.internAtom("__selectorAutoInit");
+    defer rt.atoms.free(auto_name);
+    try global.definePerformanceAutoInitProperty(
+        rt,
+        auto_name,
+        core.property.Flags.data(true, false, true),
+        global,
+    );
+    const auto_index = global.findProperty(auto_name) orelse return error.TestExpectedEqual;
+    try std.testing.expect(global.propFlagsAt(auto_index).isAutoInit());
+    const auto_selected = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, auto_name);
+    defer auto_selected.free(rt);
+    const materialized_index = global.findProperty(auto_name) orelse return error.TestExpectedEqual;
+    try std.testing.expect(!global.propFlagsAt(materialized_index).isAutoInit());
+    const auto_again = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, auto_name);
+    defer auto_again.free(rt);
+    try std.testing.expectEqual(core.VarRef.fromValue(auto_selected).?, core.VarRef.fromValue(auto_again).?);
 }
 
 test "runtime-strict script still constructs its global function declaration" {
@@ -202,7 +373,9 @@ test "var-ref growth rejects an owned composite frame slab" {
     const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 0, 1, 1, 0);
     slab.stack[0] = core.JSValue.undefinedValue();
     slab.var_refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.installOwnedStorage(slab.storage);
     exec_frame.var_refs = slab.var_refs;
@@ -226,7 +399,9 @@ test "local growth rejects an owned composite frame slab" {
     const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 1, 1, 0, 0);
     slab.locals[0] = core.JSValue.int32(3);
     slab.stack[0] = core.JSValue.undefinedValue();
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.installOwnedStorage(slab.storage);
     exec_frame.locals = slab.locals;
@@ -255,7 +430,9 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
 
     var args = [_]core.JSValue{core.JSValue.int32(41)};
     var no_open_refs = [_]?*core.VarRef{};
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&js.runtime.memory, js.runtime);
     exec_frame.args = &args;
     exec_frame.actual_arg_count = args.len;
@@ -319,7 +496,9 @@ test "local growth rejects moving storage after an open binding is published" {
     var locals = [_]core.JSValue{core.JSValue.int32(7)};
     const open_ref = try core.VarRef.createOpen(rt, &locals[0]);
     var open_refs = [_]?*core.VarRef{open_ref};
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.locals = &locals;
     exec_frame.open_var_refs = &open_refs;
@@ -343,7 +522,9 @@ test "call-binding OOM leaves input references with the caller" {
 
     const held = try core.Object.create(rt, core.class.ids.object, null);
     defer held.value().free(rt);
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     const initial_refs = held.header.meta().rc;
 
@@ -351,8 +532,7 @@ test "call-binding OOM leaves input references with the caller" {
     const result = exec_frame.initCallBindings(rt, .{
         .initial_this_value = held.value(),
         .current_function_value = held.value(),
-        .new_target_value = core.JSValue.undefinedValue(),
-        .constructor_this_value = held.value(),
+        .new_target_value = held.value(),
     });
     rt.setMemoryLimit(null);
 
@@ -375,7 +555,9 @@ test "original-args cold-state OOM does not retain copied references" {
     defer source_args[0].free(rt);
     var original_args = [_]core.JSValue{core.JSValue.undefinedValue()};
     defer original_args[0].free(rt);
-    var exec_frame = frame_mod.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     const initial_refs = held.header.meta().rc;
 
@@ -450,7 +632,12 @@ pub const helpers = struct {
         registerStandardGlobalsBare(rt);
         var vm_instance = engine.exec.Vm.init(ctx);
         defer vm_instance.deinit();
-        return vm_instance.run(function);
+        return runMutableVm(&vm_instance, function);
+    }
+
+    pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Bytecode) !core.JSValue {
+        var execution_adapter: engine.bytecode.LegacyExecutionAdapter = undefined;
+        return vm.run(execution_adapter.init(function));
     }
 
     pub fn objectFromValue(value: core.JSValue) *core.Object {
@@ -597,7 +784,7 @@ pub const helpers = struct {
     fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        const val = obj.getProperty(key);
+        const val = try obj.getProperty(key);
         defer val.free(rt);
         if (!val.isString()) return null;
 
@@ -899,7 +1086,12 @@ pub const helpers = struct {
         // tests that schedule a promise via `Promise.resolve(...)` and
         // return without awaiting would otherwise leak the job into the
         // next test.
-        eng.runtime.job_queue.runAll();
+        if (eng.context.global) |global| {
+            while (true) switch (engine.exec.promise_ops.drainOnePendingJob(eng.context, null, global) catch break) {
+                .empty, .exception => break,
+                .success => {},
+            };
+        }
         if (eng.context.hasException()) {
             const thrown = eng.context.takeException();
             thrown.free(eng.runtime);
@@ -993,6 +1185,7 @@ pub const vm_helpers = struct {
         var state = try ParseState.initWithRuntime(rt, &lex, &function);
         defer state.deinit(rt);
         try parser_core.parseExpr(&state);
+        try function.appendCode(&.{op.@"return"});
 
         // Run the FunctionDef-backed finalize pipeline so locals are lowered
         // to get_loc / put_loc instead of falling back to global get_var /
@@ -1002,7 +1195,7 @@ pub const vm_helpers = struct {
         helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
-        return vm.run(&function);
+        return helpers.runMutableVm(&vm, &function);
     }
 
     pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
@@ -1016,13 +1209,14 @@ pub const vm_helpers = struct {
         defer state.deinit(rt);
         state.top_level_functions_as_children = true;
         try parser_core.parseExpr(&state);
+        try function.appendCode(&.{op.@"return"});
 
-        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
+        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
 
         helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
-        return vm.run(&function);
+        return helpers.runMutableVm(&vm, &function);
     }
 
     pub fn expectStringBytes(value: core.JSValue, expected: []const u8) !void {
@@ -1059,7 +1253,7 @@ pub const vm_helpers = struct {
         helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
-        return vm.run(&function);
+        return helpers.runMutableVm(&vm, &function);
     }
 
     pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
@@ -1085,12 +1279,12 @@ pub const vm_helpers = struct {
         }
         try state.finalizeEvalReturn();
 
-        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
+        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
 
         helpers.registerStandardGlobalsBare(rt);
         var vm = engine.exec.Vm.init(ctx);
         defer vm.deinit();
-        return vm.run(&function);
+        return helpers.runMutableVm(&vm, &function);
     }
 };
 
@@ -1103,10 +1297,10 @@ test "vm executes push constants arithmetic comparisons and return" {
     defer ctx.destroy();
 
     var function = try makeFunction(rt, &.{
-        op.push_i32, 2,           0, 0, 0,
-        op.push_i32, 3,           0, 0, 0,
-        op.add,      op.push_i32, 6, 0, 0,
-        0,           op.lt,
+        op.push_i32, 2,           0,            0, 0,
+        op.push_i32, 3,           0,            0, 0,
+        op.add,      op.push_i32, 6,            0, 0,
+        0,           op.lt,       op.@"return",
     });
     defer function.deinit(rt);
 
@@ -1138,7 +1332,9 @@ test "frame setLocal handles self-assignment without dropping object" {
 
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     defer function.deinit(rt);
-    var frame = engine.exec.frame.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
     defer frame.deinit(&rt.memory, rt);
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1171,11 +1367,13 @@ test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
 
     const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
     var var_refs = [_]*core.VarRef{cell};
-    var frame = engine.exec.frame.Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var frame = frame_mod.Frame.init(execution_function);
     frame.var_refs = &var_refs;
     defer frame.deinit(&rt.memory, rt);
 
-    const result = engine.exec.call_runtime.lookupFrameVarRef(ctx, global, &function, &frame, binding_name);
+    const result = engine.exec.call_runtime.lookupFrameVarRef(ctx, global, execution_function, &frame, binding_name);
     defer if (result) |value| value.free(rt);
     try std.testing.expect(result == null);
 }
@@ -1193,8 +1391,8 @@ test "derived constructor without nested this references has no owner cell" {
     defer result.free(js.runtime);
 
     const constructor = try globalFunctionBytecode(&js, "__derivedNoCapture");
-    try std.testing.expect(constructor.flags.is_derived_class_constructor);
-    try std.testing.expectEqual(@as(u16, 0), constructor.open_var_ref_count);
+    try std.testing.expect(constructor.isDerivedClassConstructor());
+    try std.testing.expectEqual(@as(u16, 0), constructor.openVarRefCount());
     const this_idx = derivedThisLocalIndex(constructor) orelse return error.InvalidFunctionBytecode;
     try std.testing.expect(!constructor.varDefs()[this_idx].isCaptured());
     try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(constructor.byteCode(), op.close_loc));
@@ -1212,7 +1410,7 @@ test "derived constructor arrow creates exactly one owner this cell" {
     );
     defer result.free(js.runtime);
 
-    try expectSingleDerivedThisArrowCapture(try globalFunctionBytecode(&js, "__derivedArrowCapture"));
+    try expectSingleDerivedThisClosureCapture(try globalFunctionBytecode(&js, "__derivedArrowCapture"));
 }
 
 test "derived constructor parameter default arrow captures this by binding identity" {
@@ -1227,7 +1425,7 @@ test "derived constructor parameter default arrow captures this by binding ident
     );
     defer result.free(js.runtime);
 
-    try expectSingleDerivedThisArrowCapture(try globalFunctionBytecode(&js, "__derivedParameterArrow"));
+    try expectSingleDerivedThisClosureCapture(try globalFunctionBytecode(&js, "__derivedParameterArrow"));
 }
 
 test "direct eval captures derived this while indirect eval does not" {
@@ -1250,13 +1448,13 @@ test "direct eval captures derived this while indirect eval does not" {
     const direct_this_idx = derivedThisLocalIndex(direct) orelse return error.InvalidFunctionBytecode;
     const direct_this = direct.varDefs()[direct_this_idx];
     try std.testing.expect(direct_this.isCaptured());
-    try std.testing.expect(direct_this.var_ref_idx < direct.open_var_ref_count);
+    try std.testing.expect(direct_this.var_ref_idx < direct.openVarRefCount());
     try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(direct.byteCode(), op.close_loc));
 
     const indirect = try globalFunctionBytecode(&js, "__derivedIndirectEval");
     const indirect_this_idx = derivedThisLocalIndex(indirect) orelse return error.InvalidFunctionBytecode;
     try std.testing.expect(!indirect.varDefs()[indirect_this_idx].isCaptured());
-    try std.testing.expectEqual(@as(u16, 0), indirect.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 0), indirect.openVarRefCount());
     try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(indirect.byteCode(), op.close_loc));
 }
 
@@ -1277,6 +1475,370 @@ test "ordinary calls to the current superclass do not initialize derived this" {
         \\}
         \\new OrdinaryCallDerived(false);
         \\new OrdinaryCallDerived(true);
+    );
+    defer result.free(js.runtime);
+}
+
+test "class entry and construction use bytecode gates without a class behavior flag" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let ordinaryNewTarget = null;
+        \\function Ordinary(value) {
+        \\  ordinaryNewTarget = new.target;
+        \\  this.value = value;
+        \\  return 7;
+        \\}
+        \\const receiver = {};
+        \\assert.sameValue(Ordinary.call(receiver, 1), 7);
+        \\assert.sameValue(receiver.value, 1);
+        \\assert.sameValue(ordinaryNewTarget, undefined);
+        \\
+        \\let baseNewTarget;
+        \\let derivedNewTarget;
+        \\class Base {
+        \\  constructor(value) {
+        \\    baseNewTarget = new.target;
+        \\    this.value = value;
+        \\    return 7;
+        \\  }
+        \\}
+        \\class Derived extends Base {
+        \\  constructor(value) {
+        \\    derivedNewTarget = new.target;
+        \\    super(value);
+        \\  }
+        \\}
+        \\assert.throws(TypeError, function () { Base(2); });
+        \\assert.throws(TypeError, function () { Derived(2); });
+        \\
+        \\function Replacement() {}
+        \\const ordinary = Reflect.construct(Ordinary, [3], Replacement);
+        \\assert.sameValue(ordinaryNewTarget, Replacement);
+        \\assert.sameValue(ordinary.value, 3);
+        \\assert.sameValue(Object.getPrototypeOf(ordinary), Replacement.prototype);
+        \\
+        \\const base = Reflect.construct(Base, [4], Replacement);
+        \\assert.sameValue(baseNewTarget, Replacement);
+        \\assert.sameValue(base.value, 4);
+        \\assert.sameValue(Object.getPrototypeOf(base), Replacement.prototype);
+        \\
+        \\const derived = Reflect.construct(Derived, [5], Replacement);
+        \\assert.sameValue(derivedNewTarget, Replacement);
+        \\assert.sameValue(baseNewTarget, Replacement);
+        \\assert.sameValue(derived.value, 5);
+        \\assert.sameValue(Object.getPrototypeOf(derived), Replacement.prototype);
+        \\
+        \\const key = "ComputedClass";
+        \\let computedNewTarget;
+        \\const holder = {
+        \\  [key]: class {
+        \\    constructor() { computedNewTarget = new.target; }
+        \\  },
+        \\};
+        \\assert.sameValue(holder[key].name, key);
+        \\assert.throws(TypeError, function () { holder[key](); });
+        \\const computed = Reflect.construct(holder[key], [], Replacement);
+        \\assert.sameValue(computedNewTarget, Replacement);
+        \\assert.sameValue(Object.getPrototypeOf(computed), Replacement.prototype);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Reflect.construct keeps a fresh prototype getter result alive through instance allocation" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let prototypeGets = 0;
+        \\let receiverIsNewTarget = true;
+        \\function Target() {}
+        \\let NewTarget;
+        \\NewTarget = new Proxy(function () {}, {
+        \\  get(target, key, receiver) {
+        \\    if (key === "prototype") {
+        \\      receiverIsNewTarget = receiverIsNewTarget && receiver === NewTarget;
+        \\      return { marker: ++prototypeGets };
+        \\    }
+        \\    return Reflect.get(target, key, receiver);
+        \\  },
+        \\});
+        \\for (let expected = 1; expected <= 256; expected++) {
+        \\  const instance = Reflect.construct(Target, [], NewTarget);
+        \\  if ((expected & 15) === 0) $262.gc();
+        \\  assert.sameValue(Object.getPrototypeOf(instance).marker, expected);
+        \\}
+        \\assert.sameValue(prototypeGets, 256);
+        \\assert.sameValue(receiverIsNewTarget, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Proxy wrapping a class named Array never enters the native Array construct record" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let caught;
+        \\try {
+        \\  new (new Proxy(class Array {
+        \\    constructor() { throw 1; }
+        \\  }, {}))();
+        \\} catch (error) {
+        \\  caught = error;
+        \\}
+        \\assert.sameValue(caught, 1);
+        \\
+        \\const ProxyArray = new Proxy(Array, {});
+        \\class DerivedArray extends ProxyArray {}
+        \\const array = new DerivedArray(1, 2);
+        \\assert.sameValue(Array.isArray(array), true);
+        \\assert.sameValue(array instanceof DerivedArray, true);
+        \\assert.sameValue(Object.getPrototypeOf(array), DerivedArray.prototype);
+        \\assert.sameValue(array.length, 2);
+        \\assert.sameValue(array[0], 1);
+        \\assert.sameValue(array[1], 2);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Proxy native constructor forwarding resolves new target prototype before coercion" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let order = 0;
+        \\let prototypeGets = 0;
+        \\let forwardedPrototype;
+        \\const ErrorProxy = new Proxy(Error, {
+        \\  get(target, key, receiver) {
+        \\    assert.sameValue(key, "prototype");
+        \\    assert.sameValue(receiver, ErrorProxy);
+        \\    assert.sameValue(order++, 0);
+        \\    prototypeGets++;
+        \\    forwardedPrototype = Reflect.get(target, key, receiver);
+        \\    return forwardedPrototype;
+        \\  },
+        \\});
+        \\const message = {
+        \\  toString() {
+        \\    assert.sameValue(order++, 1);
+        \\    return "message";
+        \\  },
+        \\};
+        \\const error = new ErrorProxy(message);
+        \\assert.sameValue(order, 2);
+        \\assert.sameValue(prototypeGets, 1);
+        \\assert.sameValue(Object.getPrototypeOf(error), forwardedPrototype);
+        \\assert.sameValue(error.message, "message");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "default derived constructor follows the live constructor prototype" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let oldBaseCalls = 0;
+        \\let seenNewTarget;
+        \\class OldBase {
+        \\  constructor() {
+        \\    oldBaseCalls++;
+        \\    this.kind = "old";
+        \\  }
+        \\}
+        \\class NewBase {
+        \\  constructor() {
+        \\    seenNewTarget = new.target;
+        \\    this.kind = "new";
+        \\  }
+        \\}
+        \\class DefaultDerived extends OldBase {}
+        \\Object.setPrototypeOf(DefaultDerived, NewBase);
+        \\const derived = new DefaultDerived();
+        \\assert.sameValue(oldBaseCalls, 0);
+        \\assert.sameValue(seenNewTarget, DefaultDerived);
+        \\assert.sameValue(derived.kind, "new");
+        \\assert.sameValue(Object.getPrototypeOf(derived), DefaultDerived.prototype);
+        \\
+        \\Object.setPrototypeOf(DefaultDerived, null);
+        \\let nullSuperError;
+        \\try { new DefaultDerived(); } catch (error) { nullSuperError = error; }
+        \\assert.sameValue(nullSuperError.constructor, TypeError);
+        \\assert.sameValue(nullSuperError.message, "not a function");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "class constructor opcode errors preserve QuickJS messages and realms" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\const other = $262.createRealm().global;
+        \\other.eval("globalThis.ForeignBase = class ForeignBase {}; globalThis.ForeignDerived = class ForeignDerived extends ForeignBase {}; globalThis.ForeignBadReturn = class ForeignBadReturn extends Object { constructor() { return 1; } }; globalThis.ForeignNoSuper = class ForeignNoSuper extends Object { constructor() { return undefined; } }; globalThis.ForeignCaughtThis = class ForeignCaughtThis extends Object { constructor() { try { this; } catch (error) { globalThis.directThisError = error; } try { (() => this)(); } catch (error) { globalThis.capturedThisError = error; } return {}; } };");
+        \\function capture(thunk) {
+        \\  try { thunk(); } catch (error) { return error; }
+        \\  throw new Error("expected constructor TypeError");
+        \\}
+        \\
+        \\const baseCallError = capture(function () { other.ForeignBase(); });
+        \\assert.sameValue(baseCallError.constructor, other.TypeError);
+        \\assert.sameValue(baseCallError.message, "class constructors must be invoked with 'new'");
+        \\
+        \\const derivedCallError = capture(function () { other.ForeignDerived(); });
+        \\assert.sameValue(derivedCallError.constructor, other.TypeError);
+        \\assert.sameValue(derivedCallError.message, "class constructors must be invoked with 'new'");
+        \\
+        \\const returnError = capture(function () { new other.ForeignBadReturn(); });
+        \\assert.sameValue(returnError.constructor, TypeError);
+        \\assert.sameValue(returnError.message, "derived class constructor must return an object or undefined");
+        \\
+        \\const noSuperError = capture(function () { new other.ForeignNoSuper(); });
+        \\assert.sameValue(noSuperError.constructor, ReferenceError);
+        \\assert.sameValue(noSuperError.message, "this is not initialized");
+        \\
+        \\new other.ForeignCaughtThis();
+        \\assert.sameValue(other.directThisError.constructor, other.ReferenceError);
+        \\assert.sameValue(other.directThisError.message, "this is not initialized");
+        \\assert.sameValue(other.capturedThisError.constructor, other.ReferenceError);
+        \\assert.sameValue(other.capturedThisError.message, "this is not initialized");
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "direct spread and arrow super follow the live derived constructor prototype" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let directNewTarget;
+        \\let spreadNewTarget;
+        \\let arrowDirectNewTarget;
+        \\let arrowSpreadNewTarget;
+        \\class OldBase {}
+        \\class NewBase {
+        \\  constructor(kind) {
+        \\    if (kind === "direct") directNewTarget = new.target;
+        \\    else if (kind === "spread") spreadNewTarget = new.target;
+        \\    else if (kind === "arrow-direct") arrowDirectNewTarget = new.target;
+        \\    else arrowSpreadNewTarget = new.target;
+        \\  }
+        \\}
+        \\class DirectDerived extends OldBase {
+        \\  constructor() { super("direct"); }
+        \\}
+        \\class SpreadDerived extends OldBase {
+        \\  constructor() { super(...["spread"]); }
+        \\}
+        \\class ArrowDirectDerived extends OldBase {
+        \\  constructor() { (() => super("arrow-direct"))(); }
+        \\}
+        \\class ArrowSpreadDerived extends OldBase {
+        \\  constructor() { (() => super(...["arrow-spread"]))(); }
+        \\}
+        \\Object.setPrototypeOf(DirectDerived, NewBase);
+        \\Object.setPrototypeOf(SpreadDerived, NewBase);
+        \\Object.setPrototypeOf(ArrowDirectDerived, NewBase);
+        \\Object.setPrototypeOf(ArrowSpreadDerived, NewBase);
+        \\const direct = new DirectDerived();
+        \\const spread = new SpreadDerived();
+        \\const arrowDirect = new ArrowDirectDerived();
+        \\const arrowSpread = new ArrowSpreadDerived();
+        \\assert.sameValue(directNewTarget, DirectDerived);
+        \\assert.sameValue(spreadNewTarget, SpreadDerived);
+        \\assert.sameValue(arrowDirectNewTarget, ArrowDirectDerived);
+        \\assert.sameValue(arrowSpreadNewTarget, ArrowSpreadDerived);
+        \\assert.sameValue(Object.getPrototypeOf(direct), DirectDerived.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(spread), SpreadDerived.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(arrowDirect), ArrowDirectDerived.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(arrowSpread), ArrowSpreadDerived.prototype);
+    );
+    defer result.free(js.runtime);
+}
+
+test "super call paths reject null live parents and do not authorize ordinary class calls" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function capture(thunk) {
+        \\  try { thunk(); } catch (error) { return error; }
+        \\  throw new Error("expected constructor error");
+        \\}
+        \\function expectNotFunction(thunk) {
+        \\  const error = capture(thunk);
+        \\  assert.sameValue(error.constructor, TypeError);
+        \\  assert.sameValue(error.message, "not a function");
+        \\}
+        \\function expectClassCallError(error) {
+        \\  assert.sameValue(error.constructor, TypeError);
+        \\  assert.sameValue(error.message, "class constructors must be invoked with 'new'");
+        \\}
+        \\class Base {}
+        \\
+        \\class ExternalDirect extends Base {
+        \\  constructor() { super(); }
+        \\}
+        \\class ExternalSpread extends Base {
+        \\  constructor() { super(...[]); }
+        \\}
+        \\class ExternalArrow extends Base {
+        \\  constructor() { (() => super("direct"))(); }
+        \\}
+        \\Object.setPrototypeOf(ExternalDirect, null);
+        \\Object.setPrototypeOf(ExternalSpread, null);
+        \\Object.setPrototypeOf(ExternalArrow, null);
+        \\expectNotFunction(() => new ExternalDirect());
+        \\expectNotFunction(() => new ExternalSpread());
+        \\expectNotFunction(() => new ExternalArrow());
+        \\
+        \\class InternalDirect extends Base {
+        \\  constructor() {
+        \\    Object.setPrototypeOf(InternalDirect, null);
+        \\    super();
+        \\  }
+        \\}
+        \\class InternalSpread extends Base {
+        \\  constructor() {
+        \\    Object.setPrototypeOf(InternalSpread, null);
+        \\    super(...[]);
+        \\  }
+        \\}
+        \\class InternalArrow extends Base {
+        \\  constructor() {
+        \\    Object.setPrototypeOf(InternalArrow, null);
+        \\    (() => super())();
+        \\  }
+        \\}
+        \\expectNotFunction(() => new InternalDirect());
+        \\expectNotFunction(() => new InternalSpread());
+        \\expectNotFunction(() => new InternalArrow());
+        \\
+        \\class OrdinaryDirect extends Base {
+        \\  constructor() {
+        \\    const parent = Object.getPrototypeOf(OrdinaryDirect);
+        \\    expectClassCallError(capture(() => parent()));
+        \\    super();
+        \\  }
+        \\}
+        \\class OrdinarySpread extends Base {
+        \\  constructor() {
+        \\    const parent = Object.getPrototypeOf(OrdinarySpread);
+        \\    expectClassCallError(capture(() => parent(...[])));
+        \\    super(...[]);
+        \\  }
+        \\}
+        \\assert.sameValue(new OrdinaryDirect() instanceof OrdinaryDirect, true);
+        \\assert.sameValue(new OrdinarySpread() instanceof OrdinarySpread, true);
     );
     defer result.free(js.runtime);
 }
@@ -1361,7 +1923,7 @@ test "constant pool execution retains returned constants" {
     const value = str.value();
     _ = try function.addConstant(value);
     value.free(rt);
-    try helpers.setCodeAndStackSize(&function, &.{ op.push_const, 0, 0, 0, 0 });
+    try helpers.setCodeAndStackSize(&function, &.{ op.push_const, 0, 0, 0, 0, op.@"return" });
 
     const result = try runFunction(rt, ctx, &function);
     defer result.free(rt);
@@ -1378,7 +1940,7 @@ test "property ops use shared object semantics" {
 
     try engine.exec.property_ops.defineDataProperty(rt, obj, key, core.JSValue.int32(9));
     try engine.exec.property_ops.setProperty(rt, obj, key, core.JSValue.int32(10));
-    const value = engine.exec.property_ops.getProperty(obj, key);
+    const value = try engine.exec.property_ops.getProperty(rt, obj, key);
     try std.testing.expectEqual(@as(?i32, 10), value.asInt32());
 
     const direct_value = try engine.exec.property_ops.getPropertyValue(rt, obj.value(), key);
@@ -1467,9 +2029,9 @@ test "value ops own primitive VM semantics" {
     defer function.deinit(rt);
     _ = try function.addConstant(one_string);
     try helpers.setCodeAndStackSize(&function, &.{
-        op.push_i32,   1, 0, 0, 0,
-        op.push_const, 0, 0, 0, 0,
-        op.eq,
+        op.push_i32,   1,            0, 0, 0,
+        op.push_const, 0,            0, 0, 0,
+        op.eq,         op.@"return",
     });
     const eq_result = try runFunction(rt, ctx, &function);
     defer eq_result.free(rt);
@@ -1533,15 +2095,12 @@ test "checked local replacement preserves int fast moves and refcounted fallback
     try std.testing.expectEqual(@as(?i32, 3), result.asInt32());
 }
 
-test "a bytecode call at logical end completes through function falloff" {
+test "an expression helper emits an explicit return after a bytecode call" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    // This script's outer bytecode ends with the ordinary call. The return from
-    // `identity` therefore resumes at code_end and must take the dispatcher's
-    // falloff path; there is no real continuation opcode to dispatch directly.
     const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
         \\(function identity(value) { return value; })(42)
     );
@@ -1881,12 +2440,12 @@ test "call subsystem installs and invokes host globals" {
 
     const print_key = try rt.internAtom("print");
     defer rt.atoms.free(print_key);
-    const print = global.getProperty(print_key);
+    const print = try global.getProperty(print_key);
     defer print.free(rt);
     const print_object: *core.Object = @fieldParentPtr("header", print.refHeader().?);
     const host_function_key = try rt.internAtom("__host_function");
     defer rt.atoms.free(host_function_key);
-    try std.testing.expect(print_object.getOwnProperty(rt, host_function_key) == null);
+    try std.testing.expect((try print_object.getOwnProperty(rt, host_function_key)) == null);
     try std.testing.expectEqual(core.host_function.ids.external_host, print_object.hostFunctionKindSlot().*);
     try std.testing.expect(print_object.externalHostFunctionId() != 0);
 
@@ -1903,10 +2462,10 @@ test "call subsystem installs and invokes host globals" {
     defer rt.atoms.free(console_key);
     const log_key = try rt.internAtom("log");
     defer rt.atoms.free(log_key);
-    const console_value = global.getProperty(console_key);
+    const console_value = try global.getProperty(console_key);
     defer console_value.free(rt);
     const console_object: *core.Object = @fieldParentPtr("header", console_value.refHeader().?);
-    const log = console_object.getProperty(log_key);
+    const log = try console_object.getProperty(log_key);
     defer log.free(rt);
     const log_object: *core.Object = @fieldParentPtr("header", log.refHeader().?);
     try std.testing.expectEqual(core.host_function.ids.external_host, log_object.hostFunctionKindSlot().*);
@@ -1922,11 +2481,11 @@ test "call subsystem installs and invokes host globals" {
     defer rt.atoms.free(assert_key);
     const same_value_key = try rt.internAtom("sameValue");
     defer rt.atoms.free(same_value_key);
-    const assert_object_value = global.getProperty(assert_key);
+    const assert_object_value = try global.getProperty(assert_key);
     defer assert_object_value.free(rt);
     const assert_object_header = assert_object_value.refHeader().?;
     const assert_object: *core.Object = @fieldParentPtr("header", assert_object_header);
-    const same_value = assert_object.getProperty(same_value_key);
+    const same_value = try assert_object.getProperty(same_value_key);
     defer same_value.free(rt);
 
     const same_args = [_]core.JSValue{ core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)) };
@@ -1938,7 +2497,7 @@ test "call subsystem installs and invokes host globals" {
 
     const test262_key = try rt.internAtom("Test262Error");
     defer rt.atoms.free(test262_key);
-    const test262_ctor = global.getProperty(test262_key);
+    const test262_ctor = try global.getProperty(test262_key);
     defer test262_ctor.free(rt);
     const test262_error = try engine.exec.call.callValue(ctx, null, test262_ctor, &.{});
     defer test262_error.free(rt);
@@ -1951,9 +2510,9 @@ test "call subsystem installs and invokes host globals" {
     defer rt.atoms.free(set_key);
     const get_key = try rt.internAtom("get");
     defer rt.atoms.free(get_key);
-    const map_set = map_object.getProperty(set_key);
+    const map_set = try map_object.getProperty(set_key);
     defer map_set.free(rt);
-    const map_get = map_object.getProperty(get_key);
+    const map_get = try map_object.getProperty(get_key);
     defer map_get.free(rt);
     const stored_key_obj = try core.string.String.createUtf8(rt, "key");
     const stored_key = stored_key_obj.value();
@@ -1988,10 +2547,10 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.atoms.free(math_key);
     const abs_key = try rt.internAtom("abs");
     defer rt.atoms.free(abs_key);
-    const math_value = global.getProperty(math_key);
+    const math_value = try global.getProperty(math_key);
     defer math_value.free(rt);
     const math_object: *core.Object = @fieldParentPtr("header", math_value.refHeader().?);
-    const abs_value = math_object.getProperty(abs_key);
+    const abs_value = try math_object.getProperty(abs_key);
     defer abs_value.free(rt);
     const abs_object: *core.Object = @fieldParentPtr("header", abs_value.refHeader().?);
     try std.testing.expect(abs_object.nativeFunctionIdSlot().* != 0);
@@ -2001,7 +2560,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 
     const atan2_key = try rt.internAtom("atan2");
     defer rt.atoms.free(atan2_key);
-    const atan2_value = math_object.getProperty(atan2_key);
+    const atan2_value = try math_object.getProperty(atan2_key);
     defer atan2_value.free(rt);
     const atan2_object: *core.Object = @fieldParentPtr("header", atan2_value.refHeader().?);
     const atan2_record = atan2_object.nativeRecord() orelse return error.InvalidBuiltinRegistry;
@@ -2034,48 +2593,78 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
 
-test "bytecode call view memo is shared by the function bytecode" {
+test "bytecode calls execute directly from the shared function bytecode" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    const result = try js.eval(
-        \\function memoizedBytecodeView(value) {
+    const definition = try js.eval(
+        \\function directFunctionBytecode(value) {
         \\    return value + 1;
         \\}
-        \\assert.sameValue(memoizedBytecodeView(1), 2);
-        \\assert.sameValue(memoizedBytecodeView(2), 3);
+        \\undefined;
     );
-    defer result.free(js.runtime);
-    try std.testing.expect(result.isUndefined());
+    defer definition.free(js.runtime);
+    try std.testing.expect(definition.isUndefined());
 
     const global = js.context.global.?;
-    const name = try js.runtime.internAtom("memoizedBytecodeView");
+    const name = try js.runtime.internAtom("directFunctionBytecode");
     defer js.runtime.atoms.free(name);
-    const function_value = global.getProperty(name);
+    const function_value = try global.getProperty(name);
     defer function_value.free(js.runtime);
     const function_object = engine.exec.object_ops.functionObjectFromValue(function_value) orelse
         return error.InvalidFunctionBytecode;
     const fb = function_object.bytecodeFunctionStoragePtr().function_bytecode orelse
         return error.InvalidFunctionBytecode;
-    const cached_view = fb.cached_view orelse
-        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!@hasField(bytecode.FunctionBytecode, "cached_view"));
+    try std.testing.expect(fb.byteCode().len != 0);
+    const function_bytecode_refs = fb.header.meta().rc;
+
+    const first_args = [_]core.JSValue{core.JSValue.int32(1)};
+    const first = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
+        js.context,
+        null,
+        global,
+        &.{},
+        core.JSValue.undefinedValue(),
+        function_value,
+        &first_args,
+    );
+    defer first.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 2), first.asInt32());
+    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+
+    const second_args = [_]core.JSValue{core.JSValue.int32(2)};
+    const second = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
+        js.context,
+        null,
+        global,
+        &.{},
+        core.JSValue.undefinedValue(),
+        function_value,
+        &second_args,
+    );
+    defer second.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 3), second.asInt32());
+    try std.testing.expectEqual(function_bytecode_refs, fb.header.meta().rc);
+
     const rerun = try js.eval(
-        \\assert.sameValue(memoizedBytecodeView(3), 4);
+        \\assert.sameValue(directFunctionBytecode(3), 4);
         \\Promise.resolve(4)
         \\    .then(function(value) {
-        \\        var holder = { method: memoizedBytecodeView };
+        \\        var holder = { method: directFunctionBytecode };
         \\        return holder.method(value);
         \\    })
         \\    .then(function(value) {
@@ -2084,7 +2673,7 @@ test "bytecode call view memo is shared by the function bytecode" {
         \\undefined;
     );
     defer rerun.free(js.runtime);
-    try std.testing.expectEqual(cached_view, fb.cached_view.?);
+    try std.testing.expect(rerun.isUndefined());
 }
 
 test "Math cproto dispatch preserves observable ToNumber semantics" {
@@ -2137,7 +2726,7 @@ test "local add_loc retains string snapshots while using a rope tail" {
     const global = js.context.global orelse return error.TypeError;
     const probe_atom = try js.runtime.internAtom("__rope_tail_probe");
     defer js.runtime.atoms.free(probe_atom);
-    const text = global.getProperty(probe_atom);
+    const text = try global.getProperty(probe_atom);
     defer text.free(js.runtime);
     const rope = text.ropeBody() orelse return error.TypeError;
     try std.testing.expectEqual(@as(usize, 8192), rope.len_());
@@ -2176,7 +2765,7 @@ test "checked lexical string accumulation keeps rope depth bounded" {
     const global = js.context.global orelse return error.TypeError;
     const probe_atom = try js.runtime.internAtom("__checked_lexical_rope_probe");
     defer js.runtime.atoms.free(probe_atom);
-    const text = global.getProperty(probe_atom);
+    const text = try global.getProperty(probe_atom);
     defer text.free(js.runtime);
     const rope = text.ropeBody() orelse return error.TypeError;
     try std.testing.expectEqual(@as(usize, 16384), rope.len_());
@@ -2639,7 +3228,7 @@ test "throw type error intrinsic marker is internal" {
     const global = js.context.global.?;
     const probe_key = try js.runtime.internAtom("__thrower_probe");
     defer js.runtime.atoms.free(probe_key);
-    const thrower_value = global.getProperty(probe_key);
+    const thrower_value = try global.getProperty(probe_key);
     defer thrower_value.free(js.runtime);
     const thrower_object = try property_ops.expectObject(thrower_value);
     const dispatch_atom = thrower_object.nativeDispatchName();
@@ -2736,7 +3325,7 @@ test "generator instances inherit shared prototype methods" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const sync_key = try js.runtime.internAtom("syncA");
     defer js.runtime.atoms.free(sync_key);
-    const sync_value = global.getProperty(sync_key);
+    const sync_value = try global.getProperty(sync_key);
     defer sync_value.free(js.runtime);
     const sync_object = try property_ops.expectObject(sync_value);
     try std.testing.expect(!js.runtime.borrowedReferenceHolderRegistered(sync_object));
@@ -2744,7 +3333,7 @@ test "generator instances inherit shared prototype methods" {
 
     const generator_prototype_key = try js.runtime.internAtom("GeneratorPrototype");
     defer js.runtime.atoms.free(generator_prototype_key);
-    const generator_prototype_value = global.getProperty(generator_prototype_key);
+    const generator_prototype_value = try global.getProperty(generator_prototype_key);
     defer generator_prototype_value.free(js.runtime);
     const generator_prototype = try property_ops.expectObject(generator_prototype_value);
     const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
@@ -2756,7 +3345,7 @@ test "generator instances inherit shared prototype methods" {
     for (generator_methods) |method| {
         const key = try js.runtime.internAtom(method.name);
         defer js.runtime.atoms.free(key);
-        const value = generator_prototype.getProperty(key);
+        const value = try generator_prototype.getProperty(key);
         defer value.free(js.runtime);
         const function_object = try property_ops.expectObject(value);
         const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
@@ -2767,12 +3356,12 @@ test "generator instances inherit shared prototype methods" {
 
     const array_iterator_key = try js.runtime.internAtom("arrayIteratorForNativeRecord");
     defer js.runtime.atoms.free(array_iterator_key);
-    const array_iterator_value = global.getProperty(array_iterator_key);
+    const array_iterator_value = try global.getProperty(array_iterator_key);
     defer array_iterator_value.free(js.runtime);
     const array_iterator = try property_ops.expectObject(array_iterator_value);
     const next_key = try js.runtime.internAtom("next");
     defer js.runtime.atoms.free(next_key);
-    const next_value = array_iterator.getProperty(next_key);
+    const next_value = try array_iterator.getProperty(next_key);
     defer next_value.free(js.runtime);
     const next_function = try property_ops.expectObject(next_value);
     const next_ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionIdSlot().*) orelse return error.InvalidBuiltinRegistry;
@@ -2934,7 +3523,7 @@ test "surviving var references keep resident local slots bare" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const key = try js.runtime.internAtom("__referenceStorage");
     defer js.runtime.atoms.free(key);
-    const value = global.getProperty(key);
+    const value = try global.getProperty(key);
     defer value.free(js.runtime);
     const generator = try property_ops.expectObject(value);
     const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
@@ -2942,7 +3531,7 @@ test "surviving var references keep resident local slots bare" {
     const target_idx = localIndexNamed(js.runtime, function, "target") orelse return error.TypeError;
     const state = generator.generatorExecutionState();
 
-    try std.testing.expect(function.open_var_ref_count > 0);
+    try std.testing.expect(function.openVarRefCount() > 0);
     try std.testing.expect(function.varDefs()[target_idx].isCaptured());
     try std.testing.expect(!function.varDefs()[target_idx].isLexical());
     try std.testing.expectEqual(@as(?i32, 41), state.storage.frame.locals[target_idx].asInt32());
@@ -2980,7 +3569,7 @@ test "direct eval captures only bindings visible at its call scope" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const key = try js.runtime.internAtom("__scopedEvalStorage");
     defer js.runtime.atoms.free(key);
-    const value = global.getProperty(key);
+    const value = try global.getProperty(key);
     defer value.free(js.runtime);
     const generator = try property_ops.expectObject(value);
     const function_value = generator.generatorFunctionBytecode() orelse return error.TypeError;
@@ -2992,10 +3581,9 @@ test "direct eval captures only bindings visible at its call scope" {
     try std.testing.expect(!function.varDefs()[sibling_idx].isCaptured());
     try std.testing.expect(function.varDefs()[visible_idx].isCaptured());
     try std.testing.expect(function.varDefs()[active_idx].isCaptured());
-    const view = bytecode.asBytecodeView(function, js.runtime);
-    try std.testing.expect(view.localOpenBindingIndex(sibling_idx) == null);
-    try std.testing.expect(view.localOpenBindingIndex(visible_idx) != null);
-    try std.testing.expect(view.localOpenBindingIndex(active_idx) != null);
+    try std.testing.expect(function.localOpenBindingIndex(sibling_idx) == null);
+    try std.testing.expect(function.localOpenBindingIndex(visible_idx) != null);
+    try std.testing.expect(function.localOpenBindingIndex(active_idx) != null);
 }
 
 test "suspended generators retain one resident execution owner across resumes" {
@@ -3026,7 +3614,7 @@ test "suspended generators retain one resident execution owner across resumes" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const key = try js.runtime.internAtom("__residentGenerator");
     defer js.runtime.atoms.free(key);
-    const value = global.getProperty(key);
+    const value = try global.getProperty(key);
     defer value.free(js.runtime);
     const generator = try property_ops.expectObject(value);
     const generator_function = generator.generatorFunctionBytecode() orelse return error.TypeError;
@@ -3099,7 +3687,7 @@ test "completed generators eagerly release their resident execution state" {
     for (names) |name| {
         const key = try js.runtime.internAtom(name);
         defer js.runtime.atoms.free(key);
-        const value = global.getProperty(key);
+        const value = try global.getProperty(key);
         defer value.free(js.runtime);
         const generator_object = try property_ops.expectObject(value);
         try std.testing.expect(generator_object.generatorDone());
@@ -3239,11 +3827,11 @@ test "number native builtin records cover static and prototype dispatch" {
     const to_fixed_key = try rt.internAtom("toFixed");
     defer rt.atoms.free(to_fixed_key);
 
-    const number_value = global.getProperty(number_key);
+    const number_value = try global.getProperty(number_key);
     defer number_value.free(rt);
     const number_object: *core.Object = @fieldParentPtr("header", number_value.refHeader().?);
 
-    const is_integer_value = number_object.getProperty(is_integer_key);
+    const is_integer_value = try number_object.getProperty(is_integer_key);
     defer is_integer_value.free(rt);
     const is_integer_object: *core.Object = @fieldParentPtr("header", is_integer_value.refHeader().?);
     try std.testing.expect(is_integer_object.nativeFunctionIdSlot().* != 0);
@@ -3260,10 +3848,10 @@ test "number native builtin records cover static and prototype dispatch" {
     defer static_result.free(rt);
     try std.testing.expectEqual(false, static_result.asBool().?);
 
-    const prototype_value = number_object.getProperty(prototype_key);
+    const prototype_value = try number_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
-    const to_fixed_value = prototype_object.getProperty(to_fixed_key);
+    const to_fixed_value = try prototype_object.getProperty(to_fixed_key);
     defer to_fixed_value.free(rt);
     const to_fixed_object: *core.Object = @fieldParentPtr("header", to_fixed_value.refHeader().?);
     try std.testing.expect(to_fixed_object.nativeFunctionIdSlot().* != 0);
@@ -3288,13 +3876,14 @@ test "number native builtin records cover static and prototype dispatch" {
     defer rt.atoms.free(fake_proto_key);
     try global.defineOwnProperty(rt, fake_proto_key, core.Descriptor.data(fake_proto, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
@@ -3313,10 +3902,10 @@ test "string static native builtin records ignore dispatch names" {
     defer rt.atoms.free(string_key);
     const from_code_point_key = try rt.internAtom("fromCodePoint");
     defer rt.atoms.free(from_code_point_key);
-    const string_value = global.getProperty(string_key);
+    const string_value = try global.getProperty(string_key);
     defer string_value.free(rt);
     const string_object: *core.Object = @fieldParentPtr("header", string_value.refHeader().?);
-    const from_code_point_value = string_object.getProperty(from_code_point_key);
+    const from_code_point_value = try string_object.getProperty(from_code_point_key);
     defer from_code_point_value.free(rt);
     const from_code_point_object: *core.Object = @fieldParentPtr("header", from_code_point_value.refHeader().?);
     try std.testing.expect(from_code_point_object.nativeFunctionIdSlot().* != 0);
@@ -3339,13 +3928,14 @@ test "string static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("B\n", output.buffered());
@@ -3364,13 +3954,13 @@ test "string prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(string_key);
     const index_of_key = try rt.internAtom("indexOf");
     defer rt.atoms.free(index_of_key);
-    const string_value = global.getProperty(string_key);
+    const string_value = try global.getProperty(string_key);
     defer string_value.free(rt);
     const string_object: *core.Object = @fieldParentPtr("header", string_value.refHeader().?);
-    const prototype_value = string_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try string_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
-    const index_of_value = prototype_object.getProperty(index_of_key);
+    const index_of_value = try prototype_object.getProperty(index_of_key);
     defer index_of_value.free(rt);
     const index_of_object: *core.Object = @fieldParentPtr("header", index_of_value.refHeader().?);
     try std.testing.expect(index_of_object.nativeFunctionIdSlot().* != 0);
@@ -3396,13 +3986,14 @@ test "string prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n", output.buffered());
@@ -3460,10 +4051,10 @@ test "date static native builtin records ignore dispatch names" {
     defer rt.atoms.free(date_key);
     const utc_key = try rt.internAtom("UTC");
     defer rt.atoms.free(utc_key);
-    const date_value = global.getProperty(date_key);
+    const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
     const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
-    const utc_value = date_object.getProperty(utc_key);
+    const utc_value = try date_object.getProperty(utc_key);
     defer utc_value.free(rt);
     const utc_object: *core.Object = @fieldParentPtr("header", utc_value.refHeader().?);
     try std.testing.expect(utc_object.nativeFunctionIdSlot().* != 0);
@@ -3485,13 +4076,14 @@ test "date static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
@@ -3508,7 +4100,7 @@ test "date constructor native builtin records ignore dispatch names" {
 
     const date_key = try rt.internAtom("Date");
     defer rt.atoms.free(date_key);
-    const date_value = global.getProperty(date_key);
+    const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
     const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
     try std.testing.expect(date_object.nativeFunctionIdSlot().* != 0);
@@ -3521,7 +4113,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notDateConstructor", dispatch_name);
 
-    const prototype_value = date_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     try fake_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, true));
 
@@ -3544,7 +4136,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt,
+    var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const d = new fakeDateConstructor({ valueOf: function(){ return 2; } });
         \\print(d instanceof Date);
         \\print(d.getTime());
@@ -3556,7 +4148,8 @@ test "date constructor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
@@ -3567,6 +4160,14 @@ test "constructValue AggregateError releases copied errors array owner" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
+    const object_proto = try core.Object.create(rt, core.class.ids.object, null);
+    const object_proto_slot = try global.cachedRealmValueSlot(rt, .object_prototype);
+    try global.setOptionalValueSlot(rt, object_proto_slot, object_proto.value());
 
     const name = try rt.internAtom("AggregateError");
     defer rt.atoms.free(name);
@@ -3601,13 +4202,13 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(date_key);
     const set_time_key = try rt.internAtom("setTime");
     defer rt.atoms.free(set_time_key);
-    const date_value = global.getProperty(date_key);
+    const date_value = try global.getProperty(date_key);
     defer date_value.free(rt);
     const date_object: *core.Object = @fieldParentPtr("header", date_value.refHeader().?);
-    const prototype_value = date_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
-    const set_time_value = prototype_object.getProperty(set_time_key);
+    const set_time_value = try prototype_object.getProperty(set_time_key);
     defer set_time_value.free(rt);
     const set_time_object: *core.Object = @fieldParentPtr("header", set_time_value.refHeader().?);
     try std.testing.expect(set_time_object.nativeFunctionIdSlot().* != 0);
@@ -3631,13 +4232,14 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
@@ -3658,14 +4260,14 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.atoms.free(is_array_key);
     const from_key = try rt.internAtom("from");
     defer rt.atoms.free(from_key);
-    const array_value = global.getProperty(array_key);
+    const array_value = try global.getProperty(array_key);
     defer array_value.free(rt);
     const array_object: *core.Object = @fieldParentPtr("header", array_value.refHeader().?);
-    const is_array_value = array_object.getProperty(is_array_key);
+    const is_array_value = try array_object.getProperty(is_array_key);
     defer is_array_value.free(rt);
     const is_array_object: *core.Object = @fieldParentPtr("header", is_array_value.refHeader().?);
     try std.testing.expect(is_array_object.nativeFunctionIdSlot().* != 0);
-    const from_value = array_object.getProperty(from_key);
+    const from_value = try array_object.getProperty(from_key);
     defer from_value.free(rt);
     const from_object: *core.Object = @fieldParentPtr("header", from_value.refHeader().?);
     try std.testing.expect(from_object.nativeFunctionIdSlot().* != 0);
@@ -3706,13 +4308,14 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_from_key);
     try global.defineOwnProperty(rt, fake_from_key, core.Descriptor.data(fake_from, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
@@ -3739,26 +4342,26 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(map_key);
     const values_key = try rt.internAtom("values");
     defer rt.atoms.free(values_key);
-    const array_value = global.getProperty(array_key);
+    const array_value = try global.getProperty(array_key);
     defer array_value.free(rt);
     const array_object: *core.Object = @fieldParentPtr("header", array_value.refHeader().?);
-    const prototype_value = array_object.getProperty(prototype_key);
+    const prototype_value = try array_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
 
-    const to_string_value = prototype_object.getProperty(to_string_key);
+    const to_string_value = try prototype_object.getProperty(to_string_key);
     defer to_string_value.free(rt);
     const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
-    const join_value = prototype_object.getProperty(join_key);
+    const join_value = try prototype_object.getProperty(join_key);
     defer join_value.free(rt);
     const join_object: *core.Object = @fieldParentPtr("header", join_value.refHeader().?);
     try std.testing.expect(join_object.nativeFunctionIdSlot().* != 0);
-    const map_value = prototype_object.getProperty(map_key);
+    const map_value = try prototype_object.getProperty(map_key);
     defer map_value.free(rt);
     const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
     try std.testing.expect(map_object.nativeFunctionIdSlot().* != 0);
-    const values_value = prototype_object.getProperty(values_key);
+    const values_value = try prototype_object.getProperty(values_key);
     defer values_value.free(rt);
     const values_object: *core.Object = @fieldParentPtr("header", values_value.refHeader().?);
     try std.testing.expect(values_object.nativeFunctionIdSlot().* != 0);
@@ -3809,13 +4412,14 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_values_key);
     try global.defineOwnProperty(rt, fake_values_key, core.Descriptor.data(fake_values, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
@@ -3847,36 +4451,36 @@ test "collection native builtin records ignore dispatch names" {
     const set_values_key = try rt.internAtom("values");
     defer rt.atoms.free(set_values_key);
 
-    const map_value = global.getProperty(map_key);
+    const map_value = try global.getProperty(map_key);
     defer map_value.free(rt);
     const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
-    const group_by_value = map_object.getProperty(group_by_key);
+    const group_by_value = try map_object.getProperty(group_by_key);
     defer group_by_value.free(rt);
     const group_by_object: *core.Object = @fieldParentPtr("header", group_by_value.refHeader().?);
     try std.testing.expect(group_by_object.nativeFunctionIdSlot().* != 0);
-    const map_prototype_value = map_object.getProperty(prototype_key);
+    const map_prototype_value = try map_object.getProperty(prototype_key);
     defer map_prototype_value.free(rt);
     const map_prototype_object: *core.Object = @fieldParentPtr("header", map_prototype_value.refHeader().?);
-    const map_set_value = map_prototype_object.getProperty(map_set_key);
+    const map_set_value = try map_prototype_object.getProperty(map_set_key);
     defer map_set_value.free(rt);
     const map_set_object: *core.Object = @fieldParentPtr("header", map_set_value.refHeader().?);
     try std.testing.expect(map_set_object.nativeFunctionIdSlot().* != 0);
-    const map_for_each_value = map_prototype_object.getProperty(map_for_each_key);
+    const map_for_each_value = try map_prototype_object.getProperty(map_for_each_key);
     defer map_for_each_value.free(rt);
     const map_for_each_object: *core.Object = @fieldParentPtr("header", map_for_each_value.refHeader().?);
     try std.testing.expect(map_for_each_object.nativeFunctionIdSlot().* != 0);
 
-    const set_value = global.getProperty(set_key);
+    const set_value = try global.getProperty(set_key);
     defer set_value.free(rt);
     const set_object: *core.Object = @fieldParentPtr("header", set_value.refHeader().?);
-    const set_prototype_value = set_object.getProperty(prototype_key);
+    const set_prototype_value = try set_object.getProperty(prototype_key);
     defer set_prototype_value.free(rt);
     const set_prototype_object: *core.Object = @fieldParentPtr("header", set_prototype_value.refHeader().?);
-    const set_union_value = set_prototype_object.getProperty(set_union_key);
+    const set_union_value = try set_prototype_object.getProperty(set_union_key);
     defer set_union_value.free(rt);
     const set_union_object: *core.Object = @fieldParentPtr("header", set_union_value.refHeader().?);
     try std.testing.expect(set_union_object.nativeFunctionIdSlot().* != 0);
-    const set_values_value = set_prototype_object.getProperty(set_values_key);
+    const set_values_value = try set_prototype_object.getProperty(set_values_key);
     defer set_values_value.free(rt);
     const set_values_object: *core.Object = @fieldParentPtr("header", set_values_value.refHeader().?);
     try std.testing.expect(set_values_object.nativeFunctionIdSlot().* != 0);
@@ -3934,13 +4538,14 @@ test "collection native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_set_values_key);
     try global.defineOwnProperty(rt, fake_set_values_key, core.Descriptor.data(fake_set_values, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
@@ -3974,51 +4579,51 @@ test "buffer native builtin records ignore dispatch names" {
     const set_uint8_key = try rt.internAtom("setUint8");
     defer rt.atoms.free(set_uint8_key);
 
-    const array_buffer_value = global.getProperty(array_buffer_key);
+    const array_buffer_value = try global.getProperty(array_buffer_key);
     defer array_buffer_value.free(rt);
     const array_buffer_object: *core.Object = @fieldParentPtr("header", array_buffer_value.refHeader().?);
-    const is_view_value = array_buffer_object.getProperty(is_view_key);
+    const is_view_value = try array_buffer_object.getProperty(is_view_key);
     defer is_view_value.free(rt);
     const is_view_object: *core.Object = @fieldParentPtr("header", is_view_value.refHeader().?);
     try std.testing.expect(is_view_object.nativeFunctionIdSlot().* != 0);
-    const array_buffer_prototype_value = array_buffer_object.getProperty(prototype_key);
+    const array_buffer_prototype_value = try array_buffer_object.getProperty(prototype_key);
     defer array_buffer_prototype_value.free(rt);
     const array_buffer_prototype_object: *core.Object = @fieldParentPtr("header", array_buffer_prototype_value.refHeader().?);
-    const array_buffer_slice_value = array_buffer_prototype_object.getProperty(slice_key);
+    const array_buffer_slice_value = try array_buffer_prototype_object.getProperty(slice_key);
     defer array_buffer_slice_value.free(rt);
     const array_buffer_slice_object: *core.Object = @fieldParentPtr("header", array_buffer_slice_value.refHeader().?);
     try std.testing.expect(array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
-    const array_buffer_byte_length_desc = array_buffer_prototype_object.getOwnProperty(rt, byte_length_key).?;
+    const array_buffer_byte_length_desc = (try array_buffer_prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer array_buffer_byte_length_desc.destroy(rt);
     const array_buffer_byte_length_getter: *core.Object = @fieldParentPtr("header", array_buffer_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(array_buffer_byte_length_getter.nativeFunctionIdSlot().* != 0);
 
-    const shared_array_buffer_value = global.getProperty(shared_array_buffer_key);
+    const shared_array_buffer_value = try global.getProperty(shared_array_buffer_key);
     defer shared_array_buffer_value.free(rt);
     const shared_array_buffer_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_value.refHeader().?);
-    const shared_array_buffer_prototype_value = shared_array_buffer_object.getProperty(prototype_key);
+    const shared_array_buffer_prototype_value = try shared_array_buffer_object.getProperty(prototype_key);
     defer shared_array_buffer_prototype_value.free(rt);
     const shared_array_buffer_prototype_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_prototype_value.refHeader().?);
-    const shared_array_buffer_slice_value = shared_array_buffer_prototype_object.getProperty(slice_key);
+    const shared_array_buffer_slice_value = try shared_array_buffer_prototype_object.getProperty(slice_key);
     defer shared_array_buffer_slice_value.free(rt);
     const shared_array_buffer_slice_object: *core.Object = @fieldParentPtr("header", shared_array_buffer_slice_value.refHeader().?);
     try std.testing.expect(shared_array_buffer_slice_object.nativeFunctionIdSlot().* != 0);
 
-    const data_view_value = global.getProperty(data_view_key);
+    const data_view_value = try global.getProperty(data_view_key);
     defer data_view_value.free(rt);
     const data_view_object: *core.Object = @fieldParentPtr("header", data_view_value.refHeader().?);
-    const data_view_prototype_value = data_view_object.getProperty(prototype_key);
+    const data_view_prototype_value = try data_view_object.getProperty(prototype_key);
     defer data_view_prototype_value.free(rt);
     const data_view_prototype_object: *core.Object = @fieldParentPtr("header", data_view_prototype_value.refHeader().?);
-    const get_uint8_value = data_view_prototype_object.getProperty(get_uint8_key);
+    const get_uint8_value = try data_view_prototype_object.getProperty(get_uint8_key);
     defer get_uint8_value.free(rt);
     const get_uint8_object: *core.Object = @fieldParentPtr("header", get_uint8_value.refHeader().?);
     try std.testing.expect(get_uint8_object.nativeFunctionIdSlot().* != 0);
-    const set_uint8_value = data_view_prototype_object.getProperty(set_uint8_key);
+    const set_uint8_value = try data_view_prototype_object.getProperty(set_uint8_key);
     defer set_uint8_value.free(rt);
     const set_uint8_object: *core.Object = @fieldParentPtr("header", set_uint8_value.refHeader().?);
     try std.testing.expect(set_uint8_object.nativeFunctionIdSlot().* != 0);
-    const data_view_byte_length_desc = data_view_prototype_object.getOwnProperty(rt, byte_length_key).?;
+    const data_view_byte_length_desc = (try data_view_prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer data_view_byte_length_desc.destroy(rt);
     const data_view_byte_length_getter: *core.Object = @fieldParentPtr("header", data_view_byte_length_desc.getter.refHeader().?);
     try std.testing.expect(data_view_byte_length_getter.nativeFunctionIdSlot().* != 0);
@@ -4088,7 +4693,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_data_view_byte_length_key);
     try global.defineOwnProperty(rt, fake_data_view_byte_length_key, core.Descriptor.data(fake_data_view_byte_length, true, false, true));
 
-    var parsed = try engine.parser.compile(rt,
+    var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const b = new ArrayBuffer(6);
         \\print(fakeArrayBufferIsView(new DataView(b)));
         \\print(fakeArrayBufferSlice.call(b, 1, 4).byteLength);
@@ -4105,7 +4710,8 @@ test "buffer native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
@@ -4129,22 +4735,22 @@ test "typed array accessor native builtin records ignore dispatch names" {
     const length_key = try rt.internAtom("length");
     defer rt.atoms.free(length_key);
 
-    const typed_array_value = global.getProperty(typed_array_key);
+    const typed_array_value = try global.getProperty(typed_array_key);
     defer typed_array_value.free(rt);
     const typed_array_object: *core.Object = @fieldParentPtr("header", typed_array_value.refHeader().?);
-    const prototype_value = typed_array_object.getProperty(prototype_key);
+    const prototype_value = try typed_array_object.getProperty(prototype_key);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
 
-    const byte_length_desc = prototype_object.getOwnProperty(rt, byte_length_key).?;
+    const byte_length_desc = (try prototype_object.getOwnProperty(rt, byte_length_key)).?;
     defer byte_length_desc.destroy(rt);
     const byte_length_getter: *core.Object = @fieldParentPtr("header", byte_length_desc.getter.refHeader().?);
     try std.testing.expect(byte_length_getter.nativeFunctionIdSlot().* != 0);
-    const length_desc = prototype_object.getOwnProperty(rt, length_key).?;
+    const length_desc = (try prototype_object.getOwnProperty(rt, length_key)).?;
     defer length_desc.destroy(rt);
     const length_getter: *core.Object = @fieldParentPtr("header", length_desc.getter.refHeader().?);
     try std.testing.expect(length_getter.nativeFunctionIdSlot().* != 0);
-    const tag_desc = prototype_object.getOwnProperty(rt, core.atom.predefinedId("Symbol.toStringTag", .symbol).?).?;
+    const tag_desc = (try prototype_object.getOwnProperty(rt, core.atom.predefinedId("Symbol.toStringTag", .symbol).?)).?;
     defer tag_desc.destroy(rt);
     const tag_getter: *core.Object = @fieldParentPtr("header", tag_desc.getter.refHeader().?);
     try std.testing.expect(tag_getter.nativeFunctionIdSlot().* != 0);
@@ -4187,7 +4793,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_tag_key);
     try global.defineOwnProperty(rt, fake_tag_key, core.Descriptor.data(fake_tag, true, false, true));
 
-    var parsed = try engine.parser.compile(rt,
+    var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const ta = new Uint8Array([1, 2, 3, 4]);
         \\print(fakeTypedArrayByteLength.call(ta));
         \\print(fakeTypedArrayLength.call(ta));
@@ -4199,7 +4805,8 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
@@ -4218,10 +4825,10 @@ test "regexp static native builtin records ignore dispatch names" {
     defer rt.atoms.free(regexp_key);
     const escape_key = try rt.internAtom("escape");
     defer rt.atoms.free(escape_key);
-    const regexp_value = global.getProperty(regexp_key);
+    const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
     const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
-    const escape_value = regexp_object.getProperty(escape_key);
+    const escape_value = try regexp_object.getProperty(escape_key);
     defer escape_value.free(rt);
     const escape_object: *core.Object = @fieldParentPtr("header", escape_value.refHeader().?);
     try std.testing.expect(escape_object.nativeFunctionIdSlot().* != 0);
@@ -4247,13 +4854,14 @@ test "regexp static native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_key);
     try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
@@ -4276,21 +4884,21 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(test_key);
     const to_string_key = try rt.internAtom("toString");
     defer rt.atoms.free(to_string_key);
-    const regexp_value = global.getProperty(regexp_key);
+    const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
     const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
-    const prototype_value = regexp_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
-    const exec_value = prototype_object.getProperty(exec_key);
+    const exec_value = try prototype_object.getProperty(exec_key);
     defer exec_value.free(rt);
     const exec_object: *core.Object = @fieldParentPtr("header", exec_value.refHeader().?);
     try std.testing.expect(exec_object.nativeFunctionIdSlot().* != 0);
-    const test_value = prototype_object.getProperty(test_key);
+    const test_value = try prototype_object.getProperty(test_key);
     defer test_value.free(rt);
     const test_object: *core.Object = @fieldParentPtr("header", test_value.refHeader().?);
     try std.testing.expect(test_object.nativeFunctionIdSlot().* != 0);
-    const to_string_value = prototype_object.getProperty(to_string_key);
+    const to_string_value = try prototype_object.getProperty(to_string_key);
     defer to_string_value.free(rt);
     const to_string_object: *core.Object = @fieldParentPtr("header", to_string_value.refHeader().?);
     try std.testing.expect(to_string_object.nativeFunctionIdSlot().* != 0);
@@ -4332,14 +4940,14 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
     try std.testing.expect(exec_array.isArray());
-    const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
+    const first_match = try exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
     const first_match_string = first_match.asStringBody().?;
     try std.testing.expect(first_match_string.eqlBytes("a"));
     const index_key = try rt.internAtom("index");
     defer rt.atoms.free(index_key);
-    const index_value = exec_array.getProperty(index_key);
+    const index_value = try exec_array.getProperty(index_key);
     defer index_value.free(rt);
     try std.testing.expectEqual(@as(i32, 1), index_value.asInt32().?);
 
@@ -4363,13 +4971,14 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_to_string_key);
     try global.defineOwnProperty(rt, fake_to_string_key, core.Descriptor.data(fake_to_string, true, false, true));
 
-    var parsed = try engine.parser.compile(rt, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
+    var parsed = try engine.parser.compile(.{ .realm = ctx }, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
     var stack = engine.exec.stack.Stack.init(&rt.memory, ctx.stackLimit());
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
@@ -4386,30 +4995,30 @@ test "regexp symbol native builtin records ignore dispatch names" {
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
-    const regexp_value = global.getProperty(regexp_key);
+    const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
     const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
-    const prototype_value = regexp_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
 
-    const search_value = prototype_object.getProperty(core.atom.predefinedId("Symbol.search", .symbol).?);
+    const search_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.search", .symbol).?);
     defer search_value.free(rt);
     const search_object: *core.Object = @fieldParentPtr("header", search_value.refHeader().?);
     try std.testing.expect(search_object.nativeFunctionIdSlot().* != 0);
-    const match_value = prototype_object.getProperty(core.atom.predefinedId("Symbol.match", .symbol).?);
+    const match_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.match", .symbol).?);
     defer match_value.free(rt);
     const match_object: *core.Object = @fieldParentPtr("header", match_value.refHeader().?);
     try std.testing.expect(match_object.nativeFunctionIdSlot().* != 0);
-    const match_all_value = prototype_object.getProperty(core.atom.predefinedId("Symbol.matchAll", .symbol).?);
+    const match_all_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.matchAll", .symbol).?);
     defer match_all_value.free(rt);
     const match_all_object: *core.Object = @fieldParentPtr("header", match_all_value.refHeader().?);
     try std.testing.expect(match_all_object.nativeFunctionIdSlot().* != 0);
-    const replace_value = prototype_object.getProperty(core.atom.predefinedId("Symbol.replace", .symbol).?);
+    const replace_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.replace", .symbol).?);
     defer replace_value.free(rt);
     const replace_object: *core.Object = @fieldParentPtr("header", replace_value.refHeader().?);
     try std.testing.expect(replace_object.nativeFunctionIdSlot().* != 0);
-    const split_value = prototype_object.getProperty(core.atom.predefinedId("Symbol.split", .symbol).?);
+    const split_value = try prototype_object.getProperty(core.atom.predefinedId("Symbol.split", .symbol).?);
     defer split_value.free(rt);
     const split_object: *core.Object = @fieldParentPtr("header", split_value.refHeader().?);
     try std.testing.expect(split_object.nativeFunctionIdSlot().* != 0);
@@ -4458,7 +5067,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const match_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match, &one_arg);
     defer match_result.free(rt);
     const match_array: *core.Object = @fieldParentPtr("header", match_result.refHeader().?);
-    const match_zero = match_array.getProperty(core.atom.atomFromUInt32(0));
+    const match_zero = try match_array.getProperty(core.atom.atomFromUInt32(0));
     defer match_zero.free(rt);
     try std.testing.expect(match_zero.isString());
     const match_zero_string = match_zero.asStringBody().?;
@@ -4498,7 +5107,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_split_key);
     try global.defineOwnProperty(rt, fake_split_key, core.Descriptor.data(fake_split, true, false, true));
 
-    var parsed = try engine.parser.compile(rt,
+    var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const r = /a/;
         \\print(fakeRegExpSearch.call(r, 'cat'));
         \\print(fakeRegExpMatch.call(r, 'cat')[0]);
@@ -4511,7 +5120,8 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
@@ -4528,22 +5138,22 @@ test "regexp accessor native builtin records ignore dispatch names" {
 
     const regexp_key = try rt.internAtom("RegExp");
     defer rt.atoms.free(regexp_key);
-    const regexp_value = global.getProperty(regexp_key);
+    const regexp_value = try global.getProperty(regexp_key);
     defer regexp_value.free(rt);
     const regexp_object: *core.Object = @fieldParentPtr("header", regexp_value.refHeader().?);
-    const prototype_value = regexp_object.getProperty(core.atom.ids.prototype);
+    const prototype_value = try regexp_object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype_object: *core.Object = @fieldParentPtr("header", prototype_value.refHeader().?);
 
     const source_key = try rt.internAtom("source");
     defer rt.atoms.free(source_key);
-    const source_desc = prototype_object.getOwnProperty(rt, source_key).?;
+    const source_desc = (try prototype_object.getOwnProperty(rt, source_key)).?;
     defer source_desc.destroy(rt);
     const source_getter: *core.Object = @fieldParentPtr("header", source_desc.getter.refHeader().?);
     try std.testing.expect(source_getter.nativeFunctionIdSlot().* != 0);
     const global_key = try rt.internAtom("global");
     defer rt.atoms.free(global_key);
-    const global_desc = prototype_object.getOwnProperty(rt, global_key).?;
+    const global_desc = (try prototype_object.getOwnProperty(rt, global_key)).?;
     defer global_desc.destroy(rt);
     const global_getter: *core.Object = @fieldParentPtr("header", global_desc.getter.refHeader().?);
     try std.testing.expect(global_getter.nativeFunctionIdSlot().* != 0);
@@ -4585,7 +5195,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer rt.atoms.free(fake_global_key);
     try global.defineOwnProperty(rt, fake_global_key, core.Descriptor.data(fake_global, true, false, true));
 
-    var parsed = try engine.parser.compile(rt,
+    var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const r = /a\/b/g;
         \\print(fakeRegExpSourceGetter.call(r));
         \\print(fakeRegExpGlobalGetter.call(r));
@@ -4595,7 +5205,8 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
@@ -4606,10 +5217,15 @@ test "vm host native builtin records dispatch by id before name fallback" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
 
-    const fake_species = try engine.core.function.nativeFunction(ctx, "notSpeciesGetter", 0);
+    // This focused dispatch fixture intentionally has no intrinsic bootstrap,
+    // but a callable RealmContext still owns an exact global. Its detached
+    // native record declares a null final prototype explicitly instead of
+    // using the post-bootstrap realm convenience API.
+    const fake_species = try engine.core.function.nativeFunctionWithPrototypeAndCapacity(ctx, null, "notSpeciesGetter", 0, 2);
     defer fake_species.free(rt);
     const fake_species_object: *core.Object = @fieldParentPtr("header", fake_species.refHeader().?);
     fake_species_object.setNativeBuiltinIdAndRecord(
@@ -4651,19 +5267,20 @@ test "vm collection constructors use registered prototype methods" {
     defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     defer rt.atoms.free(map_atom);
-    var bytes: [7]u8 = undefined;
+    var bytes: [8]u8 = undefined;
     bytes[0] = op.get_var;
     std.mem.writeInt(u16, bytes[1..3], 0, .little);
     bytes[3] = op.dup;
     bytes[4] = op.call_constructor;
     std.mem.writeInt(u16, bytes[5..7], 0, .little);
+    bytes[7] = op.@"return";
     function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
     function.var_ref_names[0] = rt.atoms.dup(map_atom);
     try helpers.setCodeAndStackSize(&function, &bytes);
 
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
-    const result = try vm_instance.run(&function);
+    const result = try helpers.runMutableVm(&vm_instance, &function);
     defer result.free(rt);
 
     const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
@@ -5148,6 +5765,55 @@ test "CallSite metadata is internal" {
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "pc2line stack locations match QuickJS return and throw matrix" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\function outer() {
+        \\  return inner();
+        \\}
+        \\function inner() {
+        \\  throw new Error("x");
+        \\}
+        \\var captured;
+        \\try { outer(); } catch (error) { captured = error.stack; }
+        \\assert.sameValue(captured.indexOf("at inner (pc2line.js:5:18)") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at outer (pc2line.js:2:3)") >= 0, true);
+        \\assert.sameValue(captured.indexOf("at <eval> (pc2line.js:8:12)") >= 0, true);
+    , .{ .filename = "pc2line.js" });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "pc2line malformed transition reports zero location instead of header fallback" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function malformedLocationTarget(value) {
+        \\    return value + 1;
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    const function = try globalFunctionBytecode(js, "malformedLocationTarget");
+    const bytes = function.pc2lineBuf();
+    try std.testing.expect(bytes.len > 2);
+    const saved = try std.testing.allocator.dupe(u8, bytes);
+    defer std.testing.allocator.free(saved);
+    defer @memcpy(bytes, saved);
+
+    // Keep a valid 1:1 header, then make the first compact transition's
+    // zig-zag column ULEB run off the end of the authoritative buffer.
+    bytes[0] = 0;
+    bytes[1] = 0;
+    @memset(bytes[2..], 0x80);
+    const location = engine.exec.exception_ops.resolveBacktraceLocation(function, 0);
+    try std.testing.expectEqual(@as(i32, 0), location.line_num);
+    try std.testing.expectEqual(@as(i32, 0), location.col_num);
 }
 
 test "Error stack uses object method runtime names" {
@@ -5729,13 +6395,14 @@ test "vm call handler accepts allocator-backed argument lists" {
     try bytes.append(rt.memory.allocator, op.call);
     const argc: u16 = 40;
     try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&argc));
+    try bytes.append(rt.memory.allocator, op.@"return");
     try helpers.setCodeAndStackSize(&function, bytes.items);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     var vm_instance = engine.exec.Vm.initWithOutput(ctx, &stream);
     defer vm_instance.deinit();
-    const result = try vm_instance.run(&function);
+    const result = try helpers.runMutableVm(&vm_instance, &function);
     defer result.free(rt);
 
     var expected = std.ArrayList(u8).empty;
@@ -5815,6 +6482,471 @@ test "job queue enqueue propagates allocator failure" {
 
     try std.testing.expectError(error.OutOfMemory, queue.enqueueFunc(js.context, countJob, &.{}));
     try std.testing.expectEqual(@as(usize, 0), queue.jobs.len);
+}
+
+test "prepared Promise reactions reserve storage without claiming FIFO order" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise.value().free(js.runtime);
+    const reaction = try engine.exec.promise_ops.qjsPromiseReactionRecord(
+        js.runtime,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    defer reaction.free(js.runtime);
+    try engine.exec.promise_ops.qjsAppendPromiseReaction(js.runtime, promise, reaction);
+
+    var prepared = try engine.exec.promise_ops.qjsPreparePromiseReactionJobs(
+        js.context,
+        promise,
+        core.JSValue.int32(42),
+        false,
+    );
+    defer prepared.deinit(js.runtime);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.reserved_entries);
+
+    // This enqueue occurs while the reaction transaction is prepared, so it
+    // must occupy the earlier physical FIFO position without stealing the
+    // reaction's guaranteed slot.
+    try js.runtime.job_queue.enqueuePromise(js.context, core.JSValue.int32(99));
+    prepared.commit(js.context, promise);
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.reserved_entries);
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+
+    var first = js.runtime.job_queue.takeFirst().?;
+    defer first.deinit();
+    switch (first.payload) {
+        .promise => |payload| try std.testing.expectEqual(@as(?i32, 99), payload.value.asInt32()),
+        else => return error.TypeError,
+    }
+
+    var second = js.runtime.job_queue.takeFirst().?;
+    defer second.deinit();
+    switch (second.payload) {
+        .promise_reaction => |payload| try std.testing.expectEqual(@as(?i32, 42), payload.value.asInt32()),
+        else => return error.TypeError,
+    }
+}
+
+test "waitAsync completions enter one typed cross-realm FIFO after facade release" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global_a = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const realm_b = try core.JSContext.create(js.runtime);
+    var realm_b_owner = true;
+    defer if (realm_b_owner) realm_b.destroy();
+    _ = try engine.exec.zjs_vm.contextGlobal(realm_b);
+
+    const promise_a = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise_a.value().free(js.runtime);
+    const promise_b = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise_b.value().free(js.runtime);
+
+    const call_runtime = engine.exec.call_runtime;
+    const waiter_a = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    waiter_a.* = .{
+        .key = .{ .offset_or_ptr = @intFromPtr(promise_a) },
+        .completion = .notified,
+        .promise = promise_a.value().dup(),
+        .realm = core.RealmRef.retain(js.context),
+    };
+    engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter_a);
+    const waiter_b = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    waiter_b.* = .{
+        .key = .{ .offset_or_ptr = @intFromPtr(promise_b) },
+        .completion = .notified,
+        .promise = promise_b.value().dup(),
+        .realm = core.RealmRef.retain(realm_b),
+    };
+    engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter_b);
+    var waiters_linked = true;
+    defer if (waiters_linked) {
+        call_runtime.cleanupAtomicsWaitersForContext(js.context);
+        call_runtime.cleanupAtomicsWaitersForContext(realm_b);
+    };
+
+    // The host realm selects the Runtime, not which RealmRef-owned completion
+    // is eligible to move into its FIFO.
+    try call_runtime.processExpiredAtomicsWaiters(js.context);
+    waiters_linked = false;
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(js.runtime.job_queue.jobs[0].realm.borrow() == js.context);
+    try std.testing.expect(js.runtime.job_queue.jobs[1].realm.borrow() == realm_b);
+
+    realm_b.destroy();
+    realm_b_owner = false;
+    try std.testing.expect(js.runtime.job_queue.jobs[1].realm.borrow() == realm_b);
+
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+    try std.testing.expect(promise_a.promiseResult() != null);
+    try std.testing.expect(promise_b.promiseResult() == null);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+    try std.testing.expect(promise_b.promiseResult() != null);
+
+    // Each completion appended its ordinary Promise continuation behind the
+    // other already-queued completion.
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(js.runtime.job_queue.jobs[0].realm.borrow() == js.context);
+    try std.testing.expect(js.runtime.job_queue.jobs[1].realm.borrow() == realm_b);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global_a)) == .success);
+}
+
+test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise.value().free(js.runtime);
+
+    const call_runtime = engine.exec.call_runtime;
+    const waiter = try js.runtime.memory.create(call_runtime.AtomicsWaiter);
+    waiter.* = .{
+        .key = .{ .offset_or_ptr = @intFromPtr(promise) },
+        .completion = .notified,
+        .promise = promise.value().dup(),
+        .realm = core.RealmRef.retain(js.context),
+    };
+    engine.exec.promise_ops.atomicsLinkAsyncWaiter(waiter);
+    var waiter_linked = true;
+    defer if (waiter_linked) call_runtime.cleanupAtomicsWaitersForContext(js.context);
+
+    try call_runtime.processExpiredAtomicsWaiters(js.context);
+    waiter_linked = false;
+    helpers.job_counter = 0;
+    try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
+
+    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
+    defer js.runtime.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        engine.exec.promise_ops.drainOnePendingJob(js.context, null, global),
+    );
+    try std.testing.expect(promise.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .atomics_waiter);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .generic);
+
+    js.runtime.setMemoryLimit(null);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expect(promise.promiseResult() != null);
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .promise);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expectEqual(@as(usize, 1), helpers.job_counter);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+}
+
+test "dynamic import job OOM retains its FIFO position for retry" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const ImportProbe = struct {
+        var attempts: usize = 0;
+
+        fn run(
+            _: *core.JSContext,
+            _: ?*std.Io.Writer,
+            _: *const engine.exec.jobs.DynamicImportPayload,
+        ) core.context.DynamicImportError!core.JSValue {
+            attempts += 1;
+            if (attempts == 1) return error.OutOfMemory;
+            return core.JSValue.undefinedValue();
+        }
+    };
+    ImportProbe.attempts = 0;
+    helpers.job_counter = 0;
+    try js.runtime.job_queue.enqueueDynamicImport(
+        js.context,
+        ImportProbe.run,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        engine.exec.promise_ops.drainOnePendingJob(js.context, null, global),
+    );
+    try std.testing.expectEqual(@as(usize, 2), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .dynamic_import);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .generic);
+
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expectEqual(@as(usize, 2), ImportProbe.attempts);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expectEqual(@as(usize, 1), helpers.job_counter);
+}
+
+test "dynamic import job keeps its enqueue Realm after creator facade release" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const host_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const entry_realm = try core.JSContext.create(js.runtime);
+    var entry_realm_owner = true;
+    defer if (entry_realm_owner) entry_realm.destroy();
+    const entry_global = try engine.exec.zjs_vm.contextGlobal(entry_realm);
+
+    const ImportProbe = struct {
+        var seen_realm: ?*core.JSContext = null;
+        var seen_global: ?*core.Object = null;
+
+        fn run(
+            ctx: *core.JSContext,
+            _: ?*std.Io.Writer,
+            _: *const engine.exec.jobs.DynamicImportPayload,
+        ) core.context.DynamicImportError!core.JSValue {
+            seen_realm = ctx;
+            seen_global = ctx.global;
+            return core.JSValue.undefinedValue();
+        }
+    };
+    ImportProbe.seen_realm = null;
+    ImportProbe.seen_global = null;
+    try js.runtime.job_queue.enqueueDynamicImport(
+        entry_realm,
+        ImportProbe.run,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+
+    entry_realm.destroy();
+    entry_realm_owner = false;
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, host_global)) == .success);
+    try std.testing.expect(ImportProbe.seen_realm == entry_realm);
+    try std.testing.expect(ImportProbe.seen_global == entry_global);
+}
+
+test "dynamic import loader mutates only the enqueue Realm registry after public owner release" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const facade_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const entry_realm = try core.JSContext.create(js.runtime);
+    var entry_realm_owner = true;
+    defer if (entry_realm_owner) entry_realm.destroy();
+    const entry_global = try engine.exec.zjs_vm.contextGlobal(entry_realm);
+
+    const LoaderProbe = struct {
+        expected: *core.JSContext,
+        facade: *core.JSContext,
+        saw_expected_realm: bool = false,
+        active_registry_has_record: bool = false,
+        facade_registry_has_record: bool = false,
+
+        fn load(
+            userdata: ?*anyopaque,
+            ctx: *core.JSContext,
+            _: ?*std.Io.Writer,
+            _: *core.Object,
+            _: []const u8,
+            _: []const u8,
+        ) core.context.DynamicImportError!core.JSValue {
+            const self: *@This() = @ptrCast(@alignCast(userdata orelse return error.ModuleNotFound));
+            const name = ctx.runtime.internAtom("w1e-enqueue-realm-record") catch return error.OutOfMemory;
+            defer ctx.runtime.atoms.free(name);
+            _ = ctx.modules.createFresh(ctx.runtime, name) catch return error.OutOfMemory;
+            self.saw_expected_realm = ctx == self.expected;
+            self.active_registry_has_record = ctx.modules.find(name) != null;
+            self.facade_registry_has_record = self.facade.modules.find(name) != null;
+            return core.JSValue.undefinedValue();
+        }
+    };
+
+    var probe = LoaderProbe{
+        .expected = entry_realm,
+        .facade = js.context,
+    };
+    var loader_scope = js.runtime.installDynamicImportLoader(.{
+        .callback = LoaderProbe.load,
+        .userdata = &probe,
+    });
+    defer loader_scope.deinit();
+
+    const specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./record.mjs");
+    defer specifier.free(js.runtime);
+    const import_promise = try engine.exec.module_graph.enqueueDynamicImportJob(
+        entry_realm,
+        entry_global,
+        null,
+        "/w1e/enqueue/main.mjs",
+        specifier,
+    );
+    // The queued capability owns everything it needs; do not let the test's
+    // returned Promise stand in for the Job's enqueue-Realm owner.
+    import_promise.free(js.runtime);
+
+    entry_realm.destroy();
+    entry_realm_owner = false;
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, facade_global)) == .success);
+    try std.testing.expect(probe.saw_expected_realm);
+    try std.testing.expect(probe.active_registry_has_record);
+    try std.testing.expect(!probe.facade_registry_has_record);
+}
+
+test "thenable job reservation OOM leaves resolving function retryable" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.capacity);
+
+    const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise.value().free(js.runtime);
+    const resolving = try engine.exec.promise_ops.createPromiseResolvingPair(js.runtime, global, promise.value());
+    defer resolving.resolve.free(js.runtime);
+    defer resolving.reject.free(js.runtime);
+    const resolve_object = try property_ops.expectObject(resolving.resolve);
+    const state_value = resolve_object.functionPromiseResolvingState() orelse return error.TypeError;
+    const state = try property_ops.expectObject(state_value);
+
+    const thenable = try core.Object.create(js.runtime, core.class.ids.object, null);
+    defer thenable.value().free(js.runtime);
+    const promise_key = try js.runtime.internAtom("Promise");
+    defer js.runtime.atoms.free(promise_key);
+    const callable = try global.getProperty(promise_key);
+    defer callable.free(js.runtime);
+    const then_key = try js.runtime.internAtom("then");
+    defer js.runtime.atoms.free(then_key);
+    try thenable.defineOwnProperty(
+        js.runtime,
+        then_key,
+        core.Descriptor.data(callable, true, true, true),
+    );
+
+    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
+    defer js.runtime.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+        js.context,
+        null,
+        global,
+        resolve_object,
+        &.{thenable.value()},
+        null,
+        null,
+    ));
+
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(!state.promiseAlreadyResolved());
+    try std.testing.expect(promise.promiseResult() == null);
+
+    js.runtime.setMemoryLimit(null);
+    const result = try engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+        js.context,
+        null,
+        global,
+        resolve_object,
+        &.{thenable.value()},
+        null,
+        null,
+    );
+    if (result) |value| value.free(js.runtime);
+
+    try std.testing.expect(state.promiseAlreadyResolved());
+    try std.testing.expect(promise.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .promise_thenable);
+}
+
+test "published Promise resolution survives resolver collection through typed FIFO owner" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    defer js.runtime.setMemoryLimit(null);
+
+    const promise = try core.Object.create(js.runtime, core.class.ids.promise, null);
+    defer promise.value().free(js.runtime);
+    const reaction = try engine.exec.promise_ops.qjsPromiseReactionRecord(
+        js.runtime,
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+    );
+    defer reaction.free(js.runtime);
+    try engine.exec.promise_ops.qjsAppendPromiseReaction(js.runtime, promise, reaction);
+
+    const resolving = try engine.exec.promise_ops.createPromiseResolvingPair(js.runtime, global, promise.value());
+    var resolving_alive = true;
+    defer if (resolving_alive) {
+        resolving.resolve.free(js.runtime);
+        resolving.reject.free(js.runtime);
+    };
+    const resolve_object = try property_ops.expectObject(resolving.resolve);
+
+    // Reserve the durable continuation node, then force reaction-batch
+    // preparation to fail after the resolving once-guard has committed.
+    try js.runtime.job_queue.ensureCapacity(1);
+    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
+    const result = try engine.exec.promise_ops.qjsPromiseResolvingFunctionCall(
+        js.context,
+        null,
+        global,
+        resolve_object,
+        &.{core.JSValue.int32(41)},
+        null,
+        null,
+    );
+    if (result) |value| value.free(js.runtime);
+    try std.testing.expect(promise.promiseResult() == null);
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .promise_settlement);
+
+    // Neither resolver is needed after publication: the Runtime FIFO owns the
+    // target, completion and Realm until the same-runtime retry succeeds.
+    resolving.resolve.free(js.runtime);
+    resolving.reject.free(js.runtime);
+    resolving_alive = false;
+    _ = js.runtime.runObjectCycleRemoval();
+
+    js.runtime.setMemoryLimit(null);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+    try std.testing.expectEqual(@as(?i32, 41), promise.promiseResult().?.asInt32());
+    try std.testing.expect(!promise.promiseIsRejected());
+    try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
+    try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
+}
+
+test "Promise reaction retains callable Proxy classification after revocation" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const eval_result = try js.eval(
+        \\var __revokedPromiseReaction = "pending";
+        \\var __wakePromiseReaction;
+        \\var __parentPromiseReaction = new Promise(function (resolve) { __wakePromiseReaction = resolve; });
+        \\var __revocablePromiseHandler = Proxy.revocable(function (value) { return value + 1; }, {});
+        \\var __childPromiseReaction = __parentPromiseReaction.then(__revocablePromiseHandler.proxy);
+        \\__revocablePromiseHandler.revoke();
+        \\__wakePromiseReaction(1);
+        \\__childPromiseReaction.then(
+        \\  function () { __revokedPromiseReaction = "fulfilled"; },
+        \\  function (error) { __revokedPromiseReaction = error.name; }
+        \\);
+    );
+    defer eval_result.free(js.runtime);
+    try js.runJobs();
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const result_key = try js.runtime.internAtom("__revokedPromiseReaction");
+    defer js.runtime.atoms.free(result_key);
+    const result = try global.getProperty(result_key);
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(result, "TypeError");
 }
 
 test "job queue keeps symbol arguments rooted until release" {
@@ -6753,8 +7885,7 @@ test "using early exit before await using keeps sync disposal synchronous" {
 
     var disassembly_buffer: [2048]u8 = undefined;
     var disassembly = std.Io.Writer.fixed(&disassembly_buffer);
-    const plain_view = bytecode.asBytecodeView(plain, js.runtime);
-    try bytecode.dump.dumpBytecode(&disassembly, &plain_view, .{});
+    try bytecode.dump.dumpFunctionBytecode(&disassembly, plain, &js.runtime.atoms, .{});
     try std.testing.expect(std.mem.indexOf(u8, disassembly.buffered(), "using_") == null);
 }
 
@@ -6826,7 +7957,7 @@ test "runtime teardown preserves closure capture metadata until objects are dest
     // Keeping a captured closure on a builtin prototype while constructing a
     // lifetime-linked weak holder perturbs the intrusive GC-list order. Runtime
     // teardown must not use that incidental order to destroy the closure's FB
-    // before the closure consumes FB.var_refs_len and frees its capture array.
+    // before the closure consumes FB.closure_var_count and frees its capture array.
     const result = try js.eval(
         \\function assert(value) { if (value !== true) throw 1; }
         \\var calls = 0;
@@ -7534,7 +8665,7 @@ test "resident generators preserve mapped arguments parameter aliases" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "implicit arguments runtime rescue preserves mapped aliases" {
+test "implicit arguments resolution preserves mapped aliases" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -7615,7 +8746,7 @@ test "resident mapped arguments share one open bare arg slot" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const generator_key = try js.runtime.internAtom("__mappedArgGenerator");
     defer js.runtime.atoms.free(generator_key);
-    const generator_value = global.getProperty(generator_key);
+    const generator_value = try global.getProperty(generator_key);
     defer generator_value.free(js.runtime);
     const generator = try property_ops.expectObject(generator_value);
     const state = generator.generatorExecutionState();
@@ -7623,7 +8754,7 @@ test "resident mapped arguments share one open bare arg slot" {
 
     const arguments_key = try js.runtime.internAtom("__mappedArgArguments");
     defer js.runtime.atoms.free(arguments_key);
-    const arguments_value = global.getProperty(arguments_key);
+    const arguments_value = try global.getProperty(arguments_key);
     defer arguments_value.free(js.runtime);
     const arguments = try property_ops.expectObject(arguments_value);
     const argument_refs = arguments.argumentsVarRefs();
@@ -7675,7 +8806,7 @@ test "generic arg opcodes preserve mapped aliases in a bare resident slot" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const generator_key = try js.runtime.internAtom("__genericArgGenerator");
     defer js.runtime.atoms.free(generator_key);
-    const generator_value = global.getProperty(generator_key);
+    const generator_value = try global.getProperty(generator_key);
     defer generator_value.free(js.runtime);
     const generator = try property_ops.expectObject(generator_value);
     const fifth_slot = &generator.generatorExecutionState().storage.frame.args[4];
@@ -7786,7 +8917,7 @@ test "cycle collection closes escaped generator arg aliases before releasing res
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const arguments_key = try js.runtime.internAtom("__argCycleArguments");
     defer js.runtime.atoms.free(arguments_key);
-    const arguments_value = global.getProperty(arguments_key);
+    const arguments_value = try global.getProperty(arguments_key);
     defer arguments_value.free(js.runtime);
     const arguments = try property_ops.expectObject(arguments_value);
     const refs = arguments.argumentsVarRefs();
@@ -7831,13 +8962,13 @@ test "generator completion closes escaped arg aliases before releasing resident 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const generator_key = try js.runtime.internAtom("__completedArgGenerator");
     defer js.runtime.atoms.free(generator_key);
-    const generator_value = global.getProperty(generator_key);
+    const generator_value = try global.getProperty(generator_key);
     defer generator_value.free(js.runtime);
     const generator = try property_ops.expectObject(generator_value);
 
     const arguments_key = try js.runtime.internAtom("__completedArgArguments");
     defer js.runtime.atoms.free(arguments_key);
-    const arguments_value = global.getProperty(arguments_key);
+    const arguments_value = try global.getProperty(arguments_key);
     defer arguments_value.free(js.runtime);
     const arguments = try property_ops.expectObject(arguments_value);
     const cell = arguments.argumentsVarRefs()[0] orelse return error.TypeError;
@@ -8279,8 +9410,8 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     setup.free(rt);
 
     // Publication pins: the padded arms fire off the SAME O1 kind byte the
-    // exact family uses. The sloppy plain callee publishes `.sloppy`; the
-    // non-`this`-reading strict callee and the arrow publish `.raw_this`.
+    // exact family uses. The sloppy plain callee and sloppy arrow publish
+    // `.sloppy`; the non-`this`-reading strict callee publishes `.raw_this`.
     // The `this`-READING strict callee pins `.none`: `this` compiles to
     // `push_this; put_loc` (a local), so `var_count > 0` refuses the whole
     // leaf family by geometry and the raw frame `this` policy stays
@@ -8296,26 +9427,32 @@ test "padded-args leaf missing parameters read undefined across every entry arm"
     defer rt.atoms.free(strict_leaf_name);
     const arrow_name = try rt.internAtom("__padArrow");
     defer rt.atoms.free(arrow_name);
-    const one_fn = global.getProperty(one_name);
+    const one_fn = try global.getProperty(one_name);
     defer one_fn.free(rt);
-    const strict_fn = global.getProperty(strict_name);
+    const strict_fn = try global.getProperty(strict_name);
     defer strict_fn.free(rt);
-    const strict_leaf_fn = global.getProperty(strict_leaf_name);
+    const strict_leaf_fn = try global.getProperty(strict_leaf_name);
     defer strict_leaf_fn.free(rt);
-    const arrow_fn = global.getProperty(arrow_name);
+    const arrow_fn = try global.getProperty(arrow_name);
     defer arrow_fn.free(rt);
     const resolved_one = inline_calls.resolveInlineFunction(global, one_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_one.view.exact_args_leaf_kind == .sloppy);
+    try std.testing.expect(resolved_one.fb.hasExtension());
+    try std.testing.expect(resolved_one.fb.byte_code != null);
+    try std.testing.expect(resolved_one.fb.byte_code_len > 0);
+    try std.testing.expectEqual(resolved_one.fb.canonicalCallFacts(), resolved_one.call_facts);
+    try std.testing.expect(resolved_one.fb.exactArgsLeafKind() == .sloppy);
+    const bound_one = resolved_one.bind(core.JSValue.undefinedValue(), one_fn);
+    try std.testing.expectEqual(resolved_one.call_facts, bound_one.call_facts);
     const resolved_strict = inline_calls.resolveInlineFunction(global, strict_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_strict.view.exact_args_leaf_kind == .none);
+    try std.testing.expect(resolved_strict.fb.exactArgsLeafKind() == .none);
     const resolved_strict_leaf = inline_calls.resolveInlineFunction(global, strict_leaf_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_strict_leaf.view.exact_args_leaf_kind == .raw_this);
+    try std.testing.expect(resolved_strict_leaf.fb.exactArgsLeafKind() == .raw_this);
     const resolved_arrow = inline_calls.resolveInlineFunction(global, arrow_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_arrow.view.exact_args_leaf_kind == .raw_this);
+    try std.testing.expect(resolved_arrow.fb.exactArgsLeafKind() == .sloppy);
 
     _ = rt.runObjectCycleRemoval();
     const baseline_objects = rt.gc.liveCount();
@@ -8366,11 +9503,11 @@ test "padded-args leaf excluded shapes keep generic-path outcomes" {
     for (names) |name| {
         const atom_name = try rt.internAtom(name);
         defer rt.atoms.free(atom_name);
-        const fn_value = global.getProperty(atom_name);
+        const fn_value = try global.getProperty(atom_name);
         defer fn_value.free(rt);
         const resolved = inline_calls.resolveInlineFunction(global, fn_value) orelse
             return error.InvalidFunctionBytecode;
-        try std.testing.expect(resolved.view.exact_args_leaf_kind == .none);
+        try std.testing.expect(resolved.fb.exactArgsLeafKind() == .none);
     }
 
     _ = rt.runObjectCycleRemoval();
@@ -8513,23 +9650,23 @@ test "zero-arg leaf leftover bodies are refused publication and balance rc" {
     defer rt.atoms.free(switch_name);
     const branchy_name = try rt.internAtom("__zeroBalancedBranchy");
     defer rt.atoms.free(branchy_name);
-    const drop_fn = global.getProperty(drop_name);
+    const drop_fn = try global.getProperty(drop_name);
     defer drop_fn.free(rt);
-    const switch_fn = global.getProperty(switch_name);
+    const switch_fn = try global.getProperty(switch_name);
     defer switch_fn.free(rt);
-    const branchy_fn = global.getProperty(branchy_name);
+    const branchy_fn = try global.getProperty(branchy_name);
     defer branchy_fn.free(rt);
     const resolved_drop = inline_calls.resolveInlineFunction(global, drop_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(!resolved_drop.view.flags.simple_inline_empty_leaf);
-    try std.testing.expect(!resolved_drop.view.raw_this_inline_empty_leaf);
+    try std.testing.expect(!resolved_drop.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(!resolved_drop.fb.rawThisInlineEmptyLeaf());
     const resolved_switch = inline_calls.resolveInlineFunction(global, switch_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(!resolved_switch.view.flags.simple_inline_empty_leaf);
-    try std.testing.expect(!resolved_switch.view.raw_this_inline_empty_leaf);
+    try std.testing.expect(!resolved_switch.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(!resolved_switch.fb.rawThisInlineEmptyLeaf());
     const resolved_branchy = inline_calls.resolveInlineFunction(global, branchy_fn) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_branchy.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved_branchy.fb.simpleInlineEmptyLeaf());
 
     _ = rt.runObjectCycleRemoval();
     const baseline_objects = rt.gc.liveCount();
@@ -8551,8 +9688,8 @@ test "capture leaf abrupt teardown releases operands and keeps borrowed cells" {
     // general teardown: the pending operand is released exactly once and the
     // BORROWED capture cells are never closed or double-released (the cells
     // belong to the still-live closure; a teardown release would corrupt
-    // their rc and break the second eval round). Covers the plain sloppy,
-    // plain arrow (raw-this pivot), and method receiver entry arms.
+    // their rc and break the second eval round). Covers the ordinary sloppy
+    // function and arrow frame policy plus the method receiver entry arm.
     const setup = try js.eval(
         \\const capThrowState = (function () {
         \\    const held = { x: 1 };
@@ -8668,15 +9805,17 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     setup.free(rt);
     const leaf_name = try rt.internAtom("__warmEmptyLeaf");
     defer rt.atoms.free(leaf_name);
-    const callable = global.getProperty(leaf_name);
+    const callable = try global.getProperty(leaf_name);
     defer callable.free(rt);
     const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);
-    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
@@ -8695,12 +9834,12 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
+    const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
-    const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
@@ -8713,7 +9852,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
@@ -8723,18 +9862,20 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
 
     // An oversized operand window cannot use the active arena chunk. The fast
     // miss is pure and the authoritative constructor owns/frees heap backing.
-    var oversized = resolved.view.*;
-    oversized.stack_size = core.VmStackArena.chunk_slots;
+    const oversized = try createOversizedLeafFixture(rt, resolved.fb);
+    var oversized_alive = true;
+    defer if (oversized_alive) oversized.destroyUnpublishedFixture(rt);
+    const oversized_bytes = rt.memory.allocated_bytes;
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
-    const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
+    const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
     continuation.deinit(rt);
-    try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
 
     // The same miss under a hard memory cap must restore depth/watermark and
     // release the source slot, leaving the warmed Machine reusable.
@@ -8742,11 +9883,14 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, &oversized, region_start);
+    const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
+    try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
+    oversized.destroyUnpublishedFixture(rt);
+    oversized_alive = false;
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -8776,31 +9920,33 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     defer rt.atoms.free(leftover_name);
     const native_name = try rt.internAtom("__fwdNativeCall");
     defer rt.atoms.free(native_name);
-    const callable = global.getProperty(leaf_name);
+    const callable = try global.getProperty(leaf_name);
     defer callable.free(rt);
-    const thrower = global.getProperty(thrower_name);
+    const thrower = try global.getProperty(thrower_name);
     defer thrower.free(rt);
-    const leftover = global.getProperty(leftover_name);
+    const leftover = try global.getProperty(leftover_name);
     defer leftover.free(rt);
-    const native_call = global.getProperty(native_name);
+    const native_call = try global.getProperty(native_name);
     defer native_call.free(rt);
     const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
     const resolved_thrower = inline_calls.resolveInlineFunction(global, thrower) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved_thrower.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved_thrower.fb.simpleInlineEmptyLeaf());
     const resolved_leftover = inline_calls.resolveInlineFunction(global, leftover) orelse
         return error.InvalidFunctionBytecode;
     // The leftover-operand body fails the static return-balance proof, so it
     // is refused zero-arg leaf publication entirely: forwarded calls of it
     // ride the authoritative forwarding path and the O3 arm's len==0 guard
     // becomes a defensive backstop rather than the routing mechanism.
-    try std.testing.expect(!resolved_leftover.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(!resolved_leftover.fb.simpleInlineEmptyLeaf());
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);
-    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
@@ -8823,7 +9969,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     try l0_stack.pushOwned(native_call.dup());
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) == null);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
@@ -8832,7 +9978,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
 
     // Prime Entry and arena chunks through the authoritative zero-arg leaf
     // constructor (the forwarded twin shares both pools).
-    const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.view, region_start);
+    const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(primed.isEmptyLeaf());
     machine.popReturnedEmptyLeaf();
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
@@ -8849,7 +9995,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.view, region_start) orelse
+    const warm = machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isForwardedLeaf());
     try std.testing.expect(warm.teardown.has_native_caller);
@@ -8866,13 +10012,15 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     // An oversized operand window cannot use the active arena chunk. The
     // fast miss is pure — both slots stay owned by the region for the
     // authoritative fallback.
-    var oversized = resolved.view.*;
-    oversized.stack_size = core.VmStackArena.chunk_slots;
+    const oversized = try createOversizedLeafFixture(rt, resolved.fb);
+    var oversized_alive = true;
+    defer if (oversized_alive) oversized.destroyUnpublishedFixture(rt);
+    const oversized_bytes = rt.memory.allocated_bytes;
     try l0_stack.pushOwned(callable.dup());
     try l0_stack.pushOwned(native_call.dup());
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, &oversized, region_start) == null);
+    try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
@@ -8880,6 +10028,9 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     region_start[0] = core.JSValue.undefinedValue();
     region_start[1].free(rt);
     region_start[1] = core.JSValue.undefinedValue();
+    try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
+    oversized.destroyUnpublishedFixture(rt);
+    oversized_alive = false;
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -8888,8 +10039,9 @@ test "forwarded leaf call semantics keep exclusions on the authoritative path" {
     defer helpers.endSharedTest();
 
     // The O3 arm accepts only argc<=1 undefined-thisArg calls of published
-    // sloppy zero-arg leaves; strict/arrow targets, a null/object thisArg,
-    // and extra arguments must keep the authoritative forwarding semantics.
+    // sloppy zero-arg leaves, including sloppy arrows. Strict targets, a
+    // null/object thisArg, and extra arguments keep the authoritative
+    // forwarding semantics.
     // 256 rounds cross the cold->warm seam (first call misses into the
     // generic path, later calls ride the warm constructor).
     const result = try js.evalWithOptions(
@@ -9060,21 +10212,23 @@ test "method empty leaf warm constructor moves receiver ownership" {
     setup.free(rt);
     const holder_name = try rt.internAtom("__warmMethodLeafRecv");
     defer rt.atoms.free(holder_name);
-    const receiver = global.getProperty(holder_name);
+    const receiver = try global.getProperty(holder_name);
     defer receiver.free(rt);
     const receiver_object = object_ops.objectFromValue(receiver) orelse
         return error.Unexpected;
     const method_name = try rt.internAtom("m");
     defer rt.atoms.free(method_name);
-    const callable = receiver_object.getProperty(method_name);
+    const callable = try receiver_object.getProperty(method_name);
     defer callable.free(rt);
     const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
         return error.InvalidFunctionBytecode;
-    try std.testing.expect(resolved.view.flags.simple_inline_empty_leaf);
+    try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);
-    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
@@ -9095,8 +10249,8 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
-    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.view, region_start, l0_resume_pc) == null);
+    const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
@@ -9104,7 +10258,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     // Authoritative constructor: receiver moves into the frame's owned raw
     // `this` (region slot cleared, no extra refcount), and the empty-leaf
     // return epilogue releases exactly that moved reference.
-    const first = try machine.pushEmptyLeafCall(.receiver, global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.same(receiver));
     try std.testing.expect(first.frame.ownership.this_value == .owned);
@@ -9122,7 +10276,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.same(receiver));
@@ -9136,20 +10290,25 @@ test "method empty leaf warm constructor moves receiver ownership" {
 
     // Setup failure must restore depth/watermark and release BOTH region
     // slots — receiver and callable — leaving the warmed Machine reusable.
-    var oversized = resolved.view.*;
-    oversized.stack_size = core.VmStackArena.chunk_slots;
+    const oversized = try createOversizedLeafFixture(rt, resolved.fb);
+    var oversized_alive = true;
+    defer if (oversized_alive) oversized.destroyUnpublishedFixture(rt);
+    const oversized_bytes = rt.memory.allocated_bytes;
     try l0_stack.pushOwned(receiver.dup());
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, &oversized, region_start);
+    const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
+    try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
+    oversized.destroyUnpublishedFixture(rt);
+    oversized_alive = false;
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -9247,19 +10406,21 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     setup.free(rt);
     const leaf_name = try rt.internAtom("__strictWarmLeaf");
     defer rt.atoms.free(leaf_name);
-    const callable = global.getProperty(leaf_name);
+    const callable = try global.getProperty(leaf_name);
     defer callable.free(rt);
     const resolved = inline_calls.resolveInlineFunction(global, callable) orelse
         return error.InvalidFunctionBytecode;
     // The raw-this leaf publishes its own eligibility byte (the packed sloppy
     // bit stays clear); the call adapter selects the undefined-`this` arm.
-    try std.testing.expect(!resolved.view.flags.simple_inline_empty_leaf);
-    try std.testing.expect(resolved.view.raw_this_inline_empty_leaf);
-    try std.testing.expect(resolved.view.flags.is_strict);
+    try std.testing.expect(!resolved.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(resolved.fb.rawThisInlineEmptyLeaf());
+    try std.testing.expect(resolved.fb.isStrictMode());
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);
-    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
@@ -9278,7 +10439,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try l0_stack.pushOwned(callable.dup());
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    const first = try machine.pushEmptyLeafCall(.raw_undefined, global, &l0_stack, resolved.view, region_start);
+    const first = try machine.pushEmptyLeafCall(.raw_undefined, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.isUndefined());
     try std.testing.expect(first.frame.ownership.this_value == .borrowed);
@@ -9290,10 +10451,10 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    const l0_resume_pc = l0_frame.function.code.ptr + l0_frame.pc;
+    const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.view, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.isUndefined());
@@ -9315,7 +10476,9 @@ test "inline call teardown releases every escaped storage shape" {
 
     var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer l0_function.deinit(rt);
-    var l0_frame = engine.exec.frame.Frame.init(&l0_function);
+    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
@@ -9331,16 +10494,15 @@ test "inline call teardown releases every escaped storage shape" {
     var function = try helpers.makeFunction(rt, &.{op.return_undef});
     defer function.deinit(rt);
     function.simple_inline_eligible = true;
-    var fb = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer fb.deinit(rt);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
     var unused_var_refs: [1]*core.VarRef = undefined;
     const target = inline_calls.InlineTarget{
         .var_refs = &unused_var_refs,
         .callable = core.JSValue.undefinedValue(),
-        .fb = &fb,
-        .view = &function,
+        .fb = execution_function,
+        .call_facts = execution_function.callFacts(),
         .this_value = core.JSValue.undefinedValue(),
-        .new_target = core.JSValue.undefinedValue(),
     };
 
     // Warm the Machine's Entry chunk and the VM stack-arena chunk; neither is
@@ -10380,10 +11542,10 @@ test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
 
     var output_buffer: [128]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    // An arrow captures `this` lexically; once it is inline-eligible, the shared
-    // frame setup must still bind the lexical `this` (not the plain-call default
-    // or the method receiver). `bound.call(other)`/`carrier.m()` must not change
-    // the arrow's `this`.
+    // An arrow captures `this` lexically. Its unobservable frame slot follows
+    // the ordinary strict/sloppy or receiver policy, while bytecode reads the
+    // capture cell. `bound.call(other)`/`carrier.m()` must not change that
+    // lexical `this`.
     const result = try js.evalWithOutput(
         \\const lex = { tag: "LEX" };
         \\function make() { return () => this.tag; }
@@ -10405,6 +11567,8 @@ test "arrow direct eval reads captured this and new.target" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
+    // Direct eval must resolve the arrow's capture cells rather than the
+    // ordinary strict/sloppy frame-this slot selected by inline setup.
     const result = try js.eval(
         \\function Replacement() {}
         \\function Factory() {
@@ -10472,6 +11636,125 @@ test "class field direct eval keeps QuickJS field initializer capabilities" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "public instance fields initialize once in constructor order on every path" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const events = [];
+        \\const counts = {};
+        \\function mark(label, value) {
+        \\  events.push(label);
+        \\  counts[label] = (counts[label] || 0) + 1;
+        \\  return value;
+        \\}
+        \\
+        \\class DefaultBase {
+        \\  first = mark("base-default:first", 1);
+        \\  second = mark("base-default:second", this.first + 1);
+        \\}
+        \\class ExplicitBase {
+        \\  first = mark("base:first", 1);
+        \\  second = mark("base:second", this.first + 1);
+        \\  constructor() { events.push("base:body"); }
+        \\}
+        \\
+        \\class Parent {
+        \\  constructor(label) {
+        \\    this.seed = 10;
+        \\    events.push(label + ":parent");
+        \\  }
+        \\}
+        \\class DirectDerived extends Parent {
+        \\  first = mark("direct:first", this.seed + 1);
+        \\  second = mark("direct:second", this.first + 1);
+        \\  constructor() {
+        \\    events.push("direct:before");
+        \\    super("direct");
+        \\    events.push("direct:body");
+        \\  }
+        \\}
+        \\class SpreadDerived extends Parent {
+        \\  first = mark("spread:first", this.seed + 1);
+        \\  second = mark("spread:second", this.first + 1);
+        \\  constructor(...args) {
+        \\    events.push("spread:before");
+        \\    super(...args);
+        \\    events.push("spread:body");
+        \\  }
+        \\}
+        \\class DefaultDerived extends Parent {
+        \\  first = mark("default:first", this.seed + 1);
+        \\  second = mark("default:second", this.first + 1);
+        \\}
+        \\class NestedOuter {
+        \\  first = mark("nested:outer:first", 20);
+        \\  Inner = class {
+        \\    first = mark("nested:inner:first", 30);
+        \\    second = mark("nested:inner:second", this.first + 1);
+        \\  };
+        \\  second = mark("nested:outer:second", this.first + 1);
+        \\}
+        \\
+        \\const defaultBase = new DefaultBase();
+        \\const base = new ExplicitBase();
+        \\const direct = new DirectDerived();
+        \\const spread = new SpreadDerived("spread");
+        \\const derived = new DefaultDerived("default");
+        \\const nestedA = new NestedOuter();
+        \\const nestedB = new NestedOuter();
+        \\const nestedInnerA = new nestedA.Inner();
+        \\const nestedInnerB = new nestedB.Inner();
+        \\
+        \\assert.sameValue(defaultBase.first, 1);
+        \\assert.sameValue(defaultBase.second, 2);
+        \\assert.sameValue(base.first, 1);
+        \\assert.sameValue(base.second, 2);
+        \\assert.sameValue(direct.first, 11);
+        \\assert.sameValue(direct.second, 12);
+        \\assert.sameValue(spread.first, 11);
+        \\assert.sameValue(spread.second, 12);
+        \\assert.sameValue(derived.first, 11);
+        \\assert.sameValue(derived.second, 12);
+        \\assert.sameValue(nestedA.first, 20);
+        \\assert.sameValue(nestedA.second, 21);
+        \\assert.sameValue(nestedB.first, 20);
+        \\assert.sameValue(nestedB.second, 21);
+        \\assert.sameValue(nestedA.Inner === nestedB.Inner, false);
+        \\assert.sameValue(nestedInnerA.first, 30);
+        \\assert.sameValue(nestedInnerA.second, 31);
+        \\assert.sameValue(nestedInnerB.first, 30);
+        \\assert.sameValue(nestedInnerB.second, 31);
+        \\for (const label of [
+        \\  "base-default:first", "base-default:second",
+        \\  "base:first", "base:second",
+        \\  "direct:first", "direct:second",
+        \\  "spread:first", "spread:second",
+        \\  "default:first", "default:second",
+        \\]) {
+        \\  assert.sameValue(counts[label], 1, label + " initialized exactly once");
+        \\}
+        \\for (const label of [
+        \\  "nested:outer:first", "nested:outer:second",
+        \\  "nested:inner:first", "nested:inner:second",
+        \\]) {
+        \\  assert.sameValue(counts[label], 2, label + " initialized once per instance");
+        \\}
+        \\assert.sameValue(
+        \\  events.join(","),
+        \\  "base-default:first,base-default:second," +
+        \\    "base:first,base:second,base:body," +
+        \\    "direct:before,direct:parent,direct:first,direct:second,direct:body," +
+        \\    "spread:before,spread:parent,spread:first,spread:second,spread:body," +
+        \\    "default:parent,default:first,default:second," +
+        \\    "nested:outer:first,nested:outer:second,nested:outer:first,nested:outer:second," +
+        \\    "nested:inner:first,nested:inner:second,nested:inner:first,nested:inner:second"
+        \\);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "arrow super property call keeps the enclosing method receiver" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -10491,6 +11774,44 @@ test "arrow super property call keeps the enclosing method receiver" {
         \\const callSuper = derivedInstance.makeArrow();
         \\assert.sameValue(callSuper(), 42);
         \\assert.sameValue(callSuper.call({ ignored: true }), 42);
+        \\class ReplacementBase {
+        \\    method() {
+        \\        assert.sameValue(this, derivedInstance);
+        \\        return 84;
+        \\    }
+        \\}
+        \\Object.setPrototypeOf(Derived.prototype, ReplacementBase.prototype);
+        \\assert.sameValue(callSuper(), 84);
+        \\assert.sameValue(callSuper.call({ ignored: true }), 84);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "bytecode constructability follows canonical function shape" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function Ordinary(length) { this.length = length; }
+        \\const arrow = () => {};
+        \\function* generator() {}
+        \\async function asyncFunction() {}
+        \\async function* asyncGenerator() {}
+        \\const functions = [arrow, generator, asyncFunction, asyncGenerator];
+        \\for (const fn of functions) {
+        \\  assert.throws(TypeError, function () { Reflect.construct(Object, [], fn); });
+        \\  const values = Array.of.call(fn, 1, 2);
+        \\  assert.sameValue(Array.isArray(values), true);
+        \\  assert.sameValue(values.length, 2);
+        \\  assert.sameValue(values[0], 1);
+        \\  assert.sameValue(values[1], 2);
+        \\}
+        \\const ordinary = Array.of.call(Ordinary, 1, 2);
+        \\assert.sameValue(ordinary instanceof Ordinary, true);
+        \\assert.sameValue(ordinary.length, 2);
+        \\assert.sameValue(ordinary[0], 1);
+        \\assert.sameValue(ordinary[1], 2);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -10500,14 +11821,27 @@ test "forwarded call releases ignored arrow thisArg" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
+    // The strict arrow publishes the ordinary raw frame policy. Forwarded
+    // Function.call still transfers and releases its explicit receiver even
+    // though arrow bytecode ignores that slot.
     const setup = try js.eval(
-        \\const strictArrowForCall = (function () {
+        \\globalThis.strictArrowForCall = (function () {
         \\    "use strict";
         \\    return () => 0;
         \\})();
         \\strictArrowForCall.call({ marker: 0 });
     );
     setup.free(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const arrow_name = try js.runtime.internAtom("strictArrowForCall");
+    defer js.runtime.atoms.free(arrow_name);
+    const arrow = try global.getProperty(arrow_name);
+    defer arrow.free(js.runtime);
+    const resolved = inline_calls.resolveInlineFunction(global, arrow) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(!resolved.fb.simpleInlineEmptyLeaf());
+    try std.testing.expect(resolved.fb.rawThisInlineEmptyLeaf());
+
     _ = js.runtime.runObjectCycleRemoval();
     const baseline_objects = js.runtime.gc.liveCount();
 
@@ -10573,6 +11907,31 @@ test "function inherited data lookup preserves own and exotic semantics" {
         \\function strictFunction() { "use strict"; }
         \\assert.throws(TypeError, function() { return strictFunction.caller; });
         \\assert.throws(TypeError, function() { return strictFunction.arguments; });
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "function caller and arguments restrictions follow immutable function shape" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function assertForbidden(fn) {
+        \\  assert.throws(TypeError, function() { return fn.caller; });
+        \\  assert.throws(TypeError, function() { return fn.arguments; });
+        \\}
+        \\function ordinarySloppy() {}
+        \\assert.sameValue(ordinarySloppy.caller, undefined);
+        \\assert.sameValue(ordinarySloppy.arguments, undefined);
+        \\function strictFunction() { "use strict"; }
+        \\assertForbidden(strictFunction);
+        \\assertForbidden(() => {});
+        \\assertForbidden(async () => {});
+        \\assertForbidden(async function() {});
+        \\assertForbidden(function*() {});
+        \\assertForbidden(async function*() {});
+        \\assertForbidden(({ method() {} }).method);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -11168,9 +12527,9 @@ test "spread super brands derived instances before class field initializers" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    // Regression: super(...args) compiles to op.apply is_new=1, whose handler
-    // skipped the private-method brand install that op.call_constructor
-    // performs — `this.#m()` in a field initializer then threw TypeError.
+    // Regression: super(...args) compiles to op.apply is_new=1. The lexical
+    // `<class_fields_init>` call must run after that path just as after direct
+    // super(), so `this.#m()` sees the installed brand.
     const result = try js.evalWithOptions(
         \\(function () {
         \\  class A { constructor(a, b) { this.s = (a | 0) + (b | 0); } }
@@ -11187,6 +12546,489 @@ test "spread super brands derived instances before class field initializers" {
     defer result.free(js.runtime);
 
     try std.testing.expectEqual(@as(?i32, 10), result.asInt32());
+}
+
+test "computed class keys close over runtime private field identity" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\let probe;
+        \\class Box {
+        \\  #value;
+        \\  [probe = (candidate => #value in candidate)] = 0;
+        \\}
+        \\const box = new Box();
+        \\assert.sameValue(probe(box), true, "computed-key closure recognizes the private field");
+        \\assert.sameValue(probe({}), false, "computed-key closure rejects an unrelated object");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "nested same-name private fields isolate repeated class evaluations" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function makePair(outerInitial, innerInitial) {
+        \\  let outerProbe;
+        \\  class Outer {
+        \\    #value = outerInitial;
+        \\    [outerProbe = (candidate => #value in candidate)] = 0;
+        \\    read() { return this.#value; }
+        \\    makeInner() {
+        \\      let innerProbe;
+        \\      class Inner {
+        \\        #value = innerInitial;
+        \\        [innerProbe = (candidate => #value in candidate)] = 0;
+        \\        read() { return this.#value; }
+        \\      }
+        \\      return { value: new Inner(), probe: innerProbe };
+        \\    }
+        \\  }
+        \\  const outer = new Outer();
+        \\  const inner = outer.makeInner();
+        \\  return { outer, inner: inner.value, outerProbe, innerProbe: inner.probe };
+        \\}
+        \\const first = makePair(11, 101);
+        \\const second = makePair(22, 202);
+        \\assert.sameValue(first.outer.read(), 11);
+        \\assert.sameValue(first.inner.read(), 101);
+        \\assert.sameValue(second.outer.read(), 22);
+        \\assert.sameValue(second.inner.read(), 202);
+        \\assert.sameValue(first.outerProbe(first.outer), true);
+        \\assert.sameValue(first.outerProbe(first.inner), false);
+        \\assert.sameValue(first.outerProbe(second.outer), false);
+        \\assert.sameValue(first.innerProbe(first.inner), true);
+        \\assert.sameValue(first.innerProbe(first.outer), false);
+        \\assert.sameValue(first.innerProbe(second.inner), false);
+        \\assert.sameValue(second.outerProbe(second.outer), true);
+        \\assert.sameValue(second.innerProbe(second.inner), true);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "private fields isolate class evaluations and preserve lexical call and eval semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__execPrivateFieldRegression = (function () {
+        \\  function makePrivateBox(instanceInitial, staticInitial) {
+        \\    return class PrivateBox {
+        \\      #instanceValue = instanceInitial;
+        \\      #callable = function () { return this; };
+        \\      static #staticValue = staticInitial;
+        \\
+        \\      read() { return this.#instanceValue; }
+        \\      write(value) {
+        \\        this.#instanceValue = value;
+        \\        return this.#instanceValue;
+        \\      }
+        \\      static readInstance(value) { return value.#instanceValue; }
+        \\      static hasInstance(value) { return #instanceValue in value; }
+        \\
+        \\      static readStatic() { return this.#staticValue; }
+        \\      static writeStatic(value) {
+        \\        this.#staticValue = value;
+        \\        return this.#staticValue;
+        \\      }
+        \\      static hasStatic(value) { return #staticValue in value; }
+        \\
+        \\      readFromArrow() { return (() => this.#instanceValue)(); }
+        \\      readFromInnerFunction() {
+        \\        const receiver = this;
+        \\        return function () { return receiver.#instanceValue; }();
+        \\      }
+        \\      callStoredFunction() { return this.#callable(); }
+        \\      readFromDirectEval() { return eval("this.#instanceValue"); }
+        \\      writeFromDirectEval(value) {
+        \\        return eval("this.#instanceValue = value");
+        \\      }
+        \\    };
+        \\  }
+        \\
+        \\  const First = makePrivateBox(11, 101);
+        \\  const Second = makePrivateBox(22, 202);
+        \\  return { First, Second, first: new First(), second: new Second() };
+        \\})();
+    );
+    defer setup.free(js.runtime);
+
+    const identity_checks = try js.eval(
+        \\(function ({ First, Second, first, second }) {
+        \\  assert.sameValue(
+        \\    First.hasInstance(first),
+        \\    true,
+        \\    "first factory evaluation recognizes its instance private field"
+        \\  );
+        \\  assert.sameValue(
+        \\    First.hasInstance(second),
+        \\    false,
+        \\    "first factory evaluation does not recognize the second private identity"
+        \\  );
+        \\  assert.sameValue(
+        \\    Second.hasInstance(first),
+        \\    false,
+        \\    "second factory evaluation does not recognize the first private identity"
+        \\  );
+        \\  assert.sameValue(
+        \\    Second.hasInstance(second),
+        \\    true,
+        \\    "second factory evaluation recognizes its instance private field"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.readInstance(second); },
+        \\    "cross-factory instance private reads fail their brand check"
+        \\  );
+        \\})(__execPrivateFieldRegression);
+    );
+    defer identity_checks.free(js.runtime);
+
+    const field_checks = try js.eval(
+        \\(function ({ First, Second, first }) {
+        \\  assert.sameValue(first.read(), 11, "instance private field read");
+        \\  assert.sameValue(first.write(12), 12, "instance private field write result");
+        \\  assert.sameValue(first.read(), 12, "instance private field write persists");
+        \\  assert.sameValue(First.hasStatic(First), true, "static private field #in on owner");
+        \\  assert.sameValue(First.hasStatic(Second), false, "static private field #in rejects peer class");
+        \\  assert.sameValue(Second.hasStatic(First), false, "peer static private identity is isolated");
+        \\  assert.sameValue(Second.hasStatic(Second), true, "peer static private field #in on owner");
+        \\  assert.sameValue(First.readStatic(), 101, "static private field read");
+        \\  assert.sameValue(First.writeStatic(303), 303, "static private field write result");
+        \\  assert.sameValue(First.readStatic(), 303, "static private field write persists");
+        \\  assert.sameValue(Second.readStatic(), 202, "peer static private field remains independent");
+        \\})(__execPrivateFieldRegression);
+    );
+    defer field_checks.free(js.runtime);
+
+    const capture_checks = try js.eval(
+        \\(function ({ first }) {
+        \\  assert.sameValue(first.readFromArrow(), 12, "nested arrow captures private environment");
+        \\  assert.sameValue(
+        \\    first.readFromInnerFunction(),
+        \\    12,
+        \\    "nested ordinary function captures private environment"
+        \\  );
+        \\})(__execPrivateFieldRegression);
+    );
+    defer capture_checks.free(js.runtime);
+
+    const receiver_check = try js.eval(
+        \\(function ({ first }) {
+        \\  assert.sameValue(
+        \\    first.callStoredFunction(),
+        \\    first,
+        \\    "calling a function stored in a private field preserves the instance receiver"
+        \\  );
+        \\})(__execPrivateFieldRegression);
+    );
+    defer receiver_check.free(js.runtime);
+
+    const direct_eval_checks = try js.eval(
+        \\(function ({ first }) {
+        \\  assert.sameValue(first.readFromDirectEval(), 12, "direct eval reads the enclosing private name");
+        \\  assert.sameValue(
+        \\    first.writeFromDirectEval(44),
+        \\    44,
+        \\    "direct eval writes the enclosing private name"
+        \\  );
+        \\  assert.sameValue(first.read(), 44, "direct eval private write persists");
+        \\})(__execPrivateFieldRegression);
+    );
+    defer direct_eval_checks.free(js.runtime);
+}
+
+test "private method brands use lexical initializers on every constructor path" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\class ExplicitBase {
+        \\  #method() { return 1; }
+        \\  constructor() {}
+        \\  read() { return this.#method(); }
+        \\  hasBrand() { return #method in this; }
+        \\}
+        \\class Parent {}
+        \\class DirectDerived extends Parent {
+        \\  #method() { return 2; }
+        \\  constructor() { super(); }
+        \\  read() { return this.#method(); }
+        \\  hasBrand() { return #method in this; }
+        \\}
+        \\class SpreadDerived extends Parent {
+        \\  #method() { return 3; }
+        \\  constructor(...args) { super(...args); }
+        \\  read() { return this.#method(); }
+        \\  hasBrand() { return #method in this; }
+        \\}
+        \\class DefaultDerived extends Parent {
+        \\  #method() { return 4; }
+        \\  read() { return this.#method(); }
+        \\  hasBrand() { return #method in this; }
+        \\}
+        \\globalThis.__privateMethodExplicitBase = new ExplicitBase();
+        \\globalThis.__privateMethodDirectDerived = new DirectDerived();
+        \\globalThis.__privateMethodSpreadDerived = new SpreadDerived();
+        \\globalThis.__privateMethodDefaultDerived = new DefaultDerived();
+        \\assert.sameValue(__privateMethodExplicitBase.read(), 1);
+        \\assert.sameValue(__privateMethodExplicitBase.hasBrand(), true);
+        \\assert.sameValue(__privateMethodDirectDerived.read(), 2);
+        \\assert.sameValue(__privateMethodDirectDerived.hasBrand(), true);
+        \\assert.sameValue(__privateMethodSpreadDerived.read(), 3);
+        \\assert.sameValue(__privateMethodSpreadDerived.hasBrand(), true);
+        \\assert.sameValue(__privateMethodDefaultDerived.read(), 4);
+        \\assert.sameValue(__privateMethodDefaultDerived.hasBrand(), true);
+    );
+    defer result.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const instance_names = [_][]const u8{
+        "__privateMethodExplicitBase",
+        "__privateMethodDirectDerived",
+        "__privateMethodSpreadDerived",
+        "__privateMethodDefaultDerived",
+    };
+    for (instance_names) |name| {
+        const atom = try js.runtime.internAtom(name);
+        defer js.runtime.atoms.free(atom);
+        const value = try global.getProperty(atom);
+        defer value.free(js.runtime);
+        const instance = try core.Object.expect(value);
+        try std.testing.expect(!instance.hasOwnProperty(core.atom.ids.Private_brand));
+    }
+}
+
+test "private methods and accessors preserve brands captures and readonly semantics" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const setup = try js.eval(
+        \\globalThis.__execPrivateMethodAccessorRegression = (function () {
+        \\  function makePrivateMembers(instanceInitial, staticInitial) {
+        \\    return class PrivateMembers {
+        \\      #value = instanceInitial;
+        \\      static #staticValue = staticInitial;
+        \\
+        \\      #method(delta) { return this.#value + delta; }
+        \\      get #getterOnly() { return this.#value; }
+        \\      set #setterOnly(value) { this.#value = value; }
+        \\      get #getset() { return this.#value; }
+        \\      set #getset(value) { this.#value = value; }
+        \\
+        \\      static #staticMethod(delta) { return this.#staticValue + delta; }
+        \\      static get #staticGetterOnly() { return this.#staticValue; }
+        \\      static set #staticSetterOnly(value) { this.#staticValue = value; }
+        \\      static get #staticGetset() { return this.#staticValue; }
+        \\      static set #staticGetset(value) { this.#staticValue = value; }
+        \\
+        \\      callMethod(delta) { return this.#method(delta); }
+        \\      readGetterOnly() { return this.#getterOnly; }
+        \\      writeSetterOnly(value) { this.#setterOnly = value; }
+        \\      readSetterOnly() { return this.#setterOnly; }
+        \\      readGetset() { return this.#getset; }
+        \\      writeGetset(value) { this.#getset = value; }
+        \\      overwriteMethod(value) { this.#method = value; }
+        \\      overwriteGetterOnly(value) { this.#getterOnly = value; }
+        \\
+        \\      static callInstanceMethod(value, delta) { return value.#method(delta); }
+        \\      static readInstanceGetter(value) { return value.#getterOnly; }
+        \\      static writeInstanceSetter(value, next) { value.#setterOnly = next; }
+        \\      static hasInstanceMethod(value) { return #method in value; }
+        \\      static hasInstanceGetter(value) { return #getterOnly in value; }
+        \\
+        \\      static callStaticMethod(delta) { return this.#staticMethod(delta); }
+        \\      static readStaticGetterOnly() { return this.#staticGetterOnly; }
+        \\      static writeStaticSetterOnly(value) { this.#staticSetterOnly = value; }
+        \\      static readStaticSetterOnly() { return this.#staticSetterOnly; }
+        \\      static readStaticGetset() { return this.#staticGetset; }
+        \\      static writeStaticGetset(value) { this.#staticGetset = value; }
+        \\      static overwriteStaticMethod(value) { this.#staticMethod = value; }
+        \\      static overwriteStaticGetterOnly(value) { this.#staticGetterOnly = value; }
+        \\      static hasStaticMethod(value) { return #staticMethod in value; }
+        \\      static hasStaticGetter(value) { return #staticGetterOnly in value; }
+        \\
+        \\      makeMethodArrow() { return delta => this.#method(delta); }
+        \\      makeGetterInnerFunction() {
+        \\        const receiver = this;
+        \\        return function () { return receiver.#getterOnly; };
+        \\      }
+        \\    };
+        \\  }
+        \\
+        \\  const First = makePrivateMembers(10, 100);
+        \\  const Second = makePrivateMembers(20, 200);
+        \\  return { First, Second, first: new First(), second: new Second() };
+        \\})();
+    );
+    defer setup.free(js.runtime);
+
+    const brand_checks = try js.eval(
+        \\(function ({ First, Second, first, second }) {
+        \\  assert.sameValue(First.hasInstanceMethod(first), true, "instance private method #in on owner");
+        \\  assert.sameValue(
+        \\    First.hasInstanceMethod(second),
+        \\    false,
+        \\    "same factory source creates a fresh instance method brand per evaluation"
+        \\  );
+        \\  assert.sameValue(
+        \\    Second.hasInstanceMethod(first),
+        \\    false,
+        \\    "peer factory evaluation rejects the first instance method brand"
+        \\  );
+        \\  assert.sameValue(Second.hasInstanceMethod(second), true, "peer instance method #in on owner");
+        \\  assert.sameValue(First.hasInstanceGetter(first), true, "instance private accessor #in on owner");
+        \\  assert.sameValue(
+        \\    First.hasInstanceGetter(second),
+        \\    false,
+        \\    "instance private accessor identity is isolated across factory evaluations"
+        \\  );
+        \\  assert.sameValue(First.hasStaticMethod(First), true, "static private method #in on owner");
+        \\  assert.sameValue(
+        \\    First.hasStaticMethod(Second),
+        \\    false,
+        \\    "static private method identity is isolated across factory evaluations"
+        \\  );
+        \\  assert.sameValue(Second.hasStaticMethod(First), false, "peer static method brand rejects owner");
+        \\  assert.sameValue(Second.hasStaticMethod(Second), true, "peer static private method #in on owner");
+        \\  assert.sameValue(First.hasStaticGetter(First), true, "static private accessor #in on owner");
+        \\  assert.sameValue(
+        \\    First.hasStaticGetter(Second),
+        \\    false,
+        \\    "static private accessor identity is isolated across factory evaluations"
+        \\  );
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer brand_checks.free(js.runtime);
+
+    const instance_checks = try js.eval(
+        \\(function ({ First, Second, first, second }) {
+        \\  assert.sameValue(first.callMethod(1), 11, "instance private method call");
+        \\  assert.sameValue(first.readGetterOnly(), 10, "getter-only private accessor read");
+        \\  first.writeSetterOnly(12);
+        \\  assert.sameValue(first.readGetterOnly(), 12, "setter-only private accessor write");
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { first.readSetterOnly(); },
+        \\    "reading a setter-only private accessor throws"
+        \\  );
+        \\  first.writeGetset(14);
+        \\  assert.sameValue(first.readGetset(), 14, "paired private accessor read after write");
+        \\  assert.sameValue(second.callMethod(1), 21, "peer instance method retains independent state");
+        \\  assert.sameValue(Second.readInstanceGetter(second), 20, "peer private getter remains independent");
+        \\  First.writeInstanceSetter(first, 16);
+        \\  assert.sameValue(first.readGetterOnly(), 16, "static wrapper can write its matching private setter");
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer instance_checks.free(js.runtime);
+
+    const static_checks = try js.eval(
+        \\(function ({ First, Second }) {
+        \\  assert.sameValue(First.callStaticMethod(1), 101, "static private method call");
+        \\  assert.sameValue(First.readStaticGetterOnly(), 100, "static getter-only private accessor read");
+        \\  First.writeStaticSetterOnly(120);
+        \\  assert.sameValue(
+        \\    First.readStaticGetterOnly(),
+        \\    120,
+        \\    "static setter-only private accessor write"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.readStaticSetterOnly(); },
+        \\    "reading a static setter-only private accessor throws"
+        \\  );
+        \\  First.writeStaticGetset(140);
+        \\  assert.sameValue(First.readStaticGetset(), 140, "paired static private accessor read after write");
+        \\  assert.sameValue(Second.callStaticMethod(1), 201, "peer static method retains independent state");
+        \\  assert.sameValue(Second.readStaticGetterOnly(), 200, "peer static getter remains independent");
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer static_checks.free(js.runtime);
+
+    const capture_checks = try js.eval(
+        \\(function ({ first, second }) {
+        \\  const methodArrow = first.makeMethodArrow();
+        \\  const getterInnerFunction = first.makeGetterInnerFunction();
+        \\  assert.sameValue(methodArrow.call(second, 2), 18, "nested arrow captures receiver and private method");
+        \\  assert.sameValue(
+        \\    getterInnerFunction.call(second),
+        \\    16,
+        \\    "nested ordinary function captures the private accessor environment"
+        \\  );
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer capture_checks.free(js.runtime);
+
+    const wrong_brand_checks = try js.eval(
+        \\(function ({ First, Second, second }) {
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.callInstanceMethod(second, 1); },
+        \\    "instance private method rejects a peer factory brand"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.readInstanceGetter(second); },
+        \\    "instance private accessor rejects a peer factory brand"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.writeInstanceSetter(second, 1); },
+        \\    "instance private setter rejects a peer factory brand"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.callStaticMethod.call(Second, 1); },
+        \\    "static private method rejects a peer class receiver"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.readStaticGetterOnly.call(Second); },
+        \\    "static private accessor rejects a peer class receiver"
+        \\  );
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer wrong_brand_checks.free(js.runtime);
+
+    const readonly_checks = try js.eval(
+        \\(function ({ First, first }) {
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { first.overwriteMethod(0); },
+        \\    "instance private methods are readonly"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { first.overwriteGetterOnly(0); },
+        \\    "getter-only instance private accessors reject writes"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.overwriteStaticMethod(0); },
+        \\    "static private methods are readonly"
+        \\  );
+        \\  assert.throws(
+        \\    TypeError,
+        \\    function () { First.overwriteStaticGetterOnly(0); },
+        \\    "getter-only static private accessors reject writes"
+        \\  );
+        \\  assert.sameValue(first.callMethod(1), 17, "failed method overwrite leaves method intact");
+        \\  assert.sameValue(first.readGetterOnly(), 16, "failed getter overwrite leaves accessor intact");
+        \\  assert.sameValue(First.callStaticMethod(1), 141, "failed static method overwrite leaves method intact");
+        \\  assert.sameValue(
+        \\    First.readStaticGetterOnly(),
+        \\    140,
+        \\    "failed static getter overwrite leaves accessor intact"
+        \\  );
+        \\})(__execPrivateMethodAccessorRegression);
+    );
+    defer readonly_checks.free(js.runtime);
 }
 
 test "started generator resumes preserve unmapped arguments from parked locals" {
@@ -11280,9 +13122,9 @@ test "bytecode closures reuse the final function-prototype shape" {
     );
     defer result.free(js.runtime);
     const functions = try core.Object.expect(result);
-    const first_value = functions.getProperty(core.atom.atomFromUInt32(0));
+    const first_value = try functions.getProperty(core.atom.atomFromUInt32(0));
     defer first_value.free(js.runtime);
-    const second_value = functions.getProperty(core.atom.atomFromUInt32(1));
+    const second_value = try functions.getProperty(core.atom.atomFromUInt32(1));
     defer second_value.free(js.runtime);
     const first = try core.Object.expect(first_value);
     const second = try core.Object.expect(second_value);
@@ -11294,6 +13136,87 @@ test "bytecode closures reuse the final function-prototype shape" {
     try std.testing.expectEqual(global, second.bytecodeFunctionRealmGlobalPtr().?);
     try std.testing.expect(!first.flags.is_borrowed_reference_holder);
     try std.testing.expect(!second.flags.is_borrowed_reference_holder);
+}
+
+test "escaped closure keeps its compile realm after facade destruction" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const compile_facade = try zjs.JSContext.create(rt);
+    var compile_facade_alive = true;
+    defer if (compile_facade_alive) compile_facade.destroy();
+    const compile_realm = compile_facade.core;
+    const compile_global = try compile_facade.globalObject();
+    var parsed = try engine.parser.compile(
+        .{ .realm = compile_realm },
+        "(function escaped() { return this; })",
+        .{ .mode = .script, .filename = "escaped-realm.js", .return_completion = true },
+    );
+    var parsed_alive = true;
+    defer if (parsed_alive) parsed.deinit();
+
+    // The public facade releases its initial RealmRef before any bytecode is
+    // executed. The canonical root and child FBs are now the only realm owners.
+    compile_facade.destroy();
+    compile_facade_alive = false;
+
+    const caller = try zjs.JSContext.create(rt);
+    defer caller.destroy();
+    const root_function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
+    var stack = engine.exec.stack.Stack.init(&rt.memory, caller.core.stackLimit());
+    defer stack.deinit(rt);
+    const escaped = try engine.exec.zjs_vm.runWithOutput(caller.core, &stack, root_function, null);
+    var escaped_alive = true;
+    defer if (escaped_alive) escaped.free(rt);
+
+    // Drop the root FB and its cpool edge. The escaped closure's child FB must
+    // still own the compile realm independently.
+    parsed.deinit();
+    parsed_alive = false;
+    const result = try caller.callFunction(escaped, &.{}, .{});
+    try std.testing.expectEqual(compile_global, try core.Object.expect(result));
+    result.free(rt);
+
+    escaped.free(rt);
+    escaped_alive = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.contextForGlobalIncludingConstructing(compile_global) == null);
+}
+
+test "standard constructors publish realm class prototype slots" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const Expected = struct {
+        name: []const u8,
+        class_id: core.ClassId,
+    };
+    const expected = [_]Expected{
+        .{ .name = "Object", .class_id = core.class.ids.object },
+        .{ .name = "Function", .class_id = core.class.ids.bytecode_function },
+        .{ .name = "Array", .class_id = core.class.ids.array },
+        .{ .name = "Number", .class_id = core.class.ids.number },
+        .{ .name = "Boolean", .class_id = core.class.ids.boolean },
+        .{ .name = "RegExp", .class_id = core.class.ids.regexp },
+        .{ .name = "Iterator", .class_id = core.class.ids.iterator },
+        .{ .name = "Map", .class_id = core.class.ids.map },
+        .{ .name = "Set", .class_id = core.class.ids.set },
+        .{ .name = "WeakMap", .class_id = core.class.ids.weakmap },
+        .{ .name = "WeakSet", .class_id = core.class.ids.weakset },
+        .{ .name = "Promise", .class_id = core.class.ids.promise },
+        .{ .name = "ArrayBuffer", .class_id = core.class.ids.array_buffer },
+        .{ .name = "Uint8Array", .class_id = core.class.ids.uint8_array },
+        .{ .name = "DataView", .class_id = core.class.ids.dataview },
+    };
+
+    for (expected) |item| {
+        const key = try js.runtime.internAtom(item.name);
+        defer js.runtime.atoms.free(key);
+        const constructor = global.getOwnDataObjectBorrowed(key) orelse return error.TestUnexpectedResult;
+        const prototype = constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(prototype, js.context.classPrototypeObject(item.class_id).?);
+    }
 }
 
 test "FunctionRealm query separates owned carriers from caller-semantics classes" {
@@ -11322,11 +13245,11 @@ test "FunctionRealm query separates owned carriers from caller-semantics classes
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const carriers_atom = try js.runtime.internAtom("__functionRealmCarriers");
     defer js.runtime.atoms.free(carriers_atom);
-    const carriers = global.getProperty(carriers_atom);
+    const carriers = try global.getProperty(carriers_atom);
     defer carriers.free(js.runtime);
     const carrier_array = try core.Object.expect(carriers);
     var values: [7]core.JSValue = undefined;
-    for (&values, 0..) |*slot, index| slot.* = carrier_array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
+    for (&values, 0..) |*slot, index| slot.* = try carrier_array.getProperty(core.atom.atomFromUInt32(@intCast(index)));
     defer for (values) |value| value.free(js.runtime);
 
     const native = try core.Object.expect(values[0]);
@@ -11343,6 +13266,305 @@ test "FunctionRealm query separates owned carriers from caller-semantics classes
     js.context.clearException();
 }
 
+test "generator async and wrapper noncarriers derive cross-realm state across GC" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\globalThis.__w1b3eOther = $262.createRealm().global;
+        \\__w1b3eOther.eval("globalThis.w1b3eSync = function* () { yield globalThis; return globalThis; }; globalThis.w1b3eThrow = function* () { try { yield 0; } catch (error) { yield globalThis; } }; globalThis.w1b3eFast = function* () { yield globalThis; }; globalThis.w1b3eAsyncGenerator = async function* () { yield globalThis; }; globalThis.w1b3eAsyncFunction = async function () { await 0; return globalThis; }; globalThis.w1b3eTarget = function () { return globalThis; };");
+        \\globalThis.__w1b3eSync = __w1b3eOther.w1b3eSync();
+        \\globalThis.__w1b3eThrow = __w1b3eOther.w1b3eThrow();
+        \\globalThis.__w1b3eFast = __w1b3eOther.w1b3eFast();
+        \\globalThis.__w1b3eAsyncGenerator = __w1b3eOther.w1b3eAsyncGenerator();
+        \\globalThis.__w1b3eAsyncFunctionPromise = __w1b3eOther.w1b3eAsyncFunction();
+        \\globalThis.__w1b3eBound = __w1b3eOther.w1b3eTarget.bind(null);
+        \\globalThis.__w1b3eProxy = new Proxy(__w1b3eOther.w1b3eTarget, {});
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const names = [_][]const u8{
+        "__w1b3eOther",
+        "__w1b3eSync",
+        "__w1b3eThrow",
+        "__w1b3eFast",
+        "__w1b3eAsyncGenerator",
+        "__w1b3eBound",
+        "__w1b3eProxy",
+    };
+    var values: [names.len]core.JSValue = @splat(core.JSValue.undefinedValue());
+    defer for (values) |value| value.free(js.runtime);
+    for (names, &values) |name, *value| {
+        const key = try js.runtime.internAtom(name);
+        defer js.runtime.atoms.free(key);
+        value.* = try global.getProperty(key);
+    }
+
+    const other_global = try core.Object.expect(values[0]);
+    for (values[1..]) |value| {
+        const object = try core.Object.expect(value);
+        try std.testing.expect(!js.runtime.borrowedReferenceHolderRegistered(object));
+        try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
+        try std.testing.expect(object.functionRealmGlobalPtr() == null);
+        try std.testing.expectEqual(other_global, object_ops.objectRealmGlobal(object).?);
+    }
+    for (values[1..5]) |value| {
+        const generator = try core.Object.expect(value);
+        try std.testing.expectEqual(other_global, generator.generatorFunctionRealmGlobalPtr().?);
+    }
+
+    _ = js.runtime.runObjectCycleRemoval();
+
+    for (values[1..]) |value| {
+        const object = try core.Object.expect(value);
+        try std.testing.expect(!js.runtime.borrowedReferenceHolderRegistered(object));
+        try std.testing.expectEqual(other_global, object_ops.objectRealmGlobal(object).?);
+    }
+
+    const exercise = try js.eval(
+        \\var __w1b3eLocalGeneratorPrototype = Object.getPrototypeOf(function* () {}.prototype);
+        \\var __w1b3eLocalNext = __w1b3eLocalGeneratorPrototype.next;
+        \\var __w1b3eStep = __w1b3eLocalNext.call(__w1b3eSync);
+        \\assert.sameValue(__w1b3eStep.value, __w1b3eOther);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eStep), __w1b3eOther.Object.prototype);
+        \\__w1b3eStep = __w1b3eLocalGeneratorPrototype.return.call(__w1b3eSync, __w1b3eOther);
+        \\assert.sameValue(__w1b3eStep.value, __w1b3eOther);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eStep), __w1b3eOther.Object.prototype);
+        \\var __w1b3eCompleted = __w1b3eLocalNext.call(__w1b3eSync);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eCompleted), Object.prototype);
+        \\__w1b3eLocalNext.call(__w1b3eThrow);
+        \\__w1b3eStep = __w1b3eLocalGeneratorPrototype.throw.call(__w1b3eThrow, 1);
+        \\assert.sameValue(__w1b3eStep.value, __w1b3eOther);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eStep), __w1b3eOther.Object.prototype);
+        \\__w1b3eFast.next = __w1b3eLocalNext;
+        \\assert.sameValue([...__w1b3eFast][0], __w1b3eOther);
+        \\assert.sameValue(__w1b3eBound(), __w1b3eOther);
+        \\assert.sameValue(__w1b3eProxy(), __w1b3eOther);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eAsyncFunctionPromise), __w1b3eOther.Promise.prototype);
+        \\globalThis.__w1b3eAsyncFunctionValue = undefined;
+        \\__w1b3eAsyncFunctionPromise.then(function (value) { __w1b3eAsyncFunctionValue = value; });
+        \\var __w1b3eLocalAsyncGeneratorPrototype = Object.getPrototypeOf(async function* () {}.prototype);
+        \\globalThis.__w1b3eAsyncGeneratorPromise = __w1b3eLocalAsyncGeneratorPrototype.next.call(__w1b3eAsyncGenerator);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eAsyncGeneratorPromise), __w1b3eOther.Promise.prototype);
+        \\globalThis.__w1b3eAsyncGeneratorStep = undefined;
+        \\__w1b3eAsyncGeneratorPromise.then(function (step) { __w1b3eAsyncGeneratorStep = step; });
+    );
+    exercise.free(js.runtime);
+
+    try js.runJobs();
+    const verify_async = try js.eval(
+        \\assert.sameValue(__w1b3eAsyncFunctionValue, __w1b3eOther);
+        \\assert.sameValue(__w1b3eAsyncGeneratorStep.value, __w1b3eOther);
+        \\assert.sameValue(Object.getPrototypeOf(__w1b3eAsyncGeneratorStep), __w1b3eOther.Object.prototype);
+    );
+    defer verify_async.free(js.runtime);
+    try std.testing.expect(verify_async.isUndefined());
+}
+
+test "FinalizationRegistry cleanup job keeps registry realm before invoking callback realm" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const registry_facade = try zjs.JSContext.create(rt);
+    var registry_facade_alive = true;
+    defer if (registry_facade_alive) registry_facade.destroy();
+    const registry_realm = registry_facade.core;
+    const registry_global = try registry_facade.globalObject();
+
+    const callback_facade = try zjs.JSContext.create(rt);
+    var callback_facade_alive = true;
+    defer if (callback_facade_alive) callback_facade.destroy();
+    const callback_realm = callback_facade.core;
+    const callback_global = try callback_facade.globalObject();
+    try std.testing.expect(registry_realm != callback_realm);
+
+    var probe: CrossRealmNativeProbe = .{};
+    const external_id = try rt.registerExternalHostFunction(.{
+        .ptr = &probe,
+        .call = crossRealmNativeProbe,
+    });
+    const callback = try core.function.nativeFunction(callback_realm, "finalizationRealmProbe", 1);
+    defer callback.free(rt);
+    const callback_object = try core.Object.expect(callback);
+    callback_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    callback_object.externalHostFunctionIdSlot().* = external_id;
+
+    const registry_value = try object_ops.qjsConstructFinalizationRegistryWithPrototype(
+        registry_realm,
+        callback,
+        null,
+    );
+    defer registry_value.free(rt);
+    const registry = try core.Object.expect(registry_value);
+    try std.testing.expectEqual(registry_realm, registry.finalizationRegistryRealmContext().?);
+    try std.testing.expectEqual(callback_realm, callback_object.nativeFunctionRealm().?);
+
+    // Drop both public construction owners before GC. The registry and
+    // callback carriers must independently keep their construction Realms
+    // alive through enqueue and invocation.
+    registry_facade.destroy();
+    registry_facade_alive = false;
+    callback_facade.destroy();
+    callback_facade_alive = false;
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(
+        rt,
+        target.value(),
+        core.JSValue.int32(73),
+        core.JSValue.undefinedValue(),
+    );
+    target.value().free(rt);
+    _ = try rt.tryRunObjectCycleRemoval();
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(registry_realm, rt.job_queue.jobs[0].realm.borrow().?);
+    const queued_payload = switch (rt.job_queue.jobs[0].payload) {
+        .finalization => |payload| payload,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?i32, 73), queued_payload.held_value.asInt32());
+
+    // The job starts with the registry construction realm, but the final call
+    // still follows the callback C_FUNCTION's independent RealmRef.
+    try std.testing.expectEqual(
+        .exception,
+        try engine.exec.promise_ops.drainOnePendingJob(registry_realm, null, registry_global),
+    );
+    try std.testing.expectEqual(callback_realm, probe.seen_realm.?);
+    try std.testing.expectEqual(callback_global, probe.seen_global.?);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    registry_realm.clearException();
+}
+
+test "event-loop caller reaches external C function with one callee realm view" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const setup = try js.eval(
+        \\(function () {
+        \\    globalThis.__calleeRealm = $262.createRealm().global;
+        \\    globalThis.__callerRealm = $262.createRealm().global;
+        \\})();
+    );
+    setup.free(js.runtime);
+
+    const loop_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const callee_key = try js.runtime.internAtom("__calleeRealm");
+    defer js.runtime.atoms.free(callee_key);
+    const caller_key = try js.runtime.internAtom("__callerRealm");
+    defer js.runtime.atoms.free(caller_key);
+    const callee_value = try loop_global.getProperty(callee_key);
+    defer callee_value.free(js.runtime);
+    const caller_value = try loop_global.getProperty(caller_key);
+    defer caller_value.free(js.runtime);
+    const callee_global = try core.Object.expect(callee_value);
+    const caller_global = try core.Object.expect(caller_value);
+    const callee_realm = js.runtime.contextForGlobalIncludingConstructing(callee_global) orelse return error.TestUnexpectedResult;
+    const caller_realm = js.runtime.contextForGlobalIncludingConstructing(caller_global) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(callee_realm != caller_realm);
+    try std.testing.expect(callee_realm != js.context);
+    try std.testing.expect(caller_realm != js.context);
+
+    var probe: CrossRealmNativeProbe = .{};
+    const external_id = try js.runtime.registerExternalHostFunction(.{
+        .ptr = &probe,
+        .call = crossRealmNativeProbe,
+    });
+    const native_value = try core.function.nativeFunction(callee_realm, "realmProbe", 0);
+    defer native_value.free(js.runtime);
+    const native_object = try core.Object.expect(native_value);
+    native_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    native_object.externalHostFunctionIdSlot().* = external_id;
+
+    const escaped_key = try js.runtime.internAtom("__escapedNative");
+    defer js.runtime.atoms.free(escaped_key);
+    try caller_global.defineOwnProperty(
+        js.runtime,
+        escaped_key,
+        core.Descriptor.data(native_value, true, true, true),
+    );
+
+    var caller_wrapper = zjs.JSContext.borrowCore(caller_realm);
+    const wrapper_setup = try caller_wrapper.eval(
+        \\globalThis.__eventLoopWrapper = function () {
+        \\    globalThis.__caller_body_ran = true;
+        \\    try {
+        \\        __escapedNative();
+        \\    } catch (error) {
+        \\        globalThis.__callee_error = error;
+        \\    }
+        \\};
+    , .{});
+    wrapper_setup.free(js.runtime);
+    const wrapper_key = try js.runtime.internAtom("__eventLoopWrapper");
+    defer js.runtime.atoms.free(wrapper_key);
+    const wrapper_value = try caller_global.getProperty(wrapper_key);
+    defer wrapper_value.free(js.runtime);
+
+    try js.event_loop.enqueueTimer(js.context, 1, wrapper_value, 0, false);
+    try std.testing.expect(try engine.exec.call_runtime.runNextOsTimer(js.context, null, loop_global));
+
+    try std.testing.expectEqual(callee_realm, probe.seen_realm.?);
+    try std.testing.expectEqual(callee_global, probe.seen_global.?);
+    const mutation_key = try js.runtime.internAtom("__native_realm_mutation");
+    defer js.runtime.atoms.free(mutation_key);
+    const callee_mutation = try callee_global.getProperty(mutation_key);
+    defer callee_mutation.free(js.runtime);
+    const caller_mutation = try caller_global.getProperty(mutation_key);
+    defer caller_mutation.free(js.runtime);
+    const loop_mutation = try loop_global.getProperty(mutation_key);
+    defer loop_mutation.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), callee_mutation.asInt32());
+    try std.testing.expect(caller_mutation.isUndefined());
+    try std.testing.expect(loop_mutation.isUndefined());
+
+    const error_key = try js.runtime.internAtom("__callee_error");
+    defer js.runtime.atoms.free(error_key);
+    const caught_error = try caller_global.getProperty(error_key);
+    defer caught_error.free(js.runtime);
+    const caught_object = try core.Object.expect(caught_error);
+    const type_error_value = try callee_global.getProperty(core.atom.predefinedId("TypeError", .string).?);
+    defer type_error_value.free(js.runtime);
+    const type_error_constructor = try core.Object.expect(type_error_value);
+    const type_error_prototype_value = try type_error_constructor.getProperty(core.atom.ids.prototype);
+    defer type_error_prototype_value.free(js.runtime);
+    const type_error_prototype = try core.Object.expect(type_error_prototype_value);
+    try std.testing.expectEqual(type_error_prototype, caught_object.getPrototype().?);
+
+    const body_ran_key = try js.runtime.internAtom("__caller_body_ran");
+    defer js.runtime.atoms.free(body_ran_key);
+    const body_ran = try caller_global.getProperty(body_ran_key);
+    defer body_ran.free(js.runtime);
+    try std.testing.expectEqual(true, body_ran.asBool().?);
+}
+
+test "true C function without its RealmRef fails the final-arm invariant" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+
+    const function_value = try core.function.nativeFunction(js.context, "missingRealm", 0);
+    defer function_value.free(js.runtime);
+    const function_object = try core.Object.expect(function_value);
+    function_object.hostFunctionKindSlot().* = core.host_function.ids.output;
+    function_object.releaseNativeFunctionRealmForRuntimeTeardown(js.context);
+
+    try std.testing.expectError(
+        error.InvalidBuiltinRegistry,
+        engine.exec.call.callValueWithThisGlobalsAndGlobal(
+            js.context,
+            null,
+            global,
+            &.{},
+            core.JSValue.undefinedValue(),
+            function_value,
+            &.{},
+        ),
+    );
+}
+
 test "generator creation avoids a second payload copy of rooted input slices" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -11354,7 +13576,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     argument_setup.free(js.runtime);
     const argument_key = try js.runtime.internAtom("__argumentGenerator");
     defer js.runtime.atoms.free(argument_key);
-    const argument_generator = global.getProperty(argument_key);
+    const argument_generator = try global.getProperty(argument_key);
     defer argument_generator.free(js.runtime);
     const argument_values = [_]core.JSValue{argument};
 
@@ -11428,7 +13650,7 @@ test "generator creation avoids a second payload copy of rooted input slices" {
     capture_setup.free(js.runtime);
     const capture_key = try js.runtime.internAtom("__captureGenerator");
     defer js.runtime.atoms.free(capture_key);
-    const capture_generator = global.getProperty(capture_key);
+    const capture_generator = try global.getProperty(capture_key);
     defer capture_generator.free(js.runtime);
     const warm_capture = try engine.exec.call_runtime.callValueOrBytecode(
         js.context,
@@ -11664,7 +13886,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const callback_key = try js.runtime.internAtom("__zjs_timer_throw");
     defer js.runtime.atoms.free(callback_key);
-    const callback = global.getProperty(callback_key);
+    const callback = try global.getProperty(callback_key);
     defer callback.free(js.runtime);
 
     try js.event_loop.enqueueTimer(@ptrCast(js.context), 1, callback, 0, false);
@@ -11921,6 +14143,192 @@ test "module cycles do not hoist a body-leading named function expression" {
     try std.testing.expectEqualStrings("ReferenceError\n", output.buffered());
 }
 
+test "same module specifier keeps record cells namespace import meta and error state per Realm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const realm_b = try core.JSContext.create(js.runtime);
+    defer realm_b.destroy();
+    var facade_a = zjs.JSContext.borrowCore(js.context);
+    var facade_b = zjs.JSContext.borrowCore(realm_b);
+    const filename = "w1e-shared-module-identity.mjs";
+
+    try std.testing.expectError(
+        error.JSException,
+        facade_a.eval(
+            \\globalThis.__w1eRuns = (globalThis.__w1eRuns || 0) + 1;
+            \\export let value = 11;
+            \\export function realmFunction() { return value; }
+            \\export const meta = import.meta;
+            \\throw new Error("realm A only");
+        , .{ .mode = .module, .filename = filename }),
+    );
+    if (js.context.hasException()) {
+        const exception = js.context.takeException();
+        exception.free(js.runtime);
+    }
+
+    const result_b = try facade_b.eval(
+        \\globalThis.__w1eRuns = (globalThis.__w1eRuns || 0) + 1;
+        \\export let value = 22;
+        \\export function realmFunction() { return value; }
+        \\export const meta = import.meta;
+    , .{ .mode = .module, .filename = filename });
+    defer result_b.free(js.runtime);
+
+    const module_name = try js.runtime.internAtom(filename);
+    defer js.runtime.atoms.free(module_name);
+    const record_a = js.context.modules.find(module_name) orelse return error.TestUnexpectedResult;
+    const record_b = realm_b.modules.find(module_name) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(record_a != record_b);
+    try std.testing.expectEqual(core.module.Status.errored, record_a.status);
+    try std.testing.expectEqual(core.module.Status.evaluated, record_b.status);
+    try std.testing.expect(record_a.eval_exception != null);
+    try std.testing.expect(record_b.eval_exception == null);
+
+    const meta_a = record_a.import_meta orelse return error.TestUnexpectedResult;
+    const meta_b = record_b.import_meta orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!meta_a.same(meta_b));
+
+    const value_name = try js.runtime.internAtom("value");
+    defer js.runtime.atoms.free(value_name);
+    const value_a_index = record_a.findLocalBindingIndex(value_name) orelse return error.TestUnexpectedResult;
+    const value_b_index = record_b.findLocalBindingIndex(value_name) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!record_a.local_bindings[value_a_index].cell.same(record_b.local_bindings[value_b_index].cell));
+
+    const function_name = try js.runtime.internAtom("realmFunction");
+    defer js.runtime.atoms.free(function_name);
+    const function_a_index = record_a.findLocalBindingIndex(function_name) orelse return error.TestUnexpectedResult;
+    const function_b_index = record_b.findLocalBindingIndex(function_name) orelse return error.TestUnexpectedResult;
+    const function_a_cell = core.VarRef.fromValue(record_a.local_bindings[function_a_index].cell) orelse return error.TestUnexpectedResult;
+    const function_b_cell = core.VarRef.fromValue(record_b.local_bindings[function_b_index].cell) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!function_a_cell.varRefValue().same(function_b_cell.varRefValue()));
+
+    const namespace_a = try engine.exec.module.moduleNamespaceValue(js.context, module_name);
+    defer namespace_a.free(js.runtime);
+    const namespace_b = try engine.exec.module.moduleNamespaceValue(realm_b, module_name);
+    defer namespace_b.free(js.runtime);
+    try std.testing.expect(!namespace_a.same(namespace_b));
+
+    const runs_name = try js.runtime.internAtom("__w1eRuns");
+    defer js.runtime.atoms.free(runs_name);
+    const global_a = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const global_b = try engine.exec.zjs_vm.contextGlobal(realm_b);
+    const runs_a = try global_a.getProperty(runs_name);
+    defer runs_a.free(js.runtime);
+    const runs_b = try global_b.getProperty(runs_name);
+    defer runs_b.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), runs_a.asInt32());
+    try std.testing.expectEqual(@as(?i32, 1), runs_b.asInt32());
+}
+
+test "Runtime loader keeps same-path TLA continuations and waiters in parent and child Realms" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var parent_facade = zjs.JSContext.borrowCore(js.context);
+    _ = try parent_facade.globalObject();
+
+    const dir = ".zig-cache/w1e-cross-realm-tla";
+    const main_path = dir ++ "/main.js";
+    const module_path = dir ++ "/shared.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = module_path,
+        .data =
+        \\globalThis.__w1eTlaRuns = (globalThis.__w1eTlaRuns || 0) + 1;
+        \\await 0;
+        \\globalThis.__w1eTlaRuns += 10;
+        \\export const value = globalThis.__w1eTlaRuns;
+        ,
+    });
+
+    var state = engine.exec.module_graph.DynamicImportState{
+        .runtime = js.runtime,
+        .output = null,
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .max_source_size = 4096,
+    };
+    defer state.deinit();
+    var loader_scope = engine.exec.module_graph.installDynamicImport(&state);
+    defer loader_scope.deinit();
+
+    const child_holder = try engine.exec.call.createRealmObject(js.context);
+    defer child_holder.free(js.runtime);
+    const child_record = try property_ops.expectObject(child_holder);
+    const child = child_record.realmContext() orelse return error.TestUnexpectedResult;
+    const parent_global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const child_global = try engine.exec.zjs_vm.contextGlobal(child);
+
+    const specifier = try engine.exec.value_ops.createStringValue(js.runtime, "./shared.mjs");
+    defer specifier.free(js.runtime);
+    const parent_first = try engine.exec.module_graph.enqueueDynamicImportJob(js.context, parent_global, null, main_path, specifier);
+    defer parent_first.free(js.runtime);
+    const child_first = try engine.exec.module_graph.enqueueDynamicImportJob(child, child_global, null, main_path, specifier);
+    defer child_first.free(js.runtime);
+    const parent_second = try engine.exec.module_graph.enqueueDynamicImportJob(js.context, parent_global, null, main_path, specifier);
+    defer parent_second.free(js.runtime);
+    const child_second = try engine.exec.module_graph.enqueueDynamicImportJob(child, child_global, null, main_path, specifier);
+    defer child_second.free(js.runtime);
+
+    // The first import in each Realm creates one TLA continuation and waiter;
+    // the second sees that Realm's evaluating record and adds only a waiter.
+    // All four dynamic-import jobs precede the Promise reactions they enqueue.
+    for (0..4) |_| {
+        try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(child, null, child_global)) == .success);
+    }
+    try std.testing.expectEqual(@as(usize, 2), state.owned_continuations.items.len);
+    try std.testing.expectEqual(@as(usize, 4), state.owned_waiters.items.len);
+    try std.testing.expect(state.owned_continuations.items[0].realm.borrow() == js.context);
+    try std.testing.expect(state.owned_continuations.items[1].realm.borrow() == child);
+    try std.testing.expect(state.owned_waiters.items[0].realm.borrow() == js.context);
+    try std.testing.expect(state.owned_waiters.items[1].realm.borrow() == child);
+    try std.testing.expect(state.owned_waiters.items[2].realm.borrow() == js.context);
+    try std.testing.expect(state.owned_waiters.items[3].realm.borrow() == child);
+
+    // The facade selects only the Runtime. Each continuation resumes and each
+    // same-path waiter settles through its own retained Realm.
+    try state.runJobs(child);
+    try std.testing.expectEqual(@as(usize, 0), state.owned_continuations.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.owned_waiters.items.len);
+
+    const PromiseResult = struct {
+        fn get(value: core.JSValue) !core.JSValue {
+            const promise = try property_ops.expectObject(value);
+            if (promise.promiseIsRejected()) return error.TestUnexpectedResult;
+            return promise.promiseResult() orelse error.TestUnexpectedResult;
+        }
+    };
+    const parent_namespace_first = try PromiseResult.get(parent_first);
+    const parent_namespace_second = try PromiseResult.get(parent_second);
+    const child_namespace_first = try PromiseResult.get(child_first);
+    const child_namespace_second = try PromiseResult.get(child_second);
+    try std.testing.expect(parent_namespace_first.same(parent_namespace_second));
+    try std.testing.expect(child_namespace_first.same(child_namespace_second));
+    try std.testing.expect(!parent_namespace_first.same(child_namespace_first));
+
+    const runs_name = try js.runtime.internAtom("__w1eTlaRuns");
+    defer js.runtime.atoms.free(runs_name);
+    const parent_runs = try parent_global.getProperty(runs_name);
+    defer parent_runs.free(js.runtime);
+    const child_runs = try child_global.getProperty(runs_name);
+    defer child_runs.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 11), parent_runs.asInt32());
+    try std.testing.expectEqual(@as(?i32, 11), child_runs.asInt32());
+
+    const resolved_path = try std.fs.path.resolve(std.testing.allocator, &.{module_path});
+    defer std.testing.allocator.free(resolved_path);
+    const module_name = try js.runtime.internAtom(resolved_path);
+    defer js.runtime.atoms.free(module_name);
+    const parent_module = js.context.modules.find(module_name) orelse return error.TestUnexpectedResult;
+    const child_module = child.modules.find(module_name) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(parent_module != child_module);
+    try std.testing.expectEqual(core.module.Status.evaluated, parent_module.status);
+    try std.testing.expectEqual(core.module.Status.evaluated, child_module.status);
+}
+
 test "module top-level await resumes in Promise reaction FIFO order" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -11990,6 +14398,153 @@ test "module await reaction keeps its position on the awaited Promise" {
     defer result.free(js.runtime);
 
     try std.testing.expectEqualStrings("before,module,after\n", output.buffered());
+}
+
+test "module TLA continuation OOM retains FIFO node for retry" {
+    const ArmableOneShotAllocator = struct {
+        backing: std.mem.Allocator,
+        armed: bool = false,
+        induced: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{
+                .ptr = self,
+                .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+            };
+        }
+
+        fn arm(self: *@This()) void {
+            self.armed = true;
+            self.induced = false;
+        }
+
+        fn disarm(self: *@This()) void {
+            self.armed = false;
+        }
+
+        fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.armed and !self.induced) {
+                self.induced = true;
+                return null;
+            }
+            return self.backing.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.backing.rawFree(memory, alignment, ret_addr);
+        }
+    };
+
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const registry = engine.exec.standard_globals;
+    registry.configureRuntime(js.runtime);
+
+    const dir = ".zig-cache/module-tla-continuation-oom-retry-test";
+    const main_path = dir ++ "/main.js";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/a.mjs",
+        .data =
+        \\globalThis.__aRetry = (globalThis.__aRetry || 0) + 1;
+        \\await 1;
+        \\globalThis.__aRetry += 10;
+        \\await 2;
+        \\globalThis.__aRetry += 100;
+        \\export const value = "a";
+        ,
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = dir ++ "/b.mjs",
+        .data =
+        \\globalThis.__bRetry = (globalThis.__bRetry || 0) + 1;
+        \\await 1;
+        \\globalThis.__bRetry += 10;
+        \\await 2;
+        \\globalThis.__bRetry += 100;
+        \\export const value = "b";
+        ,
+    });
+
+    var injector = ArmableOneShotAllocator{ .backing = std.testing.allocator };
+    var state = engine.exec.module_graph.DynamicImportState{
+        .runtime = js.runtime,
+        .output = null,
+        .io = std.testing.io,
+        .allocator = injector.allocator(),
+        .max_source_size = 4096,
+    };
+    defer state.deinit();
+    var dynamic_import_scope = engine.exec.module_graph.installDynamicImport(&state);
+    defer dynamic_import_scope.deinit();
+
+    const setup = try js.evalWithOptions(
+        \\globalThis.__paRetry = import("./a.mjs");
+        \\globalThis.__pbRetry = import("./b.mjs");
+    , .{ .filename = main_path });
+    setup.free(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    // Script eval drains the two dynamic-import jobs, but TLA resumptions stay
+    // in the loader state's owned continuation FIFO until state.runJobs().
+    try std.testing.expectEqual(@as(usize, 2), state.owned_continuations.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[0].path, "/a.mjs"));
+    try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[1].path, "/b.mjs"));
+    const a_counter_atom = try js.runtime.internAtom("__aRetry");
+    defer js.runtime.atoms.free(a_counter_atom);
+    const b_counter_atom = try js.runtime.internAtom("__bRetry");
+    defer js.runtime.atoms.free(b_counter_atom);
+
+    // The next state-allocation is the source copy for A's newly-yielded
+    // continuation. The old generator has already resumed, so dropping the
+    // node here strands the exposed import Promise and cannot be repaired by
+    // simply running A's previous continuation again.
+    injector.arm();
+    try std.testing.expectError(error.OutOfMemory, state.runJobs(js.context));
+    try std.testing.expect(injector.induced);
+    try std.testing.expectEqual(@as(usize, 2), state.owned_continuations.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[0].path, "/a.mjs"));
+    try std.testing.expect(std.mem.endsWith(u8, state.owned_continuations.items[1].path, "/b.mjs"));
+    const a_after_oom = try global.getProperty(a_counter_atom);
+    defer a_after_oom.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 11), a_after_oom.asInt32());
+    const b_after_oom = try global.getProperty(b_counter_atom);
+    defer b_after_oom.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), b_after_oom.asInt32());
+
+    injector.disarm();
+    try state.runJobs(js.context);
+    try std.testing.expectEqual(@as(usize, 0), state.owned_continuations.items.len);
+
+    const a_counter = try global.getProperty(a_counter_atom);
+    defer a_counter.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 111), a_counter.asInt32());
+    const b_counter = try global.getProperty(b_counter_atom);
+    defer b_counter.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 111), b_counter.asInt32());
+
+    inline for (.{ "__paRetry", "__pbRetry" }) |name| {
+        const promise_atom = try js.runtime.internAtom(name);
+        defer js.runtime.atoms.free(promise_atom);
+        const promise_value = try global.getProperty(promise_atom);
+        defer promise_value.free(js.runtime);
+        const promise = try property_ops.expectObject(promise_value);
+        try std.testing.expect(promise.promiseResult() != null);
+        try std.testing.expect(!promise.promiseIsRejected());
+    }
 }
 
 test "async module dependency does not preempt an independent sibling" {
@@ -12225,6 +14780,8 @@ test "reflect construct roots argument list while resolving prototype" {
 
     const target = try core.function.nativeFunction(ctx, "Array", 1);
     defer target.free(rt);
+    const target_object = try core.Object.expect(target);
+    try std.testing.expect(try target_object.addArrayBuiltinMarker(rt, .constructor));
     const new_target = try core.function.nativeFunction(ctx, "Array", 1);
     defer new_target.free(rt);
     const new_target_object = engine.exec.call.thisObject(new_target) orelse return error.TypeError;
@@ -12269,12 +14826,10 @@ test "reflect construct roots argument list while resolving prototype" {
 }
 
 // ===========================================================================
-// Branch-to-end fall-off forms. The register-resident dispatch carries no
-// fall-off bounds check (qjs-aligned), so the jump-aware epilogues MUST
-// terminate every branch-to-end path with a real return op and the pipeline
-// MUST plant the trailing op.return sentinel for the eval-completion form.
-// Each test pins the observable completion value; a regression surfaces as
-// the sentinel popping an empty operand stack (garbage completion / UB).
+// Branch-to-end forms. The register-resident dispatch carries no hot falloff
+// check (qjs-aligned), so every parser epilogue must terminate branch-to-end
+// paths with a real return op and the verifier must reject reachable falloff.
+// Each test pins the observable completion value.
 // ===========================================================================
 
 test "if-throw fall-off form returns undefined (if_false8 branch-to-end)" {
@@ -12371,12 +14926,11 @@ test "generator branch-to-end completes with undefined value" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "eval L0 completion falls off onto the op.return sentinel" {
+test "eval and script completion end in an explicit value return" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    // Direct/indirect eval bodies end with `scope_get_var <ret>` and fall off
-    // the end; the trailing sentinel returns the completion riding the stack.
+    // Direct/indirect eval bodies end with `get_loc <ret>; return`.
     const result = try js.eval(
         \\assert.sameValue(eval("if (false) throw 5;"), undefined);
         \\assert.sameValue(eval("1 + 2"), 3);
@@ -12385,8 +14939,8 @@ test "eval L0 completion falls off onto the op.return sentinel" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
 
-    // Script completion (<repl> return_completion form) rides the same
-    // sentinel fall-off at the top level.
+    // Script completion (<repl> return_completion form) uses the same explicit
+    // value-return epilogue at the top level.
     const repl_undef = try js.evalWithOptions("if (false) throw 7;", .{ .filename = "<repl>" });
     defer repl_undef.free(js.runtime);
     try std.testing.expect(repl_undef.isUndefined());
@@ -12415,6 +14969,29 @@ test "module top-level branch-to-end gets a terminator (no fall-off)" {
 
     const result = try js.evalModule(
         \\if (false) throw 9;
+    );
+    defer result.free(js.runtime);
+}
+
+test "W1d: module import.meta identity survives methods and nested closures" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\const rootMeta = import.meta;
+        \\class Holder {
+        \\  read() { return import.meta; }
+        \\}
+        \\function nested() {
+        \\  const arrow = () => import.meta;
+        \\  return [import.meta, arrow()];
+        \\}
+        \\const [nestedMeta, arrowMeta] = nested();
+        \\if (new Holder().read() !== rootMeta ||
+        \\    nestedMeta !== rootMeta ||
+        \\    arrowMeta !== rootMeta) {
+        \\  throw new Error("import.meta identity escaped its module");
+        \\}
     );
     defer result.free(js.runtime);
 }
@@ -12595,7 +15172,7 @@ test "get_var uninitialized-cell inline global-object leg preserves the cold wat
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const q1_name = try rt.internAtom("__q1");
     defer rt.atoms.free(q1_name);
-    const verdict = global.getProperty(q1_name);
+    const verdict = try global.getProperty(q1_name);
     defer verdict.free(rt);
     // 11 probes, all green.
     try std.testing.expectEqual(@as(?i32, 1101), verdict.asInt32());
@@ -12678,7 +15255,7 @@ test "named function expression self-binding materializes lazily with pinned Qui
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const q2_name = try rt.internAtom("__q2");
     defer rt.atoms.free(q2_name);
-    const verdict = global.getProperty(q2_name);
+    const verdict = try global.getProperty(q2_name);
     defer verdict.free(rt);
     // 22 probes, all green.
     try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());

@@ -170,7 +170,6 @@ fn valueFromAccessorHeader(header: ?*gc.Header) JSValue {
 
 pub const AutoInitKind = enum(u8) {
     native_function,
-    native_accessor,
     console,
     math_namespace,
     json_namespace,
@@ -179,19 +178,8 @@ pub const AutoInitKind = enum(u8) {
     navigator,
     performance,
     array_unscopables,
-    number_constant,
-    int32_constant,
     string_constant,
     empty_array,
-    /// Lazy `function.prototype` (qjs `JS_AUTOINIT_ID_PROTOTYPE`,
-    /// `js_instantiate_prototype` quickjs.c:17341): the prototype object and its
-    /// `constructor` back-reference are materialized only when `.prototype` is
-    /// first observed or the function is constructed. Avoids the per-function
-    /// prototype allocation AND the `func <-> prototype.constructor` reference
-    /// cycle (so a never-constructed closure is reclaimed by refcount instead of
-    /// the cycle collector). All payload is derived from the owner function
-    /// object at materialization, so a single interned descriptor is shared.
-    function_prototype,
 };
 
 pub const ArrayBuiltinMarker = enum(u8) {
@@ -210,37 +198,128 @@ pub const TypedArrayBuiltinMarker = enum(u8) {
     static_of = 3,
 };
 
-/// Lazy-materialization payload for `Slot.auto_init`. The slot holds
-/// just enough metadata for the first reader to call `builder`,
-/// receive a fresh `JSValue`, and replace the slot with `.data`.
-///
-/// Borrowed from QuickJS's `JS_PROP_AUTOINIT` mechanism
-/// (`JSCFunctionListEntry` + `JS_AutoInitProperty`): the standard
-/// builtins are described as compile-time tables and the real
-/// function objects are only allocated when JS code observes them.
-/// For zjs, this turns `installStandardGlobals` from "build ~700
-/// native function objects up front" into "stamp 700 placeholder
-/// slots" (no allocation), at the cost of one materialization on the
-/// first read of each method.
-///
-/// `name` and `length` are the same pair that `nativeFunction` would
-/// have received eagerly. `rt` is captured so `getProperty` can
-/// materialize without threading the JSRuntime through every prop-read
-/// call site (zjs's `getProperty(self: Object, ...)` is reached by
-/// 300+ callers; we want this change to be local).
+/// Exact QuickJS auto-init dispatch domain (`JSAutoInitIDEnum`).  The low two
+/// bits of the owning Realm pointer encode this id in each property slot.
+pub const AutoInitId = enum(u2) {
+    prototype = 0,
+    module_ns = 1,
+    prop = 2,
+};
+
+/// One owned Realm edge plus the QuickJS auto-init id, packed into one word.
+/// Realm contexts are GC allocations whose header address is at least
+/// four-byte aligned; the low two bits are therefore available for the id.
+pub const RealmAndAutoInitId = extern struct {
+    raw: usize,
+
+    const id_mask: usize = 0b11;
+
+    pub fn retain(realm_header: *gc.Header, init_id: AutoInitId) RealmAndAutoInitId {
+        std.debug.assert(realm_header.metaConst().kind == .realm_context);
+        const address = @intFromPtr(realm_header);
+        std.debug.assert(address & id_mask == 0);
+        gc.retain(realm_header);
+        return .{ .raw = address | @intFromEnum(init_id) };
+    }
+
+    pub fn clone(self: RealmAndAutoInitId) RealmAndAutoInitId {
+        if (self.realmHeader()) |header| gc.retain(header);
+        return self;
+    }
+
+    pub fn id(self: RealmAndAutoInitId) AutoInitId {
+        std.debug.assert(self.raw != 0);
+        return @enumFromInt(self.raw & id_mask);
+    }
+
+    pub fn realmHeader(self: RealmAndAutoInitId) ?*gc.Header {
+        const address = self.raw & ~id_mask;
+        return if (address == 0) null else @ptrFromInt(address);
+    }
+
+    pub fn syncRealmHeader(self: *RealmAndAutoInitId, realm_header: *gc.Header) void {
+        std.debug.assert(realm_header.metaConst().kind == .realm_context);
+        const address = @intFromPtr(realm_header);
+        std.debug.assert(address & id_mask == 0);
+        const init_id = self.id();
+        self.raw = address | @intFromEnum(init_id);
+    }
+
+    pub fn deinit(self: *RealmAndAutoInitId, rt: *JSRuntime) void {
+        const header = self.realmHeader() orelse return;
+        self.raw = 0;
+        gc.release(rt, header);
+    }
+};
+
+/// QJS-shaped two-word AUTOINIT property payload.  `opaque` is either null
+/// (PROTOTYPE), a typed module owner (MODULE_NS), or a stable immutable PROP
+/// descriptor.  It never points at the owning object or a mutable cache.
+pub const AutoInitSlot = extern struct {
+    realm_and_id: RealmAndAutoInitId,
+    opaque_ptr: ?*const anyopaque,
+
+    fn retainOpaque(realm_header: *gc.Header, init_id: AutoInitId, opaque_ptr: ?*const anyopaque) AutoInitSlot {
+        return .{
+            .realm_and_id = RealmAndAutoInitId.retain(realm_header, init_id),
+            .opaque_ptr = opaque_ptr,
+        };
+    }
+
+    pub fn retainPrototype(realm_header: *gc.Header) AutoInitSlot {
+        return retainOpaque(realm_header, .prototype, null);
+    }
+
+    pub fn retainProp(realm_header: *gc.Header, stored_descriptor: *const AutoInit) AutoInitSlot {
+        return retainOpaque(realm_header, .prop, @ptrCast(stored_descriptor));
+    }
+
+    pub fn retainModule(realm_header: *gc.Header, owner: *const AutoInitModuleOwner) AutoInitSlot {
+        return retainOpaque(realm_header, .module_ns, @ptrCast(owner));
+    }
+
+    pub fn descriptor(self: AutoInitSlot) ?*const AutoInit {
+        if (self.realm_and_id.id() != .prop) return null;
+        const stored = self.opaque_ptr orelse return null;
+        return @ptrCast(@alignCast(stored));
+    }
+
+    pub fn moduleOwner(self: AutoInitSlot) ?*const AutoInitModuleOwner {
+        if (self.realm_and_id.id() != .module_ns) return null;
+        const stored = self.opaque_ptr orelse return null;
+        return @ptrCast(@alignCast(stored));
+    }
+
+    pub fn clone(self: AutoInitSlot) AutoInitSlot {
+        return .{
+            .realm_and_id = self.realm_and_id.clone(),
+            .opaque_ptr = self.opaque_ptr,
+        };
+    }
+
+    pub fn deinit(self: *AutoInitSlot, rt: *JSRuntime) void {
+        self.realm_and_id.deinit(rt);
+        self.opaque_ptr = null;
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(RealmAndAutoInitId) == @sizeOf(usize));
+    std.debug.assert(@alignOf(RealmAndAutoInitId) == @alignOf(usize));
+    std.debug.assert(@sizeOf(AutoInitSlot) == 2 * @sizeOf(usize));
+    std.debug.assert(@alignOf(AutoInitSlot) == @alignOf(usize));
+}
+
+/// Immutable PROP builder facts. Runtime and Realm ownership live in the
+/// two-word property slot, never in this shareable descriptor.
 pub const AutoInit = struct {
     name: []const u8,
     length: i32,
-    rt: *JSRuntime,
     kind: AutoInitKind = .native_function,
-    // Kind-specific payload reused by host function autoinit and by native
-    // accessor pairs. For `.native_accessor`, `host_function_kind > 0` means
-    // an accessor setter exists; it stores the setter length, while
-    // `external_host_function_id` stores the setter native-builtin id.
+    // Kind-specific payload reused by host function autoinit.
     host_function_kind: i32 = 0,
     external_host_function_id: u32 = 0,
     host_function_prototype: bool = false,
-    host_function_realm_global: usize = 0,
     native_builtin_id: i32 = 0,
     array_builtin_marker: ArrayBuiltinMarker = .none,
     typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
@@ -249,12 +328,22 @@ pub const AutoInit = struct {
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
     disposable_stack_method: u8 = 0,
     async_disposable_stack_method: u8 = 0,
-    shared_native_cache_slot: u8 = 0,
+    /// Optional immutable standard/host preparation step. It may only finish
+    /// metadata on the freshly-created result function; it must not retain or
+    /// mutate the owner whose AUTOINIT slot is being materialized.
+    prepare_native_function: ?*const fn (*JSRuntime, *const AutoInit, JSValue) anyerror!void = null,
 };
 
-pub const AutoInitRef = struct {
-    rt: *JSRuntime,
-    id: u32,
+/// Typed MODULE_NS materialization contract. A resolver returns either a
+/// newly-owned namespace value or the existing export cell that the property
+/// must retain directly; it never snapshots a VarRef's current value.
+pub const AutoInitMaterialization = union(enum) {
+    value: JSValue,
+    var_ref: *VarRef,
+};
+
+pub const AutoInitModuleOwner = struct {
+    resolve: *const fn (owner: *const AutoInitModuleOwner, realm_header: *gc.Header) anyerror!AutoInitMaterialization,
 };
 
 /// qjs `JSProperty` (quickjs.c:947-963): a 16B untagged union. The active arm
@@ -271,7 +360,7 @@ pub const AutoInitRef = struct {
 pub const Slot = union {
     data: JSValue,
     accessor: Accessor,
-    auto_init: AutoInitRef,
+    auto_init: AutoInitSlot,
     // QuickJS `JS_PROP_VARREF`: the property slot HOLDS the cell pointer
     // (qjs `pr->u.var_ref`). Reads/writes of such a property auto-deref
     // `cell.pvalue`. Used for top-level lexical (`let`/`const`) bindings on
@@ -283,9 +372,10 @@ pub const Slot = union {
         switch (flags.kind) {
             .data => self.data.free(rt),
             .accessor => self.accessor.destroy(rt),
-            // Auto-init metadata is owned by JSRuntime.auto_init_table and
-            // released when the runtime is torn down.
-            .auto_init => {},
+            .auto_init => {
+                var owned = self.auto_init;
+                owned.deinit(rt);
+            },
             // The slot holds one ref on the cell (qjs add_property ref_count++);
             // release it (qjs free_property VARREF branch -> free_var_ref).
             // PRESERVE the cycle-collector guard: during remove_cycles a
@@ -304,7 +394,7 @@ pub const Slot = union {
         return switch (flags.kind) {
             .data => .{ .data = self.data.dup() },
             .accessor => .{ .accessor = self.accessor.dup() },
-            .auto_init => .{ .auto_init = self.auto_init },
+            .auto_init => .{ .auto_init = self.auto_init.clone() },
             .var_ref => blk: {
                 _ = self.var_ref.valueRef().dup();
                 break :blk .{ .var_ref = self.var_ref };
@@ -323,20 +413,22 @@ comptime {
     }
 }
 
-pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !AutoInitRef {
-    // The table is runtime-resident. Parsing may temporarily replace
-    // `memory.allocator` with an arena, whose lifetime is shorter than `rt`.
-    try rt.auto_init_table.append(rt.memory.persistent_allocator, info);
-    return .{ .rt = rt, .id = @intCast(rt.auto_init_table.items.len - 1) };
+pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !*const AutoInit {
+    // Each descriptor has a stable address for the Runtime lifetime. Parsing
+    // may temporarily replace `memory.allocator` with a short-lived arena, so
+    // allocate and index these through the persistent Runtime account.
+    const stored = try rt.createRuntime(AutoInit);
+    errdefer rt.destroyRuntime(AutoInit, stored);
+    stored.* = info;
+    try rt.auto_init_descriptors.append(rt.memory.persistent_allocator, stored);
+    return stored;
 }
 
-pub fn autoInitAt(rt: *JSRuntime, ref: AutoInitRef) *AutoInit {
-    std.debug.assert(ref.rt == rt);
-    return autoInit(ref);
-}
-
-pub fn autoInit(ref: AutoInitRef) *AutoInit {
-    return &ref.rt.auto_init_table.items[ref.id];
+pub fn autoInit(ref: anytype) *const AutoInit {
+    return switch (@TypeOf(ref)) {
+        AutoInitSlot => ref.descriptor() orelse unreachable,
+        else => @compileError("expected AutoInitSlot"),
+    };
 }
 
 /// Per-object property storage. Holds only the value side of a

@@ -155,17 +155,14 @@ test "script or module metadata owns each bytecode transfer" {
     const fb = &fb_slice[0];
     var fb_alive = true;
     defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
-    try std.testing.expectEqual(display_filename, fb.filename);
+    try std.testing.expectEqual(display_filename, fb.filenameAtom());
     try std.testing.expectEqual(referrer, fb.scriptOrModule());
-    try std.testing.expectEqual(base_ref_count + 3, rt.atoms.refCount(referrer).?);
-
-    const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(display_filename, view.filename);
-    try std.testing.expectEqual(referrer, view.script_or_module);
+    try std.testing.expectEqual(atom_module.null_atom, fd.script_or_module);
+    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
     fb_alive = false;
-    try std.testing.expectEqual(base_ref_count + 2, rt.atoms.refCount(referrer).?);
+    try std.testing.expectEqual(base_ref_count + 1, rt.atoms.refCount(referrer).?);
 
     fd.deinit(rt);
     fd_alive = false;
@@ -176,31 +173,27 @@ test "script or module metadata owns each bytecode transfer" {
     try std.testing.expectEqual(base_ref_count, rt.atoms.refCount(referrer).?);
 }
 
-test "bytecode setCode plants the op.return sentinel even for empty code" {
+test "bytecode setCode owns exactly the visible code bytes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     defer function_bc.deinit(rt);
 
-    // The bounds-check-free dispatch starts a zero-length body with
-    // `pc == code_end` and reads `code[0]` there — the sentinel must exist
-    // (a bare `&.{}` slice would hand it a dangling pointer).
     try function_bc.setCode(&.{});
     try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 1), function_bc.code_capacity);
-    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[0]);
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
 
     try function_bc.setCode(&.{ 1, 2 });
     try std.testing.expectEqual(@as(usize, 2), function_bc.code.len);
-    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[2]);
+    try std.testing.expectEqual(@as(usize, 2), function_bc.code_capacity);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, function_bc.code);
     try function_bc.setCode(&.{});
     try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
-    try std.testing.expectEqual(@as(usize, 1), function_bc.code_capacity);
-    try std.testing.expectEqual(bytecode.opcode.op.@"return", function_bc.code.ptr[0]);
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
 }
 
-test "bytecode appendCode does not infer direct eval from atom operand bytes" {
+test "bytecode appendCode preserves eval-looking atom operand bytes as data" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -215,7 +208,7 @@ test "bytecode appendCode does not infer direct eval from atom operand bytes" {
     try std.testing.expectEqual(op.eval, instruction[1]);
     try std.testing.expectEqual(op.apply_eval, instruction[2]);
     try function_bc.appendCode(&instruction);
-    try std.testing.expect(!function_bc.flags.has_eval_call);
+    try std.testing.expectEqualSlices(u8, &instruction, function_bc.code);
 }
 
 test "bytecode module record add failure releases duplicated atom references" {
@@ -258,7 +251,627 @@ fn createTestFunctionBytecode(
         const root_scope = try fd.appendScope(-1);
         if (root_scope != 0) return error.TestUnexpectedResult;
     }
-    return pipeline.finalize.createFunctionBytecode(fd, rt);
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+    return pipeline.finalize.createFunctionBytecode(fd, .{ .realm = realm });
+}
+
+test "createFunctionBytecode rejects a cross-runtime compile context before moving owners" {
+    const owner_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer owner_rt.destroy();
+    const foreign_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer foreign_rt.destroy();
+    const foreign_realm = try core.RealmContext.create(foreign_rt);
+    defer foreign_realm.destroy();
+
+    const name = try owner_rt.internAtom("cross-runtime-function-bytecode");
+    defer owner_rt.atoms.free(name);
+    var fd = function_def.FunctionDef.init(&owner_rt.memory, &owner_rt.atoms, name);
+    defer fd.deinit(owner_rt);
+    _ = try fd.appendScope(-1);
+    try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+    const code_ptr = fd.byte_code.ptr;
+    const owner_bytes = owner_rt.memory.allocated_bytes;
+    const foreign_bytes = foreign_rt.memory.allocated_bytes;
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = foreign_realm }),
+    );
+    try std.testing.expectEqual(@intFromPtr(code_ptr), @intFromPtr(fd.byte_code.ptr));
+    try std.testing.expectEqualSlices(u8, &.{bytecode.opcode.op.return_undef}, fd.byte_code);
+    try std.testing.expectEqual(name, fd.func_name);
+    try std.testing.expectEqual(owner_bytes, owner_rt.memory.allocated_bytes);
+    try std.testing.expectEqual(foreign_bytes, foreign_rt.memory.allocated_bytes);
+}
+
+test "FunctionBytecode uses the exact QJS base and optional inline tails" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const extension_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
+    const Case = struct { debug: bool, extension: bool, fam_bytes: usize };
+    const cases = [_]Case{
+        .{ .debug = false, .extension = false, .fam_bytes = 0 },
+        .{ .debug = true, .extension = false, .fam_bytes = @sizeOf(bytecode.function_bytecode.DebugInfo) },
+        .{ .debug = false, .extension = true, .fam_bytes = extension_bytes },
+        .{
+            .debug = true,
+            .extension = true,
+            .fam_bytes = @sizeOf(bytecode.function_bytecode.DebugInfo) + extension_bytes,
+        },
+    };
+
+    for (cases) |case| {
+        const before_bytes = rt.memory.allocated_bytes;
+        const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+            .has_debug = case.debug,
+            .has_extension = case.extension,
+        });
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(bytecode.FunctionBytecode));
+        try std.testing.expectEqual(@as(usize, 8), @alignOf(bytecode.FunctionBytecode));
+        try std.testing.expectEqual(case.fam_bytes, fb.famBytes());
+        try std.testing.expectEqual(@sizeOf(bytecode.FunctionBytecode) + case.fam_bytes, fb.layout().mainPayloadBytes());
+        try std.testing.expectEqual(fb.layout().mainPayloadBytes(), fb.heapByteSize());
+        try std.testing.expectEqual(case.debug, fb.hasDebug());
+        try std.testing.expectEqual(case.extension, fb.hasExtension());
+        try std.testing.expect(fb.legacyBytecodeAdapter() == null);
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
+        try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
+        try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().kind);
+        try std.testing.expectEqual(@as(i32, 1), fb.header.meta().rc);
+        try std.testing.expect(fb.header.meta().flags.metadata_in_slab);
+
+        try std.testing.expect(fb.byte_code == null);
+        try std.testing.expect(fb.vardefs == null);
+        try std.testing.expect(fb.closure_var == null);
+        try std.testing.expect(fb.cpool == null);
+        try std.testing.expectEqual(@as(i32, 0), fb.byte_code_len);
+        try std.testing.expectEqual(@as(i32, 0), fb.cpool_count);
+        try std.testing.expectEqual(@as(i32, 0), fb.closure_var_count);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &fb._flag_padding);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &fb._realm_padding);
+        try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & bytecode.FunctionBytecode.byte18_rom_mask);
+        try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & 0x80);
+
+        if (fb.debugInfo()) |dbg| {
+            try std.testing.expectEqual(@intFromPtr(fb) + 0x60, @intFromPtr(dbg));
+            try std.testing.expectEqual(@as(u32, 0), dbg._padding);
+            try std.testing.expect(dbg.pc2line_buf == null);
+            try std.testing.expect(dbg.source_ptr == null);
+        }
+        if (fb.hotExtension()) |hot| {
+            const expected = @intFromPtr(fb) + fb.layout().hot_off.?;
+            try std.testing.expectEqual(expected, @intFromPtr(hot));
+        }
+        try std.testing.expectEqual(case.extension, fb.hotExtension() != null);
+
+        fb.destroyUnpublishedFixture(rt);
+        try std.testing.expectEqual(before_bytes, rt.memory.allocated_bytes);
+    }
+
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "call_facts"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "script_or_module"),
+    );
+}
+
+test "FunctionLayout matches the QJS-order core pack for both JSValue representations" {
+    const layout = try bytecode.FunctionLayout.init(
+        true,
+        true,
+        2,
+        1,
+        2,
+        2,
+        3,
+    );
+    const value_size = @sizeOf(core.JSValue);
+    const expected_cpool_off: usize = 0x80;
+    const expected_vardefs_off = expected_cpool_off + 2 * value_size;
+    const expected_closure_var_off = expected_vardefs_off + 3 * @sizeOf(bytecode.function_bytecode.BytecodeVarDef);
+    const expected_byte_code_off = expected_closure_var_off + 2 * @sizeOf(bytecode.function_bytecode.BytecodeClosureVar);
+    const expected_byte_code_end = expected_byte_code_off + 3;
+    const expected_hot_extension_off = expected_byte_code_end;
+    const expected_total_size =
+        expected_hot_extension_off +
+        @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
+
+    try std.testing.expectEqual(expected_cpool_off, layout.cpool_off);
+    try std.testing.expectEqual(expected_vardefs_off, layout.vardefs_off);
+    try std.testing.expectEqual(expected_closure_var_off, layout.closure_var_off);
+    try std.testing.expectEqual(expected_byte_code_off, layout.byte_code_off);
+    try std.testing.expectEqual(expected_byte_code_end, layout.byte_code_end);
+    try std.testing.expectEqual(@as(?usize, expected_hot_extension_off), layout.hot_off);
+    try std.testing.expectEqual(expected_total_size, layout.total_size);
+    try std.testing.expectEqual(expected_total_size, layout.mainPayloadBytes());
+    try std.testing.expectEqual(expected_total_size - @sizeOf(bytecode.FunctionBytecode), layout.famBytes());
+
+    switch (value_size) {
+        16 => {
+            try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
+            try std.testing.expectEqual(@as(usize, 0xa0), layout.vardefs_off);
+            try std.testing.expectEqual(@as(usize, 0xc4), layout.closure_var_off);
+            try std.testing.expectEqual(@as(usize, 0xd4), layout.byte_code_off);
+            try std.testing.expectEqual(@as(usize, 0xd7), layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0xd7), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0xdf), layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x7f), layout.famBytes());
+        },
+        8 => {
+            try std.testing.expectEqual(@as(usize, 0x80), layout.cpool_off);
+            try std.testing.expectEqual(@as(usize, 0x90), layout.vardefs_off);
+            try std.testing.expectEqual(@as(usize, 0xb4), layout.closure_var_off);
+            try std.testing.expectEqual(@as(usize, 0xc4), layout.byte_code_off);
+            try std.testing.expectEqual(@as(usize, 0xc7), layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0xc7), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0xcf), layout.total_size);
+            try std.testing.expectEqual(@as(usize, 0x6f), layout.famBytes());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "FunctionLayout has no padding between QJS core segments or after extension-free code" {
+    const Case = struct {
+        has_debug: bool,
+        cpool_count: usize,
+        arg_count: usize,
+        var_count: usize,
+        closure_count: usize,
+        code_len: usize,
+    };
+    const cases = [_]Case{
+        .{
+            .has_debug = false,
+            .cpool_count = 0,
+            .arg_count = 0,
+            .var_count = 0,
+            .closure_count = 0,
+            .code_len = 0,
+        },
+        .{
+            .has_debug = true,
+            .cpool_count = 3,
+            .arg_count = 2,
+            .var_count = 1,
+            .closure_count = 2,
+            .code_len = 5,
+        },
+    };
+
+    for (cases) |case| {
+        const layout = try bytecode.FunctionLayout.init(
+            case.has_debug,
+            false,
+            case.cpool_count,
+            case.arg_count,
+            case.var_count,
+            case.closure_count,
+            case.code_len,
+        );
+        const core_end: usize = @sizeOf(bytecode.FunctionBytecode) +
+            (if (case.has_debug) @as(usize, @sizeOf(bytecode.function_bytecode.DebugInfo)) else 0);
+        try std.testing.expectEqual(core_end, layout.cpool_off);
+        try std.testing.expectEqual(
+            layout.cpool_off + case.cpool_count * @sizeOf(core.JSValue),
+            layout.vardefs_off,
+        );
+        try std.testing.expectEqual(
+            layout.vardefs_off +
+                (case.arg_count + case.var_count) * @sizeOf(bytecode.function_bytecode.BytecodeVarDef),
+            layout.closure_var_off,
+        );
+        try std.testing.expectEqual(
+            layout.closure_var_off +
+                case.closure_count * @sizeOf(bytecode.function_bytecode.BytecodeClosureVar),
+            layout.byte_code_off,
+        );
+        try std.testing.expectEqual(layout.byte_code_off + case.code_len, layout.byte_code_end);
+        try std.testing.expect(layout.hot_off == null);
+        try std.testing.expectEqual(layout.byte_code_end, layout.total_size);
+        try std.testing.expectEqual(layout.total_size, layout.mainPayloadBytes());
+    }
+}
+
+test "FunctionLayout places the exact hot tail at every code-end residue" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const code = [_]u8{
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+        bytecode.opcode.op.return_undef,
+    };
+
+    for (0..8) |code_len| {
+        const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+            .byte_code = code[0..code_len],
+            .has_debug = false,
+            .has_extension = true,
+        });
+        defer fb.destroyUnpublishedFixture(rt);
+
+        const expected = try bytecode.FunctionLayout.init(false, true, 0, 0, 0, 0, code_len);
+        const actual = fb.layout();
+        const expected_hot_extension_off = actual.byte_code_end;
+        const expected_total_size =
+            expected_hot_extension_off +
+            @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
+
+        try std.testing.expect(std.meta.eql(expected, actual));
+        try std.testing.expectEqual(@as(usize, 0x60), actual.byte_code_off);
+        try std.testing.expectEqual(@as(usize, 0x60) + code_len, actual.byte_code_end);
+        try std.testing.expectEqual(code_len, actual.byte_code_end % 8);
+        try std.testing.expectEqual(@as(?usize, expected_hot_extension_off), actual.hot_off);
+        try std.testing.expectEqual(expected_total_size, actual.total_size);
+        try std.testing.expectEqual(
+            @intFromPtr(fb) + expected_hot_extension_off,
+            @intFromPtr(fb.hotExtension().?),
+        );
+        if (code_len == 0) {
+            try std.testing.expect(fb.byte_code == null);
+        } else {
+            try std.testing.expectEqual(
+                @intFromPtr(fb) + actual.byte_code_off,
+                @intFromPtr(fb.byte_code.?),
+            );
+        }
+        try std.testing.expectEqualSlices(u8, code[0..code_len], fb.byteCode());
+        try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
+
+        if (code_len == 3) {
+            try std.testing.expectEqual(@as(usize, 0x63), actual.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0x63), actual.hot_off);
+            try std.testing.expectEqual(@as(usize, 0x6b), actual.total_size);
+        }
+    }
+}
+
+test "FunctionLayout rejects every checked size overflow class" {
+    const max = std.math.maxInt(usize);
+    try std.testing.expectError(
+        error.BytecodeOverflow,
+        bytecode.FunctionLayout.init(false, false, max, 0, 0, 0, 0),
+    );
+    try std.testing.expectError(
+        error.BytecodeOverflow,
+        bytecode.FunctionLayout.init(false, false, 0, max, 1, 0, 0),
+    );
+    try std.testing.expectError(
+        error.BytecodeOverflow,
+        bytecode.FunctionLayout.init(false, false, 0, 0, 0, max, 0),
+    );
+    try std.testing.expectError(
+        error.BytecodeOverflow,
+        bytecode.FunctionLayout.init(true, true, 0, 0, 0, 0, max),
+    );
+}
+
+test "CallFacts is one 16-bit execution snapshot" {
+    try std.testing.expectEqual(@as(usize, 2), @sizeOf(bytecode.CallFacts));
+    try std.testing.expectEqual(@as(usize, 0), @bitOffsetOf(bytecode.CallFacts, "execution"));
+    try std.testing.expectEqual(
+        @as(usize, 8),
+        @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "call_facts"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "_call_facts_padding"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "script_or_module"),
+    );
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .has_debug = false,
+        .has_extension = true,
+    });
+    defer fb.destroyUnpublishedFixture(rt);
+
+    const first_execution: bytecode.function_bytecode.ExecutionFlags = .{
+        .has_mapped_arguments = true,
+        .strict_simple_inline_eligible = true,
+        .raw_this_inline_exact_args_leaf = true,
+        .exact_args_leaf_kind = .raw_this,
+    };
+    fb.setExecutionFlags(first_execution);
+
+    const first_snapshot = fb.callFacts();
+    try std.testing.expectEqual(first_execution, first_snapshot.execution);
+
+    const second_execution: bytecode.function_bytecode.ExecutionFlags = .{
+        .simple_inline_eligible = true,
+        .simple_inline_empty_leaf = true,
+        .capture_leaf_kind = .sloppy,
+    };
+    fb.setExecutionFlags(second_execution);
+    const second_snapshot = fb.callFacts();
+    try std.testing.expectEqual(second_execution, second_snapshot.execution);
+
+    // A caller-owned snapshot is immutable even if an unpublished fixture is
+    // subsequently changed through the construction-only mutators.
+    try std.testing.expectEqual(first_execution, first_snapshot.execution);
+}
+
+test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const code = [_]u8{bytecode.opcode.op.return_undef};
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .flags = .{
+            .is_strict_mode = true,
+            .runtime_strict_mode = true,
+            .has_prototype = true,
+            .has_simple_parameter_list = true,
+            .is_derived_class_constructor = true,
+            .need_home_object = true,
+            .func_kind = .async_generator,
+            .new_target_allowed = true,
+            .super_call_allowed = true,
+            .super_allowed = true,
+            .arguments_allowed = true,
+            .is_direct_or_indirect_eval = true,
+        },
+        .arg_count = 1,
+        .var_count = 1,
+        .var_ref_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+    });
+    defer fb.destroyUnpublishedFixture(rt);
+
+    try std.testing.expectEqual(@as(u8, 0x01), fb.js_mode);
+    try std.testing.expectEqual(@as(u8, 0xff), fb.flag_byte17);
+    try std.testing.expectEqual(@as(u8, 0x77), fb.flag_byte18);
+    try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & bytecode.FunctionBytecode.byte18_rom_mask);
+    try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & 0x80);
+    try std.testing.expectEqual(@as(i32, 1), fb.byte_code_len);
+    try std.testing.expectEqual(@as(i32, 1), fb.cpool_count);
+    try std.testing.expectEqual(@as(i32, 1), fb.closure_var_count);
+    try std.testing.expectEqual(@as(u16, 1), fb.var_ref_count);
+    try std.testing.expect(fb.byte_code != null);
+    try std.testing.expect(fb.vardefs != null);
+    try std.testing.expect(fb.closure_var != null);
+    try std.testing.expect(fb.cpool != null);
+    try std.testing.expect(fb.cpoolSlice()[0].isUndefined());
+
+    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, 1);
+    const layout = fb.layout();
+    try std.testing.expect(std.meta.eql(expected_layout, layout));
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.cpool_off, @intFromPtr(fb.cpool.?));
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.vardefs_off, @intFromPtr(fb.vardefs.?));
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.closure_var_off, @intFromPtr(fb.closure_var.?));
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.byte_code_off, @intFromPtr(fb.byte_code.?));
+    try std.testing.expectEqual(
+        @intFromPtr(fb) + layout.hot_off.?,
+        @intFromPtr(fb.hotExtension().?),
+    );
+    try std.testing.expectEqual(fb.callFacts(), fb.canonicalCallFacts());
+}
+
+test "packed FunctionBytecode zero-count pointers stay null beside non-empty segments" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .var_count = 1,
+        .cpool_count = 1,
+        .has_debug = false,
+        .has_extension = true,
+    });
+    defer fb.destroyUnpublishedFixture(rt);
+
+    const expected_layout = try bytecode.FunctionLayout.init(false, true, 1, 0, 1, 0, 0);
+    const layout = fb.layout();
+    try std.testing.expect(std.meta.eql(expected_layout, layout));
+    try std.testing.expect(fb.cpool != null);
+    try std.testing.expect(fb.vardefs != null);
+    try std.testing.expect(fb.closure_var == null);
+    try std.testing.expect(fb.byte_code == null);
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.cpool_off, @intFromPtr(fb.cpool.?));
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.vardefs_off, @intFromPtr(fb.vardefs.?));
+    try std.testing.expectEqual(
+        @intFromPtr(fb) + layout.hot_off.?,
+        @intFromPtr(fb.hotExtension().?),
+    );
+    try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), fb.callFacts());
+    switch (@sizeOf(core.JSValue)) {
+        16 => {
+            try std.testing.expectEqual(@as(usize, 0x7c), layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0x7c), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0x84), layout.total_size);
+        },
+        8 => {
+            try std.testing.expectEqual(@as(usize, 0x74), layout.byte_code_end);
+            try std.testing.expectEqual(@as(?usize, 0x74), layout.hot_off);
+            try std.testing.expectEqual(@as(usize, 0x7c), layout.total_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "non-empty W1c5 fixture does not force the optional extension" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const before_bytes = rt.memory.allocated_bytes;
+    const code = [_]u8{bytecode.opcode.op.return_undef};
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .byte_code = &code,
+        .has_debug = false,
+        .has_extension = false,
+    });
+
+    const expected_layout = try bytecode.FunctionLayout.init(false, false, 0, 0, 0, 0, code.len);
+    const layout = fb.layout();
+    try std.testing.expect(std.meta.eql(expected_layout, layout));
+    try std.testing.expect(!fb.hasDebug());
+    try std.testing.expect(!fb.hasExtension());
+    try std.testing.expect(fb.hotExtension() == null);
+    try std.testing.expect(layout.hot_off == null);
+    try std.testing.expectEqual(layout.byte_code_end, layout.total_size);
+    try std.testing.expectEqual(code.len, fb.famBytes());
+    try std.testing.expect(fb.byte_code != null);
+    try std.testing.expectEqual(@intFromPtr(fb) + layout.byte_code_off, @intFromPtr(fb.byte_code.?));
+    try std.testing.expectEqualSlices(u8, &code, fb.byteCode());
+
+    fb.destroyUnpublishedFixture(rt);
+    try std.testing.expectEqual(before_bytes, rt.memory.allocated_bytes);
+}
+
+test "FunctionBytecode FAM builder zeroes a reused slab payload without touching metadata" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const code = [_]u8{
+        bytecode.opcode.op.undefined,
+        bytecode.opcode.op.drop,
+        bytecode.opcode.op.return_undef,
+    };
+    // Keep a sibling block live so freeing `first` does not return the whole
+    // slab arena; the next allocation must consume the just-freed slot.
+    const guard = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .arg_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+        .has_extension = true,
+    });
+    defer guard.destroyUnpublishedFixture(rt);
+    const first = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .arg_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+        .has_extension = true,
+    });
+    const first_address = @intFromPtr(first);
+    @memset(&first._flag_padding, 0xaa);
+    @memset(&first._realm_padding, 0xbb);
+    first.debugInfoMut().?._padding = 0xcccccccc;
+    first.cpoolSlice()[0] = core.JSValue.int32(99);
+    first.allVarDefs()[0].scope_next = 0x12345678;
+    first.allVarDefs()[0].flags = 0xff;
+    first.allVarDefs()[0].reserved = 0xff;
+    first.allVarDefs()[0].var_ref_idx = 0xffff;
+    first.closureVar()[0].flags = 0xff;
+    first.closureVar()[0].kind_flags = 0xff;
+    first.closureVar()[0].var_idx = 0xffff;
+    first.hotExtensionMut().?.call_facts = @bitCast(@as(u16, 0xffff));
+    first.hotExtensionMut().?._call_facts_padding = 0xffff;
+    first.destroyUnpublishedFixture(rt);
+
+    const second = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .arg_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+        .has_extension = true,
+    });
+    defer second.destroyUnpublishedFixture(rt);
+    try std.testing.expectEqual(first_address, @intFromPtr(second));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &second._flag_padding);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &second._realm_padding);
+    try std.testing.expectEqual(@as(u32, 0), second.debugInfo().?._padding);
+    try std.testing.expect(second.cpoolSlice()[0].isUndefined());
+    try std.testing.expectEqual(atom_module.null_atom, second.allVarDefs()[0].var_name);
+    try std.testing.expectEqual(@as(i32, 0), second.allVarDefs()[0].scope_next);
+    try std.testing.expectEqual(@as(u8, 0), second.allVarDefs()[0].flags);
+    try std.testing.expectEqual(@as(u8, 0), second.allVarDefs()[0].reserved);
+    try std.testing.expectEqual(@as(u16, 0), second.allVarDefs()[0].var_ref_idx);
+    try std.testing.expectEqual(@as(u8, 0), second.closureVar()[0].flags);
+    try std.testing.expectEqual(@as(u8, 0), second.closureVar()[0].kind_flags);
+    try std.testing.expectEqual(@as(u16, 0), second.closureVar()[0].var_idx);
+    try std.testing.expectEqual(atom_module.null_atom, second.closureVar()[0].var_name);
+    try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), second.hotExtension().?.call_facts);
+    try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?._call_facts_padding);
+    try std.testing.expectEqual(atom_module.null_atom, second.hotExtension().?.script_or_module);
+    try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().kind);
+    try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
+}
+
+test "published no-debug no-extension FunctionBytecode uses the deferred zero-FAM free path" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    errdefer rt.destroy();
+
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .has_debug = false,
+        .has_extension = false,
+    });
+    try std.testing.expect(!fb.hasDebug());
+    try std.testing.expect(!fb.hasExtension());
+    try std.testing.expectEqual(@as(usize, 0), fb.famBytes());
+    fb.publishFixtureNoFail(rt);
+
+    // Runtime teardown deinitializes FB resources in Pass A and releases the
+    // raw struct in the deferred Pass B. The physical-tail bits must therefore
+    // survive deinit so destroyWithFam receives the original zero length.
+    rt.destroy();
+}
+
+test "published packed FunctionBytecode preserves its exact FAM size through deferred free" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    errdefer rt.destroy();
+
+    const code = [_]u8{
+        bytecode.opcode.op.undefined,
+        bytecode.opcode.op.drop,
+        bytecode.opcode.op.return_undef,
+    };
+    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+        .arg_count = 1,
+        .var_count = 1,
+        .closure_var_count = 1,
+        .cpool_count = 1,
+        .byte_code = &code,
+        .has_debug = true,
+        .has_extension = true,
+    });
+    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, code.len);
+    try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
+    try std.testing.expect(fb.famBytes() > @sizeOf(bytecode.function_bytecode.DebugInfo));
+    fb.publishFixtureNoFail(rt);
+
+    // Pass A clears the live count/pointer owners. Pass B must still hand the
+    // exact original packed-FAM length to destroyWithFam, rather than
+    // reconstructing a zero or extension-only tail from cleared fields.
+    rt.destroy();
+}
+
+fn finalizeMutableWithTestRealm(
+    function: *bytecode.Bytecode,
+    fd: ?*function_def.FunctionDef,
+    rt: *core.JSRuntime,
+) !void {
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+    return pipeline.finalize.runWithFunctionDefRuntime(function, fd, .{ .realm = realm });
 }
 
 fn resolveEvalDeclarationPlan(
@@ -1115,7 +1728,7 @@ test "resolve_variables: direct eval var object probes unresolved make refs" {
     var input = [_]u8{0} ** 18;
     input[0] = op.scope_make_ref;
     std.mem.writeInt(u32, input[1..5], x_atom, .little);
-    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u32, input[5..9], 16, .little);
     std.mem.writeInt(u16, input[9..11], 0, .little);
     input[11] = op.push_i32;
     std.mem.writeInt(i32, input[12..16], 1, .little);
@@ -1180,7 +1793,7 @@ test "resolve_variables: all dynamic reference forms probe var before arg var ob
         input[0] = case.scope_op;
         std.mem.writeInt(u32, input[1..5], x_atom, .little);
         if (case.scope_op == op.scope_make_ref) {
-            std.mem.writeInt(u32, input[5..9], 0, .little);
+            std.mem.writeInt(u32, input[5..9], 16, .little);
             std.mem.writeInt(u16, input[9..11], 0, .little);
             input[11] = op.push_i32;
             std.mem.writeInt(i32, input[12..16], 1, .little);
@@ -1373,7 +1986,7 @@ test "resolve_variables: global scope_make_ref assignment lowers to put_var" {
     var input = [_]u8{0} ** 21;
     input[0] = op.scope_make_ref;
     std.mem.writeInt(u32, input[1..5], global_atom, .little);
-    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u32, input[5..9], 18, .little);
     std.mem.writeInt(u16, input[9..11], 0, .little);
     input[11] = op.scope_get_var;
     std.mem.writeInt(u32, input[12..16], local_atom, .little);
@@ -1400,6 +2013,68 @@ test "resolve_variables: global scope_make_ref assignment lowers to put_var" {
     try std.testing.expectEqual(global_atom, fd.closure_var[0].var_name);
 }
 
+test "resolve_variables: patched make-ref label folds a tail beyond the former scan bound" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("long-reference-tail");
+    const global_atom = try rt.internAtom("g");
+    const local_atom = try rt.internAtom("value");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(global_atom);
+    defer rt.atoms.free(local_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_atom, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 39;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], global_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 36, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    var pc: usize = 11;
+    for (0..9) |_| {
+        input[pc] = op.undefined;
+        input[pc + 1] = op.drop;
+        pc += 2;
+    }
+    try std.testing.expectEqual(@as(usize, 29), pc);
+    input[pc] = op.scope_get_var;
+    std.mem.writeInt(u32, input[pc + 1 ..][0..4], local_atom, .little);
+    std.mem.writeInt(u16, input[pc + 5 ..][0..2], 0, .little);
+    pc += 7;
+    try std.testing.expectEqual(@as(usize, 36), pc);
+    input[pc] = op.insert3;
+    input[pc + 1] = op.put_ref_value;
+    input[pc + 2] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(global_atom);
+    try bc.retainAtomOperand(local_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 24), bc.code.len);
+    for (0..9) |index| {
+        try std.testing.expectEqual(op.undefined, bc.code[index * 2]);
+        try std.testing.expectEqual(op.drop, bc.code[index * 2 + 1]);
+    }
+    try std.testing.expectEqual(op.get_loc0, bc.code[18]);
+    try std.testing.expectEqual(op.dup, bc.code[19]);
+    try std.testing.expectEqual(op.put_var, bc.code[20]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[21..23], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[23]);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
 test "resolve_variables: strict global scope_make_ref keeps original reference" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -1421,7 +2096,7 @@ test "resolve_variables: strict global scope_make_ref keeps original reference" 
     var input = [_]u8{0} ** 18;
     input[0] = op.scope_make_ref;
     std.mem.writeInt(u32, input[1..5], global_atom, .little);
-    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u32, input[5..9], 16, .little);
     std.mem.writeInt(u16, input[9..11], 0, .little);
     input[11] = op.push_i32;
     std.mem.writeInt(i32, input[12..16], 1, .little);
@@ -1470,7 +2145,7 @@ test "resolve_variables: local scope_make_ref assignment lowers safe reference t
     var input = [_]u8{0} ** 21;
     input[0] = op.scope_make_ref;
     std.mem.writeInt(u32, input[1..5], local_target, .little);
-    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u32, input[5..9], 18, .little);
     std.mem.writeInt(u16, input[9..11], 0, .little);
     input[11] = op.scope_get_var;
     std.mem.writeInt(u32, input[12..16], local_value, .little);
@@ -1493,6 +2168,53 @@ test "resolve_variables: local scope_make_ref assignment lowers safe reference t
         op.return_undef,
     }, bc.code);
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
+test "resolve_variables: unpatched scope_make_ref never scans for a nearby put tail" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("unpatched-make-ref");
+    const global_atom = try rt.internAtom("g");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(global_atom);
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], global_atom, .little);
+    // A zero label cannot associate the reference with the adjacent put.
+    // Parser-produced make refs always publish an exact forward target.
+    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    input[11] = op.undefined;
+    input[12] = op.put_ref_value;
+    input[13] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(global_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        op.make_var_ref,
+        @as(u8, @truncate(global_atom)),
+        @as(u8, @truncate(global_atom >> 8)),
+        @as(u8, @truncate(global_atom >> 16)),
+        @as(u8, @truncate(global_atom >> 24)),
+        op.undefined,
+        op.put_ref_value,
+        op.return_undef,
+    }, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{global_atom}, bc.atom_operands);
 }
 
 test "resolve_variables: drops enter_scope/leave_scope" {
@@ -1884,7 +2606,7 @@ test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
     try bc.retainAtomOperand(x_atom);
 
     // Run full pipeline
-    try pipeline.finalize.runWithFunctionDefRuntime(&bc, &fd, rt);
+    try finalizeMutableWithTestRealm(&bc, &fd, rt);
 
     // Expected: get_var <var_ref x> ; return_undef (3 + 1 = 4 bytes)
     // enter_scope, leave_scope, and label should all be dropped
@@ -1897,6 +2619,109 @@ test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
     try std.testing.expectEqual(x_atom, bc.var_ref_names[0]);
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
 }
+
+test "parent finalization failure releases its published child realm owner" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const name = try rt.internAtom("parent-finalize-failure");
+    defer rt.atoms.free(name);
+    var parent = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    var parent_alive = true;
+    defer if (parent_alive) parent.deinit(rt);
+    _ = try parent.appendScope(-1);
+
+    const child = try rt.memory.create(function_def.FunctionDef);
+    var child_owned = true;
+    errdefer if (child_owned) {
+        child.deinit(rt);
+        rt.memory.destroy(function_def.FunctionDef, child);
+    };
+    child.* = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    _ = try child.appendScope(-1);
+    try child.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    child.parent_cpool_idx = @intCast(try parent.appendCpool(core.JSValue.undefinedValue()));
+    try parent.addChild(child);
+    child_owned = false;
+
+    // The post-order walk publishes the valid child first. The parent's
+    // reachable falloff is rejected only when its own lowering runs.
+    try parent.appendByteCode(&.{bytecode.opcode.op.nop});
+    try std.testing.expectError(
+        error.InvalidBytecode,
+        pipeline.finalize.createFunctionBytecode(&parent, .{ .realm = realm }),
+    );
+
+    try std.testing.expect(parent.cpool[0].isFunctionBytecode());
+    const child_header = parent.cpool[0].objectHeader() orelse return error.TestExpectedEqual;
+    const child_fb: *bytecode.FunctionBytecode = @alignCast(@fieldParentPtr("header", child_header));
+    try std.testing.expectEqual(realm, child_fb.realmContext());
+    try std.testing.expectEqual(@as(i32, 2), realm.header.meta().rc);
+
+    // The failed parent FunctionDef still owns the installed cpool value.
+    // Releasing that owner must drop the child's independent RealmRef exactly
+    // once; no partially-created parent FB may retain another reference.
+    parent.deinit(rt);
+    parent_alive = false;
+    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+}
+
+test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    const name = try rt.internAtom("cpool-owner-transfer");
+    defer rt.atoms.free(name);
+
+    const child_fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .realm = realm });
+    child_fb.publishFixtureNoFail(rt);
+    var child_value = core.JSValue.functionBytecode(&child_fb.header);
+    var child_value_alive = true;
+    defer if (child_value_alive) child_value.free(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    var fd_alive = true;
+    defer if (fd_alive) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    _ = try fd.appendCpool(child_value);
+    child_value.free(rt);
+    child_value_alive = false;
+    const child_rc_before = child_fb.header.meta().rc;
+    try std.testing.expectEqual(@as(i32, 1), child_rc_before);
+
+    const parent_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
+    const parent_fb = &parent_slice[0];
+    var parent_alive = true;
+    defer if (parent_alive) core.JSValue.functionBytecode(&parent_fb.header).free(rt);
+
+    try std.testing.expect(fd.cpool[0].isUndefined());
+    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+
+    fd.deinit(rt);
+    fd_alive = false;
+    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try std.testing.expectEqual(name, child_fb.funcName());
+    try std.testing.expectEqual(&child_fb.header, parent_fb.cpoolSlice()[0].objectHeader().?);
+
+    const held_child = parent_fb.cpoolSlice()[0].dup();
+    var held_child_alive = true;
+    defer if (held_child_alive) held_child.free(rt);
+    const realm_refs_before_parent_free = realm.header.meta().rc;
+    core.JSValue.functionBytecode(&parent_fb.header).free(rt);
+    parent_alive = false;
+    try std.testing.expectEqual(child_rc_before, child_fb.header.meta().rc);
+    try std.testing.expectEqual(realm_refs_before_parent_free - 1, realm.header.meta().rc);
+    held_child.free(rt);
+    held_child_alive = false;
+    try std.testing.expectEqual(@as(i32, 1), realm.header.meta().rc);
+}
+
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----
 
 test "resolve_variables: scope_get_var → get_loc when var is local" {
@@ -3118,6 +3943,38 @@ test "resolve_labels preserves dead code reached by an external jump" {
     try std.testing.expectEqualSlices(core.Atom, &.{live_atom}, bc.atom_operands);
 }
 
+test "resolve_labels retains return after jump-entered trailing cleanup" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("jump-entered-cleanup-return");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 15;
+    input[0] = op.get_loc0;
+    input[1] = op.if_false;
+    std.mem.writeInt(u32, input[2..6], 11, .little);
+    input[6] = op.goto;
+    std.mem.writeInt(u32, input[7..11], 0, .little);
+    input[11] = op.close_loc;
+    std.mem.writeInt(u16, input[12..14], 0, .little);
+    input[14] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(op.return_undef, bc.code[bc.code.len - 1]);
+    _ = try stack_size.compute(bc.code, .{});
+}
+
 test "resolve_labels relocates gosub directly to its finalizer" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3247,6 +4104,148 @@ test "M1.1: resolve_variables lowers private-field temp opcodes" {
         try std.testing.expectEqualSlices(u8, case.expected, bc.code);
         try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     }
+}
+
+test "W1d: resolve_variables lowers private method and accessor VarKinds" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("private-kinds");
+    const private_atom = try rt.internAtom("#x");
+    const setter_atom = try rt.internAtom("#x<set>");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(private_atom);
+    defer rt.atoms.free(setter_atom);
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        kind: function_def.VarKind,
+        temp: u8,
+        with_setter: bool = false,
+        expected: []const u8,
+        expected_atoms: usize = 0,
+    }{
+        .{ .kind = .private_method, .temp = op.scope_get_private_field, .expected = &.{ op.get_loc0, op.check_brand, op.nip, op.return_undef } },
+        .{ .kind = .private_method, .temp = op.scope_get_private_field2, .expected = &.{ op.get_loc0, op.check_brand, op.return_undef } },
+        .{ .kind = .private_getter, .temp = op.scope_get_private_field, .expected = &.{ op.get_loc0, op.check_brand, op.call_method, 0, 0, op.return_undef } },
+        .{ .kind = .private_getter, .temp = op.scope_get_private_field2, .expected = &.{ op.dup, op.get_loc0, op.check_brand, op.call_method, 0, 0, op.return_undef } },
+        .{ .kind = .private_setter, .temp = op.scope_get_private_field, .expected = &.{ op.throw_error, 0, 0, 0, 0, 0, op.return_undef }, .expected_atoms = 1 },
+        .{ .kind = .private_method, .temp = op.scope_put_private_field, .expected = &.{ op.throw_error, 0, 0, 0, 0, 0, op.return_undef }, .expected_atoms = 1 },
+        .{ .kind = .private_getter_setter, .temp = op.scope_put_private_field, .with_setter = true, .expected = &.{ op.get_loc1, op.swap, op.rot3r, op.check_brand, op.rot3l, op.call_method, 1, 0, op.drop, op.return_undef } },
+        .{ .kind = .private_method, .temp = op.scope_in_private_field, .expected = &.{ op.get_loc0, op.private_in, op.return_undef } },
+    };
+
+    for (cases) |case| {
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.use_short_opcodes = true;
+        _ = try fd.appendScope(-1);
+        _ = try fd.addScopeVar(private_atom, case.kind, 0, true, true);
+        if (case.with_setter) _ = try fd.addScopeVar(setter_atom, .private_setter, 0, true, true);
+
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        var input = [_]u8{0} ** 8;
+        input[0] = case.temp;
+        std.mem.writeInt(u32, input[1..5], private_atom, .little);
+        std.mem.writeInt(u16, input[5..7], 0, .little);
+        input[7] = op.return_undef;
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(private_atom);
+
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_variables.run(&ctx);
+
+        const expected = try rt.memory.alloc(u8, case.expected.len);
+        defer rt.memory.free(u8, expected);
+        @memcpy(expected, case.expected);
+        if (case.expected_atoms == 1) std.mem.writeInt(u32, expected[1..5], private_atom, .little);
+        try std.testing.expectEqualSlices(u8, expected, bc.code);
+        try std.testing.expectEqual(case.expected_atoms, bc.atom_operands.len);
+    }
+}
+
+test "W1d: private-in has no atom-only binding fallback" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("private-side-metadata");
+    const private_atom = try rt.internAtom("#x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(private_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_in_private_field;
+    std.mem.writeInt(u32, input[1..5], private_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(private_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
+    try std.testing.expectError(error.ClosureVarNotFound, pipeline.resolve_variables.run(&ctx));
+}
+
+test "W1d: private binding topology threads LOCAL then REF without atom fallback" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("private-topology");
+    const private_atom = try rt.internAtom("#x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(private_atom);
+
+    var owner = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer owner.deinit(rt);
+    owner.use_short_opcodes = true;
+    _ = try owner.appendScope(-1);
+    _ = try owner.addScopeVar(private_atom, .private_field, 0, true, true);
+
+    var middle = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer middle.deinit(rt);
+    middle.use_short_opcodes = true;
+    middle.parent = &owner;
+    middle.parent_scope_level = 0;
+    _ = try middle.appendScope(-1);
+
+    var leaf = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer leaf.deinit(rt);
+    leaf.use_short_opcodes = true;
+    leaf.parent = &middle;
+    leaf.parent_scope_level = 0;
+    _ = try leaf.appendScope(-1);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_private_field;
+    std.mem.writeInt(u32, input[1..5], private_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(private_atom);
+
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &leaf);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expect(owner.vars[0].is_captured);
+    try std.testing.expectEqual(@as(usize, 1), middle.closure_var.len);
+    try std.testing.expectEqual(function_def.ClosureType.local, middle.closure_var[0].closureType());
+    try std.testing.expectEqual(@as(usize, 1), leaf.closure_var.len);
+    try std.testing.expectEqual(function_def.ClosureType.ref, leaf.closure_var[0].closureType());
+    try std.testing.expectEqual(function_def.VarKind.private_field, leaf.closure_var[0].varKind());
+    try std.testing.expectEqualSlices(u8, &.{ op.get_var_ref0, op.get_private_field, op.return_undef }, bc.code);
 }
 
 test "M1.1: resolve_variables covers every ClosureType classification" {
@@ -3396,7 +4395,7 @@ test "resolve_labels shortens FunctionDef special-object prologue slots" {
     try std.testing.expectEqualSlices(u8, &expected, bc.code);
 }
 
-test "resolve_labels: base class constructor prologue does not duplicate class fields init" {
+test "resolve_labels: base class constructor prologue initializes this once" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("C");
@@ -3404,67 +4403,43 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
 
     const op = bytecode.opcode.op;
 
-    {
-        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-        defer fd.deinit(rt);
-        fd.func_type = .class_constructor;
-        fd.this_var_idx = 0;
-        fd.class_fields_init_cpool_idx = 0;
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.func_type = .class_constructor;
+    fd.this_var_idx = 0;
 
-        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer bc.deinit(rt);
-        try bc.setCode(&.{op.return_undef});
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&.{op.return_undef});
 
-        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
-        try pipeline.resolve_labels.run(&ctx);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
 
-        const expected = [_]u8{
-            op.push_this,    op.put_loc, 0, 0,
-            op.return_undef,
-        };
-        try std.testing.expectEqualSlices(u8, &expected, bc.code);
-        const computed = try stack_size.compute(bc.code, .{});
-        try std.testing.expectEqual(@as(u16, 1), computed);
-    }
-
-    {
-        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-        defer fd.deinit(rt);
-        fd.func_type = .class_constructor;
-        fd.this_var_idx = 0;
-
-        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer bc.deinit(rt);
-        try bc.setCode(&.{op.return_undef});
-
-        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
-        try pipeline.resolve_labels.run(&ctx);
-
-        const expected = [_]u8{
-            op.push_this,    op.put_loc, 0, 0,
-            op.return_undef,
-        };
-        try std.testing.expectEqualSlices(u8, &expected, bc.code);
-    }
+    const expected = [_]u8{
+        op.push_this,    op.put_loc, 0, 0,
+        op.return_undef,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    const computed = try stack_size.compute(bc.code, .{});
+    try std.testing.expectEqual(@as(u16, 1), computed);
 }
 
 // ---- M1.3 task1: createFunctionBytecode produces a usable structure ----
 
-test "createFunctionBytecode: copies metadata + bytecode + closure_var from FunctionDef" {
+test "createFunctionBytecode: moves final owners from FunctionDef without refcount churn" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("inner");
     const arg_name = try rt.internAtom("arg");
     const captured_name = try rt.internAtom("captured");
-    const private_name = try rt.internAtom("#p");
     defer rt.atoms.free(name);
     defer rt.atoms.free(arg_name);
     defer rt.atoms.free(captured_name);
-    defer rt.atoms.free(private_name);
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-    defer fd.deinit(rt);
+    var fd_alive = true;
+    defer if (fd_alive) fd.deinit(rt);
 
     fd.is_strict_mode = true;
     fd.has_prototype = true;
@@ -3474,9 +4449,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     fd.func_kind = .async_generator;
     fd.line_num = 7;
     fd.col_num = 3;
-    const source = try rt.memory.alloc(u8, "async function* inner(arg) {}".len);
-    @memcpy(source, "async function* inner(arg) {}");
-    fd.source_text = source;
+    try fd.replaceSourceText("async function* inner(arg) {}");
 
     // Body: push_atom_value <inner> ; drop ; get_var <var_ref 0> ;
     // drop ; return_undef. This covers atom operand copying and IC
@@ -3514,18 +4487,51 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
         .var_idx = 0,
         .var_name = captured_name,
     });
-    try fd.appendPrivateBoundName(private_name);
+    const source_owner_ptr = fd.source_text.?.ptr;
+    const name_refs_before = rt.atoms.refCount(name).?;
+    const arg_refs_before = rt.atoms.refCount(arg_name).?;
+    const captured_refs_before = rt.atoms.refCount(captured_name).?;
 
     const fb_slice = try createTestFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expect(fb.flags.is_strict_mode);
-    try std.testing.expect(fb.flags.has_prototype);
-    try std.testing.expect(!fb.flags.has_simple_parameter_list);
-    try std.testing.expect(fb.flags.is_derived_class_constructor);
-    try std.testing.expect(fb.flags.is_direct_or_indirect_eval);
-    try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.flags.func_kind);
+    try std.testing.expectEqual(atom_module.null_atom, fd.func_name);
+    try std.testing.expectEqual(atom_module.null_atom, fd.filename);
+    try std.testing.expectEqual(atom_module.null_atom, fd.script_or_module);
+    try std.testing.expectEqual(atom_module.null_atom, fd.args[0].var_name);
+    try std.testing.expectEqual(atom_module.null_atom, fd.vars[0].var_name);
+    try std.testing.expectEqual(atom_module.null_atom, fd.closure_var[0].var_name);
+    try std.testing.expect(fd.cpool[0].isUndefined());
+    try std.testing.expect(fd.source_text == null);
+    try std.testing.expectEqual(name_refs_before, rt.atoms.refCount(name).?);
+    try std.testing.expectEqual(arg_refs_before, rt.atoms.refCount(arg_name).?);
+    try std.testing.expectEqual(captured_refs_before, rt.atoms.refCount(captured_name).?);
+    try std.testing.expect(fb.hasDebug());
+    try std.testing.expect(fb.hasExtension());
+    try std.testing.expectEqual(@intFromPtr(fb) + 0x60, @intFromPtr(fb.debugInfo().?));
+    try std.testing.expectEqual(
+        @intFromPtr(fb) + fb.layout().hot_off.?,
+        @intFromPtr(fb.hotExtension().?),
+    );
+    try std.testing.expectEqual(@intFromPtr(source_owner_ptr), @intFromPtr(fb.debugInfo().?.source_ptr.?));
+    try std.testing.expectEqual(@as(u8, 0), fb.debugInfo().?.source_ptr.?[@intCast(fb.debugInfo().?.source_len)]);
+
+    // FunctionDef is now only a raw compile-storage shell. Destroy it before
+    // consuming the FB to prove every moved owner survives independently.
+    fd.deinit(rt);
+    fd_alive = false;
+    try std.testing.expectEqual(name_refs_before, rt.atoms.refCount(name).?);
+    try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.sourceText().?);
+    try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
+    try std.testing.expectEqual(captured_name, fb.closureVar()[0].var_name);
+
+    try std.testing.expect(fb.isStrictMode());
+    try std.testing.expect(fb.hasPrototype());
+    try std.testing.expect(!fb.hasSimpleParameterList());
+    try std.testing.expect(fb.isDerivedClassConstructor());
+    try std.testing.expect(fb.isDirectOrIndirectEval());
+    try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.functionKind());
     try std.testing.expectEqual(@as(usize, 11), fb.byteCode().len);
     try std.testing.expectEqual(@as(i32, 11), fb.byte_code_len);
     try std.testing.expectEqual(op.push_atom_value, fb.byteCode()[0]);
@@ -3533,6 +4539,8 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(op.get_var, fb.byteCode()[6]);
     try std.testing.expectEqual(op.drop, fb.byteCode()[9]);
     try std.testing.expectEqual(op.return_undef, fb.byteCode()[10]);
+    try std.testing.expect(fb.pc2lineBuf().len > 0);
+    try std.testing.expect(@intFromPtr(fb.byteCode().ptr) != @intFromPtr(fb.pc2lineBuf().ptr));
     try std.testing.expectEqual(@as(usize, 1), fb.argVarDefs().len);
     try std.testing.expectEqual(arg_name, fb.argVarDefs()[0].var_name);
     try std.testing.expectEqual(@as(usize, 1), fb.varDefs().len);
@@ -3546,12 +4554,10 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     // arrays removed to match qjs JSClosureVar).
     try std.testing.expect(fb.closureVar()[0].isLexical());
     try std.testing.expect(fb.closureVar()[0].isConst());
-    try std.testing.expectEqual(@as(usize, 1), fb.privateBoundNames().len);
-    try std.testing.expectEqual(private_name, fb.privateBoundNames()[0]);
     try std.testing.expectEqual(@as(u16, 1), fb.var_count);
     try std.testing.expectEqual(@as(u16, 1), fb.arg_count);
     try std.testing.expectEqual(@as(u16, 1), fb.defined_arg_count);
-    try std.testing.expectEqual(@as(u32, 1), fb.var_refs_len);
+    try std.testing.expectEqual(@as(i32, 1), fb.closure_var_count);
     {
         // Atom operands are retained inline in the bytecode (no side array);
         // iterate them to confirm the single `name` operand survived finalize.
@@ -3565,31 +4571,124 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(@as(i32, 7), fb.lineNum());
     try std.testing.expectEqual(@as(i32, 3), fb.colNum());
     try std.testing.expect(fb.pc2lineLen() > 0);
+    try std.testing.expect(fb.pc2lineBuf().len >= 2);
+    try std.testing.expectEqualSlices(u8, &.{ 6, 2 }, fb.pc2lineBuf()[0..2]);
+    try std.testing.expect(!@hasField(bytecode.function_bytecode.DebugInfo, "line_num"));
+    try std.testing.expect(!@hasField(bytecode.function_bytecode.DebugInfo, "col_num"));
     try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.sourceText().?);
 
-    const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expect(view.flags.is_strict);
-    try std.testing.expect(view.flags.is_async);
-    try std.testing.expect(view.flags.is_generator);
-    try std.testing.expect(view.flags.is_derived_class_constructor);
-    try std.testing.expect(view.flags.is_direct_or_indirect_eval);
-    try std.testing.expectEqualSlices(u8, fb.byteCode(), view.code);
+    try std.testing.expect(fb.isStrictMode());
+    try std.testing.expect(fb.isAsync());
+    try std.testing.expect(fb.isGenerator());
     // The finalized FB no longer exposes a standalone atom-operand array; the
-    // view's `atom_operands` is empty and its atoms are read inline from `code`.
-    try std.testing.expectEqual(@as(usize, 0), view.atom_operands.len);
-    try std.testing.expectEqualSlices(bytecode.function_bytecode.BytecodeVarDef, fb.argVarDefs(), view.argdefs);
-    try std.testing.expectEqualSlices(bytecode.function_bytecode.BytecodeVarDef, fb.varDefs(), view.vardefs);
-    // The finalized FB no longer keeps a standalone `var_ref_names` array; the
-    // view leaves `var_ref_names` empty for normal (non-eval) functions and
-    // derives names from `closure_var[i].var_name` via `varRefName`.
-    try std.testing.expectEqual(@as(usize, 0), view.var_ref_names.len);
-    try std.testing.expectEqual(fb.closureVar().len, view.varRefNamesLen());
-    try std.testing.expectEqual(fb.closureVar()[0].var_name, view.varRefName(0));
-    try std.testing.expectEqual(fb.closureVar()[0].isConst(), view.varRefIsConstAt(0));
-    try std.testing.expectEqual(fb.closureVar()[0].isLexical(), view.varRefIsLexicalAt(0));
-    try std.testing.expectEqualSlices(atom_module.Atom, fb.privateBoundNames(), view.private_bound_names);
-    try std.testing.expectEqualSlices(core.JSValue, fb.cpoolSlice(), view.constants.values);
-    try std.testing.expectEqual(fb.stack_size, view.stack_size);
+    // iterator above reads the retained atoms directly from final bytecode.
+    try std.testing.expect(!@hasField(bytecode.FunctionBytecode, "atom_operands"));
+    // The finalized FB derives var-ref names and flags from `closure_var`
+    // instead of retaining parallel arrays.
+    try std.testing.expect(!@hasField(bytecode.FunctionBytecode, "var_ref_names"));
+    try std.testing.expectEqual(fb.closureVar().len, fb.varRefNamesLen());
+    try std.testing.expectEqual(fb.closureVar()[0].var_name, fb.varRefName(0));
+    try std.testing.expectEqual(fb.closureVar()[0].isConst(), fb.varRefIsConstAt(0));
+    try std.testing.expectEqual(fb.closureVar()[0].isLexical(), fb.varRefIsLexicalAt(0));
+}
+
+test "createFunctionBytecode rejects a same-count mismatched inline atom owner before transfer" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const function_name = try rt.internAtom("mismatched_owner_function");
+    const encoded_atom = try rt.internAtom("encoded_owner");
+    const ledger_atom = try rt.internAtom("ledger_owner");
+    defer rt.atoms.free(function_name);
+    defer rt.atoms.free(encoded_atom);
+    defer rt.atoms.free(ledger_atom);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
+    defer fd.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var body = [_]u8{0} ** 7;
+    body[0] = op.push_atom_value;
+    std.mem.writeInt(u32, body[1..5], encoded_atom, .little);
+    body[5] = op.drop;
+    body[6] = op.return_undef;
+    try fd.appendByteCode(&body);
+    try fd.appendAtomOperand(ledger_atom);
+
+    const encoded_refs = rt.atoms.refCount(encoded_atom).?;
+    const ledger_refs = rt.atoms.refCount(ledger_atom).?;
+    try std.testing.expectError(error.InvalidBytecode, createTestFunctionBytecode(&fd, rt));
+
+    try std.testing.expectEqual(encoded_refs, rt.atoms.refCount(encoded_atom).?);
+    try std.testing.expectEqual(ledger_refs, rt.atoms.refCount(ledger_atom).?);
+    try std.testing.expectEqual(@as(usize, 1), fd.atom_operands.len);
+    try std.testing.expectEqual(ledger_atom, fd.atom_operands[0]);
+}
+
+test "FunctionDef source replacement preserves the prior NUL owner across OOM and retry" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("source-owner-retry");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    try fd.replaceSourceText("old source");
+    const old_ptr = fd.source_text.?.ptr;
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(error.OutOfMemory, fd.replaceSourceText("replacement source"));
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@intFromPtr(old_ptr), @intFromPtr(fd.source_text.?.ptr));
+    try std.testing.expectEqualStrings("old source", fd.source_text.?);
+    try std.testing.expectEqual(@as(u8, 0), fd.source_text.?.ptr[fd.source_text.?.len]);
+
+    try fd.replaceSourceText("replacement source");
+    try std.testing.expectEqualStrings("replacement source", fd.source_text.?);
+    try std.testing.expectEqual(@as(u8, 0), fd.source_text.?.ptr[fd.source_text.?.len]);
+}
+
+test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+    const name = try rt.internAtom("finalize-recovery");
+    defer rt.atoms.free(name);
+
+    var failed_fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    var failed_fd_alive = true;
+    defer if (failed_fd_alive) failed_fd.deinit(rt);
+    _ = try failed_fd.appendScope(-1);
+    try failed_fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    try failed_fd.replaceSourceText("failed attempt");
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    const failed_result = pipeline.finalize.createFunctionBytecode(&failed_fd, .{ .realm = realm });
+    rt.setMemoryLimit(null);
+    if (failed_result) |unexpected| {
+        core.JSValue.functionBytecode(&unexpected[0].header).free(rt);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        if (err != error.OutOfMemory) return err;
+    }
+    failed_fd.deinit(rt);
+    failed_fd_alive = false;
+
+    var recovery_fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer recovery_fd.deinit(rt);
+    _ = try recovery_fd.appendScope(-1);
+    try recovery_fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    try recovery_fd.replaceSourceText("recovered attempt");
+
+    const recovered_slice = try pipeline.finalize.createFunctionBytecode(&recovery_fd, .{ .realm = realm });
+    const recovered = &recovered_slice[0];
+    defer core.JSValue.functionBytecode(&recovered.header).free(rt);
+    try std.testing.expectEqualStrings("recovered attempt", recovered.sourceText().?);
+    try std.testing.expectEqual(bytecode.opcode.op.return_undef, recovered.byteCode()[0]);
 }
 
 test "final bytecode vardefs are compact arguments plus locals" {
@@ -3638,11 +4737,10 @@ test "final variable metadata matches pinned QuickJS physical ABI" {
     const FinalClosureVar = bytecode.function_bytecode.BytecodeClosureVar;
     const FinalVarDef = bytecode.function_bytecode.BytecodeVarDef;
 
-    // Keep the upstream values stable. zjs-only kinds must extend, rather
-    // than split, the QuickJS enum because both final row types store 4 bits.
+    // Keep the upstream values stable because both final row types store 4
+    // bits.
     try std.testing.expectEqual(@as(u4, 5), @intFromEnum(VarKind.private_field));
     try std.testing.expectEqual(@as(u4, 10), @intFromEnum(VarKind.global_function_decl));
-    try std.testing.expectEqual(@as(u4, 11), @intFromEnum(VarKind.class_static_this));
 
     // LP64 QuickJS: sizeof/alignof(JSClosureVar) == 8/4 and
     // sizeof/alignof(JSBytecodeVarDef) == 12/4.
@@ -3686,7 +4784,77 @@ test "final variable metadata matches pinned QuickJS physical ABI" {
     try std.testing.expectEqual(@as(u8, 0), std.mem.asBytes(&uncaptured)[9]);
 }
 
-test "bytecode view separates strict and sloppy simple inline eligibility" {
+test "legacy execution adapter delegates synthetic var-ref name mirrors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    try std.testing.expect(!@hasField(bytecode.FunctionBytecode.Flags, "backtrace_barrier"));
+    try std.testing.expect(!@hasField(bytecode.FunctionDef, "backtrace_barrier"));
+
+    const name = try rt.internAtom("legacy-var-ref-name");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    try std.testing.expect(!@hasField(@TypeOf(function.flags), "backtrace_barrier"));
+    function.flags.is_strict = true;
+    function.flags.runtime_strict = true;
+    function.flags.has_mapped_arguments = true;
+    function.realm = realm;
+    function.arg_count = 2;
+    function.var_count = 3;
+    function.stack_size = 4;
+    function.open_var_ref_count = 1;
+    try function.setCode(&.{bytecode.opcode.op.return_undef});
+    function.var_ref_names = try rt.memory.alloc(atom_module.Atom, 1);
+    function.var_ref_names[0] = rt.atoms.dup(name);
+
+    var adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = adapter.init(&function);
+    try std.testing.expectEqual(@as(usize, 1), execution_function.varRefNamesLen());
+    try std.testing.expectEqual(name, execution_function.varRefName(0));
+    try std.testing.expect(!execution_function.varRefIsLexicalAt(0));
+    try std.testing.expect(!execution_function.varRefIsConstAt(0));
+    try std.testing.expect(!execution_function.varRefIsGlobalDeclAt(0));
+    try std.testing.expectEqualSlices(u8, function.code, execution_function.byteCode());
+    try std.testing.expect(execution_function.byte_code == null);
+    try std.testing.expectEqual(bytecode.legacy_byte_code_len_sentinel, execution_function.byte_code_len);
+    try std.testing.expect(execution_function.realm.borrow() == null);
+    try std.testing.expectEqual(realm, execution_function.realmContext());
+    try std.testing.expect(execution_function.isStrictMode());
+    try std.testing.expect(execution_function.runtimeStrictMode());
+    try std.testing.expectEqual(@as(u16, 2), execution_function.arg_count);
+    try std.testing.expectEqual(@as(u16, 3), execution_function.var_count);
+    try std.testing.expectEqual(@as(u16, 4), execution_function.stack_size);
+    try std.testing.expectEqual(@as(u16, 1), execution_function.openVarRefCount());
+    try std.testing.expect(execution_function.callFacts().execution.has_mapped_arguments);
+    try std.testing.expectEqual(
+        @as(usize, 112),
+        @sizeOf(bytecode.LegacyExecutionAdapter),
+    );
+    // The negative sentinel deliberately keeps this borrowed stack bridge out
+    // of canonical count-based FunctionLayout reconstruction. Its hot tail and
+    // borrowed pointer occupy fixed base+96/base+104 slots even though the
+    // mirrored table counts and borrowed code are all non-empty.
+    try std.testing.expectEqual(
+        @as(usize, 0x68),
+        @offsetOf(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"),
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(execution_function) + @sizeOf(bytecode.FunctionBytecode),
+        @intFromPtr(execution_function.hotExtension().?),
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(execution_function) +
+            @sizeOf(bytecode.FunctionBytecode) +
+            @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
+        @intFromPtr(&adapter.legacy_bytecode_adapter),
+    );
+    try std.testing.expect(execution_function.legacyBytecodeAdapter().? == &function);
+}
+
+test "function bytecode separates strict and sloppy simple inline eligibility" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3703,12 +4871,11 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(view.simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
-        try std.testing.expect(view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+        try std.testing.expect(fb.simpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
+        try std.testing.expect(fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
     }
 
     {
@@ -3722,24 +4889,22 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(!view.simple_inline_eligible);
-        try std.testing.expect(view.strict_simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
+        try std.testing.expect(!fb.simpleInlineEligible());
+        try std.testing.expect(fb.strictSimpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
         // The raw-this leaf publishes its own eligibility byte; the packed
         // sloppy bit stays clear so the established sloppy call arms keep
         // their single-bit test.
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(view.raw_this_inline_empty_leaf);
-        try std.testing.expect(view.flags.is_strict);
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(fb.rawThisInlineEmptyLeaf());
+        try std.testing.expect(fb.isStrictMode());
     }
 
     {
-        // Arrow (either mode): rides the raw-this leaf byte — the frame
-        // preserves the raw incoming `this`; lexical this/new.target are
-        // ordinary closure cells, so the zero-capture leaf never consults
-        // the slot. The general simple-inline family stays closed to arrows
-        // (its sloppy arm substitutes the realm global).
+        // A sloppy arrow shares the ordinary sloppy eligibility bytes. Its
+        // frame receives the realm-global substitution, but lexical
+        // this/new.target are ordinary closure cells, so that slot is
+        // unobservable to arrow bytecode.
         var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
         defer fd.deinit(rt);
         fd.func_kind = .normal;
@@ -3750,13 +4915,50 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(!view.simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_snapshot_inline_eligible);
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(view.raw_this_inline_empty_leaf);
-        try std.testing.expect(view.flags.is_arrow_function);
+        try std.testing.expect(fb.simpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
+        try std.testing.expect(fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
+        try std.testing.expectEqual(function_def.FunctionKind.normal, fb.functionKind());
+        try std.testing.expect(!fb.hasPrototype());
+        try std.testing.expectEqual(@as(usize, 0), fb.closureVarCount());
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{bytecode.opcode.op.return_undef},
+            fb.byteCode(),
+        );
+    }
+
+    {
+        // A strict arrow shares the ordinary strict/raw eligibility bytes.
+        // Its lexical this capture remains independent of the raw undefined
+        // frame slot.
+        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        defer fd.deinit(rt);
+        fd.func_kind = .normal;
+        fd.func_type = .arrow;
+        fd.has_simple_parameter_list = true;
+        fd.is_strict_mode = true;
+        try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+
+        const fb_slice = try createTestFunctionBytecode(&fd, rt);
+        const fb = &fb_slice[0];
+        defer core.JSValue.functionBytecode(&fb.header).free(rt);
+        try std.testing.expect(!fb.simpleInlineEligible());
+        try std.testing.expect(fb.strictSimpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleSnapshotInlineEligible());
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(fb.rawThisInlineEmptyLeaf());
+        try std.testing.expect(fb.isStrictMode());
+        try std.testing.expectEqual(function_def.FunctionKind.normal, fb.functionKind());
+        try std.testing.expect(!fb.hasPrototype());
+        try std.testing.expectEqual(@as(usize, 0), fb.closureVarCount());
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{bytecode.opcode.op.return_undef},
+            fb.byteCode(),
+        );
     }
 
     {
@@ -3775,18 +4977,17 @@ test "bytecode view separates strict and sloppy simple inline eligibility" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(!view.simple_inline_eligible);
-        try std.testing.expect(!view.strict_simple_inline_eligible);
-        try std.testing.expect(view.strict_simple_snapshot_inline_eligible);
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!fb.simpleInlineEligible());
+        try std.testing.expect(!fb.strictSimpleInlineEligible());
+        try std.testing.expect(fb.strictSimpleSnapshotInlineEligible());
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
         // Arguments materialization is excluded from the leaf geometry in
         // both modes.
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
     }
 }
 
-test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
+test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3800,6 +5001,7 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
         .{ .strict = false, .arrow = false, .captured_arg = false },
         .{ .strict = true, .arrow = false, .captured_arg = false },
         .{ .strict = false, .arrow = true, .captured_arg = false },
+        .{ .strict = true, .arrow = true, .captured_arg = false },
         .{ .strict = false, .arrow = false, .captured_arg = true },
     };
     for (modes) |mode| {
@@ -3846,14 +5048,13 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        const expect_sloppy = !mode.strict and !mode.arrow and !mode.captured_arg;
-        const expect_raw = (mode.strict or mode.arrow) and !mode.captured_arg;
-        try std.testing.expectEqual(expect_sloppy, view.simple_inline_exact_args_leaf);
-        try std.testing.expectEqual(expect_raw, view.raw_this_inline_exact_args_leaf);
+        const expect_sloppy = !mode.strict and !mode.captured_arg;
+        const expect_raw = mode.strict and !mode.captured_arg;
+        try std.testing.expectEqual(expect_sloppy, fb.simpleInlineExactArgsLeaf());
+        try std.testing.expectEqual(expect_raw, fb.rawThisInlineExactArgsLeaf());
         // The zero-arg family never overlaps the exact-args family.
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
     }
 
     {
@@ -3866,15 +5067,14 @@ test "bytecode view publishes exact-args leaf bytes by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(!view.simple_inline_exact_args_leaf);
-        try std.testing.expect(!view.raw_this_inline_exact_args_leaf);
-        try std.testing.expect(view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(!fb.simpleInlineExactArgsLeaf());
+        try std.testing.expect(!fb.rawThisInlineExactArgsLeaf());
+        try std.testing.expect(fb.simpleInlineEmptyLeaf());
     }
 }
 
-test "bytecode view publishes capture leaf kind by mode and geometry" {
-    const LeafKind = @FieldType(bytecode.Bytecode, "capture_leaf_kind");
+test "function bytecode publishes capture leaf kind by mode and geometry" {
+    const LeafKind = bytecode.function_bytecode.ExactArgsLeafKind;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -3910,14 +5110,13 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        const expect_kind: LeafKind = if (mode.strict or mode.arrow) .raw_this else .sloppy;
-        try std.testing.expectEqual(expect_kind, view.capture_leaf_kind);
+        const expect_kind: LeafKind = if (mode.strict) .raw_this else .sloppy;
+        try std.testing.expectEqual(expect_kind, fb.captureLeafKind());
         // Captured callees never overlap the established zero-arg empty-leaf
         // bytes or the with-args exact-args family.
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
-        try std.testing.expectEqual(LeafKind.none, view.exact_args_leaf_kind);
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
+        try std.testing.expectEqual(LeafKind.none, fb.exactArgsLeafKind());
     }
 
     {
@@ -3931,9 +5130,8 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
-        try std.testing.expect(view.flags.simple_inline_empty_leaf);
+        try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
+        try std.testing.expect(fb.simpleInlineEmptyLeaf());
     }
 
     {
@@ -3957,9 +5155,8 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
-        try std.testing.expectEqual(LeafKind.sloppy, view.exact_args_leaf_kind);
+        try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
+        try std.testing.expectEqual(LeafKind.sloppy, fb.exactArgsLeafKind());
     }
 
     {
@@ -3982,11 +5179,10 @@ test "bytecode view publishes capture leaf kind by mode and geometry" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expectEqual(LeafKind.none, view.capture_leaf_kind);
-        try std.testing.expectEqual(LeafKind.none, view.exact_args_leaf_kind);
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
+        try std.testing.expectEqual(LeafKind.none, fb.captureLeafKind());
+        try std.testing.expectEqual(LeafKind.none, fb.exactArgsLeafKind());
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
     }
 }
 
@@ -4035,19 +5231,14 @@ test "stack_size compute reports the return-balance proof" {
         try std.testing.expect(balanced);
     }
     {
-        // Reachable fall-off-the-end at a nonzero level executes the hidden
-        // return_undef sentinel with a leftover: unbalanced.
         const bc = [_]u8{op.push_1};
         var balanced = true;
-        _ = try stack_size.compute(&bc, .{ .returns_balanced_out = &balanced });
-        try std.testing.expect(!balanced);
+        try std.testing.expectError(error.ReachableFalloff, stack_size.compute(&bc, .{ .returns_balanced_out = &balanced }));
     }
     {
-        // Fall-off-the-end at level 0 is a balanced sentinel return.
         const bc = [_]u8{op.nop};
-        var balanced = false;
-        _ = try stack_size.compute(&bc, .{ .returns_balanced_out = &balanced });
-        try std.testing.expect(balanced);
+        var balanced = true;
+        try std.testing.expectError(error.ReachableFalloff, stack_size.compute(&bc, .{ .returns_balanced_out = &balanced }));
     }
     {
         // Terminated-by-throw code carries no balance fact (abrupt paths
@@ -4059,8 +5250,24 @@ test "stack_size compute reports the return-balance proof" {
     }
 }
 
+test "stack verifier and finalize reject reachable end edges" {
+    const op = bytecode.opcode.op;
+
+    var jump_to_end = [_]u8{0} ** 5;
+    jump_to_end[0] = op.goto;
+    std.mem.writeInt(i32, jump_to_end[1..5], 4, .little);
+    try std.testing.expectError(error.ReachableFalloff, stack_size.compute(&jump_to_end, .{}));
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function.deinit(rt);
+    try function.setCode(&.{op.nop});
+    try std.testing.expectError(error.InvalidBytecode, pipeline.finalize.run(&function));
+}
+
 test "zero-arg empty leaf publication requires the return-balance proof" {
-    const LeafKind = @FieldType(bytecode.Bytecode, "capture_leaf_kind");
+    const LeafKind = bytecode.function_bytecode.ExactArgsLeafKind;
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -4083,6 +5290,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         .{ .strict = false, .arrow = false },
         .{ .strict = true, .arrow = false },
         .{ .strict = false, .arrow = true },
+        .{ .strict = true, .arrow = true },
     };
     for (modes) |mode| {
         // Unbalanced zero-arg bodies must be refused BOTH zero-arg leaf
@@ -4101,10 +5309,10 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(!view.flags.simple_inline_empty_leaf);
-        try std.testing.expect(!view.raw_this_inline_empty_leaf);
-        try std.testing.expectEqual(!mode.strict and !mode.arrow, view.simple_inline_eligible);
+        try std.testing.expect(!fb.simpleInlineEmptyLeaf());
+        try std.testing.expect(!fb.rawThisInlineEmptyLeaf());
+        try std.testing.expectEqual(!mode.strict, fb.simpleInlineEligible());
+        try std.testing.expectEqual(mode.strict, fb.strictSimpleInlineEligible());
     }
 
     {
@@ -4117,8 +5325,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expect(view.flags.simple_inline_empty_leaf);
+        try std.testing.expect(fb.simpleInlineEmptyLeaf());
     }
 
     {
@@ -4139,8 +5346,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expectEqual(LeafKind.sloppy, view.exact_args_leaf_kind);
+        try std.testing.expectEqual(LeafKind.sloppy, fb.exactArgsLeafKind());
     }
 
     {
@@ -4159,52 +5365,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
         const fb_slice = try createTestFunctionBytecode(&fd, rt);
         const fb = &fb_slice[0];
         defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-        try std.testing.expectEqual(LeafKind.sloppy, view.capture_leaf_kind);
-    }
-}
-
-test "implicit arguments get_var rescue reserves mapped arg aliases" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const function_name = try rt.internAtom("implicit-arguments-get-var-rescue");
-    const arg_name = try rt.internAtom("value");
-    defer rt.atoms.free(function_name);
-    defer rt.atoms.free(arg_name);
-
-    for ([_]u8{ bytecode.opcode.op.get_var, bytecode.opcode.op.get_var_undef }) |get_op| {
-        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
-        defer fd.deinit(rt);
-        fd.func_kind = .normal;
-        fd.has_simple_parameter_list = true;
-        _ = try fd.appendArg(.{
-            .var_name = arg_name,
-            .scope_level = 0,
-            .is_lexical = false,
-        });
-        _ = try fd.addClosureVar(.{
-            .closure_type = .global,
-            .is_lexical = false,
-            .is_const = false,
-            .var_kind = .normal,
-            .var_idx = 0,
-            .var_name = core.atom.ids.arguments,
-        });
-
-        var code = [_]u8{ get_op, 0, 0, bytecode.opcode.op.drop, bytecode.opcode.op.return_undef };
-        std.mem.writeInt(u16, code[1..3], 0, .little);
-        try fd.appendByteCode(&code);
-
-        const fb_slice = try createTestFunctionBytecode(&fd, rt);
-        const fb = &fb_slice[0];
-        defer core.JSValue.functionBytecode(&fb.header).free(rt);
-        const view = bytecode.asBytecodeView(fb, rt);
-
-        try std.testing.expect(view.flags.has_mapped_arguments);
-        try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
-        try std.testing.expectEqual(@as(?u16, 0), view.argOpenBindingIndex(0));
-        try std.testing.expectEqual(@as(usize, view.open_var_ref_count), frame_mod.frameOpenVarRefStorageCount(&view));
+        try std.testing.expectEqual(LeafKind.sloppy, fb.captureLeafKind());
     }
 }
 
@@ -4243,7 +5404,7 @@ test "direct eval reserves identity for visible function-scope locals and argume
 
     // add_eval_variables captures the argument first, then every scope-zero
     // local in index order, including its newly appended `<var>` object.
-    try std.testing.expectEqual(@as(u16, 3), fb.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 3), fb.openVarRefCount());
     try std.testing.expect(fb.varDefs()[0].isCaptured());
     // qjs add_eval_variables calls capture_var for own arguments before
     // scope-zero locals. The open-cell index records that event order; it is
@@ -4283,13 +5444,12 @@ test "surviving local references reserve compact open VarRef storage" {
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
     try std.testing.expect(fb.varDefs()[0].isCaptured());
     try std.testing.expectEqual(@as(u16, 0), fb.varDefs()[0].var_ref_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, fb.byteCode()[0]);
-    const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(@as(u16, 1), view.open_var_ref_count);
-    try std.testing.expectEqual(@as(?u16, 0), view.localOpenBindingIndex(0));
+    try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
+    try std.testing.expectEqual(@as(?u16, 0), fb.localOpenBindingIndex(0));
 }
 
 test "sloppy function-name references lower to an uncaptured dummy object property" {
@@ -4339,7 +5499,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
     expected[17] = bytecode.opcode.op.return_undef;
 
     try std.testing.expectEqualSlices(u8, &expected, fb.byteCode());
-    try std.testing.expectEqual(@as(u16, 0), fb.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 0), fb.openVarRefCount());
     try std.testing.expect(!fb.varDefs()[0].isCaptured());
     try std.testing.expect(!fd.vars[0].is_captured);
 }
@@ -4377,15 +5537,14 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     const fb = &fb_slice[0];
     defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
-    try std.testing.expectEqual(@as(u16, 1), fb.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
     try std.testing.expect(fd.args[0].is_captured);
     try std.testing.expectEqual(@as(u16, 0), fd.args[0].open_binding_idx);
     try std.testing.expectEqual(@as(u16, 0), fb.argVarDefs()[0].var_ref_idx);
     try std.testing.expectEqual(bytecode.opcode.op.make_arg_ref, fb.byteCode()[0]);
     try std.testing.expectEqual(arg_name, std.mem.readInt(u32, fb.byteCode()[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[5..7], .little));
-    const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(@as(?u16, 0), view.argOpenBindingIndex(0));
+    try std.testing.expectEqual(@as(?u16, 0), fb.argOpenBindingIndex(0));
 }
 
 test "direct Bytecode retains compact open VarRef frame sizing" {
@@ -4415,7 +5574,7 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     try function.setCode(&code);
     try function.retainAtomOperand(local_name);
 
-    try pipeline.finalize.runWithFunctionDefRuntime(&function, &fd, rt);
+    try finalizeMutableWithTestRealm(&function, &fd, rt);
 
     try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
     try std.testing.expect(fd.vars[0].is_captured);
@@ -4432,16 +5591,17 @@ test "mapped frames use the exact compile-time open-binding count for every fram
     defer function.deinit(rt);
     function.open_var_ref_count = 2;
     function.flags.has_mapped_arguments = true;
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
 
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
     function.flags.is_generator = true;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
     function.flags.is_generator = false;
     function.flags.is_async = true;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
     function.flags.is_async = false;
     function.flags.has_mapped_arguments = false;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(&function));
+    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
 
     const open_count: usize = 2;
     const storage_len = try frame_mod.FrameSlab.requiredStorageSlots(5, 0, 2, 3, 3, open_count);
@@ -4495,10 +5655,9 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
     try std.testing.expect(fb.closureVar()[0].isLexical());
     try std.testing.expect(fb.closureVar()[0].isConst());
 
-    const view = bytecode.asBytecodeView(fb, rt);
-    try std.testing.expectEqual(@as(usize, 1), view.closure_var.len);
-    try std.testing.expectEqual(global_name, view.closure_var[0].var_name);
-    try std.testing.expectEqual(function_def.ClosureType.global_decl, view.closure_var[0].closureType());
+    try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
+    try std.testing.expectEqual(global_name, fb.closureVar()[0].var_name);
+    try std.testing.expectEqual(function_def.ClosureType.global_decl, fb.closureVar()[0].closureType());
 }
 
 test "createFunctionBytecode accounts large finalized payload in large space" {
@@ -4519,29 +5678,42 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
 
     const body = [_]u8{bytecode.opcode.op.return_undef};
     try fd.appendByteCode(&body);
 
-    const source = try rt.memory.alloc(u8, large_threshold);
+    const source = try std.testing.allocator.alloc(u8, large_threshold);
+    defer std.testing.allocator.free(source);
     @memset(source, 'x');
-    fd.source_text = source;
+    try fd.replaceSourceText(source);
 
-    const fb_slice = try createTestFunctionBytecode(&fd, rt);
+    const realm = try core.RealmContext.create(rt);
+    var realm_alive = true;
+    defer if (realm_alive) realm.destroy();
+    const before_fb = rt.gcStats();
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
     const fb = &fb_slice[0];
+    var fb_alive = true;
+    defer if (fb_alive) core.JSValue.functionBytecode(&fb.header).free(rt);
+    realm.destroy();
+    realm_alive = false;
 
     const heap_bytes = fb.heapByteSize();
     try std.testing.expect(heap_bytes >= large_threshold);
-    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.meta().size_class);
+    // This function's base+debug+tables+exact-code+extension FAM is slab-backed;
+    // its metadata size_class is the allocator's slab index, while GC heap
+    // accounting asks the live FB for the main payload plus independent source.
+    try std.testing.expect(fb.header.meta().flags.metadata_in_slab);
 
     const stats = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, 1), stats.large_alloc_count);
-    try std.testing.expectEqual(heap_bytes, stats.large_allocated_bytes);
-    try std.testing.expectEqual(heap_bytes, stats.heap_live_bytes);
-    try std.testing.expectEqual(heap_bytes, stats.large_object_bytes);
+    try std.testing.expectEqual(before_fb.large_alloc_count + 1, stats.large_alloc_count);
+    try std.testing.expectEqual(before_fb.large_allocated_bytes + heap_bytes, stats.large_allocated_bytes);
+    try std.testing.expectEqual(before_fb.heap_live_bytes + heap_bytes, stats.heap_live_bytes);
+    try std.testing.expectEqual(before_fb.large_object_bytes + heap_bytes, stats.large_object_bytes);
     try std.testing.expect(stats.large_committed_bytes >= heap_bytes);
     try std.testing.expectEqual(stats.large_committed_bytes, stats.heap_committed_bytes);
-    try std.testing.expectEqual(@as(usize, 0), stats.old_alloc_count);
+    try std.testing.expectEqual(before_fb.old_alloc_count, stats.old_alloc_count);
     // Heap object allocations no longer feed the weighted allocation_debt:
     // js_trigger_gc pacing rides on memory.allocated_bytes vs malloc_gc_threshold
     // (runtime.zig), and allocation_debt is reserved for the off-heap external
@@ -4550,6 +5722,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expectEqual(@as(usize, 0), stats.allocation_debt);
 
     core.JSValue.functionBytecode(&fb.header).free(rt);
+    fb_alive = false;
     const after_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_free.peak_allocated_bytes);
@@ -4564,18 +5737,11 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expectEqual(@as(usize, 0), after_free.decommitted_bytes);
 }
 
-fn observedGcCapacityBytes(before_capacity: usize, after_capacity: usize) usize {
-    if (after_capacity <= before_capacity) return 0;
-    return (after_capacity - before_capacity) * @sizeOf(*core.gc.ObjectHeader);
-}
-
 fn populateFunctionDefForFinalizeFailure(
-    rt: *core.JSRuntime,
     fd: *function_def.FunctionDef,
     name: atom_module.Atom,
     arg_name: atom_module.Atom,
     captured_name: atom_module.Atom,
-    private_name: atom_module.Atom,
 ) !void {
     const op = bytecode.opcode.op;
     var body = [_]u8{0} ** 11;
@@ -4599,9 +5765,75 @@ fn populateFunctionDefForFinalizeFailure(
         .var_idx = 0,
         .var_name = captured_name,
     });
-    try fd.appendPrivateBoundName(private_name);
     const source_text = "function oom_inner(oom_arg) {}";
-    const source = try rt.memory.alloc(u8, source_text.len);
-    @memcpy(source, source_text);
-    fd.source_text = source;
+    try fd.replaceSourceText(source_text);
+}
+
+fn runFunctionBytecodeFinalizeOomLifecycle(allocator: std.mem.Allocator) !void {
+    const rt = try core.JSRuntime.create(allocator);
+    var rt_owned = true;
+    errdefer if (rt_owned) rt.destroy();
+
+    const realm = try core.RealmContext.create(rt);
+    var realm_owned = true;
+    errdefer if (realm_owned) realm.destroy();
+
+    const name = try rt.internAtom("oom-finalize-function");
+    var name_owned = true;
+    errdefer if (name_owned) rt.atoms.free(name);
+    const arg_name = try rt.internAtom("oom-finalize-arg");
+    var arg_name_owned = true;
+    errdefer if (arg_name_owned) rt.atoms.free(arg_name);
+    const captured_name = try rt.internAtom("oom-finalize-captured");
+    var captured_name_owned = true;
+    errdefer if (captured_name_owned) rt.atoms.free(captured_name);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    var fd_owned = true;
+    errdefer if (fd_owned) fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    try populateFunctionDefForFinalizeFailure(&fd, name, arg_name, captured_name);
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = realm });
+    const fb = &fb_slice[0];
+    var fb_owned = true;
+    errdefer if (fb_owned) core.JSValue.functionBytecode(&fb.header).free(rt);
+    if (fb.sourceText() == null) {
+        return error.TestUnexpectedResult;
+    }
+
+    core.JSValue.functionBytecode(&fb.header).free(rt);
+    fb_owned = false;
+    fd.deinit(rt);
+    fd_owned = false;
+    rt.atoms.free(captured_name);
+    captured_name_owned = false;
+    rt.atoms.free(arg_name);
+    arg_name_owned = false;
+    rt.atoms.free(name);
+    name_owned = false;
+    realm.destroy();
+    realm_owned = false;
+    rt.destroy();
+    rt_owned = false;
+}
+
+test "private class identity has no bytecode side metadata carrier" {
+    try std.testing.expect(!@hasDecl(bytecode.function_bytecode, "ClassMeta"));
+    try std.testing.expect(!@hasDecl(bytecode.function_bytecode, "FunctionBytecodeSideExtension"));
+    try std.testing.expect(!@hasField(bytecode.function_def.FunctionDef, "private_bound_names"));
+    try std.testing.expect(!@hasField(bytecode.function_def.FunctionDef, "class_private_names"));
+    try std.testing.expect(!@hasField(bytecode.Bytecode, "private_bound_names"));
+    try std.testing.expect(!@hasField(bytecode.Bytecode, "class_private_names"));
+    try std.testing.expect(!@hasField(bytecode.FunctionLayout, "side_off"));
+    try std.testing.expect(!@hasField(bytecode.LegacyExecutionAdapter, "side_extension"));
+    try std.testing.expect(@hasField(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"));
+}
+
+test "createFunctionBytecode exhaustively rolls back every precommit allocation failure" {
+    try runFunctionBytecodeFinalizeOomLifecycle(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runFunctionBytecodeFinalizeOomLifecycle,
+        .{},
+    );
 }

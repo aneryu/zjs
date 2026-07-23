@@ -449,10 +449,10 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
                 .class_id = class_id,
             };
 
-            const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
-            function_object.setNativeFunctionRealm(ctx);
-            errdefer function_object.value().free(rt);
-            try defineFunctionMetadata(rt, function_object, name, length);
+            const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+            const function_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, function_proto, name, length, 2);
+            errdefer function_value.free(rt);
+            const function_object = try core.Object.expect(function_value);
 
             const external_id = try rt.registerExternalHostFunction(.{
                 .ptr = @ptrCast(runtime),
@@ -463,14 +463,7 @@ pub fn JSObject(comptime Payload: type, comptime spec: anytype) type {
 
             function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
             function_object.externalHostFunctionIdSlot().* = external_id;
-            return function_object.value();
-        }
-
-        fn defineFunctionMetadata(rt: *core.JSRuntime, function_object: *core.Object, name: []const u8, length: i32) !void {
-            const name_value = (try core.string.String.createAscii(rt, name)).value();
-            defer name_value.free(rt);
-            try function_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name_value, false, false, true));
-            try function_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(length), false, false, true));
+            return function_value;
         }
 
         fn MethodStub(comptime entry: anytype) type {
@@ -1121,7 +1114,7 @@ test "JSObject prototype methods enforce realm-local binding" {
 
     const touch_key = try rt.internAtom("touch");
     defer rt.atoms.free(touch_key);
-    const touch_a = objectFromValue(value_a).?.getProperty(touch_key);
+    const touch_a = try objectFromValue(value_a).?.getProperty(touch_key);
     defer touch_a.free(rt);
 
     try std.testing.expectError(error.JSException, ctx_a.callFunction(touch_a, &.{}, .{ .this_value = value_b }));
@@ -1154,6 +1147,7 @@ test "JSObject method records do not retain a second prototype root" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    _ = try ctx.globalObject();
 
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try ObjectType.install(ctx);
@@ -1372,11 +1366,11 @@ test "JSObject installs prototype method with typed self and arguments" {
     const object = objectFromValue(value).?;
     const add_key = try rt.internAtom("add");
     defer rt.atoms.free(add_key);
-    const add_value = object.getProperty(add_key);
+    const add_value = try object.getProperty(add_key);
     defer add_value.free(rt);
 
     const add_object = objectFromValue(add_value).?;
-    const length_value = add_object.getProperty(core.atom.ids.length);
+    const length_value = try add_object.getProperty(core.atom.ids.length);
     defer length_value.free(rt);
     try std.testing.expectEqual(@as(i32, 2), length_value.asInt32().?);
 
@@ -1408,6 +1402,7 @@ test "JSObject keeps static property names in runtime binding state" {
     const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
+    _ = try ctx.globalObject();
 
     const method_atom = try rt.internAtom(method_name);
     defer rt.atoms.free(method_atom);
@@ -1487,7 +1482,7 @@ test "JSObject typed method borrows utf8 string and byte slices" {
     const object = objectFromValue(value).?;
     const mix_key = try rt.internAtom("mix");
     defer rt.atoms.free(mix_key);
-    const mix_value = object.getProperty(mix_key);
+    const mix_value = try object.getProperty(mix_key);
     defer mix_value.free(rt);
 
     const result = try ctx.callFunction(mix_value, &.{
@@ -1632,7 +1627,7 @@ test "JSObject typed method errors become pending JS exceptions" {
 fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    return object.getProperty(key);
+    return try object.getProperty(key);
 }
 
 fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
@@ -1647,6 +1642,7 @@ fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name
 
 fn createTestRuntime() !*core.JSRuntime {
     const rt = try core.JSRuntime.create(std.testing.allocator);
+    @import("../exec/root.zig").standard_globals.configureRuntime(rt);
     rt.materialize_context_global_cb = struct {
         fn cb(c: *core.JSContext) anyerror!*core.Object {
             return try @import("../exec/root.zig").zjs_vm.contextGlobal(c);

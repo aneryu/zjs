@@ -17,21 +17,23 @@ const LegacyStaticMethod = core.host_function.builtin_method_ids.promise.LegacyS
 
 /// QuickJS source map: narrow Promise constructor payload used by transitional
 /// `new_promise` bytecode.
-pub fn construct(rt: *core.JSRuntime) !core.JSValue {
-    return constructWithPrototype(rt, null);
+pub fn construct(realm: *core.RealmContext) !core.JSValue {
+    return constructWithPrototype(realm, null);
 }
 
-pub fn constructWithPrototype(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {
+pub fn constructWithPrototype(realm: *core.RealmContext, prototype: ?*core.Object) !core.JSValue {
+    const rt = realm.runtime;
     const object = try core.Object.create(rt, core.class.ids.promise, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     if (prototype == null) {
-        try core.function.defineNativeMethod(rt, object, "then", 2);
-        try core.function.defineNativeMethod(rt, object, "catch", 1);
+        try core.function.defineNativeMethod(realm, object, "then", 2);
+        try core.function.defineNativeMethod(realm, object, "catch", 1);
     }
     return object.value();
 }
 
-pub fn fulfilledWithPrototype(rt: *core.JSRuntime, value: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+pub fn fulfilledWithPrototype(realm: *core.RealmContext, value: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    const rt = realm.runtime;
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -43,13 +45,14 @@ pub fn fulfilledWithPrototype(rt: *core.JSRuntime, value: core.JSValue, prototyp
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const promise = try constructWithPrototype(rt, prototype);
+    const promise = try constructWithPrototype(realm, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
     try object.setPromiseResult(rt, rooted_value.dup());
     return promise;
 }
 
-pub fn rejectedWithPrototype(rt: *core.JSRuntime, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    const rt = realm.runtime;
     var rooted_reason = reason;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_reason },
@@ -61,7 +64,7 @@ pub fn rejectedWithPrototype(rt: *core.JSRuntime, reason: core.JSValue, prototyp
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const promise = try constructWithPrototype(rt, prototype);
+    const promise = try constructWithPrototype(realm, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
     try object.setPromiseResult(rt, rooted_reason.dup());
     object.promiseIsRejectedSlot().* = true;
@@ -71,20 +74,18 @@ pub fn rejectedWithPrototype(rt: *core.JSRuntime, reason: core.JSValue, prototyp
 test "fulfilledWithPrototype roots direct function bytecode result while constructing promise" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    realm.cached_function_proto = function_proto;
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
@@ -94,10 +95,22 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     rt.setGCThreshold(0);
     errdefer rt.setGCThreshold(old_threshold);
 
-    const promise_value = try fulfilledWithPrototype(rt, result_value, null);
+    const promise_value = try fulfilledWithPrototype(realm, result_value, null);
     var promise_alive = true;
     defer if (promise_alive) promise_value.free(rt);
     const promise = promiseObject(promise_value) orelse return error.TypeError;
+
+    const then_value = try promise.getProperty(core.atom.predefinedId("then", .string).?);
+    defer then_value.free(rt);
+    const then_function = try core.Object.expect(then_value);
+    try std.testing.expectEqual(core.class.ids.c_function_data, then_function.class_id);
+    try std.testing.expectEqual(function_proto, then_function.getPrototype().?);
+
+    const catch_value = try promise.getProperty(core.atom.predefinedId("catch", .string).?);
+    defer catch_value.free(rt);
+    const catch_function = try core.Object.expect(catch_value);
+    try std.testing.expectEqual(core.class.ids.c_function_data, catch_function.class_id);
+    try std.testing.expectEqual(function_proto, catch_function.getPrototype().?);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = promise.promiseResult() orelse return error.TypeError;
@@ -141,7 +154,7 @@ pub fn staticCallWithPrototype(
                     return value.dup();
                 }
             }
-            return fulfilledWithPrototype(ctx.runtime, value, prototype);
+            return fulfilledWithPrototype(ctx, value, prototype);
         },
         @intFromEnum(LegacyStaticMethod.all) => if (payload) |iterable| return promiseAll(ctx, iterable, prototype),
         @intFromEnum(LegacyStaticMethod.race) => if (payload) |iterable| return promiseRace(ctx, iterable, prototype),
@@ -151,14 +164,14 @@ pub fn staticCallWithPrototype(
         },
         @intFromEnum(LegacyStaticMethod.all_settled) => if (payload) |iterable| return promiseAllSettled(ctx, iterable, prototype),
         @intFromEnum(LegacyStaticMethod.any) => if (payload) |iterable| return promiseAny(ctx, iterable, prototype, global),
-        @intFromEnum(LegacyStaticMethod.with_resolvers) => return withResolvers(ctx.runtime, prototype),
+        @intFromEnum(LegacyStaticMethod.with_resolvers) => return withResolvers(ctx, prototype),
         else => return error.TypeError,
     }
-    return constructWithPrototype(ctx.runtime, prototype);
+    return constructWithPrototype(ctx, prototype);
 }
 
 pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    const promise = try rejectedWithPrototype(ctx.runtime, reason, prototype);
+    const promise = try rejectedWithPrototype(ctx, reason, prototype);
     ctx.recordUnhandledPromiseRejection(promise, reason);
     return promise;
 }
@@ -178,7 +191,8 @@ pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     }
 }
 
-pub fn withResolvers(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {
+pub fn withResolvers(ctx: *core.JSContext, prototype: ?*core.Object) !core.JSValue {
+    const rt = ctx.runtime;
     var promise_val = core.JSValue.undefinedValue();
     var resolve_val = core.JSValue.undefinedValue();
     var reject_val = core.JSValue.undefinedValue();
@@ -200,9 +214,9 @@ pub fn withResolvers(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValu
     defer resolve_val.free(rt);
     defer reject_val.free(rt);
 
-    promise_val = try constructWithPrototype(rt, prototype);
-    resolve_val = try createResolvingFunction(rt, promise_val, false);
-    reject_val = try createResolvingFunction(rt, promise_val, true);
+    promise_val = try constructWithPrototype(ctx, prototype);
+    resolve_val = try createResolvingFunction(ctx, promise_val, false);
+    reject_val = try createResolvingFunction(ctx, promise_val, true);
 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_val = result.value();
@@ -213,7 +227,9 @@ pub fn withResolvers(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValu
     return result_val;
 }
 
-fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: bool) !core.JSValue {
+fn createResolvingFunction(ctx: *core.JSContext, promise: core.JSValue, reject: bool) !core.JSValue {
+    const rt = ctx.runtime;
+    const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
     var rooted_promise = promise;
     var function_val = core.JSValue.undefinedValue();
     var state_val = core.JSValue.undefinedValue();
@@ -229,7 +245,7 @@ fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: b
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    function_val = try core.function.nativeDataFunction(rt, "", 1);
+    function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
     errdefer function_val.free(rt);
     const header = function_val.refHeader() orelse return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -247,6 +263,10 @@ fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: b
 test "createResolvingFunction roots promise and state while allocating slots" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
 
     const promise_symbol = try rt.atoms.newValueSymbol("gc-promise-resolving-target-symbol");
     const old_threshold = rt.gcThreshold();
@@ -254,7 +274,7 @@ test "createResolvingFunction roots promise and state while allocating slots" {
     defer rt.setGCThreshold(old_threshold);
 
     const promise_value = try rt.symbolValue(promise_symbol);
-    const function_value = try createResolvingFunction(rt, promise_value, false);
+    const function_value = try createResolvingFunction(ctx, promise_value, false);
     var function_alive = true;
     defer if (function_alive) function_value.free(rt);
     const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader() orelse return error.TypeError);
@@ -276,12 +296,16 @@ test "createResolvingFunction roots promise and state while allocating slots" {
 test "withResolvers roots promise and resolving functions while creating result" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
+    ctx.cached_function_proto = function_proto;
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const result_value = try withResolvers(rt, null);
+    const result_value = try withResolvers(ctx, null);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
     const result: *core.Object = @fieldParentPtr("header", result_value.refHeader() orelse return error.TypeError);
@@ -293,11 +317,11 @@ test "withResolvers roots promise and resolving functions while creating result"
     const reject_key = try rt.internAtom("reject");
     defer rt.atoms.free(reject_key);
 
-    const promise_value = result.getProperty(promise_key);
+    const promise_value = try result.getProperty(promise_key);
     defer promise_value.free(rt);
-    const resolve_value = result.getProperty(resolve_key);
+    const resolve_value = try result.getProperty(resolve_key);
     defer resolve_value.free(rt);
-    const reject_value = result.getProperty(reject_key);
+    const reject_value = try result.getProperty(reject_key);
     defer reject_value.free(rt);
 
     try std.testing.expect(promiseObject(promise_value) != null);
@@ -338,7 +362,7 @@ fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
 
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        item_val = source.getProperty(core.atom.atomFromUInt32(index));
+        item_val = try source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
             item_val = core.JSValue.undefinedValue();
@@ -359,14 +383,14 @@ fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
         }
     }
     out.setArrayLength(source.arrayLength());
-    return fulfilledWithPrototype(rt, out_val, prototype);
+    return fulfilledWithPrototype(ctx, out_val, prototype);
 }
 
 fn promiseRace(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
     const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
-    if (source.arrayLength() == 0) return constructWithPrototype(rt, prototype);
-    const item = source.getProperty(core.atom.atomFromUInt32(0));
+    if (source.arrayLength() == 0) return constructWithPrototype(ctx, prototype);
+    const item = try source.getProperty(core.atom.atomFromUInt32(0));
     defer item.free(rt);
     if (promiseObject(item)) |promise| {
         const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
@@ -375,9 +399,9 @@ fn promiseRace(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.O
             markHandled(ctx, promise);
             return rejectedWithUnhandledPrototype(ctx, value, prototype);
         }
-        return fulfilledWithPrototype(rt, value, prototype);
+        return fulfilledWithPrototype(ctx, value, prototype);
     }
-    return fulfilledWithPrototype(rt, item, prototype);
+    return fulfilledWithPrototype(ctx, item, prototype);
 }
 
 fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
@@ -408,7 +432,7 @@ fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*
 
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        item_val = source.getProperty(core.atom.atomFromUInt32(index));
+        item_val = try source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
             item_val = core.JSValue.undefinedValue();
@@ -424,7 +448,7 @@ fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(record_val, true, true, true));
     }
     out.setArrayLength(source.arrayLength());
-    return fulfilledWithPrototype(rt, out_val, prototype);
+    return fulfilledWithPrototype(ctx, out_val, prototype);
 }
 
 fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object, global: ?*core.Object) !core.JSValue {
@@ -458,7 +482,7 @@ fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
     var error_count: u32 = 0;
     var index: u32 = 0;
     while (index < source.arrayLength()) : (index += 1) {
-        item_val = source.getProperty(core.atom.atomFromUInt32(index));
+        item_val = try source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
             item_val = core.JSValue.undefinedValue();
@@ -484,7 +508,7 @@ fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Ob
         }
     }
     if (has_fulfillment) {
-        return fulfilledWithPrototype(rt, fulfillment_val, prototype);
+        return fulfilledWithPrototype(ctx, fulfillment_val, prototype);
     }
     errors.setArrayLength(error_count);
     const aggregate_error = try aggregateErrorValue(ctx, global, errors);
@@ -497,6 +521,7 @@ test "promise all family preserves direct symbol payload ownership" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
+    ctx.cached_function_proto = try core.Object.create(rt, core.class.ids.object, null);
 
     const all_source = try core.Object.createArray(rt, null);
     var all_source_alive = true;
@@ -518,7 +543,7 @@ test "promise all family preserves direct symbol payload ownership" {
 
     const any_symbol = try rt.atoms.newValueSymbol("gc-promise-any-rejection-symbol");
     const any_value = try rt.symbolValue(any_symbol);
-    const rejected_value = try rejectedWithPrototype(rt, any_value, null);
+    const rejected_value = try rejectedWithPrototype(ctx, any_value, null);
     any_value.free(rt);
     var rejected_alive = true;
     defer if (rejected_alive) rejected_value.free(rt);
@@ -535,7 +560,7 @@ test "promise all family preserves direct symbol payload ownership" {
     const all_result_value = all_promise.promiseResult() orelse return error.TypeError;
     const all_result = objectFromValue(all_result_value) orelse return error.TypeError;
     {
-        const stored = all_result.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try all_result.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, all_symbol), stored.asSymbolAtom());
     }
@@ -547,12 +572,12 @@ test "promise all family preserves direct symbol payload ownership" {
     const settled_result_value = settled_promise.promiseResult() orelse return error.TypeError;
     const settled_result = objectFromValue(settled_result_value) orelse return error.TypeError;
     {
-        const record_value = settled_result.getProperty(core.atom.atomFromUInt32(0));
+        const record_value = try settled_result.getProperty(core.atom.atomFromUInt32(0));
         defer record_value.free(rt);
         const record = objectFromValue(record_value) orelse return error.TypeError;
         const value_atom = try rt.internAtom("value");
         defer rt.atoms.free(value_atom);
-        const stored = record.getProperty(value_atom);
+        const stored = try record.getProperty(value_atom);
         defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, settled_symbol), stored.asSymbolAtom());
     }
@@ -566,11 +591,11 @@ test "promise all family preserves direct symbol payload ownership" {
     const aggregate = objectFromValue(aggregate_value) orelse return error.TypeError;
     const errors_atom = try rt.internAtom("errors");
     defer rt.atoms.free(errors_atom);
-    const errors_value = aggregate.getProperty(errors_atom);
+    const errors_value = try aggregate.getProperty(errors_atom);
     defer errors_value.free(rt);
     const errors = objectFromValue(errors_value) orelse return error.TypeError;
     {
-        const stored = errors.getProperty(core.atom.atomFromUInt32(0));
+        const stored = try errors.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
         try std.testing.expectEqual(@as(?core.Atom, any_symbol), stored.asSymbolAtom());
     }
@@ -625,19 +650,13 @@ test "settlementRecord roots direct function bytecode item while creating record
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-
-    {
-        const __cp = try rt.memory.alloc(core.JSValue, 1);
-        fb.cpool = __cp.ptr;
-        fb.cpool_count = @intCast(__cp.len);
-    }
+    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
+    var fb_published = false;
+    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");
-    fb.cpool[0] = try rt.symbolValue(symbol_atom);
-    fb.cpool_count = 1;
+    fb.cpoolSlice()[0] = try rt.symbolValue(symbol_atom);
+    fb.publishFixtureNoFail(rt);
+    fb_published = true;
 
     var item = core.JSValue.functionBytecode(&fb.header);
     var item_alive = true;
@@ -655,7 +674,7 @@ test "settlementRecord roots direct function bytecode item while creating record
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
     defer rt.atoms.free(value_atom);
-    const stored = record.getProperty(value_atom);
+    const stored = try record.getProperty(value_atom);
     {
         defer stored.free(rt);
         try std.testing.expect(stored.same(item));
@@ -702,12 +721,12 @@ fn aggregateErrorValue(ctx: *core.JSContext, global: ?*core.Object, errors: *cor
     if (global) |global_object| {
         const ctor_key = try ctx.runtime.internAtom("AggregateError");
         defer ctx.runtime.atoms.free(ctor_key);
-        const ctor_value = global_object.getProperty(ctor_key);
+        const ctor_value = try global_object.getProperty(ctor_key);
         defer ctor_value.free(ctx.runtime);
         if (ctor_value.isObject()) {
             const ctor_object = promiseObject(ctor_value) orelse objectFromValue(ctor_value);
             if (ctor_object) |ctor| {
-                const prototype_value = ctor.getProperty(core.atom.ids.prototype);
+                const prototype_value = try ctor.getProperty(core.atom.ids.prototype);
                 defer prototype_value.free(ctx.runtime);
                 prototype = objectFromValue(prototype_value);
             }
@@ -751,7 +770,7 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
     const errors_key = try rt.internAtom("errors");
     defer rt.atoms.free(errors_key);
     {
-        const stored_errors_value = aggregate.getProperty(errors_key);
+        const stored_errors_value = try aggregate.getProperty(errors_key);
         defer stored_errors_value.free(rt);
         try std.testing.expect(stored_errors_value.same(errors.value()));
     }

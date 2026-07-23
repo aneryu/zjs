@@ -7,6 +7,7 @@ const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
+const module_mod = @import("module.zig");
 const property = @import("property.zig");
 const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
@@ -218,8 +219,6 @@ pub const DataPropertyLookup = struct {
 };
 
 pub const OrdinaryPayload = struct {
-    private_remap_from: []atom.Atom = &.{},
-    private_remap_to: []atom.Atom = &.{},
     callsite_file: ?JSValue = null,
     callsite_function: ?JSValue = null,
     promise_reaction_on_fulfilled: ?JSValue = null,
@@ -232,7 +231,6 @@ pub const OrdinaryPayload = struct {
     promise_combinator_reject: ?JSValue = null,
     promise_combinator_values: ?JSValue = null,
     promise_combinator_keys: ?JSValue = null,
-    typed_array_array_buffer_prototype: ?JSValue = null,
     error_stack: ?JSValue = null,
     error_stack_sites: ?JSValue = null,
     error_stack_site_count: usize = 0,
@@ -242,11 +240,8 @@ pub const OrdinaryPayload = struct {
     callsite_is_native: bool = false,
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
-        destroyAtomSlice(rt, &self.private_remap_from);
-        destroyAtomSlice(rt, &self.private_remap_to);
         destroyOptionalValue(rt, &self.callsite_file);
         destroyOptionalValue(rt, &self.callsite_function);
         destroyOptionalValue(rt, &self.promise_reaction_on_fulfilled);
@@ -259,7 +254,6 @@ pub const OrdinaryPayload = struct {
         destroyOptionalValue(rt, &self.promise_combinator_reject);
         destroyOptionalValue(rt, &self.promise_combinator_values);
         destroyOptionalValue(rt, &self.promise_combinator_keys);
-        destroyOptionalValue(rt, &self.typed_array_array_buffer_prototype);
         destroyOptionalValue(rt, &self.error_stack);
         destroyOptionalValue(rt, &self.error_stack_sites);
         self.* = .{};
@@ -283,7 +277,6 @@ pub const IteratorPayload = struct {
     zip_mode: u8 = 0,
     zip_state: u8 = 0,
     executing: bool = false,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -317,7 +310,6 @@ pub const CollectionPayload = struct {
     active_count: usize = 0,
     weak_entries: []WeakCollectionEntry = &.{},
     weak_entries_capacity: usize = 0,
-    realm_global_ptr: ?*Object = null,
     weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *CollectionPayload, rt: *JSRuntime) void {
@@ -442,7 +434,6 @@ pub const BufferPayload = struct {
     detached: bool = false,
     immutable: bool = false,
     max_byte_length: ?usize = null,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *BufferPayload, rt: *JSRuntime) void {
         self.releaseStorage(rt);
@@ -475,7 +466,6 @@ pub const TypedArrayPayload = struct {
     element_size: u32 = 0,
     fixed_length: ?u32 = null,
     kind: u8 = 0,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *TypedArrayPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.buffer);
@@ -486,14 +476,9 @@ pub const RegExpPayload = extern struct {
     /// QuickJS stores these two owned `JSString *` fields directly in
     /// `JSObject.u.regexp` (quickjs.c:748-751, 47554-47564). Keeping the zjs
     /// representation pointer-only lets the standard RegExp class use the
-    /// object's existing 24-byte union instead of a second payload allocation.
+    /// object's existing union instead of a second payload allocation.
     source: ?*string.String = null,
     compiled_bytecode: ?*string.String = null,
-    /// ZJS's generic realm resolver can attach a borrowed realm identity to
-    /// class payloads. Standard RegExp construction currently leaves this
-    /// null; retaining the spare union word keeps custom `.regexp` payloads
-    /// layout-compatible while the first two words mirror QuickJS exactly.
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *RegExpPayload, rt: *JSRuntime) void {
         const old_source = self.source;
@@ -504,21 +489,18 @@ pub const RegExpPayload = extern struct {
     }
 
     comptime {
-        std.debug.assert(@sizeOf(@This()) == 24);
+        std.debug.assert(@sizeOf(@This()) == 2 * @sizeOf(?*string.String));
     }
 };
 
 pub const BoundFunctionPayload = struct {
     target: ?JSValue = null,
     this_value: ?JSValue = null,
-    realm_global: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
     args: []JSValue = &.{},
 
     pub fn destroy(self: *BoundFunctionPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
         destroyOptionalValue(rt, &self.this_value);
-        destroyOptionalValue(rt, &self.realm_global);
         destroyValueSlice(rt, &self.args);
     }
 };
@@ -526,7 +508,6 @@ pub const BoundFunctionPayload = struct {
 pub const ProxyPayload = struct {
     target: ?JSValue = null,
     handler: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *ProxyPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.target);
@@ -536,7 +517,6 @@ pub const ProxyPayload = struct {
 
 pub const ArgumentsPayload = struct {
     var_refs: []JSValue = &.{},
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
         destroyValueSlice(rt, &self.var_refs);
@@ -545,7 +525,6 @@ pub const ArgumentsPayload = struct {
 
 pub const ObjectDataPayload = struct {
     data: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.data);
@@ -554,7 +533,6 @@ pub const ObjectDataPayload = struct {
 
 pub const WeakRefPayload = struct {
     weak_target_identity: ?usize = null,
-    realm_global_ptr: ?*Object = null,
     weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *WeakRefPayload, rt: *JSRuntime) void {
@@ -567,7 +545,6 @@ pub const VarRefPayload = struct {
     is_const: bool = false,
     is_function_name: bool = false,
     is_deletable: bool = false,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.value);
@@ -579,11 +556,16 @@ pub const FinalizationRegistryPayload = struct {
     cleanup_callback: ?JSValue = null,
     cells: []FinalizationRegistryCell = &.{},
     cells_capacity: usize = 0,
-    realm_global_ptr: ?*Object = null,
+    /// QuickJS `JSFinalizationRegistryData.realm`: the registry, not its
+    /// callback, selects the Realm used to enqueue and begin the cleanup job.
+    /// The callback's own callable carrier may subsequently switch execution
+    /// to a different Realm when the job invokes it.
+    realm: context_mod.RealmRef = .{},
     weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.cleanup_callback);
+        self.realm.deinit();
         const old_cells = self.cells;
         const old_capacity = self.cells_capacity;
         self.cells = &.{};
@@ -602,7 +584,6 @@ pub const StdFilePayload = struct {
     file: ?*std.c.FILE = null,
     is_popen: bool = false,
     is_stdio: bool = false,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *StdFilePayload) void {
         self.* = .{};
@@ -668,7 +649,6 @@ pub const DisposableStackPayload = struct {
     async_dispose_resolve: ?JSValue = null,
     async_dispose_reject: ?JSValue = null,
     async_dispose_error: ?JSValue = null,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *DisposableStackPayload, rt: *JSRuntime) void {
         const old_resources = self.resources;
@@ -759,7 +739,6 @@ pub const PromisePayload = struct {
     reactions: []JSValue = &.{},
     is_rejected: bool = false,
     atomics_wait_async: bool = false,
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *PromisePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.result);
@@ -1220,7 +1199,6 @@ fn destroyGeneratorExecutionState(rt: *JSRuntime, slot: *?*GeneratorExecutionSta
 }
 
 pub const GeneratorPayload = struct {
-    realm_global_ptr: ?*Object = null,
     execution: ?*GeneratorExecutionState = null,
     async_promise: ?JSValue = null,
     /// Async-generator request queue (mirrors JSAsyncGeneratorData.queue,
@@ -1228,14 +1206,6 @@ pub const GeneratorPayload = struct {
     async_queue: []AsyncGeneratorRequest = &.{},
     async_queue_capacity: usize = 0,
     resume_completion_type: i32 = 0,
-    /// Dense index into the runtime's borrowed-reference-holder registry.
-    /// Generator instances carry a borrowed realm pointer just like function
-    /// objects; caching the index keeps short-lived generator teardown O(1).
-    /// These three bytes consume existing tail padding without growing the
-    /// payload (see the matching fields on FunctionPayload).
-    borrowed_holder_index_lo: u8 = 0,
-    borrowed_holder_index_mid: u8 = 0,
-    borrowed_holder_index_hi: u8 = 0,
     /// Async-generator state machine (mirrors JSAsyncGeneratorStateEnum,
     /// quickjs.c:21345). Only meaningful for JS_CLASS_ASYNC_GENERATOR objects.
     async_state: u8 = 0,
@@ -1248,9 +1218,6 @@ pub const GeneratorPayload = struct {
     yield_star_suspended: bool = false,
 
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
-        // Normal generators borrow this pointer under current_function; clear
-        // it before releasing that dominating strong edge.
-        self.realm_global_ptr = null;
         destroyGeneratorExecutionState(rt, &self.execution);
         destroyOptionalValue(rt, &self.async_promise);
         for (self.async_queue) |*req| {
@@ -1270,17 +1237,6 @@ pub const GeneratorPayload = struct {
 
 pub const ArrayBuiltinMarker = property.ArrayBuiltinMarker;
 pub const TypedArrayBuiltinMarker = property.TypedArrayBuiltinMarker;
-
-pub const PrimitivePrototypeSlot = enum(u8) {
-    string,
-    number,
-    boolean,
-    symbol,
-    bigint,
-    count,
-};
-
-const primitive_prototype_slot_count: usize = @intFromEnum(PrimitivePrototypeSlot.count);
 
 pub const RegExpLegacyStatics = struct {
     input: ?JSValue = null,
@@ -1330,27 +1286,12 @@ pub const FunctionRarePayload = struct {
     typed_array_kind: u8 = 0,
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
-    primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
-    class_fields_init: ?JSValue = null,
-    import_meta: ?JSValue = null,
-    lexical_this: ?JSValue = null,
-    arrow_constructor_this: ?JSValue = null,
-    arrow_new_target: ?JSValue = null,
-    super_constructor: ?JSValue = null,
-    private_remap_from: []atom.Atom = &.{},
-    private_remap_to: []atom.Atom = &.{},
     realm_global: ?JSValue = null,
     proxy_revoke_target: ?JSValue = null,
     promise_capability_slot: ?JSValue = null,
     promise_resolving_target: ?JSValue = null,
     promise_resolving_state: ?JSValue = null,
     promise_resolving_reject: bool = false,
-    promise_thenable_target: ?JSValue = null,
-    promise_thenable_this: ?JSValue = null,
-    promise_thenable_then: ?JSValue = null,
-    promise_reaction_record: ?JSValue = null,
-    promise_reaction_value: ?JSValue = null,
-    promise_reaction_is_rejected: bool = false,
     promise_combinator_state: ?JSValue = null,
     promise_combinator_index: u32 = 0,
     promise_combinator_mode: u8 = 0,
@@ -1368,36 +1309,20 @@ pub const FunctionRarePayload = struct {
     /// quickjs.c:21670; extra actions carry the awaits qjs compiles into the
     /// body bytecode — see exec/async_generator.zig ResolveAction).
     async_generator_action: u8 = 0,
-    realm_type_error_constructor: ?JSValue = null,
 
     pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
         destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.class_fields_init);
-        destroyOptionalValue(rt, &self.import_meta);
-        destroyOptionalValue(rt, &self.lexical_this);
-        destroyOptionalValue(rt, &self.arrow_constructor_this);
-        destroyOptionalValue(rt, &self.arrow_new_target);
-        destroyOptionalValue(rt, &self.super_constructor);
-        destroyAtomSlice(rt, &self.private_remap_from);
-        destroyAtomSlice(rt, &self.private_remap_to);
         destroyOptionalValue(rt, &self.realm_global);
         destroyOptionalValue(rt, &self.proxy_revoke_target);
         destroyOptionalValue(rt, &self.promise_capability_slot);
         destroyOptionalValue(rt, &self.promise_resolving_target);
         destroyOptionalValue(rt, &self.promise_resolving_state);
-        destroyOptionalValue(rt, &self.promise_thenable_target);
-        destroyOptionalValue(rt, &self.promise_thenable_this);
-        destroyOptionalValue(rt, &self.promise_thenable_then);
-        destroyOptionalValue(rt, &self.promise_reaction_record);
-        destroyOptionalValue(rt, &self.promise_reaction_value);
         destroyOptionalValue(rt, &self.promise_combinator_state);
         destroyOptionalValue(rt, &self.promise_finally_payload);
         destroyOptionalValue(rt, &self.promise_finally_callback);
         destroyOptionalValue(rt, &self.promise_finally_constructor);
         destroyOptionalValue(rt, &self.async_dispose_stack);
         destroyOptionalValue(rt, &self.async_function_continuation);
-        destroyOptionalValue(rt, &self.realm_type_error_constructor);
-        destroyOptionalValueSlots(rt, &self.primitive_prototypes);
         self.* = .{};
     }
 };
@@ -1460,8 +1385,8 @@ pub const FunctionPayload = struct {
 
 /// Cold per-closure extension for zjs-only function metadata. The hot qjs
 /// `u.func.home_object` word stores a direct Object pointer when this extension
-/// is absent; its low tag bit points here only for arrows/classes that need
-/// additional per-closure state.
+/// is absent; its low tag bit points here only when a bytecode function needs
+/// rare per-closure state in addition to its optional home object.
 pub const BytecodeFunctionAux = struct {
     home_object: ?*Object = null,
     rare: FunctionRarePayload = .{},
@@ -1491,7 +1416,7 @@ pub const BytecodeFunctionStorage = extern struct {
         // count have already replaced it with their allocated array.
         if (self.var_refs == emptyVarRefs()) return &.{};
         const fb = self.function_bytecode orelse return &.{};
-        return self.var_refs[0..fb.var_refs_len];
+        return self.var_refs[0..fb.closureVarCount()];
     }
 
     pub inline fn emptyVarRefs() [*]*var_ref_mod.VarRef {
@@ -1506,7 +1431,6 @@ pub const BytecodeFunctionStorage = extern struct {
 pub const ModuleNamespacePayload = struct {
     names: []atom.Atom = &.{},
     cells: []JSValue = &.{},
-    realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *ModuleNamespacePayload, rt: *JSRuntime) void {
         destroyAtomSlice(rt, &self.names);
@@ -1637,7 +1561,10 @@ pub const ObjectFlags = packed struct(u16) {
     may_have_indexed_properties: bool = false,
     length_writable: bool = true,
     is_with_environment: bool = false,
-    is_prototype: bool = false,
+    /// QuickJS `JSObject.is_std_array_prototype`: published only on a realm's
+    /// intrinsic %Array.prototype% and cleared permanently by mutations that
+    /// can make dense Array extension observe the prototype chain.
+    is_std_array_prototype: bool = false,
     reserved_class_payload_finalizer_slot: bool = false,
     has_exotic_methods: bool = false,
     is_borrowed_reference_holder: bool = false,
@@ -1648,11 +1575,9 @@ pub const ObjectFlags = packed struct(u16) {
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
 
-fn classHasExoticMethods(rt: *const JSRuntime, class_id: class.ClassId, class_record: ?*const class.Record) bool {
+fn classHasExoticMethods(class_id: class.ClassId, definition_has_exotic: bool) bool {
     if (exoticMethodsForClassId(class_id) != null) return true;
-    if (class_record) |record| return record.has_exotic or record.exotic_methods != null;
-    const record = rt.classes.recordPtr(class_id) orelse return false;
-    return record.has_exotic or record.exotic_methods != null;
+    return definition_has_exotic;
 }
 
 fn classNeedsSlowPropertyAccess(class_id: class.ClassId, has_exotic_methods: bool) bool {
@@ -1726,8 +1651,8 @@ pub const Object = extern struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.object);
     comptime {
         // GC prefix model: BlockHeader.meta() reads objectPtr-8, so header MUST
-        // be at offset 0. Zig reorders non-extern fields; if this fails, force
-        // header first with `align(16)` (see FunctionBytecode).
+        // be at offset 0. `extern struct` fixes the declared field order while
+        // preserving each concrete GC object's natural alignment.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
         // qjs JSObject is 64B: 16B GC header + 8B metadata + shape/prop
         // pointers + the 24B class-specific union.
@@ -1768,6 +1693,23 @@ pub const Object = extern struct {
         return createInternal(rt, class_id, prototype, 0, null);
     }
 
+    /// Construct a FinalizationRegistry with its QJS-style Realm owner already
+    /// installed. Retaining the Realm is infallible and happens before the
+    /// object can be published by the caller, so a production registry never
+    /// exists with a borrowed or missing construction context.
+    pub fn createFinalizationRegistry(
+        rt: *JSRuntime,
+        realm: *context_mod.RealmContext,
+        prototype: ?*Object,
+    ) !*Object {
+        std.debug.assert(realm.runtime == rt);
+        const registry = try createInternal(rt, class.ids.finalization_registry, prototype, 0, null);
+        const payload = registry.finalizationRegistryPayload() orelse unreachable;
+        std.debug.assert(payload.realm.borrow() == null);
+        payload.realm = context_mod.RealmRef.retain(realm);
+        return registry;
+    }
+
     pub fn createWithOwnPropertyCapacity(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object, capacity: usize) !*Object {
         return createInternal(rt, class_id, prototype, capacity, null);
     }
@@ -1784,13 +1726,11 @@ pub const Object = extern struct {
     /// cycle collection cannot reclaim them.
     pub fn createGeneratorShell(rt: *JSRuntime, class_id: class.ClassId) !*Object {
         std.debug.assert(class_id == class.ids.generator or class_id == class.ids.async_generator);
-        const class_record = rt.classes.recordPtr(class_id);
-        std.debug.assert(inlineClassPayloadLayout(class_record) == null);
-        const payload_kind = if (class_record) |record|
-            record.payload_kind
-        else
-            class.standardPayloadKind(class_id);
-        std.debug.assert(payload_kind == .generator);
+        var construction = try rt.classes.beginConstruction(class_id);
+        defer construction.abort();
+        const definition = construction.definition;
+        std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+        std.debug.assert(definition.payload_kind == .generator);
 
         const self = try rt.createRuntime(Object);
         errdefer rt.memory.destroy(Object, self);
@@ -1806,13 +1746,12 @@ pub const Object = extern struct {
 
         var reserved_class_payload_finalizer_slot = false;
         errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
-        if (class_record) |record| {
-            if (record.payload_finalizer != null) {
-                try rt.reserveDeferredClassPayloadFinalizerSlot();
-                reserved_class_payload_finalizer_slot = true;
-            }
+        if (definition.has_payload_finalizer) {
+            try rt.reserveDeferredClassPayloadFinalizerSlot();
+            reserved_class_payload_finalizer_slot = true;
         }
-        const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
+        const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
+        construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
@@ -1836,7 +1775,6 @@ pub const Object = extern struct {
         std.debug.assert(self.flags.class_payload_kind == .generator);
         std.debug.assert(!self.header.meta().flags.heap_accounted);
         const final_shape = try rt.shapes.createObjectRoot(prototype);
-        markObjectAsPrototype(rt, prototype);
         self.shape_ref = final_shape;
         rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
             self.shape_ref = undefined;
@@ -2043,7 +1981,6 @@ pub const Object = extern struct {
             property_storage_owned = true;
         }
 
-        markObjectAsPrototype(rt, shape_ref.proto);
         self.* = .{
             .header = .{},
             .class_id = template.class_id,
@@ -2082,15 +2019,6 @@ pub const Object = extern struct {
         entries: []const property.Entry,
     };
 
-    fn markObjectAsPrototype(rt: *JSRuntime, prototype: ?*Object) void {
-        if (prototype) |proto| {
-            proto.flags.is_prototype = true;
-            if (proto.flags.may_have_indexed_properties) {
-                rt.any_prototype_may_have_indexed_properties = true;
-            }
-        }
-    }
-
     fn createInternal(
         rt: *JSRuntime,
         class_id: class.ClassId,
@@ -2098,14 +2026,13 @@ pub const Object = extern struct {
         own_property_capacity: usize,
         property_template: ?PropertyTemplate,
     ) !*Object {
-        // qjs JS_NewObjectFromShape reads class metadata in place from
-        // `ctx->rt->class_array[class_id]` — it never copies the whole JSClass
-        // onto the stack. Mirror that with a pointer-only view so the plain
-        // object / array hot path (emptyobj/objalloc/array3) touches just the
-        // scalar fields it needs (inline_payload_size, payload_kind,
-        // payload_finalizer, exotic) instead of an 88B SIMD block copy of Record.
-        const class_record = rt.classes.recordPtr(class_id);
-        const inline_layout = inlineClassPayloadLayout(class_record);
+        // The class table may move while GC or any fallible preparation runs.
+        // Keep only the minimal immutable scalars plus a generation-bearing
+        // construction pin; never retain a `Record *` across that window.
+        var construction = try rt.classes.beginConstruction(class_id);
+        defer construction.abort();
+        const definition = construction.definition;
+        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         rt.collectBeforeObjectAllocation(alloc_size);
         const self = if (inline_layout) |layout| blk: {
@@ -2155,10 +2082,7 @@ pub const Object = extern struct {
         }
         var class_payload: class.Payload = null;
         var class_payload_kind: class.PayloadKind = .none;
-        const payload_kind = if (class_record) |record|
-            record.payload_kind
-        else
-            class.standardPayloadKind(class_id);
+        const payload_kind = definition.payload_kind;
         // The plain-object (`.ordinary`), fast-array (`.none`) and `.realm` hot
         // paths carry NO class payload — they skip the allocating switch
         // entirely. Every allocating arm has identical shape
@@ -2196,14 +2120,11 @@ pub const Object = extern struct {
         }
         var reserved_class_payload_finalizer_slot = false;
         errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
-        if (class_record) |record| {
-            if (record.payload_finalizer != null and record.inline_payload_size == 0) {
-                try rt.reserveDeferredClassPayloadFinalizerSlot();
-                reserved_class_payload_finalizer_slot = true;
-            }
+        if (definition.has_payload_finalizer and definition.inline_payload_size == 0) {
+            try rt.reserveDeferredClassPayloadFinalizerSlot();
+            reserved_class_payload_finalizer_slot = true;
         }
-        markObjectAsPrototype(rt, prototype);
-        const has_exotic_methods = classHasExoticMethods(rt, class_id, class_record);
+        const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
         const initial_storage: ObjectStorage = switch (class_id) {
             class.ids.bytecode_function,
             class.ids.generator_function,
@@ -2218,6 +2139,11 @@ pub const Object = extern struct {
             class.ids.regexp => .{ .regexp = .{} },
             else => ObjectStorage.initPayload(class_payload),
         };
+        // Reacquire by id after the complete fallible window and validate the
+        // pinned generation. An unregister requested mid-construction remains
+        // pending; this exact in-flight object atomically transfers that pin to
+        // its allocation before the object reaches the GC list.
+        construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
@@ -2435,14 +2361,22 @@ pub const Object = extern struct {
     };
 
     fn inlineClassPayloadLayout(maybe_record: ?*const class.Record) ?InlineClassPayloadLayout {
-        const record = maybe_record orelse return null;
-        if (record.inline_payload_size == 0) return null;
-        const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
+        const definition_view = maybe_record orelse return null;
+        return inlineClassPayloadLayoutFromScalars(definition_view.inline_payload_size, definition_view.inline_payload_align);
+    }
+
+    fn inlineClassPayloadLayoutForDefinition(definition: class.Table.DefinitionPlan) ?InlineClassPayloadLayout {
+        return inlineClassPayloadLayoutFromScalars(definition.inline_payload_size, definition.inline_payload_align);
+    }
+
+    fn inlineClassPayloadLayoutFromScalars(inline_payload_size: u32, inline_payload_align: u16) ?InlineClassPayloadLayout {
+        if (inline_payload_size == 0) return null;
+        const payload_align = std.mem.Alignment.fromByteUnits(inline_payload_align);
         const object_align = std.mem.Alignment.of(Object);
         const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
         const object_offset = std.mem.alignForward(usize, 8, allocation_alignment.toByteUnits());
         const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), payload_align.toByteUnits());
-        const object_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        const object_size = std.math.add(usize, payload_offset, inline_payload_size) catch return null;
         const allocation_size = std.math.add(usize, object_offset, object_size) catch return null;
         return .{
             .object_offset = object_offset,
@@ -2553,14 +2487,6 @@ pub const Object = extern struct {
         const last_index = rt.cached_iterator_next_entries.len - 1;
         if (index != last_index) rt.cached_iterator_next_entries[index] = rt.cached_iterator_next_entries[last_index];
         rt.cached_iterator_next_entries = rt.cached_iterator_next_entries.ptr[0..last_index];
-    }
-
-    pub fn ensureSharedLazyNativeFunctionCache(self: *Object, rt: *JSRuntime) !void {
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        if (ctx.shared_lazy_native_functions != null) return;
-        const cache = try rt.createRuntime([runtime_mod.shared_lazy_native_function_slots]?JSValue);
-        cache.* = @splat(null);
-        ctx.shared_lazy_native_functions = cache;
     }
 
     pub fn ensureOrdinaryPayload(self: *Object, rt: *JSRuntime) !*OrdinaryPayload {
@@ -2759,13 +2685,6 @@ pub const Object = extern struct {
         return self.cachedRealmValue(rt, .throw_type_error_intrinsic);
     }
 
-    fn sharedLazyNativeFunctionSlot(self: *Object, rt: *JSRuntime, slot: u8) ?*?JSValue {
-        if (slot == 0 or slot > runtime_mod.shared_lazy_native_function_slots) return null;
-        const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return null;
-        const cache = ctx.shared_lazy_native_functions orelse return null;
-        return &cache[slot - 1];
-    }
-
     pub fn closeStdFile(self: *Object) void {
         _ = self.closeStdFileWithResult();
     }
@@ -2813,13 +2732,13 @@ pub const Object = extern struct {
         // `releaseWeakIdentity` could reentrantly `destroyDeadWeakHusk` this
         // object mid-teardown — a double free corrupting the slab free list.
         header.meta().flags.mark = true;
-        // Single pointer-only class-record view (qjs reads class_array[class_id]
-        // in place, quickjs.c:6365). Reused for BOTH the inline-payload layout and
-        // the inline-payload finalize below, so the plain-object free path does
-        // ONE bounds-checked pointer fetch instead of a `recordPtr` here plus a
-        // second by-value 88B `record()` copy inside finalizeInlineClassPayload.
-        const class_record = rt.classes.recordPtr(self.class_id);
-        const inline_layout = inlineClassPayloadLayout(class_record);
+        // Keep only immutable scalar destruction data across recursive cleanup.
+        // A dynamic object's allocation owns its definition pin until the
+        // allocation itself is freed, so the callback can be reacquired by id
+        // and generation immediately before invocation.
+        const destroying_class_id = self.class_id;
+        const definition = rt.classes.destructionPlan(destroying_class_id) orelse unreachable;
+        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         // Size for GC free-accounting is the same value `allocationSize` derives
         // from `inline_layout` (object_size for inline-payload classes, else
         // @sizeOf(Object)) — reuse the layout we just computed instead of a second
@@ -2835,11 +2754,6 @@ pub const Object = extern struct {
         // for non-global; pure dispatch-shape change, zero behavioral risk.)
         if (self.isGlobal() and rt.borrowed_reference_holders.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
         if (self.flags.class_payload_kind == .std_file) self.enqueueDeferredStdFileClose(rt);
-        // `inline_layout != null` is exactly `record.hasInlinePayload()`
-        // (inlineClassPayloadLayout returns null iff inline_payload_size == 0), so
-        // the plain-object hot path (no inline payload) skips the finalize helper —
-        // and its record re-lookup — and takes the deferred-finalizer arm directly.
-        if (inline_layout == null or !self.finalizeInlineClassPayload(rt, class_record.?)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.propertyEntries();
         const old_property_capacity = self.propertyStorageCapacity();
         const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
@@ -2853,16 +2767,24 @@ pub const Object = extern struct {
         // Array elements live in the `u.array_values` union arm (gated by
         // `is_array`), orthogonal to the class-payload arm below.
         self.destroyArrayElements(rt);
+        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
+        const object_shape = self.shape_ref;
+        if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
+            rt.shapes.release(object_shape);
+        }
+        // qjs free_object strips property storage and releases the shape before
+        // reacquiring class_array[class_id].finalizer. The generation-bearing
+        // live pin keeps this definition available while recursive cleanup runs;
+        // only now may an inline callback observe the stripped object. Deferred
+        // callbacks are only snapshotted here and run after the allocation dies.
+        if (inline_layout == null or !self.finalizeInlineClassPayload(rt, definition.generation)) {
+            self.enqueueClassPayloadFinalizer(rt, definition.generation);
+        }
         // The non-array class payloads all share the single `u.payload`
         // union slot, discriminated by `class_payload_kind` — at most ONE is
-        // ever live per object. qjs frees the class-specific payload with a
-        // SINGLE table lookup (`class_array[class_id].finalizer`,
-        // quickjs.c:6365); mirror that with one switch on the discriminant
-        // instead of walking 19 mutually-exclusive `if (kind != .X) return`
-        // destroyers in sequence (LLVM re-materializes each as
-        // ldrb+and+cmp+b.ne — ~76 insn of dead dispatch for a plain object).
-        // Each arm's destroyer keeps its own `kind != .X` guard, so this is a
-        // pure dispatch-shape change with identical per-object semantics.
+        // ever live per object. A deferred callback transfers that payload into
+        // its job above and clears the discriminant, so this switch handles only
+        // definitions without a payload finalizer.
         switch (self.flags.class_payload_kind) {
             .none => {},
             .ordinary => self.destroyOrdinaryPayload(rt),
@@ -2886,11 +2808,6 @@ pub const Object = extern struct {
             .disposable_stack => self.destroyDisposableStackPayload(rt),
             .global => self.destroyGlobalPayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
-        }
-        if (rt.gc.phase != .deinit) self.clearCachedIteratorNext(rt) else clearCachedIteratorNextWithoutFree(rt, self);
-        const object_shape = self.shape_ref;
-        if (!(rt.gc.phase == .remove_cycles and headerIsCycleGarbage(&object_shape.header))) {
-            rt.shapes.release(object_shape);
         }
         // Cycle removal and runtime deinit both use a resource pass followed by
         // a struct-free pass: a not-yet-processed sibling (or a held Shape)
@@ -2917,51 +2834,57 @@ pub const Object = extern struct {
         // to load the flag and return.
         if (self.header.meta().flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
+        rt.classes.releaseObjectDefinition(destroying_class_id, definition.generation);
     }
 
     /// Pass-B drain of a cycle-deferred object: its resources were freed by the
     /// resource pass; only the struct memory remains. Mirrors qjs Pass B
     /// (quickjs.c:6797). Pass B filters retained weak husks before calling this.
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
-        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
+        const class_id = self.class_id;
+        const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
+        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
+        rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
     pub fn destroyDeadWeakHusk(rt: *JSRuntime, self: *Object) void {
         std.debug.assert(self.header.meta().rc == 0);
         std.debug.assert(self.weakref_count == 0);
         std.debug.assert(!self.header.meta().flags.mark);
-        const inline_layout = inlineClassPayloadLayout(rt.classes.recordPtr(self.class_id));
+        const class_id = self.class_id;
+        const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
+        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
+        rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
-    /// Precondition: `record.hasInlinePayload()` — the caller
-    /// (`destroyFromHeader`) only enters this when the already-computed
-    /// `inline_layout` is non-null, which is exactly that predicate. `record` is
-    /// the pointer view fetched once at the top of the free path, so this no
-    /// longer re-looks-up the class table (nor makes the by-value 88B `Record`
-    /// copy the old `rt.classes.record(...)` did on every object free).
-    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime, record: *const class.Record) bool {
-        const finalizer = record.payload_finalizer orelse {
+    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime, generation: u64) bool {
+        if (!rt.classes.runPayloadFinalizer(
+            self.class_id,
+            generation,
+            @ptrCast(rt),
+            @ptrCast(self),
+            &self.u.payload,
+        )) {
             self.u.payload = null;
             self.flags.class_payload_kind = .none;
             return true;
-        };
-        finalizer(@ptrCast(rt), @ptrCast(self), &self.u.payload);
+        }
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
         return true;
     }
 
-    fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
+    fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime, generation: u64) void {
         if (!self.flags.reserved_class_payload_finalizer_slot) return;
         const payload = self.u.payload;
         const payload_kind = self.flags.class_payload_kind;
         const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
         self.flags.reserved_class_payload_finalizer_slot = false;
-        const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
+        const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, generation, payload, payload_kind, object_identity);
         if (!enqueued) return;
         self.u.payload = null;
         self.flags.class_payload_kind = .none;
@@ -3020,6 +2943,7 @@ pub const Object = extern struct {
 
     fn clearBorrowedReferencesForMatcher(rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
         compactBorrowedReferenceHolders(rt);
+        var finalization_enqueue_blocked = false;
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
@@ -3033,7 +2957,7 @@ pub const Object = extern struct {
             }
             gc.retain(&current.header);
             rt.markBorrowedWeakCleanupHolderSeen();
-            current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher);
+            current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher, &finalization_enqueue_blocked);
             if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
                 current.value().free(rt);
                 if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
@@ -3085,22 +3009,12 @@ pub const Object = extern struct {
         return null;
     }
 
-    fn registerBorrowedHolderForPendingMutation(rt: *JSRuntime, object: *Object) !bool {
-        const was_registered = rt.borrowedReferenceHolderRegistered(object);
-        try rt.registerBorrowedReferenceHolder(object);
-        return !was_registered;
-    }
-
-    fn rollbackBorrowedHolderRegistration(rt: *JSRuntime, object: *Object, inserted: bool) void {
-        if (inserted) rt.unregisterBorrowedReferenceHolder(object);
-    }
-
     pub fn pruneBorrowedReferenceHolderIfEmpty(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_borrowed_reference_holder) return;
         if (!self.hasBorrowedReferences(rt)) rt.unregisterBorrowedReferenceHolder(self);
     }
 
-    fn hasBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
+    fn hasBorrowedReferences(self: *const Object, _: *JSRuntime) bool {
         if (self.weakRefPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -3109,19 +3023,11 @@ pub const Object = extern struct {
         }
         if (self.finalizationRegistryPayloadConst()) |payload| {
             if (payload.cells.len != 0) return true;
-        }
-        if (self.borrowedRealmGlobalPtr() != null) return true;
-        const scanned = self.shape_ref.prop_count;
-        for (self.prop_values[0..scanned], 0..) |entry, index| {
-            if (self.propFlagsAt(index).isAutoInit()) {
-                const info = property.autoInitAt(rt, entry.slot.auto_init).*;
-                if (info.host_function_realm_global != 0) return true;
-            }
         }
         return false;
     }
 
-    fn mayContainBorrowedReferences(self: *const Object, rt: *JSRuntime) bool {
+    fn mayContainBorrowedReferences(self: *const Object, _: *JSRuntime) bool {
         if (self.weakRefPayloadConst()) |payload| {
             if (payload.weak_target_identity != null) return true;
         }
@@ -3130,19 +3036,6 @@ pub const Object = extern struct {
         }
         if (self.finalizationRegistryPayloadConst()) |payload| {
             if (payload.cells.len != 0) return true;
-        }
-        if (rt.borrowedWeakCleanupMayMatchRealmIdentity()) {
-            if (self.borrowedRealmGlobalPtr()) |realm_global| {
-                const identity = @intFromPtr(&realm_global.header) & ~@as(usize, 1);
-                if (rt.borrowedWeakCleanupRealmIdentityMatches(identity)) return true;
-            }
-            const scanned = self.shape_ref.prop_count;
-            for (self.prop_values[0..scanned], 0..) |entry, index| {
-                if (self.propFlagsAt(index).isAutoInit()) {
-                    const info = property.autoInitAt(rt, entry.slot.auto_init).*;
-                    if (info.host_function_realm_global != 0 and rt.borrowedWeakCleanupRealmIdentityMatches(info.host_function_realm_global)) return true;
-                }
-            }
         }
         return false;
     }
@@ -3210,14 +3103,22 @@ pub const Object = extern struct {
         }
     };
 
-    fn clearBorrowedReferencesToDestroyedIdentities(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        self.clearWeakIdentities(rt, matcher);
-        self.clearRealmGlobalPtrs(rt, matcher);
-        self.clearAutoInitRealmGlobals(rt, matcher);
+    fn clearBorrowedReferencesToDestroyedIdentities(
+        self: *Object,
+        rt: *JSRuntime,
+        matcher: BorrowedIdentityMatcher,
+        finalization_enqueue_blocked: *bool,
+    ) void {
+        self.clearWeakIdentities(rt, matcher, finalization_enqueue_blocked);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
-    fn clearWeakIdentities(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
+    fn clearWeakIdentities(
+        self: *Object,
+        rt: *JSRuntime,
+        matcher: BorrowedIdentityMatcher,
+        finalization_enqueue_blocked: *bool,
+    ) void {
         if (self.weakRefPayload()) |payload| {
             if (payload.weak_target_identity) |identity| {
                 if (matcher.matches(rt, identity)) rt.clearWeakIdentitySlot(&payload.weak_target_identity);
@@ -3247,6 +3148,7 @@ pub const Object = extern struct {
         var write_index: usize = 0;
         while (read_index < finalization_payload.cells.len) : (read_index += 1) {
             var cell = finalization_payload.cells[read_index];
+            if (cell.isPending()) finalization_enqueue_blocked.* = true;
             const target_identity = cell.target_identity orelse {
                 if (write_index != read_index) finalization_payload.cells[write_index] = cell;
                 write_index += 1;
@@ -3260,8 +3162,14 @@ pub const Object = extern struct {
 
             if (cell.isActive()) {
                 cell.state = .pending_enqueue;
-                enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value) catch |err| switch (err) {
+                if (finalization_enqueue_blocked.*) {
+                    finalization_payload.cells[write_index] = cell;
+                    write_index += 1;
+                    continue;
+                }
+                enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
                     error.OutOfMemory => {
+                        finalization_enqueue_blocked.* = true;
                         finalization_payload.cells[write_index] = cell;
                         write_index += 1;
                         continue;
@@ -3289,44 +3197,6 @@ pub const Object = extern struct {
 
     fn prepareBorrowedWeakCleanupForOwnedValue(rt: *JSRuntime, stored_value: JSValue) ?usize {
         return rt.prepareBorrowedWeakCleanupForLastRefValue(stored_value);
-    }
-
-    fn clearRealmGlobalPtrs(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        if (self.ordinaryPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.iteratorPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.collectionPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.bufferPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.typedArrayPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.regExpPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.boundFunctionPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.proxyPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.argumentsPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.objectDataPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.weakRefPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.varRefPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.finalizationRegistryPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.stdFilePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.disposableStackPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.promisePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.generatorPayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-        if (self.moduleNamespacePayload()) |payload| clearObjectPtr(&payload.realm_global_ptr, rt, matcher);
-    }
-
-    fn clearObjectPtr(slot: *?*Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        if (slot.*) |stored| {
-            const identity = @intFromPtr(&stored.header) & ~@as(usize, 1);
-            if (matcher.matches(rt, identity)) slot.* = null;
-        }
-    }
-
-    fn clearAutoInitRealmGlobals(self: *Object, rt: *JSRuntime, matcher: BorrowedIdentityMatcher) void {
-        const scanned = self.shape_ref.prop_count;
-        for (self.prop_values[0..scanned], 0..) |*entry, index| {
-            if (self.propFlagsAt(index).isAutoInit()) {
-                const info = property.autoInitAt(rt, entry.slot.auto_init);
-                if (matcher.matches(rt, info.host_function_realm_global)) info.host_function_realm_global = 0;
-            }
-        }
     }
 
     pub const post_a_object_size_baseline: usize = 192;
@@ -3698,6 +3568,11 @@ pub const Object = extern struct {
         return null;
     }
 
+    pub fn finalizationRegistryRealmContext(self: *const Object) ?*context_mod.RealmContext {
+        const payload = self.finalizationRegistryPayloadConst() orelse return null;
+        return payload.realm.borrow();
+    }
+
     pub fn finalizationRegistryCellsSlot(self: *Object) *[]FinalizationRegistryCell {
         if (self.finalizationRegistryPayload()) |payload| return &payload.cells;
         std.debug.assert(self.flags.class_payload_kind == .finalization_registry);
@@ -3726,27 +3601,23 @@ pub const Object = extern struct {
 
         const entries = self.finalizationRegistryCellsSlot();
         var removed = false;
-        var index: usize = 0;
-        while (index < entries.*.len) {
-            const entry = &entries.*[index];
-            if (!entry.isActive()) {
-                index += 1;
-                continue;
-            }
-            if (entry.unregister_token_identity == null or entry.unregister_token_identity.? != token_identity) {
-                index += 1;
+        var read_index: usize = 0;
+        var write_index: usize = 0;
+        while (read_index < entries.*.len) : (read_index += 1) {
+            const cell = entries.*[read_index];
+            const matches = cell.isActive() and
+                cell.unregister_token_identity != null and
+                cell.unregister_token_identity.? == token_identity;
+            if (matches) {
+                removed = true;
+                cell.destroy(rt);
                 continue;
             }
 
-            const removed_cell = entry.*;
-            const last_idx = entries.*.len - 1;
-            if (index < last_idx) {
-                entries.*[index] = entries.*[last_idx];
-            }
-            entries.* = entries.*.ptr[0..last_idx];
-            removed = true;
-            removed_cell.destroy(rt);
+            if (write_index != read_index) entries.*[write_index] = cell;
+            write_index += 1;
         }
+        entries.* = entries.*.ptr[0..write_index];
         if (removed) self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return removed;
     }
@@ -4064,26 +3935,6 @@ pub const Object = extern struct {
 
     pub fn setFunctionPromiseResolvingState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
         try self.setOptionalValueSlot(rt, try self.functionPromiseResolvingStateSlot(rt), next_value);
-    }
-
-    pub fn setFunctionPromiseThenableTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableTargetSlot(rt), next_value);
-    }
-
-    pub fn setFunctionPromiseThenableThis(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThisSlot(rt), next_value);
-    }
-
-    pub fn setFunctionPromiseThenableThen(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseThenableThenSlot(rt), next_value);
-    }
-
-    pub fn setFunctionPromiseReactionRecord(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionRecordSlot(rt), next_value);
-    }
-
-    pub fn setFunctionPromiseReactionValue(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.functionPromiseReactionValueSlot(rt), next_value);
     }
 
     pub fn setFunctionPromiseCombinatorState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
@@ -5214,9 +5065,6 @@ pub const Object = extern struct {
         payload.just_yielded = false;
         payload.resume_completion_type = 0;
         payload.yield_star_suspended = false;
-        // Clear the borrowed realm before the execution record releases its
-        // current-function owner. Raw continuations unregister below.
-        payload.realm_global_ptr = null;
 
         if (payload.execution) |execution| {
             if (execution.suspended.running_aliases) {
@@ -5228,11 +5076,6 @@ pub const Object = extern struct {
                 destroyGeneratorExecutionState(rt, &payload.execution);
             }
         }
-
-        // Only marker-less internal continuations need this fallback while
-        // alive. A completed qjs generator no longer owns a func_state/realm
-        // edge, so unregister the corresponding borrowed holder as well.
-        self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn generatorExecutingSlot(self: *Object) *bool {
@@ -5420,16 +5263,6 @@ pub const Object = extern struct {
         return 0;
     }
 
-    pub fn functionPrimitivePrototypeSlot(self: *Object, rt: *JSRuntime, slot: PrimitivePrototypeSlot) !*?JSValue {
-        const payload = try self.ensureFunctionRarePayload(rt);
-        return &payload.primitive_prototypes[@intFromEnum(slot)];
-    }
-
-    pub fn functionPrimitivePrototype(self: *const Object, slot: PrimitivePrototypeSlot) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.primitive_prototypes[@intFromEnum(slot)];
-        return null;
-    }
-
     pub fn nativeDispatchNameSlot(self: *Object) *atom.Atom {
         std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));
         if (self.functionPayload()) |payload| return &payload.native.native_dispatch_name;
@@ -5553,32 +5386,32 @@ pub const Object = extern struct {
         return 0;
     }
 
-    pub fn addArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: ArrayBuiltinMarker) bool {
+    pub fn addArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: ArrayBuiltinMarker) !bool {
         if (marker == .none) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addTypedArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: TypedArrayBuiltinMarker) bool {
+    pub fn addTypedArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: TypedArrayBuiltinMarker) !bool {
         if (marker == .none) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setTypedArrayBuiltinMarker(payload, marker);
     }
 
-    pub fn addArrayIteratorKind(self: *Object, rt: *JSRuntime, kind: u8) bool {
+    pub fn addArrayIteratorKind(self: *Object, rt: *JSRuntime, kind: u8) !bool {
         if (kind == 0) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setArrayIteratorKind(payload, kind);
     }
 
-    pub fn addIteratorIdentityFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addIteratorIdentityFunction(self: *Object, rt: *JSRuntime) !bool {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.iterator_identity = true;
         return true;
     }
 
-    pub fn addArrayIteratorNextFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addArrayIteratorNextFunction(self: *Object, rt: *JSRuntime) !bool {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.array_iterator_next = true;
         return true;
     }
@@ -5589,49 +5422,49 @@ pub const Object = extern struct {
         payload.internal_callable_tag = .throw_type_error_intrinsic;
     }
 
-    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addAsyncIteratorAsyncDisposeFunction(self: *Object, rt: *JSRuntime) !bool {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.async_iterator_async_dispose = true;
         return true;
     }
 
-    pub fn addAsyncGeneratorPrototypeMethod(self: *Object, rt: *JSRuntime) bool {
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+    pub fn addAsyncGeneratorPrototypeMethod(self: *Object, rt: *JSRuntime) !bool {
+        const payload = try self.ensureFunctionRarePayload(rt);
         payload.async_generator_method = true;
         return true;
     }
 
-    pub fn addIteratorHelperMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
+    pub fn addIteratorHelperMethod(self: *Object, rt: *JSRuntime, method_id: u8) !bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         if (payload.iterator_helper_method != 0 and payload.iterator_helper_method != method_id) return false;
         payload.iterator_helper_method = method_id;
         return true;
     }
 
-    pub fn addAsyncFromSyncIteratorMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
+    pub fn addAsyncFromSyncIteratorMethod(self: *Object, rt: *JSRuntime, method_id: u8) !bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         if (payload.async_from_sync_iterator_method != 0 and payload.async_from_sync_iterator_method != method_id) return false;
         payload.async_from_sync_iterator_method = method_id;
         return true;
     }
 
-    pub fn addDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
+    pub fn addDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) !bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addAsyncDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) bool {
+    pub fn addAsyncDisposableStackMethod(self: *Object, rt: *JSRuntime, method_id: u8) !bool {
         if (method_id == 0) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setAsyncDisposableStackMethod(payload, method_id);
     }
 
-    pub fn addCollectionMethodOwnerClass(self: *Object, rt: *JSRuntime, owner_class: class.ClassId) bool {
+    pub fn addCollectionMethodOwnerClass(self: *Object, rt: *JSRuntime, owner_class: class.ClassId) !bool {
         if (owner_class == class.invalid_class_id) return true;
-        const payload = self.ensureFunctionRarePayload(rt) catch return false;
+        const payload = try self.ensureFunctionRarePayload(rt);
         return setCollectionMethodOwnerClass(payload, owner_class);
     }
 
@@ -5681,36 +5514,19 @@ pub const Object = extern struct {
     }
 
     pub fn setFunctionBytecodeValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
+        // `next_value` is owned and consumed on both success and failure. The
+        // finalized FunctionBytecode is already the execution record, so
+        // attachment is a no-allocation pointer publication just like qjs
+        // `js_closure2`'s `p->u.func.function_bytecode = b` transfer.
         errdefer next_value.free(rt);
         if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
         std.debug.assert(header.meta().kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-        // Publish only fully executable FBs. This moves the compatibility-view
-        // allocation to closure construction so resolveInlineTarget has a
-        // non-null invariant and cannot turn OOM into a fast-path miss later.
-        _ = try fb.ensureCachedView(&rt.memory, &rt.atoms);
         const old_fb = self.u.bytecode_function.function_bytecode;
         self.u.bytecode_function.function_bytecode = fb;
         if (old_fb) |old| gc.release(rt, &old.header);
-    }
-
-    /// Bind a bytecode closure to its realm using qjs's ownership shape:
-    /// `JSFunctionBytecode.realm` owns the common realm once, while all closure
-    /// objects that reference that FB merely derive it. As in qjs, a compiled
-    /// FB belongs to exactly one realm; evaluation in another realm must compile
-    /// or deserialize a distinct FB rather than mutating/shadowing this owner.
-    pub fn bindBytecodeFunctionRealmGlobal(self: *Object, global: *Object) !void {
-        std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        const fb = self.u.bytecode_function.function_bytecode orelse return error.InvalidBytecode;
-        if (fb.realm_global_header == null) {
-            gc.retain(&global.header);
-            fb.realm_global_header = &global.header;
-            return;
-        }
-        if (fb.realm_global_header == &global.header) return;
-        return error.InvalidBytecode;
     }
 
     /// Direct qjs `u.func` view for a proven bytecode-function object.
@@ -5744,22 +5560,16 @@ pub const Object = extern struct {
         return current_object.functionBytecode();
     }
 
-    pub fn functionClassFieldsInitSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).class_fields_init;
-    }
-
-    pub fn functionClassFieldsInit(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.class_fields_init;
-        return null;
-    }
-
-    pub fn functionImportMetaSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).import_meta;
-    }
-
-    pub fn functionImportMeta(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.import_meta;
-        return null;
+    /// Realm global for an active generator/async continuation, derived from
+    /// the saved current function just like qjs
+    /// `JSAsyncFunctionState.frame.cur_func -> JSFunctionBytecode.realm`.
+    /// Completed generators have released that execution owner and therefore
+    /// return null; their prototype method continues in its current call view.
+    pub fn generatorFunctionRealmGlobalPtr(self: *const Object) ?*Object {
+        const stored = self.generatorFunctionBytecode() orelse return null;
+        const function_bytecode = functionBytecodeFromValue(stored) orelse return null;
+        const realm = function_bytecode.realmContext() orelse return null;
+        return realm.global;
     }
 
     pub fn functionProxyRevokeTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -5804,60 +5614,6 @@ pub const Object = extern struct {
 
     pub fn functionPromiseResolvingReject(self: *const Object) bool {
         if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_reject;
-        return false;
-    }
-
-    pub fn functionPromiseThenableTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_target;
-    }
-
-    pub fn functionPromiseThenableTarget(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_target;
-        return null;
-    }
-
-    pub fn functionPromiseThenableThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_this;
-    }
-
-    pub fn functionPromiseThenableThis(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_this;
-        return null;
-    }
-
-    pub fn functionPromiseThenableThenSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_thenable_then;
-    }
-
-    pub fn functionPromiseThenableThen(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_thenable_then;
-        return null;
-    }
-
-    pub fn functionPromiseReactionRecordSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_record;
-    }
-
-    pub fn functionPromiseReactionRecord(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_record;
-        return null;
-    }
-
-    pub fn functionPromiseReactionValueSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_value;
-    }
-
-    pub fn functionPromiseReactionValue(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_value;
-        return null;
-    }
-
-    pub fn functionPromiseReactionIsRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
-        return &(try self.ensureFunctionRarePayload(rt)).promise_reaction_is_rejected;
-    }
-
-    pub fn functionPromiseReactionIsRejected(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_reaction_is_rejected;
         return false;
     }
 
@@ -5987,42 +5743,6 @@ pub const Object = extern struct {
         return 0;
     }
 
-    pub fn functionRealmTypeErrorConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).realm_type_error_constructor;
-    }
-
-    pub fn functionRealmTypeErrorConstructor(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.realm_type_error_constructor;
-        return null;
-    }
-
-    pub fn functionArrowConstructorThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).arrow_constructor_this;
-    }
-
-    pub fn functionArrowConstructorThis(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.arrow_constructor_this;
-        return null;
-    }
-
-    pub fn functionArrowNewTargetSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).arrow_new_target;
-    }
-
-    pub fn functionArrowNewTarget(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.arrow_new_target;
-        return null;
-    }
-
-    pub fn functionSuperConstructorSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).super_constructor;
-    }
-
-    pub fn functionSuperConstructor(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.super_constructor;
-        return null;
-    }
-
     pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
         if (!class.isBytecodeFunctionClass(self.class_id)) return &.{};
         return self.u.bytecode_function.captureSlice();
@@ -6048,19 +5768,10 @@ pub const Object = extern struct {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         var old_cells = self.u.bytecode_function.captureSlice();
         if (self.u.bytecode_function.function_bytecode) |fb| {
-            std.debug.assert(next_cells.len == fb.var_refs_len);
+            std.debug.assert(next_cells.len == fb.closureVarCount());
         }
         self.u.bytecode_function.var_refs = if (next_cells.len == 0) BytecodeFunctionStorage.emptyVarRefs() else next_cells.ptr;
         destroyVarRefCellSlice(rt, &old_cells);
-    }
-
-    pub fn functionLexicalThisSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        return &(try self.ensureFunctionRarePayload(rt)).lexical_this;
-    }
-
-    pub fn functionLexicalThis(self: *const Object) ?JSValue {
-        if (self.functionRarePayloadConst()) |payload| return payload.lexical_this;
-        return null;
     }
 
     pub fn functionHomeObject(self: *const Object) ?*Object {
@@ -6084,46 +5795,6 @@ pub const Object = extern struct {
             self.u.bytecode_function.home_or_aux = if (home_object) |next| @ptrCast(next) else null;
         }
         if (old_home_object) |old| old.value().free(rt);
-    }
-
-    pub fn privateRemapFromSlot(self: *Object) *[]atom.Atom {
-        if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.functionRarePayload()) |payload| return &payload.private_remap_from;
-        std.debug.assert(self.flags.class_payload_kind == .ordinary or self.flags.class_payload_kind == .function);
-        unreachable;
-    }
-
-    pub fn privateRemapFromSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
-        if (self.ordinaryPayload()) |payload| return &payload.private_remap_from;
-        if (self.flags.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_from;
-        const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.private_remap_from;
-    }
-
-    pub fn privateRemapFrom(self: *const Object) []atom.Atom {
-        if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_from;
-        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_from;
-        return &.{};
-    }
-
-    pub fn privateRemapToSlot(self: *Object) *[]atom.Atom {
-        if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.functionRarePayload()) |payload| return &payload.private_remap_to;
-        std.debug.assert(self.flags.class_payload_kind == .ordinary or self.flags.class_payload_kind == .function);
-        unreachable;
-    }
-
-    pub fn privateRemapToSlotEnsured(self: *Object, rt: *JSRuntime) !*[]atom.Atom {
-        if (self.ordinaryPayload()) |payload| return &payload.private_remap_to;
-        if (self.flags.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).private_remap_to;
-        const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.private_remap_to;
-    }
-
-    pub fn privateRemapTo(self: *const Object) []atom.Atom {
-        if (self.ordinaryPayloadConst()) |payload| return payload.private_remap_to;
-        if (self.functionRarePayloadConst()) |payload| return payload.private_remap_to;
-        return &.{};
     }
 
     pub fn setCallSiteMetadata(
@@ -6393,20 +6064,6 @@ pub const Object = extern struct {
         try self.setOptionalValueSlot(rt, try self.promiseCombinatorKeysSlot(rt), next_value);
     }
 
-    pub fn typedArrayArrayBufferPrototypeSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.typed_array_array_buffer_prototype;
-    }
-
-    pub fn typedArrayArrayBufferPrototype(self: *const Object) ?JSValue {
-        if (self.ordinaryPayloadConst()) |payload| return payload.typed_array_array_buffer_prototype;
-        return null;
-    }
-
-    pub fn setTypedArrayArrayBufferPrototype(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, try self.typedArrayArrayBufferPrototypeSlot(rt), next_value);
-    }
-
     pub fn promiseCombinatorRemainingSlot(self: *Object, rt: *JSRuntime) !*i32 {
         const payload = try self.ensureOrdinaryPayload(rt);
         return &payload.promise_combinator_remaining;
@@ -6418,56 +6075,19 @@ pub const Object = extern struct {
     }
 
     pub fn functionRealmGlobalSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        if (self.flags.class_payload_kind == .function) return &(try self.ensureFunctionRarePayload(rt)).realm_global;
-        if (self.boundFunctionPayload()) |payload| return &payload.realm_global;
-        std.debug.assert(self.flags.class_payload_kind == .function or self.flags.class_payload_kind == .bound_function);
-        unreachable;
+        std.debug.assert(self.flags.class_payload_kind == .function);
+        return &(try self.ensureFunctionRarePayload(rt)).realm_global;
     }
 
     pub fn functionRealmGlobal(self: *const Object) ?JSValue {
         if (self.functionRarePayloadConst()) |payload| return payload.realm_global;
-        if (self.boundFunctionPayloadConst()) |payload| return payload.realm_global;
         return null;
-    }
-
-    pub fn functionRealmGlobalPtrSlot(self: *Object) *?*Object {
-        if (self.ordinaryPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.objectDataPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.weakRefPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.iteratorPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.collectionPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.bufferPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.typedArrayPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.regExpPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.boundFunctionPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.proxyPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.argumentsPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.varRefPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.finalizationRegistryPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.stdFilePayload()) |payload| return &payload.realm_global_ptr;
-        if (self.disposableStackPayload()) |payload| return &payload.realm_global_ptr;
-        if (self.promisePayload()) |payload| return &payload.realm_global_ptr;
-        if (self.moduleNamespacePayload()) |payload| return &payload.realm_global_ptr;
-        if (self.generatorPayload()) |payload| return &payload.realm_global_ptr;
-        std.debug.assert(self.flags.class_payload_kind != .none);
-        unreachable;
-    }
-
-    pub fn functionRealmGlobalPtrSlotEnsured(self: *Object, rt: *JSRuntime) !*?*Object {
-        if (self.flags.class_payload_kind == .none) {
-            const payload = try self.ensureOrdinaryPayload(rt);
-            return &payload.realm_global_ptr;
-        }
-        return self.functionRealmGlobalPtrSlot();
     }
 
     pub fn setFunctionRealmGlobalPtr(self: *Object, rt: *JSRuntime, realm_global: ?*Object) !void {
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            if (realm_global) |global| {
-                try self.bindBytecodeFunctionRealmGlobal(global);
-            } else {
-                if (self.functionRarePayload()) |rare| self.clearOptionalValueSlot(rt, &rare.realm_global);
-            }
+            const expected = self.bytecodeFunctionRealmGlobalPtr() orelse return error.InvalidBuiltinRegistry;
+            if (realm_global != expected) return error.InvalidBytecode;
             return;
         }
         if (self.class_id == class.ids.c_function) {
@@ -6476,54 +6096,22 @@ pub const Object = extern struct {
             self.setNativeFunctionRealm(realm);
             return;
         }
-        // These call carriers intentionally have caller semantics. Bound and
-        // Proxy wrappers recurse with the caller view; C_FUNCTION_DATA and
-        // C_CLOSURE likewise never acquire a construction-realm owner.
-        if (self.class_id == class.ids.c_function_data or
-            self.class_id == class.ids.c_closure or
-            self.class_id == class.ids.bound_function or
-            self.class_id == class.ids.proxy)
-        {
-            return;
-        }
-        const slot = try self.functionRealmGlobalPtrSlotEnsured(rt);
-        if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
-        slot.* = realm_global;
-        if (realm_global == null) self.pruneBorrowedReferenceHolderIfEmpty(rt);
+        // Every remaining class is a caller-semantics object or a non-callable
+        // payload. Neither owns nor borrows a Realm.
     }
 
     pub fn setFunctionRealmGlobalPtrIfNull(self: *Object, rt: *JSRuntime, realm_global: ?*Object) !void {
         if (class.isBytecodeFunctionClass(self.class_id)) {
-            if (self.bytecodeFunctionRealmGlobalPtr() == null) {
-                if (realm_global) |global| try self.bindBytecodeFunctionRealmGlobal(global);
-            }
-            return;
+            return self.setFunctionRealmGlobalPtr(rt, realm_global);
         }
         if (self.class_id == class.ids.c_function) {
             if (self.nativeFunctionRealm() == null) try self.setFunctionRealmGlobalPtr(rt, realm_global);
             return;
         }
-        if (self.class_id == class.ids.c_function_data or
-            self.class_id == class.ids.c_closure or
-            self.class_id == class.ids.bound_function or
-            self.class_id == class.ids.proxy)
-        {
-            return;
-        }
-        const slot = try self.functionRealmGlobalPtrSlotEnsured(rt);
-        if (slot.* == null) {
-            if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
-            slot.* = realm_global;
-            if (realm_global == null) self.pruneBorrowedReferenceHolderIfEmpty(rt);
-        }
     }
 
     pub fn borrowedReferenceHolderIndex(self: *const Object) ?usize {
         const compact_encoded = if (self.functionPayloadConst()) |payload|
-            @as(u32, payload.borrowed_holder_index_lo) |
-                (@as(u32, payload.borrowed_holder_index_mid) << 8) |
-                (@as(u32, payload.borrowed_holder_index_hi) << 16)
-        else if (self.generatorPayloadConst()) |payload|
             @as(u32, payload.borrowed_holder_index_lo) |
                 (@as(u32, payload.borrowed_holder_index_mid) << 8) |
                 (@as(u32, payload.borrowed_holder_index_hi) << 16)
@@ -6544,11 +6132,6 @@ pub const Object = extern struct {
             payload.borrowed_holder_index_mid = @truncate(compact_encoded >> 8);
             payload.borrowed_holder_index_hi = @truncate(compact_encoded >> 16);
             return;
-        } else if (self.generatorPayload()) |payload| {
-            payload.borrowed_holder_index_lo = @truncate(compact_encoded);
-            payload.borrowed_holder_index_mid = @truncate(compact_encoded >> 8);
-            payload.borrowed_holder_index_hi = @truncate(compact_encoded >> 16);
-            return;
         }
         const link = self.weakReferenceHolderLink() orelse return;
         link.borrowed_holder_index = if (index) |holder_index|
@@ -6557,18 +6140,18 @@ pub const Object = extern struct {
             0;
     }
 
-    /// Realm-global pointer for a proven bytecode-function object. The common
-    /// edge lives on the shared FunctionBytecode exactly like qjs `b->realm`.
+    /// Realm-global pointer for a proven bytecode-function object. The shared
+    /// FunctionBytecode owns the RealmContext directly, exactly like qjs
+    /// `b->realm`; closure objects only derive this live global.
     pub fn bytecodeFunctionRealmGlobalPtr(self: *const Object) ?*Object {
-        if (self.functionRarePayloadConst()) |rare| {
-            if (rare.realm_global) |stored| {
-                if (objectFromValue(stored)) |global| return global;
-            }
-        }
+        const realm = self.bytecodeFunctionRealmContext() orelse return null;
+        return realm.global;
+    }
+
+    pub fn bytecodeFunctionRealmContext(self: *const Object) ?*context_mod.RealmContext {
+        if (!class.isBytecodeFunctionClass(self.class_id)) return null;
         const fb = self.u.bytecode_function.function_bytecode orelse return null;
-        const header = fb.realm_global_header orelse return null;
-        std.debug.assert(header.metaConst().kind == .object);
-        return @fieldParentPtr("header", header);
+        return fb.realmContext();
     }
 
     /// Install the construction realm owned by a true C_FUNCTION. Retain the
@@ -6611,31 +6194,6 @@ pub const Object = extern struct {
     pub fn functionRealmGlobalPtr(self: *const Object) ?*Object {
         if (class.isBytecodeFunctionClass(self.class_id)) return self.bytecodeFunctionRealmGlobalPtr();
         if (self.class_id == class.ids.c_function) return self.nativeFunctionRealmGlobalPtr();
-        return self.borrowedRealmGlobalPtr();
-    }
-
-    /// Raw realm pointers that participate in the runtime's borrowed-reference
-    /// cleanup registry. Bytecode-function realms are deliberately absent:
-    /// their FunctionBytecode owns a JSValue edge and is traced by the cycle GC.
-    fn borrowedRealmGlobalPtr(self: *const Object) ?*Object {
-        if (self.generatorPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.ordinaryPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.objectDataPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.weakRefPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.iteratorPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.collectionPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.bufferPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.typedArrayPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.regExpPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.boundFunctionPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.proxyPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.argumentsPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.varRefPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.finalizationRegistryPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.stdFilePayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.disposableStackPayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.promisePayloadConst()) |payload| return payload.realm_global_ptr;
-        if (self.moduleNamespacePayloadConst()) |payload| return payload.realm_global_ptr;
         return null;
     }
 
@@ -7155,13 +6713,7 @@ pub const Object = extern struct {
             },
             .function_bytecode => {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                if (fb.class_fields_init) |stored| visitor.visitValue(stored);
-                var realm_global: ?*Object = if (fb.realm_global_header) |realm_header|
-                    @fieldParentPtr("header", realm_header)
-                else
-                    null;
-                visitor.visitObject(&realm_global);
-                fb.realm_global_header = if (realm_global) |global| &global.header else null;
+                visitor.visitRealm(&fb.realm.ptr);
                 for (fb.cpoolSlice()) |*stored| visitor.visitValue(stored);
             },
             .var_ref => {
@@ -7188,12 +6740,16 @@ pub const Object = extern struct {
                 const ctx: *context_mod.JSContext = @alignCast(@fieldParentPtr("header", header));
                 ctx.traceChildEdgesNoFail(visitor);
             },
+            .module => {
+                const record: *module_mod.ModuleRecord = @alignCast(@fieldParentPtr("header", header));
+                record.traceChildEdgesNoFail(rt, visitor);
+            },
             else => {},
         }
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape or header.metaConst().kind == .realm_context;
+        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape or header.metaConst().kind == .realm_context or header.metaConst().kind == .module;
     }
 
     const DecrefVisitor = struct {
@@ -7218,6 +6774,10 @@ pub const Object = extern struct {
 
         pub fn visitRealm(self: DecrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
             if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
+        }
+
+        pub fn visitModule(self: DecrefVisitor, record: *module_mod.ModuleRecord) void {
+            self.visitHeader(&record.header);
         }
 
         pub fn visitSymbol(self: DecrefVisitor, symbol: *u32) void {
@@ -7264,6 +6824,10 @@ pub const Object = extern struct {
 
         pub fn visitRealm(self: ScanIncrefVisitor, ctx_ptr: *?*context_mod.RealmContext) void {
             if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
+        }
+
+        pub fn visitModule(self: ScanIncrefVisitor, record: *module_mod.ModuleRecord) void {
+            self.visitHeader(&record.header);
         }
 
         pub fn visitSymbol(self: ScanIncrefVisitor, symbol: *u32) void {
@@ -7318,6 +6882,10 @@ pub const Object = extern struct {
             if (ctx_ptr.*) |ctx| self.visitHeader(&ctx.header);
         }
 
+        pub fn visitModule(self: ScanRestoreVisitor, record: *module_mod.ModuleRecord) void {
+            self.visitHeader(&record.header);
+        }
+
         pub fn visitSymbol(self: ScanRestoreVisitor, symbol: *u32) void {
             _ = self;
             _ = symbol;
@@ -7347,10 +6915,11 @@ pub const Object = extern struct {
         // has no allocation and no registry rescans or mark-bit side effects.
         rt.gc.beginDecrefPhase();
         defer rt.gc.endDecrefPhase(rt);
+        var finalization_enqueue_blocked = false;
         var current = rt.weak_reference_holder_head;
         while (current) |holder| {
             const next = holder.weakReferenceHolderNext();
-            try holder.sweepDeadWeakPayloadReferences(rt);
+            try holder.sweepDeadWeakPayloadReferences(rt, &finalization_enqueue_blocked);
             current = next;
         }
     }
@@ -7364,7 +6933,11 @@ pub const Object = extern struct {
         }
     }
 
-    fn sweepDeadWeakPayloadReferences(self: *Object, rt: *JSRuntime) ObjectGraphError!void {
+    fn sweepDeadWeakPayloadReferences(
+        self: *Object,
+        rt: *JSRuntime,
+        finalization_enqueue_blocked: *bool,
+    ) ObjectGraphError!void {
         if (self.weakRefPayload()) |payload| {
             if (payload.weak_target_identity) |identity| {
                 if (!weakIdentityIsLive(rt, identity)) {
@@ -7399,41 +6972,48 @@ pub const Object = extern struct {
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         };
-        var index: usize = 0;
-        while (index < finalization_payload.cells.len) {
-            const cell = &finalization_payload.cells[index];
+        var read_index: usize = 0;
+        var write_index: usize = 0;
+        while (read_index < finalization_payload.cells.len) : (read_index += 1) {
+            var cell = finalization_payload.cells[read_index];
             if (cell.unregister_token_identity) |identity| {
                 if (!weakIdentityIsLive(rt, identity)) {
                     rt.clearWeakIdentitySlot(&cell.unregister_token_identity);
                 }
             }
             const target_identity = cell.target_identity orelse {
-                index += 1;
+                finalization_payload.cells[write_index] = cell;
+                write_index += 1;
                 continue;
             };
             if (weakIdentityIsLive(rt, target_identity)) {
-                cell.state = .active;
-                index += 1;
+                finalization_payload.cells[write_index] = cell;
+                write_index += 1;
                 continue;
             }
 
             if (cell.isActive()) cell.state = .pending_enqueue;
-            enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value) catch |err| switch (err) {
+            if (finalization_enqueue_blocked.*) {
+                finalization_payload.cells[write_index] = cell;
+                write_index += 1;
+                continue;
+            }
+            enqueueFinalizationCleanup(rt, finalization_payload, cell.held_value) catch |err| switch (err) {
                 error.OutOfMemory => {
-                    index += 1;
+                    // No later cleanup in this GC traversal may overtake this
+                    // retained cell. A later collection retries the stable
+                    // registry/entry order after allocator recovery.
+                    finalization_enqueue_blocked.* = true;
+                    finalization_payload.cells[write_index] = cell;
+                    write_index += 1;
                     continue;
                 },
                 error.PayloadMarkFailed => return error.PayloadMarkFailed,
             };
             cell.state = .queued;
-            const removed = finalization_payload.cells[index];
-            removed.destroy(rt);
-            const last_idx = finalization_payload.cells.len - 1;
-            if (index < last_idx) {
-                finalization_payload.cells[index] = finalization_payload.cells[last_idx];
-            }
-            finalization_payload.cells = finalization_payload.cells.ptr[0..last_idx];
+            cell.destroy(rt);
         }
+        finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
@@ -7538,7 +7118,7 @@ pub const Object = extern struct {
         {
             var cursor = garbage.head;
             while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape or h.meta().kind == .realm_context) garbage_count += 1;
+                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape or h.meta().kind == .realm_context or h.meta().kind == .module) garbage_count += 1;
             }
         }
 
@@ -7550,6 +7130,7 @@ pub const Object = extern struct {
         var garbage_var_refs: gc.HeaderList = .{};
         var garbage_shapes: gc.HeaderList = .{};
         var garbage_contexts: gc.HeaderList = .{};
+        var garbage_modules: gc.HeaderList = .{};
         garbage_committed = true;
         while (garbage.popFront()) |h| {
             switch (h.meta().kind) {
@@ -7558,6 +7139,7 @@ pub const Object = extern struct {
                 .var_ref => garbage_var_refs.append(h),
                 .shape => garbage_shapes.append(h),
                 .realm_context => garbage_contexts.append(h),
+                .module => garbage_modules.append(h),
                 else => unreachable,
             }
         }
@@ -7581,7 +7163,7 @@ pub const Object = extern struct {
         // survives until Pass B. A bytecode function object derives the length
         // of its `u.func.var_refs` allocation from its owning FB, exactly like
         // qjs `free_object`; therefore every Object must consume that metadata
-        // before FunctionBytecode.deinit clears `var_refs_len`. The old mixed
+        // before FunctionBytecode.deinit clears `closure_var_count`. The old mixed
         // gc-list order could deinit an FB first and leak the capture-pointer
         // allocation when the closure followed. VarRef structs also stay valid
         // until their object owners have released the capture edges.
@@ -7591,6 +7173,10 @@ pub const Object = extern struct {
         while (garbage_contexts.popFront()) |h| {
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
             context_mod.JSContext.destroyFromHeader(rt, h);
+        }
+        while (garbage_modules.popFront()) |h| {
+            rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
+            module_mod.ModuleRecord.destroyFromHeader(rt, h);
         }
         while (garbage_bytecodes.popFront()) |h| {
             rt.gc.unlinkObjectWithBytes(h, gc.Registry.heapByteSizeFromHeader(rt, h));
@@ -7640,6 +7226,7 @@ pub const Object = extern struct {
                 .var_ref => var_ref_mod.VarRef.freeCycleDeferredStruct(rt, h),
                 .function_bytecode => function_bytecode_mod.freeCycleDeferredStruct(rt, h),
                 .realm_context => context_mod.JSContext.freeCycleDeferredStruct(rt, h),
+                .module => module_mod.ModuleRecord.freeCycleDeferredStruct(rt, h),
                 else => {},
             }
         }
@@ -7710,14 +7297,6 @@ pub const Object = extern struct {
         function_bytecode: *FunctionBytecode,
         candidates: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |boxed| {
-            if (valueReferencesFunctionBytecodeCandidate(boxed.*, candidates)) {
-                const old_value = boxed.*;
-                function_bytecode.class_fields_init = null;
-                old_value.free(rt);
-                rt.memory.destroy(JSValue, boxed);
-            }
-        }
         for (function_bytecode.cpoolSlice()) |*stored| {
             if (!valueReferencesFunctionBytecodeCandidate(stored.*, candidates)) continue;
             const old_value = stored.*;
@@ -7986,7 +7565,12 @@ pub const Object = extern struct {
                     var cell_value = entry.slot.var_ref.valueRef();
                     try Helper.callVisitValue(visitor, &cell_value);
                 },
-                .auto_init => {},
+                .auto_init => {
+                    const realm_header = entry.slot.auto_init.realm_and_id.realmHeader() orelse unreachable;
+                    var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+                    try Helper.callVisitRealm(visitor, &realm);
+                    entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm orelse unreachable).header);
+                },
             }
         }
         if (self.ordinaryPayload()) |payload| {
@@ -8002,7 +7586,6 @@ pub const Object = extern struct {
             try Helper.traceOptValue(visitor, &payload.promise_combinator_reject);
             try Helper.traceOptValue(visitor, &payload.promise_combinator_values);
             try Helper.traceOptValue(visitor, &payload.promise_combinator_keys);
-            try Helper.traceOptValue(visitor, &payload.typed_array_array_buffer_prototype);
             try Helper.traceOptValue(visitor, &payload.error_stack);
             try Helper.traceOptValue(visitor, &payload.error_stack_sites);
         }
@@ -8041,37 +7624,21 @@ pub const Object = extern struct {
         }
         if (self.functionRarePayload()) |rare| {
             try Helper.traceOptValue(visitor, &rare.source);
-            try Helper.traceOptValue(visitor, &rare.class_fields_init);
-            try Helper.traceOptValue(visitor, &rare.import_meta);
-            try Helper.traceOptValue(visitor, &rare.lexical_this);
-            try Helper.traceOptValue(visitor, &rare.arrow_constructor_this);
-            try Helper.traceOptValue(visitor, &rare.arrow_new_target);
-            try Helper.traceOptValue(visitor, &rare.super_constructor);
             try Helper.traceOptValue(visitor, &rare.realm_global);
-            for (&rare.primitive_prototypes) |*slot| {
-                try Helper.traceOptValue(visitor, slot);
-            }
             try Helper.traceOptValue(visitor, &rare.proxy_revoke_target);
             try Helper.traceOptValue(visitor, &rare.promise_capability_slot);
             try Helper.traceOptValue(visitor, &rare.promise_resolving_target);
             try Helper.traceOptValue(visitor, &rare.promise_resolving_state);
-            try Helper.traceOptValue(visitor, &rare.promise_thenable_target);
-            try Helper.traceOptValue(visitor, &rare.promise_thenable_this);
-            try Helper.traceOptValue(visitor, &rare.promise_thenable_then);
-            try Helper.traceOptValue(visitor, &rare.promise_reaction_record);
-            try Helper.traceOptValue(visitor, &rare.promise_reaction_value);
             try Helper.traceOptValue(visitor, &rare.promise_combinator_state);
             try Helper.traceOptValue(visitor, &rare.promise_finally_payload);
             try Helper.traceOptValue(visitor, &rare.promise_finally_callback);
             try Helper.traceOptValue(visitor, &rare.promise_finally_constructor);
             try Helper.traceOptValue(visitor, &rare.async_dispose_stack);
             try Helper.traceOptValue(visitor, &rare.async_function_continuation);
-            try Helper.traceOptValue(visitor, &rare.realm_type_error_constructor);
         }
         if (self.boundFunctionPayload()) |payload| {
             try Helper.traceOptValue(visitor, &payload.target);
             try Helper.traceOptValue(visitor, &payload.this_value);
-            try Helper.traceOptValue(visitor, &payload.realm_global);
             for (payload.args) |*stored| try Helper.callVisitValue(visitor, stored);
         }
         if (self.collectionPayload()) |payload| {
@@ -8084,6 +7651,7 @@ pub const Object = extern struct {
             }
         }
         if (self.finalizationRegistryPayload()) |payload| {
+            try Helper.callVisitRealm(visitor, &payload.realm.ptr);
             try Helper.traceOptValue(visitor, &payload.cleanup_callback);
             for (payload.cells) |*entry| {
                 try Helper.callVisitFinalizationCell(visitor, entry);
@@ -8232,23 +7800,19 @@ pub const Object = extern struct {
     }
 
     fn collectFunctionBytecodeChildObjects(rt: *JSRuntime, visited: *ObjectVisitSet, function_bytecode: *const FunctionBytecode) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try collectValueObject(rt, visited, stored.*);
-        if (function_bytecode.realm_global_header) |realm_header| {
-            const realm_global: *Object = @fieldParentPtr("header", realm_header);
-            try collectReachableObjects(rt, visited, realm_global);
+        if (function_bytecode.realmContext()) |realm| {
+            if (realm.global) |realm_global| try collectReachableObjects(rt, visited, realm_global);
         }
         for (function_bytecode.cpoolSlice()) |stored| try collectValueObject(rt, visited, stored);
     }
 
-    fn enqueueFinalizationCleanup(rt: *JSRuntime, cleanup_callback: ?JSValue, held_value: JSValue) ObjectGraphError!void {
-        const callback = cleanup_callback orelse return;
-        const realm = if (objectFromValue(callback)) |callback_object|
-            if (callback_object.functionRealmGlobalPtr()) |global|
-                rt.contextForGlobalIncludingConstructing(global)
-            else
-                null
-        else
-            null;
+    fn enqueueFinalizationCleanup(
+        rt: *JSRuntime,
+        payload: *const FinalizationRegistryPayload,
+        held_value: JSValue,
+    ) ObjectGraphError!void {
+        const callback = payload.cleanup_callback orelse return;
+        const realm = payload.realm.borrow() orelse unreachable;
         try rt.enqueueFinalizationJobForRealm(realm, callback, held_value);
     }
 
@@ -8351,10 +7915,8 @@ pub const Object = extern struct {
         internal_bytecodes: *const ObjectVisitSet,
         processed_bytecodes: *ObjectVisitSet,
     ) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try accumulateValueIncoming(stored.*, visited, incoming, internal_bytecodes, processed_bytecodes);
-        if (function_bytecode.realm_global_header) |realm_header| {
-            const realm_global: *Object = @fieldParentPtr("header", realm_header);
-            try incrementIncomingIfVisited(visited, incoming, realm_global);
+        if (function_bytecode.realmContext()) |realm| {
+            if (realm.global) |realm_global| try incrementIncomingIfVisited(visited, incoming, realm_global);
         }
         for (function_bytecode.cpoolSlice()) |stored| try accumulateValueIncoming(stored, visited, incoming, internal_bytecodes, processed_bytecodes);
     }
@@ -8404,10 +7966,8 @@ pub const Object = extern struct {
         rt: *JSRuntime,
         function_bytecode: *FunctionBytecode,
     ) void {
-        if (function_bytecode.class_fields_init) |stored| clearValueReferenceToVisited(rt, stored);
-        if (function_bytecode.realm_global_header) |realm_header| {
-            const realm_global: *Object = @fieldParentPtr("header", realm_header);
-            if (objectIsCycleGarbage(realm_global)) function_bytecode.realm_global_header = null;
+        if (function_bytecode.realmContext()) |realm| {
+            if (headerIsCycleGarbage(&realm.header)) function_bytecode.realm.ptr = null;
         }
         for (function_bytecode.cpoolSlice()) |*stored| clearValueReferenceToVisited(rt, stored);
     }
@@ -8421,8 +7981,7 @@ pub const Object = extern struct {
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
         if (header.meta().kind != .function_bytecode) return null;
-        const aligned: *align(16) @TypeOf(header.*) = @alignCast(header);
-        return @fieldParentPtr("header", aligned);
+        return @fieldParentPtr("header", header);
     }
 
     fn collectInternalFunctionBytecodes(
@@ -8528,9 +8087,6 @@ pub const Object = extern struct {
             count += countOptionalFunctionBytecodeRef(ctx.preallocated_oom_error, function_bytecode);
             for (ctx.class_prototypes) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
             for (ctx.cached_values) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            if (ctx.shared_lazy_native_functions) |cache| {
-                for (cache) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-            }
             if (ctx.regexp_legacy_statics) |legacy| {
                 count += countOptionalFunctionBytecodeRef(legacy.input, function_bytecode);
                 count += countOptionalFunctionBytecodeRef(legacy.last_match, function_bytecode);
@@ -8543,7 +8099,45 @@ pub const Object = extern struct {
                 count += countFunctionBytecodeValueRef(entry.promise, function_bytecode);
                 count += countFunctionBytecodeValueRef(entry.reason, function_bytecode);
             }
-            for (ctx.runtime.pending_promise_jobs) |job| count += countFunctionBytecodeValueRef(job.value, function_bytecode);
+            for (ctx.runtime.job_queue.jobs) |job| {
+                if (job.realm.borrow() != ctx) continue;
+                switch (job.payload) {
+                    .generic => |payload| for (payload.argv[0..payload.argc]) |stored| {
+                        count += countFunctionBytecodeValueRef(stored, function_bytecode);
+                    },
+                    .promise => |payload| count += countFunctionBytecodeValueRef(payload.value, function_bytecode),
+                    .promise_reaction => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.reaction, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.value, function_bytecode);
+                    },
+                    .promise_thenable => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.target, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.thenable, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.then_function, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.resolving_resolve, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.resolving_reject, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.completion, function_bytecode);
+                    },
+                    .promise_settlement => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.target, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.completion, function_bytecode);
+                    },
+                    .dynamic_import => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.resolve, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.reject, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.basename, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.specifier, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.attributes, function_bytecode);
+                    },
+                    .atomics_waiter => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.promise, function_bytecode);
+                    },
+                    .finalization => |payload| {
+                        count += countFunctionBytecodeValueRef(payload.callback, function_bytecode);
+                        count += countFunctionBytecodeValueRef(payload.held_value, function_bytecode);
+                    },
+                }
+            }
         }
         return count;
     }
@@ -8566,7 +8160,6 @@ pub const Object = extern struct {
         function_bytecode: *const FunctionBytecode,
     ) usize {
         var count: usize = 0;
-        count += countOptionalFunctionBytecodeRef(if (owner.class_fields_init) |boxed| boxed.* else null, function_bytecode);
         for (owner.cpoolSlice()) |stored| count += countFunctionBytecodeValueRef(stored, function_bytecode);
         return count;
     }
@@ -8596,7 +8189,6 @@ pub const Object = extern struct {
             count += countOptionalFunctionBytecodeRef(payload.promise_combinator_reject, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.promise_combinator_values, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.promise_combinator_keys, function_bytecode);
-            count += countOptionalFunctionBytecodeRef(payload.typed_array_array_buffer_prototype, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.error_stack, function_bytecode);
             count += countOptionalFunctionBytecodeRef(payload.error_stack_sites, function_bytecode);
         }
@@ -8639,33 +8231,18 @@ pub const Object = extern struct {
         if (class.isBytecodeFunctionClass(self.class_id)) {
             if (self.u.bytecode_function.function_bytecode == function_bytecode) count += 1;
         }
-        count += countOptionalFunctionBytecodeRef(self.functionClassFieldsInit(), function_bytecode);
         for (self.functionCaptures()) |cell| count += countFunctionBytecodeValueRef(cell.valueRef(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionImportMeta(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionLexicalThis(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionArrowConstructorThis(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionArrowNewTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionSuperConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionRealmGlobal(), function_bytecode);
-        if (self.functionRarePayloadConst()) |payload| {
-            for (payload.primitive_prototypes) |stored| count += countOptionalFunctionBytecodeRef(stored, function_bytecode);
-        }
         count += countOptionalFunctionBytecodeRef(self.functionProxyRevokeTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseCapabilitySlot(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseResolvingTarget(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseResolvingState(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseThenableTarget(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseThenableThis(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseThenableThen(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseReactionRecord(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionPromiseReactionValue(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseCombinatorState(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyPayload(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyCallback(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionPromiseFinallyConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionAsyncDisposeStack(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.functionAsyncContinuation(), function_bytecode);
-        count += countOptionalFunctionBytecodeRef(self.functionRealmTypeErrorConstructor(), function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.generatorThis(), function_bytecode);
         if (self.generatorPayloadConst()) |payload| {
             if (payload.execution) |execution| {
@@ -8750,10 +8327,10 @@ pub const Object = extern struct {
         if (!self.flags.extensible) return error.NotExtensible;
         if (prototype) |proto| gc.retain(&proto.header);
         errdefer if (prototype) |proto| proto.value().free(rt);
-        markObjectAsPrototype(rt, prototype);
         try rt.shapes.prepareUpdate(&self.shape_ref);
         const old_prototype = rt.shapes.replacePrototypeAssumePrepared(self.shape_ref, prototype);
         if (old_prototype) |old| old.value().free(rt);
+        self.flags.is_std_array_prototype = false;
     }
 
     /// Rebind an unexposed, property-empty object to the shared root shape for
@@ -8770,10 +8347,10 @@ pub const Object = extern struct {
         if (self.getPrototype() == prototype) return;
 
         const replacement = try rt.shapes.createObjectRoot(prototype);
-        markObjectAsPrototype(rt, prototype);
         const previous = self.shape_ref;
         self.shape_ref = replacement;
         rt.shapes.release(previous);
+        self.flags.is_std_array_prototype = false;
     }
 
     pub fn preventExtensions(self: *Object) void {
@@ -8792,7 +8369,7 @@ pub const Object = extern struct {
         return self.flags.immutable_prototype;
     }
 
-    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) ?descriptor.Descriptor {
+    pub fn getOwnProperty(self: *const Object, rt: *JSRuntime, atom_id: atom.Atom) context_mod.DynamicImportError!?descriptor.Descriptor {
         if (self.exoticMethods(rt)) |methods| {
             if (methods.get_own_property) |hook| {
                 if (hook(@constCast(self), atom_id)) |desc| return desc;
@@ -8825,36 +8402,12 @@ pub const Object = extern struct {
             // materialization the slot is `.data` or `.accessor` and
             // re-reads are ordinary fast-path loads.
             if (entry_flags.isAutoInit()) {
-                const info = property.autoInit(entry.slot.auto_init).*;
-                // `materializeAutoInit` returns a fresh ref for
-                // `getProperty` semantics. On success the slot is promoted
-                // and `fromSlot` dups the stored value(s). On OOM the
-                // placeholder stays `.auto_init`, so expose a conservative
-                // fallback descriptor directly instead of passing the
-                // placeholder to `fromSlot`.
-                const transient = materializeAutoInit(@constCast(self), index, info);
-                if (self.propFlagsAt(index).isAutoInit()) {
-                    // OOM fallback: the placeholder did not promote. An auto_init
-                    // that materializes into an accessor is `info.kind ==
-                    // .native_accessor` (the only accessor-shaped placeholder);
-                    // all others promote to data. The kind flag is still
-                    // `.auto_init` here so derive the shape from `info`.
-                    if (info.kind == .native_accessor) {
-                        return descriptor.Descriptor.accessor(
-                            transient,
-                            JSValue.undefinedValue(),
-                            entry_flags.enumerable,
-                            entry_flags.configurable,
-                        );
-                    }
-                    return descriptor.Descriptor.data(
-                        transient,
-                        entry_flags.writable,
-                        entry_flags.enumerable,
-                        entry_flags.configurable,
-                    );
-                }
-                transient.free(info.rt);
+                // Descriptor reads share the ordinary materialization error
+                // channel. A failed builder leaves the placeholder intact for
+                // an explicit retry; it must never become a data descriptor
+                // containing `undefined`.
+                const transient = try materializeAutoInit(@constCast(self), index);
+                transient.free(rt);
                 return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), self.prop_values[index].slot);
             }
             return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
@@ -8992,7 +8545,10 @@ pub const Object = extern struct {
         return false;
     }
 
-    pub fn getProperty(self: *const Object, atom_id: atom.Atom) JSValue {
+    /// Ordinary property read. AUTOINIT construction failures are observable
+    /// and leave the placeholder intact for an explicit retry; no generic read
+    /// path converts them to `undefined`.
+    pub fn getProperty(self: *const Object, atom_id: atom.Atom) context_mod.DynamicImportError!JSValue {
         profile.recordPropLookup(self.isGlobal());
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
         if (self.isArray() and atom_id == atom.ids.length) return arrayLengthValue(self.arrayLength());
@@ -9004,346 +8560,184 @@ pub const Object = extern struct {
             return switch (self.propKindAt(index)) {
                 .data => entry.slot.data.dup(),
                 .accessor => entry.slot.accessor.getterValue().dup(),
-                // First-access materialization for `auto_init`
-                // placeholders. We need to mutate `self.prop_values[index]`
-                // to replace the placeholder with the real value;
-                // `self` is `Object` (by value) here -- the same
-                // 300+-callsite shape as the rest of `getProperty`.
-                // The slice header is a copy but the underlying entries
-                // live on the heap and are shared, so `@constCast`
-                // gives us a writable handle without changing every
-                // caller. Matches QuickJS's `JS_AutoInitProperty` which
-                // also mutates the property record in place on read.
-                .auto_init => materializeAutoInit(@constCast(self), index, property.autoInit(entry.slot.auto_init).*),
-                // JS_PROP_VARREF: auto-deref the cell (qjs JS_GetPropertyInternal
-                // 8281-8285). TDZ (uninitialized) is surfaced to the caller; the
-                // dedicated getVar path does the ReferenceError throw.
+                .auto_init => try materializeAutoInit(@constCast(self), index),
                 .var_ref => entry.slot.var_ref.varRefValue().dup(),
             };
         }
         if (self.denseArrayElement(atom_id)) |stored| return stored.dup();
-        if (self.getPrototype()) |proto| return proto.getProperty(atom_id);
+        if (self.getPrototype()) |proto| return try proto.getProperty(atom_id);
         return JSValue.undefinedValue();
     }
 
-    /// First-access materialization for an `auto_init` placeholder.
-    /// Builds the underlying value once, promotes the slot from `auto_init`
-    /// to `data` or `accessor`, and returns a fresh ref for the caller.
-    ///
-    /// The slot now owns one ref; the caller receives another via
-    /// `.dup()`. On builder failure we fall back to `undefined` to
-    /// keep `getProperty` infallible, mirroring the rest of the
-    /// non-throwing read path. (The only failure mode is `OutOfMemory`
-    /// from the function-object alloc, which would already be lethal
-    /// to the running script anyway.)
-    fn materializeAutoInit(self: *Object, index: usize, info: property.AutoInit) JSValue {
-        if (info.kind == .function_prototype) {
-            const materialized = self.materializeFunctionPrototypeAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .console) {
-            const materialized = self.materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .math_namespace or
-            info.kind == .json_namespace or
-            info.kind == .reflect_namespace or
-            info.kind == .atomics_namespace)
-        {
-            const materialized = materializeBuiltinNamespaceAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .navigator) {
-            const materialized = materializeNavigatorAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .performance) {
-            const materialized = materializePerformanceAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
+    /// QJS-shaped first-access transaction. Shape preparation uses the caller
+    /// Runtime before the stored construction Realm invokes exactly one
+    /// builder. Any failure leaves the placeholder and its Realm owner intact;
+    /// successful commit is infallible and releases that slot owner exactly
+    /// once while the produced C function (if any) keeps its own RealmRef.
+    fn materializeAutoInit(self: *Object, index: usize) context_mod.DynamicImportError!JSValue {
+        if (index >= self.shape_ref.prop_count or !self.isAutoInitAt(index)) return error.IncompatibleDescriptor;
 
-        if (info.kind == .array_unscopables) {
-            const materialized = materializeArrayUnscopablesAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .number_constant) {
-            const materialized = materializeNumberConstantAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .int32_constant) {
-            const materialized = JSValue.int32(info.length);
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .string_constant) {
-            const materialized = materializeStringConstantAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .empty_array) {
-            const materialized = materializeEmptyArrayAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        if (info.kind == .native_accessor) {
-            const materialized = self.materializeNativeAccessorAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAccessorAutoInit(index, info, materialized);
-        }
-        if (info.host_function_kind != 0) {
-            const materialized = self.materializeHostFunctionAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
-        const cache_slot = sharedLazyNativeFunctionSlotForAutoInit(info);
-        if (cache_slot) |slot| {
-            if (slot.*) |cached| {
-                if (!self.prepareAutoInitNativeFunction(info, cached, info.native_builtin_id, true)) {
-                    return JSValue.undefinedValue();
-                }
-                const cached_value = cached.dup();
-                if (!self.installMaterializedAutoInit(info.rt, index, cached_value)) {
-                    cached_value.free(info.rt);
-                    return JSValue.undefinedValue();
-                }
-                return cached_value.dup();
-            }
-        }
-        const materialized = self.materializeNativeFunctionAutoInit(info) orelse return JSValue.undefinedValue();
-        if (cache_slot) |slot| {
-            self.setOptionalValueSlot(info.rt, slot, materialized.dup()) catch {
-                materialized.free(info.rt);
-                return JSValue.undefinedValue();
-            };
-        }
-        // Promote the placeholder to a real data slot. Flags stay the
-        // same (writable / enumerable / configurable came from the
-        // descriptor used when the placeholder was installed).
-        return self.finishMaterializedAutoInit(index, info, materialized);
+        const expected_atom = self.propAtomAt(index);
+        const expected_slot = self.prop_values[index].slot.auto_init;
+        const realm_header = expected_slot.realm_and_id.realmHeader() orelse return error.InvalidBuiltinRegistry;
+        const realm: *context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+        const rt = realm.runtime;
+
+        // This is the only fallible target-shape step. It deliberately occurs
+        // before the builder so commit never needs to allocate or clone shape
+        // state after user/host code has produced a value.
+        try self.ensureUniqueShapeForMutation(rt);
+        if (!self.autoInitSlotStillMatches(index, expected_atom, expected_slot)) return error.IncompatibleDescriptor;
+
+        const result: property.AutoInitMaterialization = switch (expected_slot.realm_and_id.id()) {
+            .prototype => .{ .value = try self.materializeFunctionPrototypeAutoInit(realm) },
+            .module_ns => try materializeModuleAutoInit(realm, expected_slot.moduleOwner() orelse return error.InvalidBuiltinRegistry),
+            .prop => .{ .value = try materializePropAutoInit(realm, expected_slot.descriptor() orelse return error.InvalidBuiltinRegistry) },
+        };
+
+        return switch (result) {
+            .value => |materialized| blk: {
+                errdefer materialized.free(rt);
+                if (!self.autoInitSlotStillMatches(index, expected_atom, expected_slot)) return error.IncompatibleDescriptor;
+                break :blk try self.commitAutoInitValue(rt, index, expected_atom, materialized);
+            },
+            .var_ref => |cell| blk: {
+                if (expected_slot.realm_and_id.id() != .module_ns) return error.IncompatibleDescriptor;
+                if (!self.autoInitSlotStillMatches(index, expected_atom, expected_slot)) return error.IncompatibleDescriptor;
+                break :blk self.commitAutoInitVarRef(rt, index, expected_atom, cell);
+            },
+        };
     }
 
-    fn finishMaterializedAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: JSValue) JSValue {
-        if (!self.installMaterializedAutoInit(info.rt, index, materialized)) {
-            materialized.free(info.rt);
-            return JSValue.undefinedValue();
+    fn materializeModuleAutoInit(
+        realm: *context_mod.RealmContext,
+        owner: *const property.AutoInitModuleOwner,
+    ) context_mod.DynamicImportError!property.AutoInitMaterialization {
+        return owner.resolve(owner, &realm.header) catch |err| return @errorCast(err);
+    }
+
+    fn autoInitSlotStillMatches(self: *const Object, index: usize, expected_atom: atom.Atom, expected: property.AutoInitSlot) bool {
+        if (index >= self.shape_ref.prop_count) return false;
+        if (self.propAtomAt(index) != expected_atom or !self.isAutoInitAt(index)) return false;
+        const current = self.prop_values[index].slot.auto_init;
+        return current.realm_and_id.raw == expected.realm_and_id.raw and current.opaque_ptr == expected.opaque_ptr;
+    }
+
+    fn commitAutoInitValue(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, materialized: JSValue) !JSValue {
+        const old_flags = self.propFlagsAt(index);
+        const old_slot = self.prop_values[index].slot;
+        if (!self.isGlobal()) {
+            self.prop_values[index].slot = .{ .data = materialized };
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.data).bits());
+            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+            return materialized.dup();
         }
-        return materialized.dup();
+
+        // A global AUTOINIT becomes a cell at materialization time, not a data
+        // snapshot later repaired by global-closure construction. The caller
+        // revalidated the slot immediately before entering this commit. Once
+        // createClosed succeeds it owns `materialized`, and every remaining
+        // operation is infallible, so there is no second owner/error cleanup.
+        const cell = try var_ref_mod.VarRef.createClosed(rt, materialized);
+        cell.is_lexical = false;
+        cell.varRefIsConstSlot().* = !old_flags.writable;
+        cell.varRefIsDeletableSlot().* = old_flags.configurable;
+        self.prop_values[index].slot = .{ .var_ref = cell };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.var_ref).bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+        return cell.varRefValue().dup();
     }
 
-    fn finishMaterializedAccessorAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: property.Accessor) JSValue {
-        if (!self.installMaterializedAccessorAutoInit(info.rt, index, materialized)) {
-            materialized.destroy(info.rt);
-            return JSValue.undefinedValue();
-        }
-        return materialized.getterValue().dup();
-    }
-
-    /// Promote an auto_init placeholder to a real `.data` slot AND flip the
-    /// shape `Flags.kind` from `.auto_init` to `.data` in lockstep. The shape
-    /// is made unique first so a placeholder shared by several objects is not
-    /// corrupted. Returns false (without installing) if the shape clone OOMs;
-    /// the caller then falls back to `undefined` and leaves the placeholder
-    /// intact for a later retry. Mirrors qjs `JS_AutoInitProperty` clearing the
-    /// `JS_PROP_TMASK` to NORMAL on materialization.
-    fn installMaterializedAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: JSValue) bool {
-        const new_flags = self.propFlagsAt(index).withKind(.data);
-        self.ensureUniqueShapeForMutation(rt) catch return false;
-        self.prop_values[index].slot = .{ .data = materialized };
-        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
-        return true;
-    }
-
-    fn installMaterializedAccessorAutoInit(self: *Object, rt: *JSRuntime, index: usize, materialized: property.Accessor) bool {
-        const new_flags = self.propFlagsAt(index).withKind(.accessor);
-        self.ensureUniqueShapeForMutation(rt) catch return false;
-        self.prop_values[index].slot = .{ .accessor = materialized };
-        rt.shapes.updatePropertyFlags(self.shape_ref, index, new_flags.bits());
-        return true;
+    fn commitAutoInitVarRef(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, cell: *var_ref_mod.VarRef) JSValue {
+        const old_flags = self.propFlagsAt(index);
+        const old_slot = self.prop_values[index].slot;
+        self.prop_values[index].slot = .{ .var_ref = cell.dupCell() };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, old_flags.withKind(.var_ref).bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+        return cell.varRefValue().dup();
     }
 
     fn materializeAutoInitEntryForMutation(self: *Object, index: usize) !void {
         if (index >= self.shape_ref.prop_count) return error.IncompatibleDescriptor;
         if (!self.isAutoInitAt(index)) return;
-        const info = property.autoInit(self.prop_values[index].slot.auto_init).*;
-        const transient = materializeAutoInit(self, index, info);
-        transient.free(info.rt);
-        if (self.isAutoInitAt(index)) return error.OutOfMemory;
+        const realm_header = self.prop_values[index].slot.auto_init.realm_and_id.realmHeader() orelse return error.InvalidBuiltinRegistry;
+        const realm: *context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+        const transient = try materializeAutoInit(self, index);
+        transient.free(realm.runtime);
     }
 
-    /// True if the own property at `index` is an accessor — either a
-    /// materialized accessor, or an auto_init placeholder destined to
-    /// materialize into one (`info.kind == .native_accessor`). Lets the
-    /// set/define paths preserve lazy materialization for data placeholders
-    /// while still forcing accessor placeholders through their accessor branch.
+    /// True if the own property at `index` is an accessor. Auto-init
+    /// placeholders are data-like: native accessors are installed eagerly.
     fn isAccessorOrAccessorPlaceholderAt(self: *const Object, index: usize) bool {
         const flags = self.propFlagsAt(index);
-        if (flags.deleted) return false;
-        if (flags.kind == .accessor) return true;
-        if (flags.kind == .auto_init) {
-            return property.autoInit(self.prop_values[index].slot.auto_init).kind == .native_accessor;
+        return !flags.deleted and flags.kind == .accessor;
+    }
+
+    fn materializePropAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) context_mod.DynamicImportError!JSValue {
+        if (info.kind == .console) return materializeConsoleAutoInit(realm, info);
+        if (info.kind == .math_namespace or
+            info.kind == .json_namespace or
+            info.kind == .reflect_namespace or
+            info.kind == .atomics_namespace)
+        {
+            return materializeBuiltinNamespaceAutoInit(realm, info);
         }
-        return false;
+        if (info.kind == .navigator) return materializeNavigatorAutoInit(realm);
+        if (info.kind == .performance) return materializePerformanceAutoInit(realm);
+        if (info.kind == .array_unscopables) return materializeArrayUnscopablesAutoInit(realm.runtime);
+        if (info.kind == .string_constant) return materializeStringConstantAutoInit(realm.runtime, info);
+        if (info.kind == .empty_array) return materializeEmptyArrayAutoInit(realm);
+        if (info.host_function_kind != 0) return materializeHostFunctionAutoInit(realm, info);
+        return materializeNativeFunctionAutoInit(realm, info);
     }
 
-    fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
-        if (std.mem.eql(u8, info.name, "NaN")) return JSValue.number(std.math.nan(f64));
-        if (std.mem.eql(u8, info.name, "POSITIVE_INFINITY")) return JSValue.number(std.math.inf(f64));
-        if (std.mem.eql(u8, info.name, "NEGATIVE_INFINITY")) return JSValue.number(-std.math.inf(f64));
-        if (std.mem.eql(u8, info.name, "MAX_VALUE")) return JSValue.number(std.math.floatMax(f64));
-        if (std.mem.eql(u8, info.name, "MIN_VALUE")) return JSValue.number(@as(f64, @bitCast(@as(u64, 1))));
-        if (std.mem.eql(u8, info.name, "MAX_SAFE_INTEGER")) return JSValue.number(9007199254740991.0);
-        if (std.mem.eql(u8, info.name, "MIN_SAFE_INTEGER")) return JSValue.number(-9007199254740991.0);
-        if (std.mem.eql(u8, info.name, "EPSILON")) return JSValue.number(2.220446049250313e-16);
-        return null;
-    }
-
-    fn materializeStringConstantAutoInit(info: property.AutoInit) ?JSValue {
+    fn materializeStringConstantAutoInit(rt: *JSRuntime, info: *const property.AutoInit) !JSValue {
         if (info.name.len == 0) {
-            const cached = info.rt.emptyString() catch return null;
+            const cached = try rt.emptyString();
             return cached.value().dup();
         }
-        const created = string.String.createAscii(info.rt, info.name) catch return null;
+        const created = try string.String.createAscii(rt, info.name);
         return created.value();
     }
 
-    fn materializeEmptyArrayAutoInit(info: property.AutoInit) ?JSValue {
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
-        const array_proto = arrayPrototypeFromGlobalForAutoInit(info.rt, global);
-        const object = Object.createArray(info.rt, array_proto) catch return null;
+    fn materializeEmptyArrayAutoInit(realm: *context_mod.RealmContext) !JSValue {
+        const array_proto_value = try arrayPrototypeValueForAutoInit(realm);
+        defer array_proto_value.free(realm.runtime);
+        const object = try Object.createArray(realm.runtime, objectFromValue(array_proto_value));
         return object.value();
     }
 
-    fn functionPrototypeForAutoInit(self: *Object, info: property.AutoInit) ?*Object {
-        const realm_global: ?*Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            self.functionRealmGlobalPtr();
-        return if (realm_global) |global| global.cachedFunctionProto(info.rt) else null;
-    }
-
-    fn realmForAutoInit(self: *Object, info: property.AutoInit) ?*context_mod.RealmContext {
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else if (info.rt.contextForGlobalIncludingConstructing(self) != null)
-            self
-        else
-            self.functionRealmGlobalPtr() orelse return null;
-        return info.rt.contextForGlobalIncludingConstructing(global);
-    }
-
-    fn materializeNativeFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
-        return self.materializeNativeFunctionAutoInitOnce(info) orelse
-            self.materializeNativeFunctionAutoInitOnce(info);
-    }
-
-    fn materializeNativeFunctionAutoInitOnce(self: *Object, info: property.AutoInit) ?JSValue {
-        const realm = self.realmForAutoInit(info) orelse return null;
-        const materialized = function.nativeFunction(realm, info.name, info.length) catch return null;
-        if (!self.prepareAutoInitNativeFunction(info, materialized, info.native_builtin_id, true)) {
-            materialized.free(info.rt);
-            return null;
-        }
+    fn materializeNativeFunctionAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) !JSValue {
+        const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+        const materialized = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, 2);
+        errdefer materialized.free(realm.runtime);
+        try prepareAutoInitNativeFunction(realm.runtime, info, materialized);
         return materialized;
     }
 
-    fn materializeNativeAccessorAutoInit(self: *Object, info: property.AutoInit) ?property.Accessor {
-        const realm = self.realmForAutoInit(info) orelse return null;
-        const getter = function.nativeFunction(realm, info.name, info.length) catch return null;
-        if (!self.prepareAutoInitNativeFunction(info, getter, info.native_builtin_id, true)) {
-            getter.free(info.rt);
-            return null;
-        }
-        const setter = if (nativeAccessorAutoInitSetterLength(info)) |setter_length| setter: {
-            var setter_name_buf: [128]u8 = undefined;
-            const setter_name = nativeAccessorAutoInitSetterName(info.name, &setter_name_buf) orelse {
-                getter.free(info.rt);
-                return null;
-            };
-            const setter_value = function.nativeFunction(realm, setter_name, setter_length) catch {
-                getter.free(info.rt);
-                return null;
-            };
-            const setter_native_id: i32 = @intCast(info.external_host_function_id);
-            if (!self.prepareAutoInitNativeFunction(info, setter_value, setter_native_id, true)) {
-                getter.free(info.rt);
-                setter_value.free(info.rt);
-                return null;
-            }
-            break :setter setter_value;
-        } else JSValue.undefinedValue();
-        return property.Accessor.fromOwnedValues(getter, setter);
-    }
-
-    fn nativeAccessorAutoInitSetterLength(info: property.AutoInit) ?i32 {
-        if (info.kind != .native_accessor or info.host_function_kind <= 0) return null;
-        return info.host_function_kind;
-    }
-
-    fn nativeAccessorAutoInitSetterName(getter_name: []const u8, buffer: []u8) ?[]const u8 {
-        if (!std.mem.startsWith(u8, getter_name, "get ")) return null;
-        return std.fmt.bufPrint(buffer, "set {s}", .{getter_name["get ".len..]}) catch null;
-    }
-
     fn prepareAutoInitNativeFunction(
-        self: *Object,
-        info: property.AutoInit,
+        rt: *JSRuntime,
+        info: *const property.AutoInit,
         function_value: JSValue,
-        native_builtin_id: i32,
-        apply_markers: bool,
-    ) bool {
-        if (native_builtin_id != 0) {
+    ) context_mod.DynamicImportError!void {
+        if (info.native_builtin_id != 0) {
             if (function_value.refHeader()) |header| {
                 const obj: *Object = @fieldParentPtr("header", header);
-                obj.setNativeBuiltinIdAndRecord(info.rt, native_builtin_id);
+                obj.setNativeBuiltinIdAndRecord(rt, info.native_builtin_id);
             }
         }
-        if (apply_markers) {
-            applyAutoInitArrayBuiltinMarker(info.rt, function_value, info.array_builtin_marker);
-            applyAutoInitTypedArrayBuiltinMarker(info.rt, function_value, info.typed_array_builtin_marker);
-            applyAutoInitArrayIteratorKind(info.rt, function_value, info.array_iterator_kind);
-            applyAutoInitIteratorIdentity(info.rt, function_value, info.iterator_identity);
-            applyAutoInitCollectionMethodOwner(info.rt, function_value, info.collection_method_owner_class);
-            applyAutoInitDisposableStackMethod(info.rt, function_value, info.disposable_stack_method);
-            applyAutoInitAsyncDisposableStackMethod(info.rt, function_value, info.async_disposable_stack_method);
+        try applyAutoInitFunctionMarkers(rt, function_value, info);
+        if (info.prepare_native_function) |prepare| {
+            prepare(rt, info, function_value) catch |err| return @errorCast(err);
         }
-        // Self-wire `[[Prototype]]` to Function.prototype. The lazy
-        // install path skips the eager
-        // `wireNativeFunctionPropertyPrototypes` pass that would have
-        // done this for us, so each materialization sets it here. The
-        // cache is populated by `installStandardGlobals` once the
-        // Function constructor exists; for very early calls (e.g.
-        // materializing an Object.prototype method while Function is
-        // still being built) the cache is null and we leave the
-        // prototype as the default `null`, matching the behavior of
-        // the eager path before constructor-graph wiring.
-        if (function_value.refHeader()) |header| {
-            const obj: *Object = @fieldParentPtr("header", header);
-            const realm_global: ?*Object = if (info.host_function_realm_global != 0)
-                @ptrFromInt(info.host_function_realm_global)
-            else
-                self.functionRealmGlobalPtr();
-            if (obj.nativeFunctionRealm() == null) {
-                obj.setFunctionRealmGlobalPtr(info.rt, realm_global) catch return false;
-            }
-            if (functionPrototypeForAutoInit(self, info)) |fp| {
-                if (obj != fp and !obj.hasOwnProperty(atom.ids.prototype) and obj.hostFunctionKind() == 0) {
-                    obj.setPrototype(info.rt, fp) catch {};
-                }
-            }
-        }
-        return true;
+        // The constructor receives Function.prototype and the RealmRef before
+        // metadata publication; there is no post-construction repair phase.
     }
 
-    fn sharedLazyNativeFunctionSlotForAutoInit(info: property.AutoInit) ?*?JSValue {
-        if (info.shared_native_cache_slot == 0) return null;
-        if (info.host_function_realm_global == 0) return null;
-        const global: *Object = @ptrFromInt(info.host_function_realm_global);
-        global.ensureSharedLazyNativeFunctionCache(info.rt) catch return null;
-        return global.sharedLazyNativeFunctionSlot(info.rt, info.shared_native_cache_slot);
-    }
-
-    fn materializeArrayUnscopablesAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const object = Object.create(rt, class.ids.object, null) catch return null;
+    fn materializeArrayUnscopablesAutoInit(rt: *JSRuntime) !JSValue {
+        const object = try Object.create(rt, class.ids.object, null);
         const unscopables_value = object.value();
+        errdefer unscopables_value.free(rt);
         // qjs js_array_unscopables (order incl. "at"; spec 23.1.3.41).
         const names = [_][]const u8{
             "at",
@@ -9364,130 +8758,71 @@ pub const Object = extern struct {
             "values",
         };
         for (names) |name| {
-            const key = rt.internAtom(name) catch {
-                unscopables_value.free(rt);
-                return null;
-            };
+            const key = try rt.internAtom(name);
             defer rt.atoms.free(key);
-            object.defineOwnPropertyAssumingNew(
+            try object.defineOwnPropertyAssumingNew(
                 rt,
                 key,
                 descriptor.Descriptor.data(JSValue.boolean(true), true, true, true),
-            ) catch {
-                unscopables_value.free(rt);
-                return null;
-            };
+            );
         }
         return unscopables_value;
     }
 
-    fn applyAutoInitArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: ArrayBuiltinMarker) void {
-        if (marker == .none) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayBuiltinMarker(rt, marker);
+    fn applyAutoInitFunctionMarkers(rt: *JSRuntime, function_value: JSValue, info: *const property.AutoInit) !void {
+        const needs_rare = info.array_builtin_marker != .none or
+            info.typed_array_builtin_marker != .none or
+            info.array_iterator_kind != 0 or
+            info.iterator_identity or
+            info.collection_method_owner_class != class.invalid_class_id or
+            info.disposable_stack_method != 0 or
+            info.async_disposable_stack_method != 0;
+        if (!needs_rare) return;
+        const function_object = try Object.expect(function_value);
+        const payload = try function_object.ensureFunctionRarePayload(rt);
+        if ((info.array_builtin_marker != .none and !setArrayBuiltinMarker(payload, info.array_builtin_marker)) or
+            (info.typed_array_builtin_marker != .none and !setTypedArrayBuiltinMarker(payload, info.typed_array_builtin_marker)) or
+            (info.array_iterator_kind != 0 and !setArrayIteratorKind(payload, info.array_iterator_kind)) or
+            (info.collection_method_owner_class != class.invalid_class_id and !setCollectionMethodOwnerClass(payload, info.collection_method_owner_class)) or
+            (info.disposable_stack_method != 0 and !setDisposableStackMethod(payload, info.disposable_stack_method)) or
+            (info.async_disposable_stack_method != 0 and !setAsyncDisposableStackMethod(payload, info.async_disposable_stack_method)))
+        {
+            return error.InvalidBuiltinRegistry;
+        }
+        if (info.iterator_identity) payload.iterator_identity = true;
     }
 
-    fn applyAutoInitTypedArrayBuiltinMarker(rt: *JSRuntime, function_value: JSValue, marker: TypedArrayBuiltinMarker) void {
-        if (marker == .none) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addTypedArrayBuiltinMarker(rt, marker);
-    }
-
-    fn applyAutoInitArrayIteratorKind(rt: *JSRuntime, function_value: JSValue, kind: u8) void {
-        if (kind == 0) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addArrayIteratorKind(rt, kind);
-    }
-
-    fn applyAutoInitIteratorIdentity(rt: *JSRuntime, function_value: JSValue, is_identity: bool) void {
-        if (!is_identity) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addIteratorIdentityFunction(rt);
-    }
-
-    fn applyAutoInitCollectionMethodOwner(rt: *JSRuntime, function_value: JSValue, owner_class: class.ClassId) void {
-        if (owner_class == class.invalid_class_id) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addCollectionMethodOwnerClass(rt, owner_class);
-    }
-
-    fn applyAutoInitDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
-        if (method_id == 0) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addDisposableStackMethod(rt, method_id);
-    }
-
-    fn applyAutoInitAsyncDisposableStackMethod(rt: *JSRuntime, function_value: JSValue, method_id: u8) void {
-        if (method_id == 0) return;
-        const header = function_value.refHeader() orelse return;
-        const function_object: *Object = @fieldParentPtr("header", header);
-        _ = function_object.addAsyncDisposableStackMethod(rt, method_id);
-    }
-
-    fn materializeHostFunctionAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const realm = self.realmForAutoInit(info) orelse return null;
-        if (realm.global == null) return null;
+    fn materializeHostFunctionAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) !JSValue {
+        const rt = realm.runtime;
+        if (realm.global == null) return error.InvalidBuiltinRegistry;
+        const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const function_capacity: usize = 2 + if (info.host_function_prototype) @as(usize, 1) else 0;
-        const function_object = Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, function_capacity) catch return null;
-        const function_value = function_object.value();
-        function_object.setNativeFunctionRealm(realm);
+        const function_value = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, function_capacity);
+        errdefer function_value.free(rt);
+        const function_object = try Object.expect(function_value);
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.external_host_function_id != 0) {
-            if (info.host_function_kind != host_function.ids.external_host) {
-                function_value.free(rt);
-                return null;
-            }
+            if (info.host_function_kind != host_function.ids.external_host) return error.InvalidBuiltinRegistry;
             function_object.externalHostFunctionIdSlot().* = info.external_host_function_id;
         }
-        const name_string = string.String.createAscii(rt, info.name) catch {
-            function_value.free(rt);
-            return null;
-        };
-        const name_value = name_string.value();
-        defer name_value.free(rt);
-        const name_key = atom.predefinedId("name", .string).?;
-        function_object.defineOwnPropertyAssumingNew(rt, name_key, descriptor.Descriptor.data(name_value, true, true, true)) catch {
-            function_value.free(rt);
-            return null;
-        };
-
-        const length_key = atom.predefinedId("length", .string).?;
-        function_object.defineOwnPropertyAssumingNew(rt, length_key, descriptor.Descriptor.data(JSValue.int32(info.length), true, true, true)) catch {
-            function_value.free(rt);
-            return null;
-        };
-
         if (info.host_function_prototype) {
-            const prototype = Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 0) catch {
-                function_value.free(rt);
-                return null;
-            };
+            const object_proto_value = try objectPrototypeValueForAutoInit(realm);
+            defer object_proto_value.free(rt);
+            const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 0);
             const prototype_value = prototype.value();
             defer prototype_value.free(rt);
             const prototype_key = atom.ids.prototype;
-            function_object.defineOwnPropertyAssumingNew(rt, prototype_key, descriptor.Descriptor.data(prototype_value, true, true, true)) catch {
-                function_value.free(rt);
-                return null;
-            };
+            try function_object.defineOwnPropertyAssumingNew(rt, prototype_key, descriptor.Descriptor.data(prototype_value, true, true, true));
         }
 
         return function_value;
     }
 
-    fn materializeBuiltinNamespaceAutoInit(info: property.AutoInit) ?JSValue {
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
-        const cb = info.rt.materialize_builtin_namespace_cb orelse return null;
-        return cb(info.rt, global, info.kind) catch null;
+    fn materializeBuiltinNamespaceAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) context_mod.DynamicImportError!JSValue {
+        const global = realm.global orelse return error.InvalidBuiltinRegistry;
+        const cb = realm.runtime.materialize_builtin_namespace_cb orelse return error.InvalidBuiltinRegistry;
+        const materialized_value = cb(realm.runtime, global, info.kind) catch |err| return @errorCast(err);
+        return materialized_value orelse error.InvalidBuiltinRegistry;
     }
 
     fn defineHostAutoInitDataPropertyByName(
@@ -9514,81 +8849,72 @@ pub const Object = extern struct {
         );
     }
 
-    fn materializeConsoleAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        if (info.host_function_kind == 0) return null;
-        const realm_global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else if (rt.contextForGlobalIncludingConstructing(self) != null)
-            self
-        else
-            self.functionRealmGlobalPtr() orelse return null;
-        const console = Object.createWithOwnPropertyCapacity(rt, class.ids.object, null, 3) catch return null;
+    fn materializeConsoleAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) !JSValue {
+        const rt = realm.runtime;
+        if (info.host_function_kind == 0) return error.InvalidBuiltinRegistry;
+        const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
+        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
+        defer object_proto_value.free(rt);
+        const console = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 3);
         const console_value = console.value();
+        errdefer console_value.free(rt);
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
-            defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, realm_global) catch {
-                console_value.free(rt);
-                return null;
-            };
+            try defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, realm_global);
         }
         return console_value;
     }
 
-    fn materializeNavigatorAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
-        const object_proto = objectPrototypeFromGlobalForAutoInit(rt, global);
-        const proto = Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, 2) catch return null;
+    fn materializeNavigatorAutoInit(realm: *context_mod.RealmContext) !JSValue {
+        const rt = realm.runtime;
+        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
+        defer object_proto_value.free(rt);
+        const proto = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
         var proto_owned = true;
         defer if (proto_owned) proto.value().free(rt);
 
-        const tag = string.String.createAscii(rt, "Navigator") catch return null;
+        const tag = try string.String.createAscii(rt, "Navigator");
         const tag_value = tag.value();
         defer tag_value.free(rt);
-        proto.defineOwnPropertyAssumingNew(
+        try proto.defineOwnPropertyAssumingNew(
             rt,
             atom.predefinedId("Symbol.toStringTag", .symbol).?,
             descriptor.Descriptor.data(tag_value, false, false, true),
-        ) catch return null;
+        );
 
-        const realm = rt.contextForGlobalIncludingConstructing(global) orelse return null;
-        const getter = function.nativeFunction(realm, "get userAgent", 0) catch return null;
+        const getter = try function.nativeFunction(realm, "get userAgent", 0);
         defer getter.free(rt);
         if (getter.refHeader()) |getter_header| {
             const getter_object: *Object = @fieldParentPtr("header", getter_header);
             getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
-        const user_agent = rt.internAtom("userAgent") catch return null;
+        const user_agent = try rt.internAtom("userAgent");
         defer rt.atoms.free(user_agent);
-        proto.defineOwnPropertyAssumingNew(
+        try proto.defineOwnPropertyAssumingNew(
             rt,
             user_agent,
             descriptor.Descriptor.accessor(getter, JSValue.undefinedValue(), true, true),
-        ) catch return null;
+        );
 
-        const navigator = Object.createWithOwnPropertyCapacity(rt, class.ids.object, proto, 0) catch return null;
+        const navigator = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, proto, 0);
         proto.value().free(rt);
         proto_owned = false;
         return navigator.value();
     }
 
-    fn materializePerformanceAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
+    fn materializePerformanceAutoInit(realm: *context_mod.RealmContext) !JSValue {
+        const rt = realm.runtime;
+        const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (rt.performance_time_origin_ms == 0) rt.performance_time_origin_ms = performanceAutoInitNowMs();
-        const performance = Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectPrototypeFromGlobalForAutoInit(rt, global), 2) catch return null;
+        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
+        defer object_proto_value.free(rt);
+        const performance = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
         const performance_value = performance.value();
+        errdefer performance_value.free(rt);
 
         const now_key = atom.predefinedId("now", .string).?;
         const method_flags = property.Flags.data(true, false, true);
-        performance.defineAutoInitPropertyWithRealmAndNative(
+        try performance.defineAutoInitPropertyWithRealmAndNative(
             rt,
             now_key,
             "now",
@@ -9596,20 +8922,14 @@ pub const Object = extern struct {
             method_flags,
             global,
             function.nativeBuiltinId(.performance, 1),
-        ) catch {
-            performance_value.free(rt);
-            return null;
-        };
+        );
 
         const origin_key = atom.predefinedId("timeOrigin", .string).?;
-        performance.defineOwnPropertyAssumingNew(
+        try performance.defineOwnPropertyAssumingNew(
             rt,
             origin_key,
             descriptor.Descriptor.data(JSValue.float64(rt.performance_time_origin_ms), true, true, true),
-        ) catch {
-            performance_value.free(rt);
-            return null;
-        };
+        );
 
         return performance_value;
     }
@@ -9620,16 +8940,26 @@ pub const Object = extern struct {
         return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
     }
 
-    fn objectPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
+    /// Return an owned value for the realm's Object.prototype.
+    ///
+    /// The visible-constructor fallback is observable and may produce a fresh
+    /// object. Keeping only its raw pointer after freeing the property result
+    /// leaves bare/embedder realms with a dangling prototype during the
+    /// following allocation. Cached intrinsic values are duplicated so both
+    /// branches have the same ownership contract.
+    fn objectPrototypeValueForAutoInit(realm: *context_mod.RealmContext) !JSValue {
+        const rt = realm.runtime;
+        const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
-            if (objectFromValue(stored)) |prototype| return prototype;
+            if (stored.isObject()) return stored.dup();
         }
-        const object_ctor_value = global.getProperty(atom.predefinedId("Object", .string).?);
+        const object_ctor_value = try global.getProperty(atom.predefinedId("Object", .string).?);
         defer object_ctor_value.free(rt);
-        if (!object_ctor_value.isObject()) return null;
-        const prototype_value = objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
-        defer prototype_value.free(rt);
-        return objectFromValue(prototype_value);
+        if (!object_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
+        const prototype_value = try objectFromValue(object_ctor_value).?.getProperty(atom.ids.prototype);
+        if (prototype_value.isObject()) return prototype_value;
+        prototype_value.free(rt);
+        return JSValue.nullValue();
     }
 
     /// Materialize a lazy `function.prototype` placeholder (qjs
@@ -9639,39 +8969,41 @@ pub const Object = extern struct {
     /// (writable, non-enumerable, configurable) — installed only here, so the
     /// `func <-> prototype.constructor` cycle forms lazily, never for a
     /// function whose `.prototype` is never observed.
-    fn materializeFunctionPrototypeAutoInit(self: *Object, info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const parent: ?*Object = if (self.functionRealmGlobalPtr()) |realm_global|
-            objectPrototypeFromGlobalForAutoInit(rt, realm_global)
-        else
-            null;
-        const prototype = Object.create(rt, class.ids.object, parent) catch return null;
+    fn materializeFunctionPrototypeAutoInit(self: *Object, realm: *context_mod.RealmContext) !JSValue {
+        const rt = realm.runtime;
+        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
+        defer object_proto_value.free(rt);
+        const prototype = try Object.create(rt, class.ids.object, objectFromValue(object_proto_value));
         var prototype_owned = true;
         errdefer if (prototype_owned) Object.destroyFromHeader(rt, &prototype.header);
-        prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), true, false, true)) catch return null;
+        try prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), true, false, true));
         prototype_owned = false;
         return prototype.value();
     }
 
     /// Install the lazy `function.prototype` auto-init placeholder on a freshly
     /// created function object. Shares the single interned descriptor so the
-    /// `auto_init_table` does not grow per function.
+    /// no descriptor allocation occurs per function.
     pub fn defineFunctionPrototypeAutoInit(self: *Object, rt: *JSRuntime, flags: property.Flags) !void {
-        const ref = try rt.functionPrototypeAutoInitRef();
-        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = ref });
+        const realm = try self.autoInitRealmForDefinition(rt, null);
+        const slot = property.AutoInitSlot.retainPrototype(&realm.header);
+        try self.appendPreparedPropertyEntry(rt, atom.ids.prototype, flags.withKind(.auto_init), .{ .auto_init = slot });
     }
 
-    fn arrayPrototypeFromGlobalForAutoInit(rt: *JSRuntime, global: *Object) ?*Object {
+    fn arrayPrototypeValueForAutoInit(realm: *context_mod.RealmContext) !JSValue {
+        const rt = realm.runtime;
+        const global = realm.global orelse return error.InvalidBuiltinRegistry;
         if (global.cachedRealmValue(rt, .array_prototype)) |stored| {
-            if (objectFromValue(stored)) |prototype| return prototype;
+            if (stored.isObject()) return stored.dup();
         }
-        const array_key = atom.predefinedId("Array", .string) orelse return null;
-        const array_ctor_value = global.getProperty(array_key);
+        const array_key = atom.predefinedId("Array", .string) orelse return error.InvalidBuiltinRegistry;
+        const array_ctor_value = try global.getProperty(array_key);
         defer array_ctor_value.free(rt);
-        if (!array_ctor_value.isObject()) return null;
-        const prototype_value = objectFromValue(array_ctor_value).?.getProperty(atom.ids.prototype);
-        defer prototype_value.free(rt);
-        return objectFromValue(prototype_value);
+        if (!array_ctor_value.isObject()) return error.InvalidBuiltinRegistry;
+        const prototype_value = try objectFromValue(array_ctor_value).?.getProperty(atom.ids.prototype);
+        if (prototype_value.isObject()) return prototype_value;
+        prototype_value.free(rt);
+        return JSValue.nullValue();
     }
 
     pub fn getOwnDataPropertyValue(self: *const Object, atom_id: atom.Atom) ?JSValue {
@@ -9850,6 +9182,78 @@ pub const Object = extern struct {
     ///
     /// Same plain-object preconditions as `defineOwnPropertyAssumingNew`;
     /// no-duplicate precondition is the caller's responsibility.
+    fn autoInitRealmForDefinition(self: *Object, rt: *JSRuntime, explicit_global: ?*Object) !*context_mod.RealmContext {
+        if (explicit_global) |global| {
+            return rt.contextForGlobalIncludingConstructing(global) orelse error.InvalidBuiltinRegistry;
+        }
+        if (self.bytecodeFunctionRealmContext()) |realm| return realm;
+        if (self.nativeFunctionRealm()) |realm| return realm;
+        if (rt.contextForGlobalIncludingConstructing(self)) |realm| return realm;
+        return error.InvalidBuiltinRegistry;
+    }
+
+    fn createPropAutoInitSlot(
+        self: *Object,
+        rt: *JSRuntime,
+        explicit_global: ?*Object,
+        info: property.AutoInit,
+    ) !property.AutoInitSlot {
+        const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
+        const stored = try property.internAutoInit(rt, info);
+        return property.AutoInitSlot.retainProp(&realm.header, stored);
+    }
+
+    fn createPropAutoInitSlotFromDescriptor(
+        self: *Object,
+        rt: *JSRuntime,
+        explicit_global: ?*Object,
+        info: *const property.AutoInit,
+    ) !property.AutoInitSlot {
+        const realm = try self.autoInitRealmForDefinition(rt, explicit_global);
+        return property.AutoInitSlot.retainProp(&realm.header, info);
+    }
+
+    /// Installs a PROP placeholder backed directly by an immutable descriptor
+    /// whose lifetime dominates the property. Standard tables pass pointers to
+    /// static entries; dynamic host callers use the Runtime arena path below.
+    pub fn defineAutoInitPropertyFromDescriptor(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        realm_global: ?*Object,
+        info: *const property.AutoInit,
+    ) !void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
+            .auto_init = try self.createPropAutoInitSlotFromDescriptor(rt, realm_global, info),
+        });
+    }
+
+    /// W1b3d1 fixture seam for the typed MODULE_NS slot/result protocol. The
+    /// production delayed-export producer remains owned by W1e; callers must
+    /// keep `owner` alive until this property is replaced or destroyed.
+    pub fn defineModuleAutoInitPropertyForFixture(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        flags: property.Flags,
+        realm: *context_mod.RealmContext,
+        owner: *const property.AutoInitModuleOwner,
+    ) !void {
+        std.debug.assert(realm.runtime == rt);
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
+            .auto_init = property.AutoInitSlot.retainModule(&realm.header, owner),
+        });
+    }
+
     pub fn defineAutoInitProperty(
         self: *Object,
         rt: *JSRuntime,
@@ -9883,46 +9287,23 @@ pub const Object = extern struct {
         realm_global: ?*Object,
         native_builtin_id: i32,
     ) !void {
-        try self.defineAutoInitPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, realm_global, native_builtin_id, 0);
-    }
-
-    pub fn defineAutoInitPropertyWithRealmNativeAndCache(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        length: i32,
-        flags: property.Flags,
-        realm_global: ?*Object,
-        native_builtin_id: i32,
-        shared_native_cache_slot: u8,
-    ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        const inserted_holder = if (realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         // Inlined to skip `entryFromDescriptor`'s value-dup / accessor-
         // dup work: the placeholder has no JSValue to retain, just the
         // (name, length, rt) triple stored in the runtime auto-init table.
         // The atom is still retained the same way `addProperty` would, via
         // `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = name,
             .length = length,
-            .rt = rt,
-            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
             .native_builtin_id = native_builtin_id,
-            .shared_native_cache_slot = shared_native_cache_slot,
         }) });
-        if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
     }
 
-    pub fn defineAutoInitNonIndexPropertyWithRealmNativeAndCache(
+    pub fn replaceAutoInitPropertyWithRealmAndNative(
         self: *Object,
         rt: *JSRuntime,
         atom_id: atom.Atom,
@@ -9931,113 +9312,7 @@ pub const Object = extern struct {
         flags: property.Flags,
         realm_global: ?*Object,
         native_builtin_id: i32,
-        shared_native_cache_slot: u8,
     ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(!(self.isArray() and atom_id == atom.ids.length));
-        std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        const inserted_holder = if (realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
-            .name = name,
-            .length = length,
-            .rt = rt,
-            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-            .native_builtin_id = native_builtin_id,
-            .shared_native_cache_slot = shared_native_cache_slot,
-        }) });
-        if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
-    }
-
-    pub fn defineNativeAccessorAutoInitPropertyWithRealmAndNative(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        getter_name: []const u8,
-        getter_length: i32,
-        flags: property.Flags,
-        realm_global: ?*Object,
-        getter_native_builtin_id: i32,
-    ) !void {
-        std.debug.assert(flags.isAccessor());
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        const inserted_holder = if (realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
-            .name = getter_name,
-            .length = getter_length,
-            .rt = rt,
-            .kind = .native_accessor,
-            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-            .native_builtin_id = getter_native_builtin_id,
-        }) });
-        if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
-    }
-
-    pub fn defineNativeAccessorAutoInitPairPropertyWithRealmAndNative(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        getter_name: []const u8,
-        getter_length: i32,
-        setter_length: i32,
-        flags: property.Flags,
-        realm_global: ?*Object,
-        getter_native_builtin_id: i32,
-        setter_native_builtin_id: i32,
-    ) !void {
-        std.debug.assert(flags.isAccessor());
-        std.debug.assert(setter_length > 0);
-        std.debug.assert(setter_native_builtin_id >= 0);
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        const inserted_holder = if (realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
-            .name = getter_name,
-            .length = getter_length,
-            .rt = rt,
-            .kind = .native_accessor,
-            .host_function_kind = setter_length,
-            .external_host_function_id = @intCast(setter_native_builtin_id),
-            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-            .native_builtin_id = getter_native_builtin_id,
-        }) });
-        if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
-    }
-
-    pub fn replaceAutoInitPropertyWithRealmNativeAndCache(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        length: i32,
-        flags: property.Flags,
-        realm_global: ?*Object,
-        native_builtin_id: i32,
-        shared_native_cache_slot: u8,
-    ) !void {
-        const inserted_holder = if (realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
             if (!self.isAutoInitAt(index)) return error.TypeError;
             const ai_flags = flags.withKind(.auto_init);
@@ -10045,19 +9320,43 @@ pub const Object = extern struct {
                 try self.ensureUniqueShapeForMutation(rt);
                 rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
             }
-            self.prop_values[index].slot = .{ .auto_init = try property.internAutoInit(rt, .{
+            const next_slot = try self.createPropAutoInitSlot(rt, realm_global, .{
                 .name = name,
                 .length = length,
-                .rt = rt,
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
                 .native_builtin_id = native_builtin_id,
-                .shared_native_cache_slot = shared_native_cache_slot,
-            }) };
+            });
+            const old_slot = self.prop_values[index].slot;
+            self.prop_values[index].slot = .{ .auto_init = next_slot };
+            destroyPropertySlot(rt, atom_id, ai_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
-            if (realm_global != null) try rt.registerBorrowedReferenceHolder(self);
             return;
         }
-        try self.defineAutoInitPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, realm_global, native_builtin_id, shared_native_cache_slot);
+        try self.defineAutoInitPropertyWithRealmAndNative(rt, atom_id, name, length, flags, realm_global, native_builtin_id);
+    }
+
+    /// Bootstrap alias publication: replace an already-installed AUTOINIT
+    /// source entry with the exact same function value obtained from another
+    /// property, without materializing the entry being replaced. This mirrors
+    /// QJS `JS_DEF_ALIAS` ordering and keeps source/alias properties independent
+    /// after publication while sharing the function identity.
+    pub fn replaceAutoInitPropertyWithData(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        source_value: JSValue,
+        flags: property.Flags,
+    ) !void {
+        const index = self.findProperty(atom_id) orelse return error.IncompatibleDescriptor;
+        const old_flags = self.propFlagsAt(index);
+        if (!old_flags.isAutoInit()) return error.IncompatibleDescriptor;
+        const next_value = dupPropertyDataValue(&rt.atoms, atom_id, source_value);
+        errdefer next_value.free(rt);
+        try self.ensureUniqueShapeForMutation(rt);
+        const old_slot = self.prop_values[index].slot;
+        self.prop_values[index].slot = .{ .data = next_value };
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.data).bits());
+        destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn defineNavigatorAutoInitProperty(
@@ -10070,16 +9369,11 @@ pub const Object = extern struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = "navigator",
             .length = 0,
-            .rt = rt,
             .kind = .navigator,
-            .host_function_realm_global = @intFromPtr(realm_global),
         }) });
-        try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn defineConsoleAutoInitProperty(
@@ -10095,10 +9389,9 @@ pub const Object = extern struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, null, .{
             .name = "console",
             .length = 0,
-            .rt = rt,
             .kind = .console,
             .host_function_kind = host_function_kind,
             .external_host_function_id = external_host_function_id,
@@ -10115,16 +9408,11 @@ pub const Object = extern struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = "performance",
             .length = 0,
-            .rt = rt,
             .kind = .performance,
-            .host_function_realm_global = @intFromPtr(realm_global),
         }) });
-        try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn defineBuiltinNamespaceAutoInitProperty(
@@ -10143,16 +9431,11 @@ pub const Object = extern struct {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.flags.extensible);
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = name,
             .length = 0,
-            .rt = rt,
             .kind = kind,
-            .host_function_realm_global = @intFromPtr(realm_global),
         }) });
-        try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn defineArrayUnscopablesAutoInitProperty(
@@ -10163,50 +9446,10 @@ pub const Object = extern struct {
     ) !void {
         std.debug.assert(!self.hasExoticMethods());
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, null, .{
             .name = "[Symbol.unscopables]",
             .length = 0,
-            .rt = rt,
             .kind = .array_unscopables,
-        }) });
-    }
-
-    pub fn defineNumberConstantAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        flags: property.Flags,
-    ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
-            .name = name,
-            .length = 0,
-            .rt = rt,
-            .kind = .number_constant,
-        }) });
-    }
-
-    pub fn defineInt32ConstantAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        constant_value: i32,
-        flags: property.Flags,
-    ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
-            .name = name,
-            .length = constant_value,
-            .rt = rt,
-            .kind = .int32_constant,
         }) });
     }
 
@@ -10221,10 +9464,9 @@ pub const Object = extern struct {
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, null, .{
             .name = bytes,
             .length = 0,
-            .rt = rt,
             .kind = .string_constant,
         }) });
     }
@@ -10241,35 +9483,27 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
         std.debug.assert(!flags.isAccessor());
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
             const old_flags = self.propFlagsAt(index);
             const entry = &self.prop_values[index];
             const old_slot = entry.slot;
-            entry.slot = .{ .auto_init = try property.internAutoInit(rt, .{
+            entry.slot = .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
                 .name = "empty array",
                 .length = 0,
-                .rt = rt,
                 .kind = .empty_array,
-                .host_function_realm_global = @intFromPtr(realm_global),
             }) };
             rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.auto_init).bits());
             destroyPropertySlot(rt, atom_id, old_flags, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
-            try rt.registerBorrowedReferenceHolder(self);
             return;
         }
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = "empty array",
             .length = 0,
-            .rt = rt,
             .kind = .empty_array,
-            .host_function_realm_global = @intFromPtr(realm_global),
         }) });
-        try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn defineHostAutoInitProperty(
@@ -10281,7 +9515,7 @@ pub const Object = extern struct {
         flags: property.Flags,
         host_function_kind: i32,
         host_function_prototype: bool,
-        host_function_realm_global: ?*Object,
+        realm_global: ?*Object,
     ) !void {
         try self.defineHostAutoInitPropertyWithExternalId(
             rt,
@@ -10291,7 +9525,7 @@ pub const Object = extern struct {
             flags,
             host_function_kind,
             host_function_prototype,
-            host_function_realm_global,
+            realm_global,
             0,
         );
     }
@@ -10305,7 +9539,7 @@ pub const Object = extern struct {
         flags: property.Flags,
         host_function_kind: i32,
         host_function_prototype: bool,
-        host_function_realm_global: ?*Object,
+        realm_global: ?*Object,
         external_host_function_id: u32,
     ) !void {
         std.debug.assert(host_function_kind != 0);
@@ -10314,21 +9548,13 @@ pub const Object = extern struct {
         std.debug.assert(self.supportsPlainNamedPropertyStorage());
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        const inserted_holder = if (host_function_realm_global != null)
-            try registerBorrowedHolderForPendingMutation(rt, self)
-        else
-            false;
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try property.internAutoInit(rt, .{
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = name,
             .length = length,
-            .rt = rt,
             .host_function_kind = host_function_kind,
             .external_host_function_id = external_host_function_id,
             .host_function_prototype = host_function_prototype,
-            .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
         }) });
-        if (host_function_realm_global != null) try rt.registerBorrowedReferenceHolder(self);
     }
 
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -10337,11 +9563,16 @@ pub const Object = extern struct {
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
         const elements = self.arrayElements();
         if (index >= elements.len) return false;
-        if (self.getPrototype()) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
-        }
-
         return self.setFastArrayElementDup(rt, index, new_value);
+    }
+
+    /// QuickJS `can_extend_fast_array`: an ordinary dense Array may append
+    /// without a prototype walk only when it is extensible and its direct
+    /// prototype is null or the still-pristine intrinsic %Array.prototype%.
+    pub fn canExtendFastArray(self: *const Object) bool {
+        if (!self.flags.extensible) return false;
+        const proto = self.getPrototype() orelse return true;
+        return proto.flags.is_std_array_prototype;
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -10351,17 +9582,8 @@ pub const Object = extern struct {
         // when it grows past the current length.
         if (!self.isArray() or index != self.u.array.count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (!self.flags.extensible) return false;
+        if (!self.canExtendFastArray()) return false;
         if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
-        if (self.getPrototype()) |proto| {
-            // Filling a hole (`index < array_length`) is an ordinary [[Set]] of a
-            // missing index that must consult inherited setters / proxy traps; a
-            // proxy or exotic anywhere in the chain can intercept it, so bail to
-            // the full [[Set]] path. (A true logical-end append `index ==
-            // array_length` needs only the inherited-data-property guard below.)
-            if (index < self.u.array.length and arrayPrototypeChainHasInterceptingSet(proto)) return false;
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
-        }
 
         const element_slot = try self.appendUninitializedFastArraySlot(rt);
         element_slot.* = new_value.dup();
@@ -10375,14 +9597,11 @@ pub const Object = extern struct {
         // logical length: a holey array appends at count. See add_fast_array_element.
         if (!self.isArray() or start != self.u.array.count or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (!self.flags.extensible) return false;
+        if (!self.canExtendFastArray()) return false;
         const added: u32 = std.math.cast(u32, values.len) orelse return false;
         const limit = std.math.add(u32, start, added) catch return false;
         if (limit > array.max_array_length) return false;
 
-        const indexed_proto = if (self.getPrototype()) |proto| blk: {
-            break :blk if (arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) null else proto;
-        } else null;
         // Apply the eligibility checks above even for an empty append. qjs
         // `js_array_push` admits `push()` to its fast case only
         // when the receiver is the same extendable, fully-dense Array shape
@@ -10393,9 +9612,6 @@ pub const Object = extern struct {
         while (guard_index < limit) : (guard_index += 1) {
             const atom_id = atom.atomFromUInt32(guard_index);
             if (self.shape_ref.prop_count != 0 and self.findProperty(atom_id) != null) return false;
-            if (indexed_proto) |proto| {
-                if (proto.hasProperty(atom_id)) return false;
-            }
         }
 
         try self.ensureArrayElementCapacity(rt, @intCast(limit));
@@ -10477,7 +9693,7 @@ pub const Object = extern struct {
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (start != self.u.array.count or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
+            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
 
         const start_index: usize = @intCast(start);
@@ -10500,7 +9716,7 @@ pub const Object = extern struct {
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (start_index != self.u.array.count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
+            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
 
         const limit = try std.math.add(u32, start_index, count);
@@ -10534,7 +9750,7 @@ pub const Object = extern struct {
         if (!self.isArray() or self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
         if (start_index != self.u.array.count or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.getPrototype()) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
+            if (!arrayPrototypeChainAllowsBulkIndexedSet(proto)) return false;
         }
 
         if (limit > array.max_array_length) return false;
@@ -10567,9 +9783,6 @@ pub const Object = extern struct {
         if (mask > atom.max_int_atom) return false;
         if (!self.isArray() or !self.flags.length_writable) return false;
         if (self.hasExoticMethods() or self.arrayElementStorageMode() != .dense) return false;
-        if (self.getPrototype()) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
-        }
 
         const mask_index: usize = @intCast(mask);
         if (mask_index >= self.u.array.count) return false;
@@ -10628,36 +9841,43 @@ pub const Object = extern struct {
         return true;
     }
 
-    pub fn markIndexedProperties(self: *Object, rt: *JSRuntime) void {
+    pub fn markIndexedProperties(self: *Object, _: *JSRuntime) void {
+        // This is the local conservative lookup summary, not the realm guard
+        // invalidation hook. QuickJS invalidates `is_std_array_prototype` in
+        // `add_property` only for tagged integer atoms (0...INT32_MAX), while
+        // this flag also covers the wider ArrayIndex string-atom range.
         self.flags.may_have_indexed_properties = true;
-        if (self.flags.is_prototype) {
-            rt.any_prototype_may_have_indexed_properties = true;
+    }
+
+    fn invalidateStandardArrayPrototypeForTaggedIndexMutation(self: *Object, rt: *JSRuntime) void {
+        if (self.flags.is_std_array_prototype) {
+            self.flags.is_std_array_prototype = false;
+        } else if (self.flags.immutable_prototype) {
+            rt.invalidateStandardArrayPrototypeForObjectPrototype(self);
         }
     }
 
-    fn arrayAppendPrototypeChainHasNoIndexedProperties(proto: *Object, rt: *JSRuntime) bool {
-        if (!rt.any_prototype_may_have_indexed_properties) return true;
+    pub fn publishStandardArrayPrototype(self: *Object) void {
+        std.debug.assert(self.isArray());
+        std.debug.assert(!self.flags.may_have_indexed_properties);
+        self.flags.is_std_array_prototype = true;
+    }
+
+    pub fn isStandardArrayPrototype(self: *const Object) bool {
+        return self.flags.is_std_array_prototype;
+    }
+
+    /// Conservative proof for zjs-only bulk Set optimizations. Unlike qjs's
+    /// four `can_extend_fast_array` readers, these transforms may skip many
+    /// distinct Set operations and therefore inspect the actual chain.
+    fn arrayPrototypeChainAllowsBulkIndexedSet(proto: *Object) bool {
         var cursor: ?*Object = proto;
         while (cursor) |object| {
+            if (object.proxyTarget() != null or object.hasExoticMethods()) return false;
             if (object.flags.may_have_indexed_properties) return false;
             cursor = object.getPrototype();
         }
         return true;
-    }
-
-    /// True if any object in the prototype chain is a proxy or carries exotic
-    /// methods that could intercept a [[Set]] of an arbitrary key (e.g. a proxy
-    /// `set` trap). A dense fast-array append into a HOLE position relies on the
-    /// generic [[Set]] having found no inherited setter (faithful to qjs, which
-    /// reaches add_fast_array_element only after the prototype walk); such an
-    /// interceptor must be honored, so the dense append bails to the full path.
-    fn arrayPrototypeChainHasInterceptingSet(proto: *Object) bool {
-        var cursor: ?*Object = proto;
-        while (cursor) |object| {
-            if (object.proxyTarget() != null or object.hasExoticMethods()) return true;
-            cursor = object.getPrototype();
-        }
-        return false;
     }
 
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
@@ -10787,9 +10007,6 @@ pub const Object = extern struct {
                 return true;
             },
             .auto_init => {
-                // Native accessor placeholders must materialize and invoke the
-                // setter; only data-destined placeholders may be overwritten.
-                if (property.autoInit(entry.slot.auto_init).kind == .native_accessor) return false;
                 const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                 errdefer next_value.free(rt);
                 try self.ensureUniqueShapeForMutation(rt);
@@ -11254,6 +10471,7 @@ pub const Object = extern struct {
         self.freeArrayElementBufferAfterMove(rt);
         // Sparse array: count stays 0, length is the JS-observable `.length`.
         self.u.array.length = saved_length;
+        self.flags.is_std_array_prototype = false;
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
@@ -11368,6 +10586,11 @@ pub const Object = extern struct {
         // before the allocations it must protect.
         if (!caller_holds_atom_ref) _ = rt.atoms.dup(atom_id);
         defer if (!caller_holds_atom_ref) rt.atoms.free(atom_id);
+        // qjs add_property invalidates the standard Array-prototype marker
+        // before any fallible shape/property growth. The invalidation is
+        // intentionally sticky even if the later allocation fails.
+        if (atom.isTaggedInt(atom_id)) self.invalidateStandardArrayPrototypeForTaggedIndexMutation(rt);
+        const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
         var slot_owned = true;
         errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, entry_flags, slot);
 
@@ -11414,16 +10637,14 @@ pub const Object = extern struct {
             }
         };
 
-        // Only the boolean "is this atom an array index?" is needed here (the
-        // index value is never consumed): `markIndexedProperties` is a flag flip
-        // and `adoptShapeForNewProperty` only tests `!= null`. Route through the
-        // lean `atomIsArrayIndex` predicate, which — unlike `arrayIndexFromAtom` —
-        // does not resolve `name()` for the common named-key case (a/b/c). qjs
-        // `add_property` (quickjs.c:9184) likewise pays only `__JS_AtomIsTaggedInt`
-        // per add for a plain object.
-        const is_array_index = rt.atoms.atomIsArrayIndex(atom_id);
+        // Only the boolean "is this atom an array index?" is needed for zjs's
+        // local lookup summary and sparse-shape policy; the index value is never
+        // consumed. Keep that full ArrayIndex predicate separate from the
+        // tagged-integer realm-guard trigger above: high string-atom indexes
+        // update this local summary but do not perform qjs add_property's
+        // `is_std_array_prototype` invalidation.
         if (is_array_index) {
-            self.markIndexedProperties(rt);
+            self.flags.may_have_indexed_properties = true;
         }
         try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
@@ -11924,21 +11145,11 @@ fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descript
     };
 }
 
-pub fn dupPropertyDataValue(atoms: *atom.AtomTable, atom_id: atom.Atom, value: JSValue) JSValue {
-    if (atom_id == atom.ids.Private_brand) {
-        if (value.asSymbolAtom()) |brand_atom| {
-            if (atoms.kind(brand_atom) == .private) return value.dup();
-        }
-    }
+pub fn dupPropertyDataValue(_: *atom.AtomTable, _: atom.Atom, value: JSValue) JSValue {
     return value.dup();
 }
 
-pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, flags: property.Flags, slot: property.Slot) void {
-    if (atom_id == atom.ids.Private_brand and !flags.deleted and flags.kind == .data) {
-        if (slot.data.asSymbolAtom()) |brand_atom| {
-            if (rt.atoms.kind(brand_atom) == .private) rt.atoms.free(brand_atom);
-        }
-    }
+pub fn destroyPropertySlot(rt: *JSRuntime, _: atom.Atom, flags: property.Flags, slot: property.Slot) void {
     slot.destroy(flags, rt);
 }
 
@@ -12334,13 +11545,13 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode) !JSVal
     var out_index: u32 = 0;
     for (owned_keys) |key| {
         if (rt.atoms.isPublicSymbol(key)) continue;
-        const desc = object.getOwnProperty(rt, key) orelse continue;
+        const desc = (try object.getOwnProperty(rt, key)) orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
         element_val = switch (mode) {
             .keys => try entriesAtomToStringValue(rt, key),
-            .values => object.getProperty(key),
-            .entries => try entryArrayValue(rt, key, object.getProperty(key)),
+            .values => try object.getProperty(key),
+            .entries => try entryArrayValue(rt, key, try object.getProperty(key)),
         };
         defer {
             element_val.free(rt);

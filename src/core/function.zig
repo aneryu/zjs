@@ -3,7 +3,6 @@ const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
-const property = @import("property.zig");
 const string = @import("string.zig");
 const runtime = @import("runtime.zig");
 const JSRuntime = runtime.JSRuntime;
@@ -306,8 +305,14 @@ fn isAsciiBuiltinName(bytes: []const u8) bool {
     return true;
 }
 
-fn nativeFunctionWithClass(rt: *JSRuntime, class_id: class.ClassId, name: []const u8, length: i32) !JSValue {
-    const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, null, 2);
+fn nativeFunctionWithClass(
+    rt: *JSRuntime,
+    class_id: class.ClassId,
+    prototype: ?*Object,
+    name: []const u8,
+    length: i32,
+) !JSValue {
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, prototype, 2);
     errdefer function_object.value().free(rt);
 
     const length_key = atom.predefinedId("length", .string).?;
@@ -334,8 +339,25 @@ fn nativeFunctionWithClass(rt: *JSRuntime, class_id: class.ClassId, name: []cons
 /// any fallible metadata work, so a successfully published native function can
 /// never exist without its construction RealmRef.
 pub fn nativeFunction(realm: *RealmContext, name: []const u8, length: i32) !JSValue {
+    const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    return nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, 2);
+}
+
+/// Construct a true C function with its final `[[Prototype]]` and RealmRef in
+/// place before any fallible metadata publication. Bootstrap uses the explicit
+/// prototype form because Function.prototype itself must initially inherit
+/// from Object.prototype; ordinary post-bootstrap producers pass the realm's
+/// Function.prototype.
+pub fn nativeFunctionWithPrototypeAndCapacity(
+    realm: *RealmContext,
+    prototype: ?*Object,
+    name: []const u8,
+    length: i32,
+    capacity: usize,
+) !JSValue {
+    std.debug.assert(capacity >= 2);
     const rt = realm.runtime;
-    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, 2);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, prototype, capacity);
     function_object.setNativeFunctionRealm(realm);
     errdefer function_object.value().free(rt);
 
@@ -361,39 +383,26 @@ pub fn nativeFunction(realm: *RealmContext, name: []const u8, length: i32) !JSVa
 /// Construct a QuickJS C_FUNCTION_DATA-style carrier. It deliberately owns no
 /// realm; its callback receives the caller's RealmContext at dispatch time.
 pub fn nativeDataFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
-    return nativeFunctionWithClass(rt, class.ids.c_function_data, name, length);
+    return nativeDataFunctionWithPrototype(rt, null, name, length);
+}
+
+/// Construct a C_FUNCTION_DATA-style callable with the construction realm's
+/// final Function.prototype, but without retaining that realm. Its callback
+/// still executes in the caller realm; the prototype only fixes the function
+/// object's construction-time surface and allocation topology.
+pub fn nativeDataFunctionWithPrototype(
+    rt: *JSRuntime,
+    prototype: ?*Object,
+    name: []const u8,
+    length: i32,
+) !JSValue {
+    return nativeFunctionWithClass(rt, class.ids.c_function_data, prototype, name, length);
 }
 
 pub fn nativeFunctionForGlobal(rt: *JSRuntime, global: *Object, name: []const u8, length: i32) !JSValue {
     const realm = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
-    return nativeFunction(realm, name, length);
-}
-
-/// `name` must outlive the function object. This is intended for standard
-/// builtin tables whose names have static storage.
-pub fn nativeFunctionWithLazyName(realm: *RealmContext, name: []const u8, length: i32) !JSValue {
-    return nativeFunctionWithLazyNameAndCapacity(realm, name, length, 2);
-}
-
-/// `name` must outlive the function object. This is intended for standard
-/// builtin tables whose names have static storage.
-pub fn nativeFunctionWithLazyNameAndCapacity(realm: *RealmContext, name: []const u8, length: i32, capacity: usize) !JSValue {
-    std.debug.assert(capacity >= 2);
-    const rt = realm.runtime;
-    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, capacity);
-    function_object.setNativeFunctionRealm(realm);
-    errdefer function_object.value().free(rt);
-
-    const length_key = atom.predefinedId("length", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
-
-    const name_key = atom.predefinedId("name", .string).?;
-    const name_flags = property.Flags.data(false, false, true);
-    try function_object.defineStringConstantAutoInitProperty(rt, name_key, name, name_flags);
-
-    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
-
-    return function_object.value();
+    const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    return nativeFunctionWithPrototypeAndCapacity(realm, function_proto, name, length, 2);
 }
 
 /// Creates a fresh native function named `name`/arity `length` and installs it
@@ -401,13 +410,15 @@ pub fn nativeFunctionWithLazyNameAndCapacity(realm: *RealmContext, name: []const
 /// property on `target` under the same key. This is the lazy method-install
 /// primitive used when a Promise object is constructed without a shared
 /// prototype (so `then`/`catch` must be materialized directly on the
-/// instance). It depends only on core ops (`nativeDataFunction` + descriptor
-/// install), so engine-core callers may use it without reaching into builtins.
-/// These fallback methods have no construction realm to own, so they use the
-/// caller-realm C_FUNCTION_DATA carrier instead of manufacturing a realm-less
-/// true C_FUNCTION.
-pub fn defineNativeMethod(rt: *JSRuntime, target: *Object, name: []const u8, length: i32) !void {
-    const method = try nativeDataFunction(rt, name, length);
+/// instance). It depends only on core ops (`nativeDataFunctionWithPrototype` +
+/// descriptor install), so engine-core callers may use it without reaching
+/// into builtins. The C_FUNCTION_DATA callback retains caller-realm execution
+/// semantics, while its construction-time object surface uses the supplied
+/// realm's final Function.prototype.
+pub fn defineNativeMethod(realm: *RealmContext, target: *Object, name: []const u8, length: i32) !void {
+    const rt = realm.runtime;
+    const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
+    const method = try nativeDataFunctionWithPrototype(rt, function_proto, name, length);
     defer method.free(rt);
     try defineMethodData(rt, target, name, method, true, false, true);
 }

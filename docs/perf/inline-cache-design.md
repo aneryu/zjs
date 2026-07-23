@@ -20,8 +20,8 @@ around those helpers.
 Inline caches are enabled by default and can be disabled with:
 
 ```sh
-zig build test -Dzjs_enable_ic=false --summary all
-zig build zjs -Dzjs_enable_ic=false --summary all
+zig build test -Dzjs_enable_ic=false --seed 0 --summary all
+zig build zjs -Dzjs_enable_ic=false --seed 0 --summary all
 ```
 
 ## Cacheable Opcodes
@@ -113,8 +113,8 @@ The JSON is written to stderr.
 For IC changes, run:
 
 ```sh
-zig build test --summary all
-zig build smoke --summary all
+zig build test --seed 0 --summary all
+zig build smoke --seed 0 --summary all
 git diff --check
 ```
 

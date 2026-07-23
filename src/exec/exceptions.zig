@@ -12,6 +12,8 @@ pub const RuntimeError = error{
     CodepointTooLarge,
     DivisionByZero,
     DuplicateClass,
+    DerivedConstructorReturn,
+    DerivedThisUninitialized,
     EvalError,
     IncompatibleDescriptor,
     Interrupted,

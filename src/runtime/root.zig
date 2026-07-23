@@ -28,7 +28,14 @@ pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *
     while (cursor) |waiter| {
         if (waiter.realm.borrow()) |ctx| {
             if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {
-                waiter.notified = true;
+                if (waiter.completion != .waiting) {
+                    cursor = waiter.next;
+                    continue;
+                }
+                // May be called by a foreign test262 agent/coordinator thread:
+                // publish only the mutex-protected scalar and signal. Promise,
+                // RealmRef, allocator, and JS heap remain owner-thread-only.
+                waiter.completion = .notified;
                 waiter.cond.broadcast(io);
             }
         }

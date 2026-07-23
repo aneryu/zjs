@@ -3,7 +3,6 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const exceptions = @import("exceptions.zig");
-const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 
 const HostError = exceptions.HostError;
@@ -48,7 +47,8 @@ fn errorCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const ctx = host_call.ctx;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
@@ -60,26 +60,17 @@ fn errorCall(
         const receiver = call.thisObject(this_value) orelse return error.TypeError;
         if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
         if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Error")) return error.TypeError;
-        const global_object = (try call.activeGlobalObject(ctx.runtime, host_call.global, host_call.globals)) orelse return error.TypeError;
-        return call_runtime.qjsErrorCaptureStackTrace(ctx, output, global_object, args);
+        return call_runtime.qjsErrorCaptureStackTrace(ctx, output, realm.global, args);
     }
 
     const func_obj = host_call.func_obj;
-    const active_global = host_call.global orelse realmGlobalFor(ctx, func_obj) orelse return error.TypeError;
     return switch (id) {
-        @intFromEnum(PrototypeMethod.to_string) => string_ops.qjsErrorToStringCall(ctx, output, active_global, this_value, caller_function, caller_frame),
-        @intFromEnum(PrototypeMethod.stack_getter) => call_runtime.qjsErrorStackGetter(ctx, output, active_global, this_value),
+        @intFromEnum(PrototypeMethod.to_string) => string_ops.qjsErrorToStringCall(ctx, output, realm.global, this_value, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.stack_getter) => call_runtime.qjsErrorStackGetter(ctx, output, realm.global, this_value),
         @intFromEnum(PrototypeMethod.stack_setter) => blk: {
             const setter_func = func_obj orelse return error.TypeError;
-            break :blk call_runtime.qjsErrorStackSetter(ctx, output, active_global, this_value, setter_func, args, caller_function, caller_frame);
+            break :blk call_runtime.qjsErrorStackSetter(ctx, output, realm.global, this_value, setter_func, args, caller_function, caller_frame);
         },
         else => error.TypeError,
     };
-}
-
-fn realmGlobalFor(ctx: *core.JSContext, func_obj: ?*core.Object) ?*core.Object {
-    if (func_obj) |obj| {
-        if (object_ops.objectRealmGlobal(obj)) |realm_global| return realm_global;
-    }
-    return ctx.global;
 }

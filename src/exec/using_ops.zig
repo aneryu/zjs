@@ -63,11 +63,11 @@ pub noinline fn addResourceVm(
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
 ) !Step {
-    const hint_byte = function.code[frame.pc];
+    const hint_byte = function.byteCode()[frame.pc];
     frame.pc += 1;
     const hint: core.object.DisposalHint = switch (hint_byte) {
         @intFromEnum(core.object.DisposalHint.sync) => .sync,

@@ -169,7 +169,6 @@ pub const CallBindingInputs = struct {
     initial_this_value: JSValue,
     current_function_value: JSValue,
     new_target_value: JSValue,
-    constructor_this_value: JSValue,
 };
 
 pub const CallBindingValueMode = enum {
@@ -212,9 +211,7 @@ comptime {
 
 pub const CallBindingModes = struct {
     this_value: CallBindingValueMode = .dup,
-    constructor_this_value: CallBindingValueMode = .dup,
     current_function: CallBindingValueMode = .dup,
-    new_target: CallBindingValueMode = .dup,
 };
 
 /// `original_args` (a pre-mutation snapshot of the call arguments) is only
@@ -222,14 +219,14 @@ pub const CallBindingModes = struct {
 /// constructor calls. Sloppy simple-parameter functions always use the
 /// mapped arguments object, which reads live `frame.args`, so the snapshot
 /// duplication can be skipped for them.
-pub fn argumentsNeedsOriginalSnapshot(function: *const bytecode.Bytecode) bool {
-    return function.flags.is_derived_class_constructor or
-        function.flags.is_strict or
-        function.flags.runtime_strict or
-        !function.flags.has_simple_parameter_list;
+pub fn argumentsNeedsOriginalSnapshot(function: *const bytecode.FunctionBytecode) bool {
+    return function.isDerivedClassConstructor() or
+        function.isStrictMode() or
+        function.runtimeStrictMode() or
+        !function.hasSimpleParameterList();
 }
 
-pub fn frameArgCount(function: *const bytecode.Bytecode, argc: usize) usize {
+pub fn frameArgCount(function: *const bytecode.FunctionBytecode, argc: usize) usize {
     return @max(argc, @as(usize, @intCast(function.arg_count)));
 }
 
@@ -237,14 +234,14 @@ pub fn originalArgCount(argc: usize, need_original_snapshot: bool) usize {
     return if (argc != 0 and need_original_snapshot) argc else 0;
 }
 
-pub fn frameVarRefStorageCount(function: *const bytecode.Bytecode, inherited_var_refs: []const *core.VarRef) usize {
+pub fn frameVarRefStorageCount(function: *const bytecode.FunctionBytecode, inherited_var_refs: []const *core.VarRef) usize {
     if (inherited_var_refs.len != 0) return inherited_var_refs.len;
-    if (function.closure_var.len != 0) return function.closure_var.len;
+    if (function.closureVar().len != 0) return function.closureVar().len;
     return function.varRefNamesLen();
 }
 
-pub fn frameOpenVarRefStorageCount(function: *const bytecode.Bytecode) usize {
-    return function.open_var_ref_count;
+pub fn frameOpenVarRefStorageCount(function: *const bytecode.FunctionBytecode) usize {
+    return function.openVarRefCount();
 }
 
 pub const FrameStorageWindows = struct {
@@ -256,7 +253,7 @@ pub const FrameStorageWindows = struct {
 };
 
 pub const Frame = struct {
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     pc: usize = 0,
     this_value: JSValue = JSValue.undefinedValue(),
     current_function: JSValue = JSValue.undefinedValue(),
@@ -277,17 +274,13 @@ pub const Frame = struct {
     /// borrowed storage is an arena window. Teardown consults only this value.
     ownership: OwnershipDisposition = .{},
     /// Lazily-allocated side-struct holding the cold per-frame state a plain
-    /// inline call (fib, ordinary closures) never touches: the
-    /// derived-constructor `this`, the `arguments` object, and the original-args
-    /// snapshot. `null` on the common path, so `Frame.init` writes one null
-    /// pointer and keeps this state off the hot frame.
+    /// inline call (fib, ordinary closures) never touches: `new.target` and the
+    /// original-args snapshot. `null` on the common path, so `Frame.init`
+    /// writes one null pointer and keeps this state off the hot frame.
     cold: ?*FrameCold = null,
 
     pub const FrameCold = struct {
         new_target: JSValue = JSValue.undefinedValue(),
-        constructor_this_value: JSValue = JSValue.undefinedValue(),
-        constructor_this_value_ownership: Ownership = .borrowed,
-        arguments_object: ?JSValue = null,
         original_args: []JSValue = &.{},
     };
 
@@ -307,25 +300,20 @@ pub const Frame = struct {
         }
     }
 
-    /// Release every owned value/allocation held in `cold` (the derived-ctor
-    /// `this`, the `arguments` object, and the original-args snapshot VALUES)
-    /// then free the box. Idempotent. `original_args` VALUES must be released
-    /// BEFORE the storage backing them is reclaimed — call this before freeing
-    /// `storage_values`.
+    /// Release the owned original-args snapshot VALUES and then free the box.
+    /// `new_target` is a borrowed call binding. Idempotent. `original_args`
+    /// VALUES must be released BEFORE the storage backing them is reclaimed —
+    /// call this before freeing `storage_values`.
     pub fn freeCold(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         const c = self.cold orelse return;
-        if (c.constructor_this_value_ownership == .owned) c.constructor_this_value.free(rt);
-        if (c.arguments_object) |value| value.free(rt);
         releaseValueSliceNoReset(rt, c.original_args);
         account.destroy(FrameCold, c);
         self.cold = null;
     }
 
     /// Release ONLY the storage-coupled cold state — the original-args snapshot
-    /// VALUES — resetting that field to its default while KEEPING the box and the
-    /// ctor / arguments state. This matches the old `releaseOwnedStorage`
-    /// semantics, which reset original_args but left ctor_this/
-    /// arguments_object intact so a suspended generator retains them across resume.
+    /// VALUES — resetting that field to its default while keeping the box and
+    /// its borrowed `new.target` binding.
     pub fn releaseColdStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
         _ = account;
         const c = self.cold orelse return;
@@ -334,29 +322,23 @@ pub const Frame = struct {
     }
 
     // ---- Cold-field read accessors (return the default when `cold == null`) ----
-    pub inline fn constructorThisValue(self: *const Frame) JSValue {
-        return if (self.cold) |c| c.constructor_this_value else JSValue.undefinedValue();
-    }
     pub inline fn newTargetValue(self: *const Frame) JSValue {
         return if (self.cold) |c| c.new_target else JSValue.undefinedValue();
-    }
-    pub inline fn argumentsObject(self: *const Frame) ?JSValue {
-        return if (self.cold) |c| c.arguments_object else null;
     }
     pub inline fn originalArgs(self: *const Frame) []JSValue {
         return if (self.cold) |c| c.original_args else &.{};
     }
 
-    pub inline fn init(function: *const bytecode.Bytecode) Frame {
+    pub inline fn init(function: *const bytecode.FunctionBytecode) Frame {
         return .{ .function = function };
     }
 
     /// Build the borrowed call-binding shell used to resume a resident
     /// generator/async frame. The execution record owns `this` and `cur_func`;
-    /// unlike a fresh call there is no constructor binding to allocate and no
+    /// unlike a fresh call there is no `new.target` binding to allocate and no
     /// reference-count traffic to perform.
     pub inline fn initResidentExecution(
-        function: *const bytecode.Bytecode,
+        function: *const bytecode.FunctionBytecode,
         this_value: JSValue,
         current_function: JSValue,
         actual_arg_count: usize,
@@ -397,7 +379,7 @@ pub const Frame = struct {
     pub fn initCallBindingValues(self: *Frame, account: *memory.MemoryAccount, inputs: CallBindingInputs, modes: CallBindingModes) !void {
         // Allocate the only fallible part before retaining or taking any call
         // binding. On OOM the caller must still own every input unchanged.
-        const binding_cold = if (inputs.constructor_this_value.isUndefined() and inputs.new_target_value.isUndefined())
+        const binding_cold = if (inputs.new_target_value.isUndefined())
             null
         else
             try self.ensureCold(account);
@@ -405,16 +387,7 @@ pub const Frame = struct {
         self.current_function = bindCallValue(inputs.current_function_value, modes.current_function);
         self.ownership.this_value = modeOwnership(modes.this_value);
         self.ownership.current_function = modeOwnership(modes.current_function);
-        // ctor_this is undefined for every non-derived-constructor frame (owned
-        // undefined is a no-op to free), so only materialize `cold` when it is a
-        // real value. The inline path never reaches here (no derived ctors inline).
-        if (binding_cold) |c| {
-            c.new_target = inputs.new_target_value;
-            if (!inputs.constructor_this_value.isUndefined()) {
-                c.constructor_this_value = bindCallValue(inputs.constructor_this_value, modes.constructor_this_value);
-                c.constructor_this_value_ownership = modeOwnership(modes.constructor_this_value);
-            }
-        }
+        if (binding_cold) |c| c.new_target = inputs.new_target_value;
     }
 
     pub fn initArguments(
@@ -594,7 +567,7 @@ pub const Frame = struct {
         self.current_function = JSValue.undefinedValue();
         self.ownership.this_value = .owned;
         self.ownership.current_function = .owned;
-        // Frees constructor/arguments cold state and the box.
+        // Frees original-arguments cold state and the box.
         self.freeCold(&rt.memory, rt);
         if (this_value_ownership == .owned) this_value.free(rt);
         if (current_function_ownership == .owned) current_function.free(rt);
@@ -613,9 +586,8 @@ pub const Frame = struct {
         if (this_value_ownership == .owned) this_value.free(rt);
         if (current_function_ownership == .owned) current_function.free(rt);
 
-        // releaseOwnedStorage frees the storage slices + clears the storage-coupled
-        // cold state (original_args/sync). Then free the rest of cold (ctor_this,
-        // arguments_object) + the box — full teardown, no resume to retain it for.
+        // releaseOwnedStorage frees the storage slices and clears the
+        // storage-coupled original_args snapshot. Then free the cold box.
         self.releaseOwnedStorage(account, rt);
         self.freeCold(account, rt);
     }
@@ -629,7 +601,7 @@ pub const Frame = struct {
         releaseValueSliceNoReset(rt, self.locals);
         releaseValueSliceNoReset(rt, self.args);
         // freeCold releases original_args VALUES before the storage backing them
-        // is freed below; also frees ctor_this/arguments_object + sync allocs + box.
+        // is freed below; it also frees the box.
         if (self.cold != null) self.freeCold(account, rt);
         // Borrowed var_refs alias the closure's captures (owned by the still-live
         // function object); freeing them here would double-free on the next call.
@@ -660,8 +632,8 @@ pub const Frame = struct {
         releaseValueSlice(rt, args);
         releaseCellSliceNoReset(rt, var_refs);
         // Frees original_args VALUES (which alias `storage_values`/the arena slab)
-        // before the storage backing is reclaimed below. Keeps the cold box so a
-        // generator retains constructor/arguments state across resume.
+        // before the storage backing is reclaimed below. Keeps the cold box and
+        // its borrowed new-target binding.
         if (self.cold != null) self.releaseColdStorage(account, rt);
 
         if (storage_ownership == .owned and storage_values.len != 0) account.free(JSValue, storage_values);
@@ -673,10 +645,10 @@ pub const Frame = struct {
     }
 
     pub fn captureLocal(self: *Frame, rt: anytype, local_idx: usize) !*core.VarRef {
-        if (local_idx >= self.locals.len or local_idx >= self.function.vardefs.len) return error.InvalidBytecode;
+        if (local_idx >= self.locals.len or local_idx >= self.function.varDefs().len) return error.InvalidBytecode;
         if (core.VarRef.fromValue(self.locals[local_idx]) != null) return error.InvalidBytecode;
         const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return error.InvalidBytecode;
-        const vd = self.function.vardefs[local_idx];
+        const vd = self.function.varDefs()[local_idx];
         var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
         return table.acquire(rt, binding_idx, &self.locals[local_idx], .{
             .is_const = vd.isConst(),
@@ -694,7 +666,7 @@ pub const Frame = struct {
     }
 
     pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void {
-        if (local_idx >= self.locals.len or local_idx >= self.function.vardefs.len) return error.InvalidBytecode;
+        if (local_idx >= self.locals.len or local_idx >= self.function.varDefs().len) return error.InvalidBytecode;
         const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return;
         var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
         try table.close(rt, binding_idx);
@@ -704,14 +676,14 @@ pub const Frame = struct {
     /// while retaining aliases into the resident argument backing.
     pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) !void {
         var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
-        for (self.function.vardefs) |vd| {
+        for (self.function.varDefs()) |vd| {
             if (!vd.isCaptured()) continue;
             try table.close(rt, vd.var_ref_idx);
         }
     }
 
     pub fn installOpenVarRefSlots(self: *Frame, slots: []?*core.VarRef) !void {
-        if (slots.len != self.function.open_var_ref_count) return error.InvalidBytecode;
+        if (slots.len != self.function.openVarRefCount()) return error.InvalidBytecode;
         self.open_var_refs = slots;
         @memset(self.open_var_refs, null);
     }
@@ -722,7 +694,7 @@ pub const Frame = struct {
         arena: ?*runtime.VmStackArena,
         use_inline_storage: bool,
     ) !void {
-        const count = self.function.open_var_ref_count;
+        const count = self.function.openVarRefCount();
         if (self.open_var_refs.len != 0) {
             if (self.open_var_refs.len != count) return error.InvalidBytecode;
             return;
@@ -791,7 +763,9 @@ test "Frame setLocal preserves inline locals while growing" {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
 
-    var exec_frame = Frame.init(&function);
+    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
+    const execution_function = execution_adapter.init(&function);
+    var exec_frame = Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
 
     try exec_frame.setLocal(&rt.memory, rt, 0, JSValue.int32(11));

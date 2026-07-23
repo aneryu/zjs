@@ -19,11 +19,6 @@ test262/test/language/expressions/compound-assignment/S11.13.2_A6.7_T1.js	Test26
 test262/test/language/expressions/compound-assignment/S11.13.2_A6.8_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 4
 test262/test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js	Test262Error	Test262Error: #1: innerX === 2. Actual: 1
 test262/test/language/expressions/dynamic-import/import-attributes/2nd-param-with-type-text.js	TypeError	TypeError: $DONE() not called
-test262/test/language/expressions/function/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
-test262/test/language/expressions/generators/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
 test262/test/language/identifier-resolution/assign-to-global-undefined.js	Empty	
-test262/test/language/statements/await-using/await-using-does-not-imply-await-if-not-evaluated.js	TypeError	TypeError: $DONE() not called
-test262/test/language/statements/function/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
-test262/test/language/statements/generators/arguments-with-arguments-fn.js	Test262Error	Test262Error: Expected SameValue(«"function"», «"object"») to be true
 test262/test/staging/sm/Function/arguments-parameter-shadowing.js	Test262Error	Test262Error: Expected SameValue(«true», «false») to be true
-test262/test/staging/sm/lexical-environment/block-scoped-functions-annex-b-if.js	TypeError	TypeError
+test262/test/staging/sm/lexical-environment/block-scoped-functions-annex-b-if.js	TypeError	TypeError: not a function

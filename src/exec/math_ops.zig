@@ -195,12 +195,19 @@ fn mathOpCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (host_call.global == null) {
+    if (host_call.func_obj == null and host_call.global == null) {
+        // Explicit bare-runtime algorithmic reuse. It has no callable whose
+        // realm could provide coercion or exception intrinsics.
         if (host_call.magic == 9) return value_ops.numberToValue(mathRandom(host_call.ctx));
         const number = call(host_call.magic, host_call.args) catch return error.TypeError;
         return value_ops.numberToValue(number);
     }
-    return preparedOpCall(host_call.ctx, host_call.output, host_call.global.?, host_call.magic, host_call.args);
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    return preparedOpCall(host_call.ctx, host_call.output, global, host_call.magic, host_call.args);
 }
 
 /// Realm-path scalar `Math.*` computation (ids 1..36), shared by the record
@@ -402,11 +409,12 @@ fn mathSumPreciseCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = host_call.global orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    std.debug.assert(realm.realm == host_call.ctx);
     return qjsMathSumPrecise(
         host_call.ctx,
         host_call.output,
-        global,
+        realm.global,
         host_call.args,
         builtin_dispatch.callerBytecode(host_call),
         builtin_dispatch.callerFrame(host_call),
