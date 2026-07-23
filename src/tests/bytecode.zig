@@ -2494,6 +2494,57 @@ test "resolve_labels: folds push_i32 neg" {
     try std.testing.expectEqual(op.@"return", bc.code[5]);
 }
 
+test "resolve_labels: folds signed push_bigint_i32 neg without crossing its boundary" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        input: i32,
+        expected: i32,
+        folds: bool,
+    }{
+        .{ .input = 0, .expected = 0, .folds = true },
+        .{ .input = 1, .expected = -1, .folds = true },
+        .{ .input = std.math.maxInt(i32), .expected = -std.math.maxInt(i32), .folds = true },
+        .{ .input = std.math.minInt(i32), .expected = std.math.minInt(i32), .folds = false },
+    };
+
+    for (cases) |case| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        // push_bigint_i32 <input> ; neg ; return
+        var input = [_]u8{0} ** 7;
+        input[0] = op.push_bigint_i32;
+        std.mem.writeInt(i32, input[1..5], case.input, .little);
+        input[5] = op.neg;
+        input[6] = op.@"return";
+        try bc.setCode(&input);
+        try bc.appendSourceLoc(0, 3, 5);
+        try bc.appendSourceLoc(5, 2, 10);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(op.push_bigint_i32, bc.code[0]);
+        try std.testing.expectEqual(case.expected, std.mem.readInt(i32, bc.code[1..5], .little));
+        if (case.folds) {
+            try std.testing.expectEqual(@as(usize, 6), bc.code.len);
+            try std.testing.expectEqual(op.@"return", bc.code[5]);
+            try std.testing.expectEqual(@as(u32, 0), bc.source_loc_slots[1].pc);
+        } else {
+            try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+            try std.testing.expectEqual(op.neg, bc.code[5]);
+            try std.testing.expectEqual(op.@"return", bc.code[6]);
+            try std.testing.expectEqual(@as(u32, 5), bc.source_loc_slots[1].pc);
+        }
+    }
+}
+
 test "resolve_labels: skips dead code after unconditional goto" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

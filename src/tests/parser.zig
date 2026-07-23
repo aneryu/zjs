@@ -1286,6 +1286,75 @@ test "F4: large bigint literal lowers to constant pool value" {
     try std.testing.expect(value.isBigInt());
 }
 
+test "W5: signed bigint-i32 neg matches QuickJS final bytecode boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const inline_cases = [_]struct {
+        source: []const u8,
+        expected: i32,
+    }{
+        .{ .source = "-(0n)", .expected = 0 },
+        .{ .source = "-1n", .expected = -1 },
+        .{ .source = "-(1n)", .expected = -1 },
+        .{ .source = "-(2147483647n)", .expected = -2147483647 },
+    };
+    for (inline_cases) |case| {
+        var fn_bc = try parseExpr(&env, case.source);
+        defer fn_bc.deinit(env.rt);
+
+        try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
+        try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
+        try std.testing.expectEqual(case.expected, readI32(fn_bc.code, 1));
+        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.neg));
+        try std.testing.expectEqual(@as(usize, 0), fn_bc.cpoolSlice().len);
+    }
+
+    for ([_][]const u8{ "-(2147483648n)", "-(2147483649n)" }) |source| {
+        var fn_bc = try parseExpr(&env, source);
+        defer fn_bc.deinit(env.rt);
+
+        try expectOpcodeSequence(fn_bc.code, &.{ op.push_const8, op.neg });
+        try std.testing.expectEqual(@as(usize, 1), fn_bc.cpoolSlice().len);
+        const constant = fn_bc.constantAt(readConstIndexAtOpcode(fn_bc.code, 0)).?;
+        defer constant.free(env.rt);
+        try std.testing.expect(constant.isBigInt());
+    }
+
+    var positive_bigint = try parseExpr(&env, "1n");
+    defer positive_bigint.deinit(env.rt);
+    try std.testing.expectEqual(op.push_bigint_i32, positive_bigint.code[0]);
+    try std.testing.expectEqual(@as(i32, 1), readI32(positive_bigint.code, 1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(positive_bigint.code, op.neg));
+
+    var negative_number = try parseExpr(&env, "-(1)");
+    defer negative_number.deinit(env.rt);
+    try expectOpcodeSequence(negative_number.code, &.{op.push_minus1});
+
+    var negative_zero = try parseExpr(&env, "-(0)");
+    defer negative_zero.deinit(env.rt);
+    try expectOpcodeSequence(negative_zero.code, &.{ op.push_0, op.neg });
+}
+
+test "W5: folded parenthesized bigint keeps the unary minus source position" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseExpr(&env,
+        \\
+        \\-(
+        \\  1n
+        \\)
+    );
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
+    try std.testing.expectEqual(@as(i32, -1), readI32(fn_bc.code, 1));
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(fn_bc.pc2lineBuf(), 0);
+    try std.testing.expectEqual(@as(i32, 2), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 1), source_loc.col_num);
+}
+
 test "F4: regexp literal stores parse-time compiled bytecode in the constant pool" {
     var env = try ParserTestEnv.init();
     defer env.deinit();

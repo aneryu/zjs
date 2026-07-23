@@ -5223,6 +5223,10 @@ pub const parser_core = struct {
             try self.appendBytes(&[_]u8{op_id});
         }
 
+        fn emitOpAt(self: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
+            try self.appendBytesAt(&[_]u8{op_id}, line_num, col_num);
+        }
+
         fn emitOpNoSource(self: *State, op_id: u8) Error!void {
             try self.emitOpcodeBytesNoSource(&[_]u8{op_id});
         }
@@ -7134,15 +7138,13 @@ pub const parser_core = struct {
             return;
         }
         if (k == @as(tok.TokenKind, @intCast('-'))) {
+            const operator_line_num = s.token.line_num;
+            const operator_col_num = s.token.col_num;
             try s.advance();
-            if (s.cur_func().use_short_opcodes and s.peekKind() == tok.TOK_NUMBER) {
-                if (s.token.payload.num.is_bigint) {
-                    if (parseBigIntI32(s.token.payload.num.bigint_text, true)) |small| {
-                        try s.emitOpI32(opcode.op.push_bigint_i32, small);
-                        try s.advance();
-                        return;
-                    }
-                }
+            if (s.cur_func().use_short_opcodes and
+                s.peekKind() == tok.TOK_NUMBER and
+                !s.token.payload.num.is_bigint)
+            {
                 const value = s.token.payload.num.value;
                 if (value != 0 and numberIsExactI32(value)) {
                     try s.emitOpI32(opcode.op.push_i32, -@as(i32, @intFromFloat(value)));
@@ -7151,7 +7153,18 @@ pub const parser_core = struct {
                 }
             }
             try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
-            try s.emitOp(opcode.op.neg);
+            const last_opcode_is_inline_bigint = blk: {
+                const last_opcode_pos = s.cur_func().last_opcode_pos;
+                if (last_opcode_pos < 0) break :blk false;
+                const pos: usize = @intCast(last_opcode_pos);
+                const code = s.currentCode();
+                break :blk pos + 5 == code.len and code[pos] == opcode.op.push_bigint_i32;
+            };
+            if (last_opcode_is_inline_bigint) {
+                try s.emitOpAt(opcode.op.neg, operator_line_num, operator_col_num);
+            } else {
+                try s.emitOp(opcode.op.neg);
+            }
             return;
         }
         if (k == @as(tok.TokenKind, @intCast('~'))) {

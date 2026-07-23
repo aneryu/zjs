@@ -2392,6 +2392,25 @@ test "vm executes push constants arithmetic comparisons and return" {
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
+test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(-(0n), 0n);
+        \\assert.sameValue(-1n, -1n);
+        \\assert.sameValue(-(1n), -1n);
+        \\assert.sameValue(-(2147483647n), -2147483647n);
+        \\assert.sameValue(-(2147483648n), -2147483648n);
+        \\assert.sameValue(-(2147483649n), -2147483649n);
+        \\assert.sameValue(1n, 1n);
+        \\assert.sameValue(-(1), -1);
+        \\assert.sameValue(Object.is(-(0), -0), true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "vm executes stack constants source locations and return_undef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
