@@ -3907,7 +3907,7 @@ test "resolve_labels folds dup put slot families to set" {
     }, bc.code);
 }
 
-test "resolve_labels folds length field access and remaps atom ownership" {
+test "resolve_labels get_length fold remaps source locations and atom ownership" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
@@ -3924,7 +3924,7 @@ test "resolve_labels folds length field access and remaps atom ownership" {
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
-    var input = [_]u8{0} ** 13;
+    var input = [_]u8{0} ** 14;
     input[0] = op.get_loc0;
     input[1] = op.get_field;
     std.mem.writeInt(u32, input[2..6], keep_atom, .little);
@@ -3932,23 +3932,149 @@ test "resolve_labels folds length field access and remaps atom ownership" {
     input[7] = op.get_loc0;
     input[8] = op.get_field;
     std.mem.writeInt(u32, input[9..13], core.atom.ids.length, .little);
+    input[13] = op.drop;
     try bc.setCode(&input);
     try bc.retainAtomOperand(keep_atom);
     try bc.retainAtomOperand(core.atom.ids.length);
+    try bc.appendSourceLoc(1, 10, 2);
+    try bc.appendSourceLoc(8, 11, 3);
+    try bc.appendSourceLoc(13, 12, 4);
 
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    var expected = [_]u8{0} ** 9;
+    var expected = [_]u8{0} ** 10;
     expected[0] = op.get_loc0;
     expected[1] = op.get_field;
     std.mem.writeInt(u32, expected[2..6], keep_atom, .little);
     expected[6] = op.drop;
     expected[7] = op.get_loc0;
     expected[8] = op.get_length;
+    expected[9] = op.drop;
     try std.testing.expectEqualSlices(u8, &expected, bc.code);
     try std.testing.expectEqualSlices(core.Atom, &.{keep_atom}, bc.atom_operands);
     try std.testing.expectEqual(keep_base + 1, rt.atoms.refCount(keep_atom).?);
+    try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(i32, 10), bc.source_loc_slots[0].line_num);
+    try std.testing.expectEqual(@as(i32, 2), bc.source_loc_slots[0].col_num);
+    try std.testing.expectEqual(@as(u32, 8), bc.source_loc_slots[1].pc);
+    try std.testing.expectEqual(@as(i32, 11), bc.source_loc_slots[1].line_num);
+    try std.testing.expectEqual(@as(i32, 3), bc.source_loc_slots[1].col_num);
+    try std.testing.expectEqual(@as(u32, 9), bc.source_loc_slots[2].pc);
+    try std.testing.expectEqual(@as(i32, 12), bc.source_loc_slots[2].line_num);
+    try std.testing.expectEqual(@as(i32, 4), bc.source_loc_slots[2].col_num);
+}
+
+fn runGetLengthFoldAllocationFailure(
+    cleanup_rt: *core.JSRuntime,
+    fail_offset: usize,
+) !bool {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var account = core.memory.MemoryAccount.init(failing.allocator());
+    var atoms = core.atom.AtomTable.init(&account);
+    defer atoms.deinit();
+
+    const keep_atom = try atoms.internString("get-length-oom-keep");
+    defer atoms.free(keep_atom);
+    const keep_base = atoms.refCount(keep_atom).?;
+
+    var fd = function_def.FunctionDef.init(&account, &atoms, core.atom.ids.empty_string);
+    defer fd.deinit(cleanup_rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.Bytecode.init(&account, &atoms, core.atom.ids.empty_string);
+    defer bc.deinit(cleanup_rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 14;
+    input[0] = op.get_loc0;
+    input[1] = op.get_field;
+    std.mem.writeInt(u32, input[2..6], keep_atom, .little);
+    input[6] = op.drop;
+    input[7] = op.get_loc0;
+    input[8] = op.get_field;
+    std.mem.writeInt(u32, input[9..13], core.atom.ids.length, .little);
+    input[13] = op.drop;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(keep_atom);
+    try bc.retainAtomOperand(core.atom.ids.length);
+    try bc.appendSourceLoc(1, 10, 2);
+    try bc.appendSourceLoc(8, 11, 3);
+    try bc.appendSourceLoc(13, 12, 4);
+
+    const original_code_ptr = bc.code.ptr;
+    const original_code_capacity = bc.code_capacity;
+    const original_atom_ptr = bc.atom_operands.ptr;
+    const original_atom_capacity = bc.atom_operands_capacity;
+    const original_source_ptr = bc.source_loc_slots.ptr;
+    const original_source_capacity = bc.source_loc_capacity;
+    const original_keep_refs = atoms.refCount(keep_atom).?;
+
+    failing.fail_index = failing.alloc_index + fail_offset;
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    const first_result = pipeline.resolve_labels.run(&ctx);
+    const failed = if (first_result) |_| false else |err| switch (err) {
+        error.OutOfMemory => true,
+        else => return err,
+    };
+    failing.fail_index = std.math.maxInt(usize);
+
+    if (failed) {
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@intFromPtr(original_code_ptr), @intFromPtr(bc.code.ptr));
+        try std.testing.expectEqual(original_code_capacity, bc.code_capacity);
+        try std.testing.expectEqualSlices(u8, &input, bc.code);
+        try std.testing.expectEqual(@intFromPtr(original_atom_ptr), @intFromPtr(bc.atom_operands.ptr));
+        try std.testing.expectEqual(original_atom_capacity, bc.atom_operands_capacity);
+        try std.testing.expectEqualSlices(core.Atom, &.{ keep_atom, core.atom.ids.length }, bc.atom_operands);
+        try std.testing.expectEqual(@intFromPtr(original_source_ptr), @intFromPtr(bc.source_loc_slots.ptr));
+        try std.testing.expectEqual(original_source_capacity, bc.source_loc_capacity);
+        try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+        try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+        try std.testing.expectEqual(@as(u32, 8), bc.source_loc_slots[1].pc);
+        try std.testing.expectEqual(@as(u32, 13), bc.source_loc_slots[2].pc);
+        try std.testing.expectEqual(original_keep_refs, atoms.refCount(keep_atom).?);
+
+        try pipeline.resolve_labels.run(&ctx);
+    } else {
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    var expected = [_]u8{0} ** 10;
+    expected[0] = op.get_loc0;
+    expected[1] = op.get_field;
+    std.mem.writeInt(u32, expected[2..6], keep_atom, .little);
+    expected[6] = op.drop;
+    expected[7] = op.get_loc0;
+    expected[8] = op.get_length;
+    expected[9] = op.drop;
+    try std.testing.expectEqualSlices(u8, &expected, bc.code);
+    try std.testing.expectEqualSlices(core.Atom, &.{keep_atom}, bc.atom_operands);
+    try std.testing.expectEqual(keep_base + 1, atoms.refCount(keep_atom).?);
+    try std.testing.expectEqual(@as(usize, 3), bc.source_loc_slots.len);
+    try std.testing.expectEqual(@as(u32, 1), bc.source_loc_slots[0].pc);
+    try std.testing.expectEqual(@as(i32, 10), bc.source_loc_slots[0].line_num);
+    try std.testing.expectEqual(@as(i32, 2), bc.source_loc_slots[0].col_num);
+    try std.testing.expectEqual(@as(u32, 8), bc.source_loc_slots[1].pc);
+    try std.testing.expectEqual(@as(i32, 11), bc.source_loc_slots[1].line_num);
+    try std.testing.expectEqual(@as(i32, 3), bc.source_loc_slots[1].col_num);
+    try std.testing.expectEqual(@as(u32, 9), bc.source_loc_slots[2].pc);
+    try std.testing.expectEqual(@as(i32, 12), bc.source_loc_slots[2].line_num);
+    try std.testing.expectEqual(@as(i32, 4), bc.source_loc_slots[2].col_num);
+    return failed;
+}
+
+test "resolve_labels get_length fold is transactional across every allocation failure" {
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    defer cleanup_rt.destroy();
+
+    var fail_offset: usize = 0;
+    while (try runGetLengthFoldAllocationFailure(cleanup_rt, fail_offset)) {
+        fail_offset += 1;
+    }
+    // positions, sizes, final code, and the rebuilt atom-owner ledger.
+    try std.testing.expectEqual(@as(usize, 4), fail_offset);
 }
 
 test "resolve_labels folds discarded slot and field stores" {

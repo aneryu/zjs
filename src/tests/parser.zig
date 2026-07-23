@@ -2098,6 +2098,28 @@ test "F4: method call obj.m(x) uses get_field2 + call_method" {
     try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 11));
 }
 
+test "F4: get_length final fold consumes the ordinary length atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a.length");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_length });
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
+}
+
+test "F4: length call consumer preserves get_field2 and its atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a.length()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.call_method });
+    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 4));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 8));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
+}
+
 test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2422,6 +2444,53 @@ test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
     try std.testing.expectEqual(@as(usize, 11), next_target);
     const exit_target = readRelTarget32(fn_bc.code, 9);
     try std.testing.expectEqual(fn_bc.code.len, exit_target);
+}
+
+test "F4: optional length value reaches the get_length final fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a?.length");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.goto8,
+        op.get_length,
+    });
+    try std.testing.expectEqual(@as(usize, 11), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 12), fn_bc.code.len);
+    try std.testing.expectEqual(fn_bc.code.len, readRelTarget32(fn_bc.code, 9));
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
+}
+
+test "F4: optional length call consumer preserves get_field2 and its atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a?.length()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.goto8,
+        op.get_field2,
+        op.call_method,
+    });
+    try std.testing.expectEqual(@as(usize, 11), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
+    try std.testing.expectEqual(fn_bc.code.len, readRelTarget32(fn_bc.code, 9));
+    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 12));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 16));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
 
 test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
