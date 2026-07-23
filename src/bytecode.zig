@@ -9003,6 +9003,14 @@ pub const pipeline_resolve_labels = struct {
                     // back to the replacement start is source-only.
                     positions[pc + 3] = out_pc;
                 }
+                if (matchDupPutPeephole(code, pc)) |p| {
+                    // QJS attributes the replacement to the consumed put, or
+                    // to the following drop when that later source marker is
+                    // present. A trailing get's marker is deliberately delayed
+                    // until after the replacement (`line2` in QuickJS).
+                    positions[pc + 1] = out_pc;
+                    if (p.total_size >= 5) positions[pc + 4] = out_pc;
+                }
                 if (matchPushI32NegPeephole(code, pc) != null) {
                     // QuickJS attributes the folded push to the unary minus.
                     // A discarded push/neg/drop has size zero, so the same

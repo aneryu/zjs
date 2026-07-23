@@ -1777,6 +1777,19 @@ test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.dup, op.put_var });
 }
 
+test "F4: function-local assignment result reaches dup put to set fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(
+        &env,
+        "function f() { var x; return x = 1; }",
+    );
+    defer fn_bc.deinit(env.rt);
+
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(child.byteCode(), &.{ op.push_1, op.set_loc0, op.@"return" });
+}
+
 test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
