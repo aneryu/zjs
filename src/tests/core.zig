@@ -3959,6 +3959,492 @@ test "reserved object root shapes reuse only an exact property capacity" {
     try std.testing.expectEqual(@as(u32, 8), eight_object.shape_ref.prop_size);
 }
 
+fn expectRetainedCrossCapacityShapeTransition(
+    rt: *core.JSRuntime,
+    target_capacity: usize,
+    parent_capacity: usize,
+    prefix_atom: core.Atom,
+    appended_atom: core.Atom,
+) !void {
+    const flags: u6 = 0b000111;
+
+    var target = try rt.shapes.createObjectRootWithPropertyCapacity(null, target_capacity);
+    defer rt.shapes.release(target);
+    try rt.shapes.addProperty(&target, prefix_atom, flags);
+    try rt.shapes.addProperty(&target, appended_atom, flags);
+
+    var current = try rt.shapes.createObjectRootWithPropertyCapacity(null, parent_capacity);
+    defer rt.shapes.release(current);
+    try rt.shapes.addProperty(&current, prefix_atom, flags);
+
+    const parent = current;
+    const target_refs = target.refCount();
+    const live_shapes = rt.shapes.live_shape_count;
+    const create_calls = rt.memory.create_calls;
+    const result = rt.shapes.transitionPropertyCache(&current, appended_atom, flags, parent_capacity);
+    const retained_target = switch (result) {
+        .reconcile_property_storage => |shape| shape,
+        .miss, .adopted => return error.TestUnexpectedResult,
+    };
+    var retained_target_owned = true;
+    defer if (retained_target_owned) rt.shapes.release(retained_target);
+
+    try std.testing.expectEqual(parent, current);
+    try std.testing.expectEqual(@as(usize, 1), parent.refCount());
+    try std.testing.expectEqual(target, retained_target);
+    try std.testing.expectEqual(target_refs + 1, target.refCount());
+    try std.testing.expectEqual(live_shapes, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+
+    rt.shapes.release(retained_target);
+    retained_target_owned = false;
+    try std.testing.expectEqual(target_refs, target.refCount());
+}
+
+test "shape transition cache finds retained targets across property capacities" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const names = [_][]const u8{
+        "cap4_to_cap8_prefix",
+        "cap4_to_cap8_append",
+        "cap8_to_cap4_prefix",
+        "cap8_to_cap4_append",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |atom_id| rt.atoms.free(atom_id);
+
+    try expectRetainedCrossCapacityShapeTransition(rt, 8, 4, atoms[0], atoms[1]);
+    try expectRetainedCrossCapacityShapeTransition(rt, 4, 8, atoms[2], atoms[3]);
+}
+
+test "shape transition cache adopts exact capacity without allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prefix_atom = try rt.internAtom("same_capacity_prefix");
+    defer rt.atoms.free(prefix_atom);
+    const appended_atom = try rt.internAtom("same_capacity_append");
+    defer rt.atoms.free(appended_atom);
+    const flags: u6 = 0b000111;
+
+    var target = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    defer rt.shapes.release(target);
+    try rt.shapes.addProperty(&target, prefix_atom, flags);
+    try rt.shapes.addProperty(&target, appended_atom, flags);
+
+    // Insert a different-capacity shape with the same transition after the
+    // exact target. It may appear first in the registry bucket, but must not
+    // hide the directly adoptable exact-capacity entry.
+    var different_capacity_target = try rt.shapes.createObjectRootWithPropertyCapacity(null, 8);
+    defer rt.shapes.release(different_capacity_target);
+    try rt.shapes.addProperty(&different_capacity_target, prefix_atom, flags);
+    try rt.shapes.addProperty(&different_capacity_target, appended_atom, flags);
+
+    var current = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    defer rt.shapes.release(current);
+    try rt.shapes.addProperty(&current, prefix_atom, flags);
+
+    const target_refs = target.refCount();
+    const live_shapes = rt.shapes.live_shape_count;
+    const create_calls = rt.memory.create_calls;
+    switch (rt.shapes.transitionPropertyCache(&current, appended_atom, flags, 4)) {
+        .adopted => {},
+        .reconcile_property_storage => |retained_target| {
+            rt.shapes.release(retained_target);
+            return error.TestUnexpectedResult;
+        },
+        .miss => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(target, current);
+    try std.testing.expectEqual(target_refs + 1, target.refCount());
+    try std.testing.expectEqual(live_shapes - 1, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+}
+
+const CrossCapacityPropertyResult = struct {
+    object: *core.Object,
+    target: *core.shape.Shape,
+};
+
+fn appendPreparedCrossCapacityProperty(
+    rt: *core.JSRuntime,
+    prototype: *core.Object,
+    parent_capacity: usize,
+    target_capacity: usize,
+    prefix_atom: core.Atom,
+    appended_atom: core.Atom,
+    appended_flags: core.property.Flags,
+    appended_slot: core.property.Slot,
+) !CrossCapacityPropertyResult {
+    var slot_owned = true;
+    errdefer if (slot_owned) appended_slot.destroy(appended_flags, rt);
+
+    const data_flags = core.property.Flags.data(true, true, true);
+    var target = try rt.shapes.createObjectRootWithPropertyCapacity(prototype, target_capacity);
+    var target_owned = true;
+    errdefer if (target_owned) rt.shapes.release(target);
+    try rt.shapes.addProperty(&target, prefix_atom, data_flags.bits());
+    try rt.shapes.addProperty(&target, appended_atom, appended_flags.bits());
+
+    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, prototype, parent_capacity);
+    var object_owned = true;
+    errdefer if (object_owned) object.value().free(rt);
+    try object.defineOwnProperty(rt, prefix_atom, core.Descriptor.data(core.JSValue.int32(11), true, true, true));
+
+    const old_buffer = object.prop_values;
+    const alloc_calls = rt.memory.alloc_calls;
+    const free_calls = rt.memory.free_calls;
+    slot_owned = false;
+    try object.appendPreparedPropertyEntry(rt, appended_atom, appended_flags, appended_slot);
+
+    try std.testing.expectEqual(target, object.shape_ref);
+    try std.testing.expectEqual(@as(u32, @intCast(target_capacity)), object.shape_ref.prop_size);
+    try std.testing.expect(old_buffer != object.prop_values);
+    try std.testing.expectEqual(alloc_calls + 1, rt.memory.alloc_calls);
+    try std.testing.expectEqual(free_calls + 1, rt.memory.free_calls);
+    try std.testing.expectEqual(@as(?i32, 11), (try object.getProperty(prefix_atom)).asInt32());
+
+    object_owned = false;
+    target_owned = false;
+    return .{ .object = object, .target = target };
+}
+
+test "object shape transition reconciles data buffers across capacities" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const names = [_][]const u8{
+        "object_cap4_to_cap8_prefix",
+        "object_cap4_to_cap8_append",
+        "object_cap8_to_cap4_prefix",
+        "object_cap8_to_cap4_append",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |atom_id| rt.atoms.free(atom_id);
+
+    const data_flags = core.property.Flags.data(true, true, true);
+    {
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            4,
+            8,
+            atoms[0],
+            atoms[1],
+            data_flags,
+            .{ .data = core.JSValue.int32(48) },
+        );
+        defer rt.shapes.release(result.target);
+        defer result.object.value().free(rt);
+        try std.testing.expectEqual(@as(?i32, 48), (try result.object.getProperty(atoms[1])).asInt32());
+    }
+    {
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            8,
+            4,
+            atoms[2],
+            atoms[3],
+            data_flags,
+            .{ .data = core.JSValue.int32(84) },
+        );
+        defer rt.shapes.release(result.target);
+        defer result.object.value().free(rt);
+        try std.testing.expectEqual(@as(?i32, 84), (try result.object.getProperty(atoms[3])).asInt32());
+    }
+}
+
+test "object shape transition exact capacity adopts without allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const prefix_atom = try rt.internAtom("object_exact_capacity_prefix");
+    defer rt.atoms.free(prefix_atom);
+    const appended_atom = try rt.internAtom("object_exact_capacity_append");
+    defer rt.atoms.free(appended_atom);
+    const data_flags = core.property.Flags.data(true, true, true);
+
+    var target = try rt.shapes.createObjectRootWithPropertyCapacity(prototype, 4);
+    defer rt.shapes.release(target);
+    try rt.shapes.addProperty(&target, prefix_atom, data_flags.bits());
+    try rt.shapes.addProperty(&target, appended_atom, data_flags.bits());
+
+    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, prototype, 4);
+    defer object.value().free(rt);
+    try object.defineOwnProperty(rt, prefix_atom, core.Descriptor.data(core.JSValue.int32(11), true, true, true));
+
+    const old_buffer = object.prop_values;
+    const alloc_calls = rt.memory.alloc_calls;
+    const create_calls = rt.memory.create_calls;
+    try object.appendPreparedPropertyEntry(rt, appended_atom, data_flags, .{ .data = core.JSValue.int32(44) });
+
+    try std.testing.expectEqual(target, object.shape_ref);
+    try std.testing.expectEqual(old_buffer, object.prop_values);
+    try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
+    try std.testing.expectEqual(create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(@as(?i32, 11), (try object.getProperty(prefix_atom)).asInt32());
+    try std.testing.expectEqual(@as(?i32, 44), (try object.getProperty(appended_atom)).asInt32());
+}
+
+test "object cross-capacity shape reconcile preserves every property slot kind" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const names = [_][]const u8{
+        "reconcile_data_prefix",
+        "reconcile_data_append",
+        "reconcile_accessor_prefix",
+        "reconcile_accessor_append",
+        "reconcile_varref_prefix",
+        "reconcile_varref_append",
+        "reconcile_autoinit_prefix",
+        "reconcile_autoinit_append",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |atom_id| rt.atoms.free(atom_id);
+
+    {
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const retained = try core.Object.create(rt, core.class.ids.object, null);
+        defer retained.value().free(rt);
+        const retained_refs = retained.header.meta().rc;
+        const flags = core.property.Flags.data(true, true, true);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            4,
+            8,
+            atoms[0],
+            atoms[1],
+            flags,
+            .{ .data = retained.value().dup() },
+        );
+        defer rt.shapes.release(result.target);
+        var object_owned = true;
+        defer if (object_owned) result.object.value().free(rt);
+
+        try std.testing.expectEqual(&retained.header, result.object.propertyEntries()[1].slot.data.refHeader().?);
+        try std.testing.expectEqual(retained_refs + 1, retained.header.meta().rc);
+        result.object.value().free(rt);
+        object_owned = false;
+        try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
+    }
+
+    {
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const getter = try core.Object.create(rt, core.class.ids.object, null);
+        defer getter.value().free(rt);
+        const setter = try core.Object.create(rt, core.class.ids.object, null);
+        defer setter.value().free(rt);
+        const getter_refs = getter.header.meta().rc;
+        const setter_refs = setter.header.meta().rc;
+        const flags = core.property.Flags.accessorFlags(true, true);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            4,
+            8,
+            atoms[2],
+            atoms[3],
+            flags,
+            .{ .accessor = core.property.Accessor.fromBorrowedValues(getter.value(), setter.value()) },
+        );
+        defer rt.shapes.release(result.target);
+        var object_owned = true;
+        defer if (object_owned) result.object.value().free(rt);
+
+        const stored = result.object.propertyEntries()[1].slot.accessor;
+        try std.testing.expectEqual(&getter.header, stored.getter);
+        try std.testing.expectEqual(&setter.header, stored.setter);
+        try std.testing.expectEqual(getter_refs + 1, getter.header.meta().rc);
+        try std.testing.expectEqual(setter_refs + 1, setter.header.meta().rc);
+        result.object.value().free(rt);
+        object_owned = false;
+        try std.testing.expectEqual(getter_refs, getter.header.meta().rc);
+        try std.testing.expectEqual(setter_refs, setter.header.meta().rc);
+    }
+
+    {
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const cell = try core.VarRef.createClosed(rt, core.JSValue.int32(73));
+        defer cell.freeCell(rt);
+        const cell_refs = cell.header.meta().rc;
+        const flags = core.property.Flags.varRef(true, true, false);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            4,
+            8,
+            atoms[4],
+            atoms[5],
+            flags,
+            .{ .var_ref = cell.retain() },
+        );
+        defer rt.shapes.release(result.target);
+        var object_owned = true;
+        defer if (object_owned) result.object.value().free(rt);
+
+        try std.testing.expectEqual(cell, result.object.propertyEntries()[1].slot.var_ref);
+        try std.testing.expectEqual(cell_refs + 1, cell.header.meta().rc);
+        result.object.value().free(rt);
+        object_owned = false;
+        try std.testing.expectEqual(cell_refs, cell.header.meta().rc);
+    }
+
+    {
+        const realm = try core.RealmContext.create(rt);
+        defer realm.destroy();
+        const prototype = try core.Object.create(rt, core.class.ids.object, null);
+        defer prototype.value().free(rt);
+        const info = core.property.AutoInit{ .name = "reconcile_autoinit", .length = 0 };
+        const realm_refs = realm.header.meta().rc;
+        const flags = core.property.Flags.data(true, false, true).withKind(.auto_init);
+        const result = try appendPreparedCrossCapacityProperty(
+            rt,
+            prototype,
+            4,
+            8,
+            atoms[6],
+            atoms[7],
+            flags,
+            .{ .auto_init = core.property.AutoInitSlot.retainProp(&realm.header, &info) },
+        );
+        defer rt.shapes.release(result.target);
+        var object_owned = true;
+        defer if (object_owned) result.object.value().free(rt);
+
+        const stored = result.object.propertyEntries()[1].slot.auto_init;
+        try std.testing.expectEqual(&realm.header, stored.realm_and_id.realmHeader().?);
+        try std.testing.expectEqual(&info, stored.descriptor().?);
+        try std.testing.expectEqual(realm_refs + 1, realm.header.meta().rc);
+        result.object.value().free(rt);
+        object_owned = false;
+        try std.testing.expectEqual(realm_refs, realm.header.meta().rc);
+    }
+}
+
+fn runCrossCapacityShapeReconcileOom(successful_allocations_before_failure: usize) !void {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const retained = try core.Object.create(rt, core.class.ids.object, null);
+    defer retained.value().free(rt);
+
+    const names = [_][]const u8{
+        "reconcile_oom_a",
+        "reconcile_oom_b",
+        "reconcile_oom_c",
+        "reconcile_oom_d",
+        "reconcile_oom_e",
+    };
+    var atoms: [names.len]core.Atom = undefined;
+    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
+    defer for (atoms) |atom_id| rt.atoms.free(atom_id);
+    const flags = core.property.Flags.data(true, true, true);
+
+    // The parent has a full cap4 buffer. Its pending fifth slot first grows to
+    // cap8, then the cross-capacity cache hit requires a cap16 replacement.
+    var target = try rt.shapes.createObjectRootWithPropertyCapacity(prototype, 16);
+    defer rt.shapes.release(target);
+    for (atoms) |atom_id| try rt.shapes.addProperty(&target, atom_id, flags.bits());
+
+    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, prototype, 4);
+    var object_owned = true;
+    defer if (object_owned) object.value().free(rt);
+    for (atoms[0..4], 0..) |atom_id, index| {
+        try object.defineOwnProperty(
+            rt,
+            atom_id,
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+        );
+    }
+
+    const parent = object.shape_ref;
+    const old_buffer = object.prop_values;
+    const target_refs = target.refCount();
+    const retained_refs = retained.header.meta().rc;
+    const baseline_bytes = rt.memory.allocated_bytes;
+    const baseline_allocations = rt.memory.allocation_count;
+    const baseline_alloc_calls = rt.memory.alloc_calls;
+    const baseline_free_calls = rt.memory.free_calls;
+    const baseline_create_calls = rt.memory.create_calls;
+
+    const grown_buffer_bytes = @sizeOf(core.property.Entry) * 8;
+    rt.setMemoryLimit(baseline_bytes + grown_buffer_bytes * successful_allocations_before_failure);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        object.appendPreparedPropertyEntry(rt, atoms[4], flags, .{ .data = retained.value().dup() }),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(parent, object.shape_ref);
+    try std.testing.expectEqual(old_buffer, object.prop_values);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_count);
+    try std.testing.expectEqual(@as(u32, 4), object.shape_ref.prop_size);
+    try std.testing.expect(!object.hasOwnProperty(atoms[4]));
+    try std.testing.expectEqual(target_refs, target.refCount());
+    try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
+    try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(baseline_create_calls, rt.memory.create_calls);
+    try std.testing.expectEqual(
+        baseline_alloc_calls + successful_allocations_before_failure,
+        rt.memory.alloc_calls,
+    );
+    try std.testing.expectEqual(
+        baseline_free_calls + successful_allocations_before_failure,
+        rt.memory.free_calls,
+    );
+    for (atoms[0..4], 0..) |atom_id, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(atom_id)).asInt32());
+    }
+
+    // Removing the limit and retrying the same mutation must commit both
+    // buffer allocations, preserve all old slots, and transfer one value owner
+    // into the target layout.
+    const retry_alloc_calls = rt.memory.alloc_calls;
+    const retry_free_calls = rt.memory.free_calls;
+    try object.appendPreparedPropertyEntry(rt, atoms[4], flags, .{ .data = retained.value().dup() });
+    try std.testing.expectEqual(target, object.shape_ref);
+    try std.testing.expectEqual(@as(u32, 16), object.shape_ref.prop_size);
+    try std.testing.expectEqual(retry_alloc_calls + 2, rt.memory.alloc_calls);
+    try std.testing.expectEqual(retry_free_calls + 2, rt.memory.free_calls);
+    try std.testing.expectEqual(target_refs + 1, target.refCount());
+    try std.testing.expectEqual(retained_refs + 1, retained.header.meta().rc);
+    try std.testing.expectEqual(&retained.header, object.propertyEntries()[4].slot.data.refHeader().?);
+    for (atoms[0..4], 0..) |atom_id, index| {
+        try std.testing.expectEqual(@as(?i32, @intCast(index)), (try object.getProperty(atom_id)).asInt32());
+    }
+
+    object.value().free(rt);
+    object_owned = false;
+    try std.testing.expectEqual(target_refs, target.refCount());
+    try std.testing.expectEqual(retained_refs, retained.header.meta().rc);
+}
+
+test "object cross-capacity shape reconcile Nth OOM rolls back and retries" {
+    try runCrossCapacityShapeReconcileOom(0);
+    try runCrossCapacityShapeReconcileOom(1);
+}
+
 test "ordinary object additions reuse transition shapes" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

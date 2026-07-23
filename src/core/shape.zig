@@ -241,7 +241,9 @@ pub const Registry = struct {
             // The owning Object allocates a value buffer with exactly this
             // capacity. Reusing a larger root would make shape.prop_size exceed
             // the real buffer length, corrupting later appends and teardown.
-            // qjs shape transition reuse likewise requires equal prop_size.
+            // Property-transition lookup may discover a different-capacity
+            // target, but exposes it for Object-level storage reconciliation
+            // instead of directly adopting it.
             if (shape.prop_count != 0 or shape.proto != proto or shape.prop_size != property_capacity) continue;
             shape.retain();
             return shape;
@@ -314,6 +316,55 @@ pub const Registry = struct {
         return shape;
     }
 
+    pub const PropertyTransitionCacheResult = union(enum) {
+        /// No matching property sequence. `shape_ptr` and all refcounts are
+        /// unchanged.
+        miss,
+        /// A same-capacity target was retained into `shape_ptr`; the previous
+        /// parent reference was released.
+        adopted,
+        /// The matching target has a different property capacity. `shape_ptr`
+        /// still owns the unchanged parent; this payload is one retained target
+        /// reference for a later OOM-safe Object storage reconciliation.
+        reconcile_property_storage: *Shape,
+    };
+
+    pub const PropertyTransitionResult = union(enum) {
+        /// The transition is complete and `shape_ptr` owns the final shape.
+        adopted,
+        /// The matching target has a different property capacity. `shape_ptr`
+        /// still owns the unchanged parent; the payload is retained for the
+        /// Object layer's OOM-safe value-buffer reconciliation.
+        reconcile_property_storage: *Shape,
+    };
+
+    /// Resolve the hash-consed part of a named-property transition.
+    ///
+    /// Shape identity depends on prototype + property sequence, not on the
+    /// incidental capacity of an Object's parallel value buffer. A matching
+    /// target can therefore be found across capacities, but it is published
+    /// only when the caller's storage already has the exact target capacity.
+    /// The different-capacity result retains the target without changing or
+    /// releasing the current parent, so the Object layer can allocate/copy its
+    /// replacement buffer before a no-fail shape publication.
+    pub fn transitionPropertyCache(
+        self: *Registry,
+        shape_ptr: **Shape,
+        atom_id: atom.Atom,
+        flags: u6,
+        property_capacity: usize,
+    ) PropertyTransitionCacheResult {
+        const parent = shape_ptr.*;
+        const target = self.findHashedShapeProperty(parent, atom_id, flags, property_capacity) orelse return .miss;
+        target.retain();
+        if (target.prop_size != property_capacity) {
+            return .{ .reconcile_property_storage = target };
+        }
+        shape_ptr.* = target;
+        self.release(parent);
+        return .adopted;
+    }
+
     /// Apply a named-property transition to the shape owned by one object.
     ///
     /// Mirrors qjs `add_property`: reuse a cached transition when present,
@@ -321,15 +372,22 @@ pub const Registry = struct {
     /// threaded through the operation because either the cache/clone branch or
     /// inline-FAM growth can replace the allocation. This function owns every
     /// old-shape release required by a replacement; the in-place branch never
-    /// releases the shape whose ownership merely moved during relocation.
-    pub fn transitionProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
-        const parent = shape_ptr.*;
-        if (self.findHashedShapeProperty(parent, atom_id, flags, property_capacity)) |shape| {
-            shape.retain();
-            shape_ptr.* = shape;
-            self.release(parent);
-            return;
+    /// releases the shape whose ownership merely moved during relocation. A
+    /// different-capacity cache hit is returned retained without publishing it;
+    /// the Object layer must reconcile its parallel value buffer first.
+    pub fn transitionProperty(
+        self: *Registry,
+        shape_ptr: **Shape,
+        atom_id: atom.Atom,
+        flags: u6,
+        property_capacity: usize,
+    ) !PropertyTransitionResult {
+        switch (self.transitionPropertyCache(shape_ptr, atom_id, flags, property_capacity)) {
+            .adopted => return .adopted,
+            .miss => {},
+            .reconcile_property_storage => |target| return .{ .reconcile_property_storage = target },
         }
+        const parent = shape_ptr.*;
         if (parent.header.meta().rc != 1) {
             var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
             var child_owned = true;
@@ -343,7 +401,7 @@ pub const Registry = struct {
             shape_ptr.* = child;
             child_owned = false;
             self.release(parent);
-            return;
+            return .adopted;
         }
 
         // A unique miss is safe to mutate directly. Reserve the final property
@@ -358,19 +416,26 @@ pub const Registry = struct {
             shape.hash = transitionHash(old_hash, atom_id, flags);
             self.rehashShape(shape, old_hash);
         }
+        return .adopted;
     }
 
-    fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) ?*Shape {
+    fn findHashedShapeProperty(
+        self: *Registry,
+        parent: *Shape,
+        atom_id: atom.Atom,
+        flags: u6,
+        preferred_property_capacity: usize,
+    ) ?*Shape {
         if (!parent.is_hashed) return null;
         const expected_hash = transitionHash(parent.hash, atom_id, flags);
         const n = parent.prop_count;
         const parent_props = parent.props();
+        var different_capacity_match: ?*Shape = null;
         var current = self.firstShapeWithHash(expected_hash);
         while (current) |candidate| : (current = candidate.registry_hash_next) {
             if (candidate.hash != expected_hash) continue;
             if (candidate.proto != parent.proto) continue;
             if (candidate.prop_count != n + 1) continue;
-            if (candidate.prop_size != property_capacity) continue;
             const cand_props = candidate.props();
             var matched = true;
             for (0..n) |i| {
@@ -381,9 +446,14 @@ pub const Registry = struct {
             }
             if (!matched) continue;
             if (cand_props[n].atom_id != atom_id or cand_props[n].flags != flags) continue;
-            return candidate;
+            // Capacity is not part of transition identity. Prefer an exact
+            // capacity when duplicate legacy entries exist so it can be
+            // adopted immediately; otherwise return the first sequence match
+            // for explicit Object storage reconciliation.
+            if (candidate.prop_size == preferred_property_capacity) return candidate;
+            if (different_capacity_match == null) different_capacity_match = candidate;
         }
-        return null;
+        return different_capacity_match;
     }
 
     pub fn cloneForMutation(self: *Registry, source: *Shape) !*Shape {
