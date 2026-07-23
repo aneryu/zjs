@@ -8378,6 +8378,7 @@ pub const pipeline_resolve_labels = struct {
 
     const PushBigIntI32NegPeephole = struct {
         value: i32,
+        discarded: bool,
         total_size: usize,
     };
 
@@ -8388,10 +8389,16 @@ pub const pipeline_resolve_labels = struct {
         {
             return null;
         }
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+        if (pc + 7 <= code.len and
+            code[pc + 6] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+        {
+            return .{ .value = value, .discarded = true, .total_size = 7 };
+        }
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
         if (value == std.math.minInt(i32)) return null;
-        return .{ .value = -value, .total_size = 6 };
+        return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
     const PushAtomValuePeephole = struct {
@@ -9226,8 +9233,8 @@ pub const pipeline_resolve_labels = struct {
                     break :blk jumpSizeForOffset(opcode.op.goto, diff, use_short_opcodes);
                 } else if (matchPushI32NegPeephole(code, pc)) |p|
                     if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
-                else if (matchPushBigIntI32NegPeephole(code, pc) != null)
-                    instrSize(opcode.op.push_bigint_i32)
+                else if (matchPushBigIntI32NegPeephole(code, pc)) |p|
+                    if (p.discarded) 0 else instrSize(opcode.op.push_bigint_i32)
                 else if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p|
                     switch (p.kind) {
                         .discarded => 0,
@@ -9338,12 +9345,14 @@ pub const pipeline_resolve_labels = struct {
                     // surviving next instruction.
                     positions[pc + 5] = out_pc;
                 }
-                if (matchPushBigIntI32NegPeephole(code, pc) != null) {
+                if (matchPushBigIntI32NegPeephole(code, pc)) |p| {
                     // QuickJS attributes the folded push to the unary minus.
-                    // The matcher rejects jumps into this consumed range, so
-                    // remapping the neg boundary to the replacement start is
-                    // source-only and cannot alter control flow.
+                    // A discarded push/neg/drop has size zero, so the default
+                    // boundary mapping also points the drop at the surviving
+                    // next instruction. The matcher rejects control-flow entry
+                    // into the entire consumed range.
                     positions[pc + 5] = out_pc;
+                    if (p.discarded) positions[pc + 6] = out_pc;
                 }
                 if (dropReturnUndefPairSize(code, pc) != null) {
                     positions[pc + 1] = out_pc;
@@ -9627,9 +9636,11 @@ pub const pipeline_resolve_labels = struct {
                 if (!p.discarded) emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
                 i += p.total_size;
             } else if (matchPushBigIntI32NegPeephole(func.code, i)) |p| {
-                output[out_idx] = opcode.op.push_bigint_i32;
-                std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
-                out_idx += instrSize(opcode.op.push_bigint_i32);
+                if (!p.discarded) {
+                    output[out_idx] = opcode.op.push_bigint_i32;
+                    std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
+                    out_idx += instrSize(opcode.op.push_bigint_i32);
+                }
                 i += p.total_size;
             } else if (matchPushAtomValuePeephole(func.code, i, use_short_opcodes)) |p| {
                 if (p.kind == .empty_string) {

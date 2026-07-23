@@ -2834,6 +2834,59 @@ test "resolve_labels: folds signed push_bigint_i32 neg without crossing its boun
     }
 }
 
+test "resolve_labels: discards signed push_bigint_i32 expressions without crossing targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("bigint-discard");
+    defer rt.atoms.free(name);
+    const op = bytecode.opcode.op;
+
+    for ([_]i32{ 0, 1, std.math.maxInt(i32), std.math.minInt(i32) }) |value| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        var input = [_]u8{0} ** 8;
+        input[0] = op.push_bigint_i32;
+        std.mem.writeInt(i32, input[1..5], value, .little);
+        input[5] = op.neg;
+        input[6] = op.drop;
+        input[7] = op.return_undef;
+        try bc.setCode(&input);
+        try bc.appendSourceLoc(0, 2, 1);
+        try bc.appendSourceLoc(5, 2, 2);
+        try bc.appendSourceLoc(6, 2, 3);
+        try bc.appendSourceLoc(7, 3, 1);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
+        for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
+    }
+
+    var targeted = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer targeted.deinit(rt);
+    var targeted_input = [_]u8{0} ** 13;
+    targeted_input[0] = op.push_bigint_i32;
+    std.mem.writeInt(i32, targeted_input[1..5], 1, .little);
+    targeted_input[5] = op.neg;
+    targeted_input[6] = op.drop;
+    targeted_input[7] = op.return_undef;
+    targeted_input[8] = op.goto;
+    std.mem.writeInt(u32, targeted_input[9..13], 5, .little);
+    try targeted.setCode(&targeted_input);
+
+    var targeted_ctx = pipeline.resolve_labels.JSContext.init(&targeted);
+    try pipeline.resolve_labels.run(&targeted_ctx);
+
+    try std.testing.expectEqual(@as(usize, 7), targeted.code.len);
+    try std.testing.expectEqual(op.push_bigint_i32, targeted.code[0]);
+    try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, targeted.code[1..5], .little));
+    try std.testing.expectEqual(op.neg, targeted.code[5]);
+    try std.testing.expectEqual(op.return_undef, targeted.code[6]);
+}
+
 test "resolve_labels: numeric discard removes push_i32 immediates but not BigInt" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

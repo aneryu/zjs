@@ -3398,6 +3398,16 @@ test "W5: numeric discarded immediates respect statement and completion boundari
     // BigInt is not in the numeric-immediate discard family and remains live.
     try expectOpcodeSequence(bigint.code, &.{op.push_bigint_i32});
 
+    var negative_bigint_root = try parseStatementWithTopLevelChildren(&env, "function bigintNegative(){ (-1n); }");
+    defer negative_bigint_root.deinit(env.rt);
+    const negative_bigint = findFunctionConstantNamed(&negative_bigint_root, env.rt, "bigintNegative") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, negative_bigint.byteCode());
+
+    var large_negative_bigint_root = try parseStatementWithTopLevelChildren(&env, "function bigintLargeNegative(){ (-2147483648n); }");
+    defer large_negative_bigint_root.deinit(env.rt);
+    const large_negative_bigint = findFunctionConstantNamed(&large_negative_bigint_root, env.rt, "bigintLargeNegative") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(large_negative_bigint.byteCode(), &.{ op.push_const8, op.neg, op.return_undef });
+
     var tail_root = try parseStatementWithTopLevelChildren(&env, "function numericTail(){ (1); }");
     defer tail_root.deinit(env.rt);
     const tail = findFunctionConstantNamed(&tail_root, env.rt, "numericTail") orelse return error.TestExpectedEqual;
