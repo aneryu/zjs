@@ -7083,6 +7083,85 @@ test "QuickJS global declaration carriers precede child finalization" {
     try std.testing.expectEqual(@as(usize, 0), countOpcode(read.byteCode(), op.get_var_ref));
 }
 
+test "dynamic global writes keep put_var distinct from plain var-ref stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\var initializedCell = 0;
+        \\globalThis.dynamicCell = 0;
+        \\function writeInitialized(value) { initializedCell = value; }
+        \\function writeDynamic(value) { dynamicCell = value; }
+        \\function makeLocalWriter() {
+        \\  let localCell = 0;
+        \\  return function writeLocal(value) { localCell = value; };
+        \\}
+    ,
+        .{ .mode = .script, .filename = "dynamic-global-put-consumers.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var initialized_parent_idx: ?u16 = null;
+    var dynamic_parent_idx: ?u16 = null;
+    for (parsed.closureVars(), 0..) |cv, idx| {
+        const name = rt.atoms.name(cv.var_name) orelse "";
+        if (std.mem.eql(u8, name, "initializedCell")) {
+            try std.testing.expectEqual(function_def.ClosureType.global_decl, cv.closureType());
+            initialized_parent_idx = @intCast(idx);
+        } else if (std.mem.eql(u8, name, "dynamicCell")) {
+            try std.testing.expectEqual(function_def.ClosureType.global, cv.closureType());
+            dynamic_parent_idx = @intCast(idx);
+        }
+    }
+
+    const global_cases = [_]struct {
+        function_name: []const u8,
+        binding_name: []const u8,
+        parent_idx: u16,
+    }{
+        .{
+            .function_name = "writeInitialized",
+            .binding_name = "initializedCell",
+            .parent_idx = initialized_parent_idx orelse return error.TestExpectedEqual,
+        },
+        .{
+            .function_name = "writeDynamic",
+            .binding_name = "dynamicCell",
+            .parent_idx = dynamic_parent_idx orelse return error.TestExpectedEqual,
+        },
+    };
+    for (global_cases) |case| {
+        const writer = findFunctionConstantNamed(&parsed, rt, case.function_name) orelse
+            return error.TestExpectedEqual;
+        try expectOpcodeSequence(writer.byteCode(), &.{
+            op.get_arg0,
+            op.dup,
+            op.put_var,
+            op.return_undef,
+        });
+        try std.testing.expectEqual(@as(usize, 1), writer.closureVar().len);
+        const capture = writer.closureVar()[0];
+        try std.testing.expectEqual(function_def.ClosureType.global_ref, capture.closureType());
+        try std.testing.expectEqual(case.parent_idx, capture.var_idx);
+        try std.testing.expectEqualStrings(case.binding_name, rt.atoms.name(capture.var_name) orelse "");
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, writer.byteCode()[3..5], .little));
+    }
+
+    const make_local = findFunctionConstantNamed(&parsed, rt, "makeLocalWriter") orelse
+        return error.TestExpectedEqual;
+    const local_writer = findFunctionConstantNamed(make_local, rt, "writeLocal") orelse
+        return error.TestExpectedEqual;
+    try expectOpcodeSequence(local_writer.byteCode(), &.{
+        op.get_arg0,
+        op.dup,
+        op.put_var_ref_check,
+        op.return_undef,
+    });
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(local_writer.byteCode(), op.put_var));
+}
+
 test "QuickJS open binding indices follow child capture demand order" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

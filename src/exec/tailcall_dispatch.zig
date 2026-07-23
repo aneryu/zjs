@@ -3085,6 +3085,30 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return cont(pc + 3, sp + 1, var_buf, vm);
 }
 
+/// Dynamic global write (qjs OP_put_var, quickjs.c:18490-18525).  An
+/// initialized, mutable cell is the complete common case: transfer TOS into
+/// `*var_ref->pvalue`, free the displaced value, and continue without
+/// publishing pc/sp.  Uninitialized cells and const cells retain the cold
+/// global-object / TDZ / read-only waterfall, where observable HasProperty,
+/// Proxy, strict-miss, and catch handling need published VM state.
+pub fn op_put_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    // Normal finalized bytecode has a construction-fixed capture array.  Keep
+    // the synthetic/legacy corruption guard consistent with op_get_var.
+    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    const current = cell.pvalue.*;
+    if (current.isUninitialized() or cell.varRefIsConstSlot().*) {
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    }
+    // setVarRefValue stores the incoming owned value before freeing the old
+    // one.  At that possible GC point the pre-decrement stack window still
+    // roots TOS, matching qjs set_value(..., sp[-1]); sp-- ordering.
+    cell.setVarRefValue(vm.ctx.runtime, (sp - 1)[0]);
+    return cont(pc + 3, sp - 1, var_buf, vm);
+}
+
 // ---- COLD handlers (the migration table, transcribed). dispatch_table assembled
 //      at the end references these. The bulk lives in colds.zig via @import to keep
 //      this file readable; see the comptime-included block below. ----
