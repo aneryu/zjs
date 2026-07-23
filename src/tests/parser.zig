@@ -3284,16 +3284,60 @@ test "F5: constant test conditions reach the final QuickJS fold" {
         expected: []const u8,
     }{
         .{ .source = "if (true) x;", .expected = &.{ op.get_var, op.drop } },
-        .{ .source = "if (false) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
-        .{ .source = "if (null) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
-        .{ .source = "if (0) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+        .{ .source = "if (false) x;", .expected = &.{} },
+        .{ .source = "if (null) x;", .expected = &.{} },
+        .{ .source = "if (0) x;", .expected = &.{} },
         .{ .source = "if (1) x;", .expected = &.{ op.get_var, op.drop } },
-        .{ .source = "if (void 0) x;", .expected = &.{ op.goto8, op.get_var, op.drop } },
+        .{ .source = "if (void 0) x;", .expected = &.{} },
     };
     for (cases) |case| {
         var fn_bc = try parseStatement(&env, case.source);
         defer fn_bc.deinit(env.rt);
         try expectOpcodeSequence(fn_bc.code, case.expected);
+    }
+}
+
+test "W5: constant tests prune only the QuickJS-selected control-flow arm" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        name: []const u8,
+        expected: []const u8,
+        retained_goto: bool = false,
+    }{
+        .{
+            .source = "function constFalse(){ if (false) x; }",
+            .name = "constFalse",
+            .expected = &.{op.return_undef},
+        },
+        .{
+            .source = "function constTrueElse(){ if (true) x; else y; }",
+            .name = "constTrueElse",
+            .expected = &.{ op.get_var, op.drop, op.return_undef },
+        },
+        .{
+            .source = "function constFalseThen(){ if (false) x; y(); }",
+            .name = "constFalseThen",
+            .expected = &.{ op.goto8, op.get_var, op.call0, op.return_undef },
+            .retained_goto = true,
+        },
+        .{
+            .source = "function constRawNext(){ if (false); y(); }",
+            .name = "constRawNext",
+            .expected = &.{ op.get_var, op.call0, op.return_undef },
+        },
+    };
+
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, case.name) orelse return error.TestExpectedEqual;
+        try expectOpcodeSequence(child.byteCode(), case.expected);
+        if (case.retained_goto) {
+            try std.testing.expectEqual(@as(usize, 2), readRelTarget32(child.byteCode(), 0));
+        }
     }
 }
 
