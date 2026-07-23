@@ -6979,6 +6979,47 @@ test "QuickJS open binding indices follow child capture demand order" {
     try std.testing.expect(found_local_first);
 }
 
+test "dead scope refs do not capture across a live merge" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\function outer() {
+        \\  let x;
+        \\  function inner(flag) {
+        \\    if (flag) {
+        \\      return;
+        \\      x;
+        \\    }
+        \\    return;
+        \\  }
+        \\  return inner;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "dead-scope-capture.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const inner = findFunctionConstantNamed(outer, rt, "inner") orelse
+        return error.TestExpectedEqual;
+
+    try std.testing.expectEqual(@as(usize, 0), inner.closureVar().len);
+    try std.testing.expectEqual(@as(u16, 0), outer.openVarRefCount());
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(inner.byteCode(), op.get_var_ref));
+
+    var found_x = false;
+    for (outer.varDefs()) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "x")) continue;
+        try std.testing.expect(!vd.isCaptured());
+        found_x = true;
+    }
+    try std.testing.expect(found_x);
+}
+
 test "QuickJS postorder capture topology records exact forwarding rows" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

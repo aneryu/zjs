@@ -6737,6 +6737,105 @@ pub const pipeline_resolve_variables = struct {
         if (atom_index != func.atom_operands.len) return error.InvalidBytecode;
     }
 
+    const Phase1CfgNode = struct {
+        size: u8 = 0,
+        is_temp: bool = false,
+        is_live: bool = false,
+    };
+
+    /// QuickJS `resolve_variables` phase-2 dead-code boundary
+    /// (`quickjs.c:34360-34381`). `return_async` deliberately remains a
+    /// fallthrough instruction here; QuickJS only treats it as terminal in
+    /// `resolve_labels`.
+    fn isPhase2TerminalOp(op_id: u8) bool {
+        return switch (op_id) {
+            opcode.op.goto,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.throw,
+            opcode.op.throw_error,
+            opcode.op.ret,
+            => true,
+            else => false,
+        };
+    }
+
+    fn enqueuePhase1Reachable(
+        nodes: []Phase1CfgNode,
+        worklist: []usize,
+        worklist_len: *usize,
+        target: usize,
+    ) Error!void {
+        if (target >= nodes.len or (target + 1 != nodes.len and nodes[target].size == 0)) {
+            return error.InvalidBytecode;
+        }
+        if (nodes[target].is_live) return;
+        if (worklist_len.* >= worklist.len) return error.InvalidBytecode;
+        nodes[target].is_live = true;
+        worklist[worklist_len.*] = target;
+        worklist_len.* += 1;
+    }
+
+    /// Build phase-1 instruction boundaries and solve reachability from entry.
+    /// This is intentionally an explicit CFG rather than a "referenced label"
+    /// scan: references originating in unreachable code must not keep a dead
+    /// jump cycle, binding event, or atom owner alive.
+    fn computePhase1Reachability(ctx: *const JSContext) Error![]Phase1CfgNode {
+        const func = ctx.function;
+        const nodes = try ctx.memory.alloc(Phase1CfgNode, func.code.len + 1);
+        errdefer ctx.memory.free(Phase1CfgNode, nodes);
+        @memset(nodes, .{});
+
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < func.code.len) {
+            const op_id = func.code[pc];
+            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
+            if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
+                if (offset + 4 > size) return error.InvalidBytecode;
+            }
+            nodes[pc] = .{ .size = instr.size, .is_temp = instr.is_temp };
+            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        if (pc != func.code.len or atom_index != func.atom_operands.len) {
+            return error.InvalidBytecode;
+        }
+
+        const worklist = try ctx.memory.alloc(usize, func.code.len + 1);
+        defer ctx.memory.free(usize, worklist);
+        var worklist_len: usize = 0;
+        try enqueuePhase1Reachable(nodes, worklist, &worklist_len, 0);
+
+        var worklist_index: usize = 0;
+        while (worklist_index < worklist_len) : (worklist_index += 1) {
+            const current = worklist[worklist_index];
+            if (current == func.code.len) continue;
+
+            const node = nodes[current];
+            const op_id = func.code[current];
+            const next = current + node.size;
+            if (topologyLabelOperandOffset(op_id, node.is_temp)) |offset| {
+                const target = std.mem.readInt(u32, func.code[current + offset ..][0..4], .little);
+                try enqueuePhase1Reachable(nodes, worklist, &worklist_len, target);
+                if (op_id != opcode.op.goto) {
+                    try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
+                }
+            } else if (!isPhase2TerminalOp(op_id)) {
+                try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
+            }
+        }
+        return nodes;
+    }
+
+    fn isPhase1Reachable(nodes: []const Phase1CfgNode, pc: usize) bool {
+        return pc < nodes.len and nodes[pc].is_live;
+    }
+
     /// QuickJS `resolve_variables` discard fold (quickjs.c:34343): once the
     /// assignment value is unused, the stack permutation itself can disappear.
     fn discardedIndexedStoreOp(code: []const u8, jump_targets: []const bool, pc: usize) ?u8 {
@@ -7017,6 +7116,7 @@ pub const pipeline_resolve_variables = struct {
     /// make-ref tail plan is cached here so both later passes are read-only.
     fn analyzeResolutionEvents(
         ctx: *JSContext,
+        reachability: []const Phase1CfgNode,
         tail_atoms: []atom.Atom,
         tail_kinds: []u8,
         tail_local_indices: []u16,
@@ -7033,6 +7133,11 @@ pub const pipeline_resolve_variables = struct {
             const instr = topologyInstruction(code, atoms, pc, atom_index);
             const size: usize = instr.size;
             if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(reachability, pc)) {
+                if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+                pc += size;
+                continue;
+            }
             if (instr.is_temp and (isScopeVarOp(op_id) or isScopeRefOp(op_id))) {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 const scope = decodeScopeOperand(code[pc + 5 ..][0..2]).level;
@@ -7098,6 +7203,8 @@ pub const pipeline_resolve_variables = struct {
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
         try bindParserLabels(ctx);
+        const phase1_reachability = try computePhase1Reachability(ctx);
+        defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
         const phase1_jump_targets = try ctx.memory.alloc(bool, func.code.len + 1);
         defer ctx.memory.free(bool, phase1_jump_targets);
         try collectPhase1JumpTargets(func, phase1_jump_targets);
@@ -7120,6 +7227,7 @@ pub const pipeline_resolve_variables = struct {
 
         try analyzeResolutionEvents(
             ctx,
+            phase1_reachability,
             global_ref_tail_atoms,
             global_ref_tail_kinds,
             local_ref_tail_indices,
@@ -7151,6 +7259,14 @@ pub const pipeline_resolve_variables = struct {
         var scan_atom_idx: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
+            const instr = topologyInstruction(func.code, func.atom_operands, i, scan_atom_idx);
+            const input_size: usize = instr.size;
+            if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(phase1_reachability, i)) {
+                if (topologyInstructionHasAtom(op, instr.is_temp)) scan_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
                 if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
@@ -7395,6 +7511,7 @@ pub const pipeline_resolve_variables = struct {
                 i += size;
             }
         }
+        if (scan_atom_idx != func.atom_operands.len) return error.InvalidBytecode;
 
         // Keep empty outputs as inert slices so later bytecode ownership has a
         // stable representation without touching allocator accounting.
@@ -7457,6 +7574,15 @@ pub const pipeline_resolve_variables = struct {
             // the lowered body resolve correctly.
             pc_map[i] = out_idx;
             const op = func.code[i];
+            const instr = topologyInstruction(func.code, func.atom_operands, i, in_atom_idx);
+            const input_size: usize = instr.size;
+            if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(phase1_reachability, i)) {
+                for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
+                if (topologyInstructionHasAtom(op, instr.is_temp)) in_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
                 if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
@@ -7798,6 +7924,13 @@ pub const pipeline_resolve_variables = struct {
                 out_idx += size;
                 i += size;
             }
+        }
+        if (in_atom_idx != func.atom_operands.len or
+            out_idx > output.len or
+            out_atom_idx > output_atoms.len or
+            out_jump_idx > jump_sites.len)
+        {
+            return error.InvalidBytecode;
         }
         // Terminal entry: pc_map[old_len] == out_idx handles jumps that
         // target exactly one-past-the-end (e.g. loop exit to the next
