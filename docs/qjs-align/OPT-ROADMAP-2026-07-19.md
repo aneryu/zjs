@@ -2590,6 +2590,32 @@ fast path，而是核对当前链为何仍比 qjs 贵：
 4. 只有证明当前 qjs-style walk 仍承担 qjs 没有的通用工作才改生产代码。新 site IC 属 zjs 超集，
    不在本阶段提出；已有正确 IC 也只作为 control，不拿模块名替代实际调用链。
 
+M-PROPERTY-LOOKUP收口裁决（2026-07-24）：final bytecode census与既有W1d递归回归确认
+`get_field/get_field2`不携带private Atom，private field/method/accessor均已降为专用operandless
+opcode。因此试做了只让这两个final handler跳过`mightBePrivate`的trusted-public候选；generic、
+computed、internal与`get_length`入口仍保留原guard。候选通过exec 367/367与三方语义stdout，
+并新增static true-miss与global VARREF固定probe。
+
+ReleaseFast三方冻结件为baseline `a2499f4c` SHA
+`8d26990fd07d00f2f51ba6de1c164ead6517626336d463a3c661db4b1ff89d65`、candidate SHA
+`cec79a6e70aaf0ea7576a1ababcb8cabffb2c739e6c6c8d310cc29e450926547`与qjs SHA
+`b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d`。CPU19、
+ASLR-off、显式big-core PMU、5次warmup、18个位置平衡block的paired median如下；true-miss有
+16个完整有效block，另两个整block按协议剔除：
+
+| direct | candidate/baseline cycles | candidate/baseline instructions | candidate/qjs cycles |
+|---|---:|---:|---:|
+| own data | 1.01695x | 0.98457x | 1.84145x |
+| prototype data | 0.99333x | 0.98524x | 1.77618x |
+| true miss | 0.99586x | 0.98813x | 2.22880x |
+
+候选虽每次direct read稳定减少约3～4条指令，own-data的18个paired block却全部回退，
+范围为+1.13%～+2.32%，中位+1.695%，明确越过§8的+1% cycles回退线。反汇编同时确认
+`op_get_field2/op_get_field`各缩短32B且后者entry前移32B，但代码形态变化不能替代cycles
+裁决，也不能用padding把失败包装成收益；生产候选已完整回退。结论是当前private-atom guard
+仍属源码差异，却没有可保留的独立性能收益；ordinary lookup机制继续冻结，下一步只进入
+M-NATIVE-CALL。
+
 ### 5.5 M-NATIVE-CALL — callable 到 native frame/cproto record
 
 property lookup 完成后，QuickJS `OP_call_method → JS_CallInternal → js_call_c_function`：从 c-function
@@ -2815,7 +2841,8 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W2-0（**已完成，correctness**） | ✅ RealmContext直接own raw-zero/10000-reset interrupt counter，VM-local 1024 `InterruptPoller`与active gate删除；call/method/native/array/inline/tail/Function.prototype.call融合快路、constructor/Bound/Proxy及simple-field constructor按QJS entry次数扣caller，jump/branch只在唯一handler扣一次；最终bytecode arm后body扣callee。Interrupted按被poll Realm构造真实InternalError并以Runtime uncatchable flag跨inline unwind，catch/finally/IteratorClose不得洗掉；regexp counter、tail stack均未改 | ✅ 无handler推进、首poll与连续10000 cadence、Realm隔离、跨Machine、nested/tail、numeric cold branch、constructor双poll、fused forwarding、generator resume、cross-Realm caller-entry/callee-body及error prototype、outer inline for-of/catch均有回归。2026-07-23证据：focused core 283/283、exec 361/361；checkpoint 26/26（统一Debug 1861/1861、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；OOM 14/14；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
 | W2-tail（**已完成，correctness**） | ✅ Runtime同时记录native/logical depth与按QJS `JS_CallInternal` alloca公式计算的planned bytecode-stack bytes；普通、inline、generator/async resident entry及COPY_ARGV forwarding均精确charge/release。proper-tail-call先在caller仍存活时完整准备target，全部fallible setup成功后才以no-fail transaction转移continuation、最早arena mark、profile restore chain和累计tail budget并复用物理Entry；失败继续由原caller正常unwind/catch。caller guard/poll先于callee Realm切换，async init只准备resident frame，首次resume独占单次guard→poll；interrupt跨Promise边界只局部转移原caller-Realm uncatchable InternalError为rejection reason，不放宽通用error matcher；interrupt error构造OOM时以预制OOM对象维持unconditional uncatchable | ✅ 尾递归/大小frame混合/逻辑深度/stack overflow、raw tail opcode、COPY_ARGV、cross-Realm interrupt-vs-stack次序、generator/async cadence及async rejection Realm、interrupt×OOM catch bypass、target setup deterministic OOM与同Runtime恢复均有回归。2026-07-23证据：focused exec 366/366；OOM 14/14；alternate representation统一1866/1866；opcode-profile启用构建及tail smoke通过；checkpoint 26/26（统一Debug 1866/1866、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
 | W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
-| W3 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | ordinary/global-varref lookup probe 分开；lookup 与 callable dispatch 分开保留/回退 |
+| W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
+| W3-native（下一步） | M-NATIVE-CALL | lookup与callable dispatch继续分开；先复现native stack/backtrace correctness，再只审计已解析NativeCallTarget的重复transport |
 | W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
 | W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
 | W6 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
