@@ -7913,6 +7913,25 @@ pub const pipeline_resolve_labels = struct {
         };
     }
 
+    /// QuickJS `find_jump_target` folds a goto whose threaded destination is
+    /// return/return_undef/throw. It also treats one or more drops immediately
+    /// before return_undef as the same terminal target because the whole frame
+    /// is discarded on return.
+    fn gotoTerminalOp(code: []const u8, pc: usize) ?u8 {
+        if (pc >= code.len or code[pc] != opcode.op.goto) return null;
+        var target = skipLabels(code, resolvedJumpTarget(code, pc) catch return null) catch return null;
+        if (target >= code.len) return null;
+        switch (code[target]) {
+            opcode.op.@"return", opcode.op.return_undef, opcode.op.throw => return code[target],
+            else => {},
+        }
+        while (target < code.len and code[target] == opcode.op.drop) : (target += 1) {}
+        if (target < code.len and code[target] == opcode.op.return_undef) {
+            return opcode.op.return_undef;
+        }
+        return null;
+    }
+
     fn relOffset(from_pc: usize, target_pc: usize) i64 {
         return @as(i64, @intCast(target_pc)) - @as(i64, @intCast(from_pc + 1));
     }
@@ -8721,7 +8740,12 @@ pub const pipeline_resolve_labels = struct {
             const next = current + size;
 
             if (op_id == opcode.op.goto) {
-                try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
+                if (gotoTerminalOp(code, current) == null) {
+                    try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                }
+            } else if (op_id == opcode.op.if_false or op_id == opcode.op.if_true) {
+                try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
             } else if (isJumpOp(op_id)) {
                 try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
                 try enqueueReachable(states, worklist, &worklist_len, next);
@@ -9008,6 +9032,8 @@ pub const pipeline_resolve_labels = struct {
                     0
                 else if (dropReturnUndefPairSize(code, pc) != null)
                     instrSize(opcode.op.return_undef)
+                else if (gotoTerminalOp(code, pc) != null)
+                    1
                 else if (isAtomLabelU8Op(op))
                     instrSize(op)
                 else if (isJumpOp(op)) blk: {
@@ -9416,6 +9442,10 @@ pub const pipeline_resolve_labels = struct {
                 output[out_idx] = opcode.op.return_undef;
                 out_idx += instrSize(opcode.op.return_undef);
                 i += return_size;
+            } else if (gotoTerminalOp(func.code, i)) |terminal_op| {
+                output[out_idx] = terminal_op;
+                out_idx += 1;
+                i += instrSize(op);
             } else if (isJumpOp(op)) {
                 const size = sizes[i];
                 try emitJump(func.code, i, output, &out_idx, positions, size);

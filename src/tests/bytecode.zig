@@ -2363,23 +2363,27 @@ test "resolve_labels: rewrites absolute goto target to relative offset" {
 
     const op = bytecode.opcode.op;
 
-    // push_i32 7 ; goto <absolute pc=11> ; drop ; return
-    var input = [_]u8{0} ** 12;
+    // push_i32 7 ; goto <absolute pc=11> ; drop ; nop ; return
+    // The nop keeps this as a relocation test instead of the independent
+    // goto-to-terminal fold.
+    var input = [_]u8{0} ** 13;
     input[0] = op.push_i32;
     std.mem.writeInt(i32, input[1..5], 7, .little);
     input[5] = op.goto;
     std.mem.writeInt(u32, input[6..10], 11, .little);
     input[10] = op.drop;
-    input[11] = op.@"return";
+    input[11] = op.nop;
+    input[12] = op.@"return";
     try bc.setCode(&input);
 
     var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 11), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 12), bc.code.len);
     try std.testing.expectEqual(op.goto, bc.code[5]);
     try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[6..10], .little));
-    try std.testing.expectEqual(op.@"return", bc.code[10]);
+    try std.testing.expectEqual(op.nop, bc.code[10]);
+    try std.testing.expectEqual(op.@"return", bc.code[11]);
 }
 
 test "resolve_labels: threads jumps through unconditional goto targets" {
@@ -2394,21 +2398,25 @@ test "resolve_labels: threads jumps through unconditional goto targets" {
 
     const op = bytecode.opcode.op;
 
-    // goto pc=5 ; goto pc=10 ; return
-    var input = [_]u8{0} ** 11;
+    // goto pc=5 ; goto pc=10 ; nop ; return. The first jump is threaded
+    // through the unreachable second jump, but cannot fold to a terminal.
+    var input = [_]u8{0} ** 12;
     input[0] = op.goto;
     std.mem.writeInt(u32, input[1..5], 5, .little);
     input[5] = op.goto;
     std.mem.writeInt(u32, input[6..10], 10, .little);
-    input[10] = op.@"return";
+    input[10] = op.nop;
+    input[11] = op.@"return";
     try bc.setCode(&input);
 
     var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 11), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 7), bc.code.len);
     try std.testing.expectEqual(op.goto, bc.code[0]);
-    try std.testing.expectEqual(@as(i32, 9), std.mem.readInt(i32, bc.code[1..5], .little));
+    try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[1..5], .little));
+    try std.testing.expectEqual(op.nop, bc.code[5]);
+    try std.testing.expectEqual(op.@"return", bc.code[6]);
 }
 
 test "resolve_labels constant tests fold every QuickJS producer and preserve source mapping" {
@@ -3084,22 +3092,84 @@ test "resolve_labels: skips dead code after unconditional goto" {
 
     const op = bytecode.opcode.op;
 
-    // goto pc=10 ; push_i32 123 ; return
-    var input = [_]u8{0} ** 11;
+    // goto pc=10 ; push_i32 123 ; nop ; return. The nop keeps the jump
+    // non-terminal while the unreachable push is removed.
+    var input = [_]u8{0} ** 12;
     input[0] = op.goto;
     std.mem.writeInt(u32, input[1..5], 10, .little);
     input[5] = op.push_i32;
     std.mem.writeInt(i32, input[6..10], 123, .little);
-    input[10] = op.@"return";
+    input[10] = op.nop;
+    input[11] = op.@"return";
     try bc.setCode(&input);
 
     var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 6), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 7), bc.code.len);
     try std.testing.expectEqual(op.goto, bc.code[0]);
     try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, bc.code[1..5], .little));
-    try std.testing.expectEqual(op.@"return", bc.code[5]);
+    try std.testing.expectEqual(op.nop, bc.code[5]);
+    try std.testing.expectEqual(op.@"return", bc.code[6]);
+}
+
+test "resolve_labels folds gotos to terminal opcodes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("goto-terminal");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    const op = bytecode.opcode.op;
+    const cases = [_]struct {
+        input: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .input = &.{ op.push_i32, 1, 0, 0, 0, op.goto, 10, 0, 0, 0, op.@"return" },
+            .expected = &.{ op.push_1, op.@"return" },
+        },
+        .{
+            .input = &.{ op.goto, 5, 0, 0, 0, op.return_undef },
+            .expected = &.{op.return_undef},
+        },
+        .{
+            .input = &.{ op.push_i32, 1, 0, 0, 0, op.goto, 10, 0, 0, 0, op.throw },
+            .expected = &.{ op.push_1, op.throw },
+        },
+        .{
+            .input = &.{
+                op.push_i32, 1,       0,               0, 0,
+                op.push_i32, 2,       0,               0, 0,
+                op.goto,     15,      0,               0, 0,
+                op.drop,     op.drop, op.return_undef,
+            },
+            .expected = &.{ op.push_1, op.push_2, op.return_undef },
+        },
+    };
+
+    for (cases, 0..) |case, case_index| {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+        try bc.setCode(case.input);
+        const goto_pc: u32 = if (case_index == 1) 0 else if (case_index == 3) 10 else 5;
+        const target_pc: u32 = std.mem.readInt(u32, case.input[goto_pc + 1 ..][0..4], .little);
+        try bc.appendSourceLoc(goto_pc, 10, 2);
+        try bc.appendSourceLoc(target_pc, 20, 3);
+
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqualSlices(u8, case.expected, bc.code);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(case.expected.len - 1)),
+            bc.source_loc_slots[0].pc,
+        );
+        try std.testing.expectEqual(@as(u32, @intCast(case.expected.len)), bc.source_loc_slots[1].pc);
+    }
 }
 
 test "F10.2: resolve_labels selects goto8 for near relative target" {
@@ -3116,22 +3186,25 @@ test "F10.2: resolve_labels selects goto8 for near relative target" {
     defer bc.deinit(rt);
 
     const op = bytecode.opcode.op;
-    // goto <absolute pc=6> ; push_i32 1 ; return
-    var input = [_]u8{0} ** 11;
+    // goto <absolute pc=10> ; push_i32 1 ; nop ; return. The nop keeps the
+    // target non-terminal so this fixture continues to cover goto8 encoding.
+    var input = [_]u8{0} ** 12;
     input[0] = op.goto;
     std.mem.writeInt(u32, input[1..5], 10, .little);
     input[5] = op.push_i32;
     std.mem.writeInt(i32, input[6..10], 1, .little);
-    input[10] = op.@"return";
+    input[10] = op.nop;
+    input[11] = op.@"return";
     try bc.setCode(&input);
 
     var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
-    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
+    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
     try std.testing.expectEqual(op.goto8, bc.code[0]);
     try std.testing.expectEqual(@as(i8, 1), @as(i8, @bitCast(bc.code[1])));
-    try std.testing.expectEqual(op.@"return", bc.code[2]);
+    try std.testing.expectEqual(op.nop, bc.code[2]);
+    try std.testing.expectEqual(op.@"return", bc.code[3]);
 }
 
 test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" {
@@ -5740,9 +5813,9 @@ test "resolve_labels relocates gosub directly to its finalizer" {
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(op.gosub, bc.code[1]);
-    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, bc.code[2..6], .little));
-    try std.testing.expectEqual(op.nop, bc.code[9]);
-    try std.testing.expectEqual(op.ret, bc.code[10]);
+    try std.testing.expectEqual(@as(i32, 6), std.mem.readInt(i32, bc.code[2..6], .little));
+    try std.testing.expectEqual(op.nop, bc.code[8]);
+    try std.testing.expectEqual(op.ret, bc.code[9]);
 }
 
 test "resolve_labels removes gosub to an empty finalizer" {
