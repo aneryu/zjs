@@ -1905,6 +1905,34 @@ const ClassConstructionGrowthProbe = struct {
     }
 };
 
+fn emptyRootShapeAllocationBytes() usize {
+    return @sizeOf(core.shape.Shape) +
+        @sizeOf(u32) * core.shape.initial_hash_size +
+        @sizeOf(core.shape.Property) * core.shape.initial_prop_size;
+}
+
+const ObjectConstructionOrderProbe = struct {
+    rt: *core.JSRuntime,
+    prototype: *core.Object,
+    live_shape_count_before: usize,
+    shape_hash_count_before: usize,
+    heap_live_bytes_before: usize,
+    prototype_refs_before: i32,
+    object_boundary_calls: usize = 0,
+    shape_owned_at_object_boundary: bool = false,
+
+    fn trigger(raw: ?*anyopaque, size: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        if (size != @sizeOf(core.Object)) return;
+        self.object_boundary_calls += 1;
+        self.shape_owned_at_object_boundary =
+            self.rt.shapes.live_shape_count == self.live_shape_count_before + 1 and
+            self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
+            self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes() and
+            self.prototype.header.meta().rc == self.prototype_refs_before + 1;
+    }
+};
+
 const InlineClassFinalizerReentry = struct {
     var target_id: core.ClassId = core.class.invalid_class_id;
     var growth_id: core.ClassId = core.class.invalid_class_id;
@@ -7570,6 +7598,13 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
     });
     defer rt.destroy();
 
+    // Keep the shared null-prototype root Shape alive. QuickJS acquires that
+    // owned Shape before JS_NewObjectFromShape's object-allocation GC boundary;
+    // the separate cache-miss test below covers the fallible Shape-first path.
+    const shape_guard = try core.Object.create(rt, core.class.ids.object, null);
+    var shape_guard_owned = true;
+    defer if (shape_guard_owned) shape_guard.value().free(rt);
+
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("gc-before-limit-self");
     defer rt.atoms.free(key);
@@ -7585,7 +7620,123 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
     replacement.value().free(rt);
+    shape_guard.value().free(rt);
+    shape_guard_owned = false;
     try expectNoLiveGc(rt);
+}
+
+test "cache-miss root shape is owned before the object allocation GC boundary" {
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_threshold = 256 * 1024 * 1024,
+    });
+    defer rt.destroy();
+
+    // Warm the shape-hash buckets while keeping this prototype unique: creating
+    // the replacement below must allocate a new root Shape for `prototype`.
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+
+    const key = try rt.internAtom("cache-miss-shape-before-object-gc");
+    defer rt.atoms.free(key);
+    const garbage = try core.Object.create(rt, core.class.ids.object, null);
+    try garbage.defineOwnProperty(rt, key, core.Descriptor.data(garbage.value(), true, true, true));
+    garbage.value().free(rt);
+
+    const object_bytes = @sizeOf(core.Object);
+    const root_shape_bytes = emptyRootShapeAllocationBytes();
+    try std.testing.expect(root_shape_bytes > object_bytes);
+
+    const allocated_before = rt.memory.allocated_bytes;
+    const collections_before = rt.gc.stats.collections;
+    // Current zjs used to allocate Object first. The Object fit this cap, but
+    // the following cache-miss Shape did not, and MemoryAccount rejected it
+    // before its ordinary allocation hook could service the pending collection.
+    // QuickJS owns the Shape first, then js_trigger_gc(sizeof(JSObject)); that
+    // boundary reclaims `garbage` before checking the Object allocation.
+    rt.setGCThreshold(allocated_before + object_bytes);
+    rt.setMemoryLimit(allocated_before + root_shape_bytes);
+    defer rt.setMemoryLimit(null);
+
+    const replacement = try core.Object.create(rt, core.class.ids.object, prototype);
+    defer replacement.value().free(rt);
+    try std.testing.expectEqual(prototype, replacement.getPrototype());
+    try std.testing.expect(replacement.shape_ref.proto == prototype);
+    if (comptime core.memory.force_gc_on_allocation_enabled) {
+        try std.testing.expect(rt.gc.stats.collections > collections_before);
+    } else {
+        try std.testing.expectEqual(collections_before + 1, rt.gc.stats.collections);
+    }
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "post-shape object OOM rolls back construction owners and retries in the same runtime" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    defer prototype.value().free(rt);
+    const class_id = try rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(class_id, .{ .class_name = "PostShapeObjectOom" });
+
+    const root_shape_bytes = emptyRootShapeAllocationBytes();
+    try std.testing.expect(root_shape_bytes > @sizeOf(core.Object));
+    const live_shape_count_before = rt.shapes.live_shape_count;
+    const shape_hash_count_before = rt.shapes.shape_hash_count;
+    const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
+    const allocated_bytes_before = rt.memory.allocated_bytes;
+    const prototype_refs_before = prototype.header.meta().rc;
+
+    var probe = ObjectConstructionOrderProbe{
+        .rt = rt,
+        .prototype = prototype,
+        .live_shape_count_before = live_shape_count_before,
+        .shape_hash_count_before = shape_hash_count_before,
+        .heap_live_bytes_before = heap_live_bytes_before,
+        .prototype_refs_before = prototype_refs_before,
+    };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = ObjectConstructionOrderProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger;
+        rt.memory.trigger_gc_ctx = saved_context;
+    }
+
+    // Permit exactly the cache-miss root Shape. The following Object allocation
+    // must fail after that Shape has been retained, registered and accounted.
+    rt.setMemoryLimit(allocated_bytes_before + root_shape_bytes);
+    try std.testing.expectError(error.OutOfMemory, core.Object.create(rt, class_id, prototype));
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(usize, 1), probe.object_boundary_calls);
+    try std.testing.expect(probe.shape_owned_at_object_boundary);
+    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
+    try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+
+    // A failed construction must release its dynamic definition pin completely.
+    rt.classes.unregisterDynamic(class_id);
+    try std.testing.expect(!rt.classes.isRegistered(class_id));
+    try std.testing.expect(!rt.classes.unregisterPending(class_id));
+    try rt.classes.register(class_id, .{ .class_name = "PostShapeObjectOom" });
+
+    probe.object_boundary_calls = 0;
+    probe.shape_owned_at_object_boundary = false;
+    const retry_allocated_bytes_before = rt.memory.allocated_bytes;
+    const retry = try core.Object.create(rt, class_id, prototype);
+    try std.testing.expectEqual(@as(usize, 1), probe.object_boundary_calls);
+    try std.testing.expect(probe.shape_owned_at_object_boundary);
+    try std.testing.expectEqual(prototype, retry.getPrototype());
+    retry.value().free(rt);
+    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
+    try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
+    try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(prototype_refs_before, prototype.header.meta().rc);
+    rt.classes.unregisterDynamic(class_id);
 }
 
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {

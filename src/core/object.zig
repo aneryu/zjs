@@ -1987,6 +1987,14 @@ pub const Object = extern struct {
             }
         };
 
+        // qjs JS_NewObjectFromShape enters with an owned Shape and consumes it
+        // on every failure path. Retain the prepared Shape before mirroring its
+        // object-allocation GC boundary.
+        const shape_ref = template.shape_ref;
+        shape_ref.retain();
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(shape_ref);
+
         const alloc_size = @sizeOf(Object);
         rt.collectBeforeObjectAllocation(alloc_size);
         const self = try rt.memory.createNoTrigger(Object);
@@ -1995,11 +2003,6 @@ pub const Object = extern struct {
             destroyFromHeader(rt, &self.header)
         else
             rt.memory.destroy(Object, self);
-
-        const shape_ref = template.shape_ref;
-        shape_ref.retain();
-        var shape_owned = true;
-        errdefer if (shape_owned) rt.shapes.release(shape_ref);
 
         const property_capacity: usize = shape_ref.prop_size;
         var property_storage: []property.Entry = &.{};
@@ -2063,23 +2066,6 @@ pub const Object = extern struct {
         const definition = construction.definition;
         const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
-        rt.collectBeforeObjectAllocation(alloc_size);
-        const self = if (inline_layout) |layout| blk: {
-            // The object-level threshold/force-GC hook just ran above. Enter
-            // MemoryAccount directly so this same allocation does not request
-            // a second collection (observable to test allocation probes and
-            // unnecessarily expensive in force-GC builds).
-            const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
-            break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
-        } else try rt.memory.createNoTrigger(Object);
-        var initialized = false;
-        errdefer {
-            if (initialized) {
-                destroyFromHeader(rt, &self.header);
-            } else {
-                freeObjectAllocation(rt, self, inline_layout);
-            }
-        }
         // qjs shape model (faithful): start from the SHARED, transition-cacheable
         // empty root shape (qjs hash-consed shapes) so objects adding the same
         // properties converge on one shared shape via cached transitions, instead
@@ -2102,6 +2088,28 @@ pub const Object = extern struct {
             try rt.shapes.createObjectRootWithPropertyCapacity(prototype, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
+        // qjs JS_NewObjectProtoClass transfers an already-owned Shape into
+        // JS_NewObjectFromShape, which only then runs js_trigger_gc immediately
+        // before the raw JSObject allocation. Keep the root/retained Shape live
+        // across the same boundary so a cache-miss allocation can make the
+        // threshold request visible before a memory-limit check rejects Object.
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = if (inline_layout) |layout| blk: {
+            // The object-level threshold/force-GC hook just ran above. Enter
+            // MemoryAccount directly so this same allocation does not request
+            // a second collection (observable to test allocation probes and
+            // unnecessarily expensive in force-GC builds).
+            const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
+            break :blk @as(*Object, @ptrFromInt(@intFromPtr(bytes.ptr) + layout.object_offset));
+        } else try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer {
+            if (initialized) {
+                destroyFromHeader(rt, &self.header);
+            } else {
+                freeObjectAllocation(rt, self, inline_layout);
+            }
+        }
         var property_storage: []property.Entry = &.{};
         var property_storage_owned = false;
         errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
