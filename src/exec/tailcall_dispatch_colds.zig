@@ -905,7 +905,6 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.add_loc] = td.op_add_loc;
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
-    t[op.put_var] = td.op_put_var;
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.get_var_ref0, .h = td.opGetVarRef(.c0) },
         .{ .o = op.get_var_ref1, .h = td.opGetVarRef(.c1) },
