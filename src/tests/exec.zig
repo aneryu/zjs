@@ -45,6 +45,30 @@ const TailSetupOomArm = struct {
     }
 };
 
+const HostBacktraceErrorProbe = struct {
+    fn call(_: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        return error.TypeError;
+    }
+};
+
+const NativeRecordStackProbe = struct {
+    var callable: core.JSValue = core.JSValue.undefinedValue();
+    var calls: usize = 0;
+    var recurse: bool = true;
+
+    const record: core.host_function.InternalRecord = .{
+        .length = 0,
+        .cproto = .generic,
+        .native_function = .{ .generic = call },
+    };
+
+    fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) anyerror!core.JSValue {
+        calls += 1;
+        if (!recurse or calls >= 256) return core.JSValue.int32(7);
+        return engine.exec.call.callValue(ctx, null, callable, &.{});
+    }
+};
+
 const InterruptOomArm = struct {
     calls: usize = 0,
     exhaust: bool = false,
@@ -7002,6 +7026,186 @@ test "native builtin errors capture a native callsite" {
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
+}
+
+test "external host errors capture the native host callsite" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var probe: u8 = 0;
+    try js.defineGlobalExternalHostFunction(
+        "hostBacktraceProbe",
+        0,
+        &probe,
+        HostBacktraceErrorProbe.call,
+        null,
+    );
+
+    var output_buffer: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOptions(
+        \\function captureHostBacktrace() {
+        \\    try {
+        \\        hostBacktraceProbe();
+        \\    } catch (error) {
+        \\        return String(error.stack);
+        \\    }
+        \\}
+        \\function captureInternalBacktrace() {
+        \\    try {
+        \\        [].map(null);
+        \\    } catch (error) {
+        \\        return String(error.stack);
+        \\    }
+        \\}
+        \\const hostStack = captureHostBacktrace();
+        \\const internalStack = captureInternalBacktrace();
+        \\print(hostStack.indexOf(
+        \\    "    at hostBacktraceProbe (native)\n    at captureHostBacktrace "
+        \\) === 0);
+        \\print(internalStack.indexOf(
+        \\    "    at map (native)\n    at captureInternalBacktrace "
+        \\) === 0);
+    , .{ .filename = "host-backtrace.js", .output = &stream });
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("true\ntrue\n", stream.buffered());
+}
+
+test "native record calls preflight the native stack and recover" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    js.runtime.setNativeStackSize(64 * 1024);
+    try js.ensureTest262GlobalsInstalled();
+
+    const function_value = try core.function.nativeFunction(js.context, "nativeRecordRecurse", 0);
+    defer function_value.free(js.runtime);
+    const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader().?);
+    function_object.nativeRecordSlot().* = &NativeRecordStackProbe.record;
+
+    const global = try js.context.globalObject();
+    const name = try js.runtime.internAtom("nativeRecordRecurse");
+    defer js.runtime.atoms.free(name);
+    try global.defineOwnProperty(
+        js.runtime,
+        name,
+        core.Descriptor.data(function_value, true, false, true),
+    );
+
+    NativeRecordStackProbe.callable = function_value;
+    NativeRecordStackProbe.calls = 0;
+    NativeRecordStackProbe.recurse = true;
+    defer NativeRecordStackProbe.callable = core.JSValue.undefinedValue();
+
+    const overflow = try js.eval(
+        \\let nativeStackResult = "missing";
+        \\try {
+        \\    nativeRecordRecurse();
+        \\} catch (error) {
+        \\    nativeStackResult = error.name + ":" + error.message;
+        \\}
+        \\assert.sameValue(nativeStackResult, "InternalError:stack overflow");
+    );
+    overflow.free(js.runtime);
+
+    NativeRecordStackProbe.recurse = false;
+    const recovery = try js.eval("assert.sameValue(nativeRecordRecurse(), 7);");
+    defer recovery.free(js.runtime);
+    try std.testing.expect(recovery.isUndefined());
+}
+
+test "external C function preflight uses caller realm and callback errors use callee realm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var caller_facade = zjs.JSContext.borrowCore(js.context);
+    const caller_global = try caller_facade.globalObject();
+    const callee_holder = try engine.exec.call.createRealmObject(js.context);
+    defer callee_holder.free(js.runtime);
+    const callee_record = try core.Object.expect(callee_holder);
+    const callee = callee_record.realmContext() orelse return error.TestUnexpectedResult;
+    const callee_global = try engine.exec.zjs_vm.contextGlobal(callee);
+
+    var probe: CrossRealmNativeProbe = .{};
+    const external_id = try js.runtime.registerExternalHostFunction(.{
+        .ptr = &probe,
+        .call = crossRealmNativeProbe,
+    });
+    const native_value = try core.function.nativeFunction(callee, "realmProbe", 0);
+    defer native_value.free(js.runtime);
+    const native_object = try core.Object.expect(native_value);
+    native_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    native_object.externalHostFunctionIdSlot().* = external_id;
+
+    js.runtime.setNativeStackSize(1);
+    defer js.runtime.setNativeStackSize(0);
+    try std.testing.expectError(
+        error.StackOverflow,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            caller_global,
+            core.JSValue.undefinedValue(),
+            native_value,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expect(probe.seen_realm == null);
+    try std.testing.expect(js.context.hasException());
+
+    const overflow_value = js.context.takeException();
+    defer overflow_value.free(js.runtime);
+    const overflow_error = try core.Object.expect(overflow_value);
+    const caller_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        caller_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    const callee_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        callee_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(caller_internal_error, overflow_error.getPrototype().?);
+    try std.testing.expect(caller_internal_error != callee_internal_error);
+
+    js.runtime.setNativeStackSize(0);
+    try std.testing.expectError(
+        error.JSException,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            caller_global,
+            core.JSValue.undefinedValue(),
+            native_value,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(callee, probe.seen_realm.?);
+    try std.testing.expectEqual(callee_global, probe.seen_global.?);
+    // Pending exceptions are runtime-wide; the Error prototype below is the
+    // realm discriminator.
+    try std.testing.expect(js.context.hasException());
+
+    const callback_error_value = callee.takeException();
+    defer callback_error_value.free(js.runtime);
+    const callback_error = try core.Object.expect(callback_error_value);
+    const caller_type_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        caller_global,
+        "TypeError",
+    ) orelse return error.TestUnexpectedResult;
+    const callee_type_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        callee_global,
+        "TypeError",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(callee_type_error, callback_error.getPrototype().?);
+    try std.testing.expect(caller_type_error != callee_type_error);
 }
 
 test "Error stack preserves construction frames across delayed access" {

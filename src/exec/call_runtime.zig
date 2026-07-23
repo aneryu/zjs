@@ -310,6 +310,7 @@ pub fn callNativeBuiltinRecordForVm(
     // func-object-free synthetic record reuse can retain supplied legacy data.
     if (ctx.runtime.internalBuiltinRecord(@intCast(@intFromEnum(native_ref.domain)), native_ref.id)) |record| {
         if (function_object.class_id == core.class.ids.c_function) {
+            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, record.length);
             const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
             return try builtin_dispatch.callInternalRecordDirectInRealm(view, output, function_object, this_value, record, args, caller_function, caller_frame);
         }
@@ -560,6 +561,7 @@ noinline fn callNativeCallableObject(
     switch (vmNativeCallableDispatch(function_object)) {
         .bound_function => return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame),
         .resolved_record => |target| {
+            try builtin_dispatch.preflightCFunctionCall(ctx, global, function_object, target.record.length);
             const view = try builtin_dispatch.CallRealmView.caller(target.realm);
             const native_result = builtin_dispatch.callInternalRecordDirectInRealm(
                 view,
@@ -1475,6 +1477,7 @@ fn constructStringBuiltinNativeVm(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    try builtin_dispatch.preflightInternalRecordCFunction(ctx, global, function_object, native_ref);
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
     native_scope.push();
     defer native_scope.deinit();
@@ -1517,6 +1520,7 @@ fn constructDateBuiltinNativeVm(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    try builtin_dispatch.preflightInternalRecordCFunction(ctx, global, function_object, native_ref);
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, function_object);
     native_scope.push();
     defer native_scope.deinit();

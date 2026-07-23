@@ -2636,6 +2636,20 @@ Recon 顺序：
 4. 只删除所有 native domains 共同承担且 qjs 不承担的 transport。收益至少在两个 builtin domain
    复现；regexp Zoo 是 breadth/semantic consumer，不是 direct attribution probe。
 
+M-NATIVE-CALL correctness 前置收口（2026-07-24）：对照 pinned QuickJS
+`js_call_c_function`，确认 observable `C_FUNCTION` 必须先在 caller realm 以
+`formal length × sizeof(JSValue)`做 native-stack preflight，成功后才切 function realm 并建立
+native frame。zjs 此前的 resolved `InternalRecord` terminal 没有这层 preflight，External
+HostCall 同时缺 native frame；String/Date/RegExp construct 的外层 coercion scope 也会让过晚
+preflight 错误地带上 callee frame。现已把 guard 放到最终 C_FUNCTION 入口及 constructor
+外层 scope 之前，`C_FUNCTION_DATA`与`func_obj == null`的 synthetic record reuse 保持 caller
+semantics；External HostCall 的单一 native frame 覆盖 callback 及其 host-error materialization。
+回归锁定递归 record 的 catchable `InternalError: stack overflow`与同 runtime 恢复、external
+host native backtrace，以及 cross-realm overflow Error 属 caller prototype而 callback
+`TypeError`属 callee prototype；changed-area exec 370/370 通过。该补丁只计 correctness、收益
+记零；下一步仍只审计已解析 `NativeCallTarget{record, realm}` 的重复 transport，不把本修复包装
+成性能候选。
+
 在 direct storage 探针证明前，不改 Array capacity/count 算法；不得把 push/pop 名称或 builtin id
 本身当成新的生产分支依据。
 
@@ -2842,7 +2856,7 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W2-tail（**已完成，correctness**） | ✅ Runtime同时记录native/logical depth与按QJS `JS_CallInternal` alloca公式计算的planned bytecode-stack bytes；普通、inline、generator/async resident entry及COPY_ARGV forwarding均精确charge/release。proper-tail-call先在caller仍存活时完整准备target，全部fallible setup成功后才以no-fail transaction转移continuation、最早arena mark、profile restore chain和累计tail budget并复用物理Entry；失败继续由原caller正常unwind/catch。caller guard/poll先于callee Realm切换，async init只准备resident frame，首次resume独占单次guard→poll；interrupt跨Promise边界只局部转移原caller-Realm uncatchable InternalError为rejection reason，不放宽通用error matcher；interrupt error构造OOM时以预制OOM对象维持unconditional uncatchable | ✅ 尾递归/大小frame混合/逻辑深度/stack overflow、raw tail opcode、COPY_ARGV、cross-Realm interrupt-vs-stack次序、generator/async cadence及async rejection Realm、interrupt×OOM catch bypass、target setup deterministic OOM与同Runtime恢复均有回归。2026-07-23证据：focused exec 366/366；OOM 14/14；alternate representation统一1866/1866；opcode-profile启用构建及tail smoke通过；checkpoint 26/26（统一Debug 1866/1866、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
 | W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
 | W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
-| W3-native（下一步） | M-NATIVE-CALL | lookup与callable dispatch继续分开；先复现native stack/backtrace correctness，再只审计已解析NativeCallTarget的重复transport |
+| W3-native（correctness前置已完成；性能候选下一步） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零 | lookup与callable dispatch继续分开；下一步只审计已解析`NativeCallTarget{record, realm}`的重复transport |
 | W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
 | W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
 | W6 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
