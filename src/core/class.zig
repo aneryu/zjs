@@ -322,6 +322,16 @@ pub const Table = struct {
     records_inline: [ids.init_count]Record = @splat(.{}),
     registration_states: []RegistrationState = &.{},
     registration_states_inline: [ids.init_count]RegistrationState = @splat(.{}),
+    /// Registration-time cache of every standard id's immutable DefinitionPlan.
+    /// Standard classes are runtime-lifetime (`unregisterDynamicOwned` rejects
+    /// `id < ids.init_count`), so `registerAtom` writes each entry at most once
+    /// and every allocation/destruction reads one indexed struct instead of the
+    /// recordPtr + per-field load chain — mirroring how qjs reads its immutable
+    /// `rt->class_array` scalars with no per-alloc bookkeeping. Standard ids
+    /// outside `standard_classes` never register; their entries stay on the
+    /// same `standardPayloadKind` fallback `definitionPlan` used for a null
+    /// record view.
+    standard_plans: [ids.init_count]DefinitionPlan = standard_plan_fallbacks,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
         var table = Table{
@@ -435,16 +445,8 @@ pub const Table = struct {
     /// dynamic definition. Standard definitions are runtime-lifetime and avoid
     /// the counter traffic entirely.
     pub fn beginConstruction(self: *Table, id: ClassId) error{InvalidClassId}!Construction {
+        if (id < ids.init_count) return self.beginStandardConstruction(id);
         self.assertOwnerThread();
-        if (id < ids.init_count) {
-            const generation = if (id < self.registration_states.len) self.registration_states[id].generation else 0;
-            return .{
-                .table = self,
-                .class_id = id,
-                .definition = definitionPlan(self.recordPtr(id), id, generation),
-                .dynamic_pin_active = false,
-            };
-        }
         if (id >= self.records.len or !self.records[id].isRegistered()) return error.InvalidClassId;
         const definition_view = self.recordPtr(id).?;
         const state = &self.registration_states[id];
@@ -464,13 +466,31 @@ pub const Table = struct {
         };
     }
 
+    /// Standard-id construction: runtime-lifetime definitions have no failure
+    /// path and no pin traffic — the registration-time plan cache is the whole
+    /// read (qjs js_create_object reads rt->class_array scalars the same way).
+    pub fn beginStandardConstruction(self: *Table, id: ClassId) Construction {
+        self.assertOwnerThread();
+        return .{
+            .table = self,
+            .class_id = id,
+            .definition = self.standardPlan(id),
+            .dynamic_pin_active = false,
+        };
+    }
+
+    /// By-value plan read for a standard id. Callers that never pin (standard
+    /// construction and destruction) use this directly so no `Construction`
+    /// address ever escapes into a defer — the plan stays register-resident.
+    pub fn standardPlan(self: *const Table, id: ClassId) DefinitionPlan {
+        std.debug.assert(id < ids.init_count);
+        return self.standard_plans[id];
+    }
+
     /// Reacquire the immutable destruction scalars for an object without
     /// retaining a pointer across cleanup or finalizer callbacks.
     pub fn destructionPlan(self: *const Table, id: ClassId) ?DefinitionPlan {
-        if (id < ids.init_count) {
-            const generation = if (id < self.registration_states.len) self.registration_states[id].generation else 0;
-            return definitionPlan(self.recordPtr(id), id, generation);
-        }
+        if (id < ids.init_count) return self.standard_plans[id];
         if (id >= self.records.len) return null;
         const state = self.registration_states[id];
         if (state.live_object_pins == 0) return null;
@@ -663,6 +683,9 @@ pub const Table = struct {
             .has_exotic = def.has_exotic or def.exotic_methods != null,
             .exotic_methods = def.exotic_methods,
         };
+        if (id < ids.init_count) {
+            self.standard_plans[id] = definitionPlan(&self.records[id], id, state.generation);
+        }
     }
 
     fn ensureCapacity(self: *Table, needed: usize) !void {
@@ -696,6 +719,14 @@ pub const Table = struct {
             self.memory.free(RegistrationState, old_states);
         }
     }
+
+    const standard_plan_fallbacks: [ids.init_count]DefinitionPlan = blk: {
+        var plans: [ids.init_count]DefinitionPlan = undefined;
+        for (&plans, 0..) |*plan, id| {
+            plan.* = .{ .payload_kind = standardPayloadKind(@intCast(id)) };
+        }
+        break :blk plans;
+    };
 
     fn definitionPlan(definition_view: ?*const Record, id: ClassId, generation: u64) DefinitionPlan {
         if (definition_view) |registered| {

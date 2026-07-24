@@ -1762,9 +1762,9 @@ pub const Object = extern struct {
     /// cycle collection cannot reclaim them.
     pub fn createGeneratorShell(rt: *JSRuntime, class_id: class.ClassId) !*Object {
         std.debug.assert(class_id == class.ids.generator or class_id == class.ids.async_generator);
-        var construction = try rt.classes.beginConstruction(class_id);
-        defer construction.abort();
-        const definition = construction.definition;
+        // Generator ids are standard: no pin traffic, so the by-value plan
+        // avoids materializing a Construction across the fallible window.
+        const definition = rt.classes.standardPlan(class_id);
         std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
         std.debug.assert(definition.payload_kind == .generator);
 
@@ -1781,7 +1781,6 @@ pub const Object = extern struct {
         errdefer freeClassPayloadAllocation(rt, class_payload, .generator);
 
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
-        construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
@@ -2061,9 +2060,20 @@ pub const Object = extern struct {
         // The class table may move while GC or any fallible preparation runs.
         // Keep only the minimal immutable scalars plus a generation-bearing
         // construction pin; never retain a `Record *` across that window.
-        var construction = try rt.classes.beginConstruction(class_id);
-        defer construction.abort();
-        const definition = construction.definition;
+        // Standard ids read the registration-time plan by value and skip the
+        // pin object entirely: `abort`/`publishObject` take *Construction, so
+        // touching one on the hot path escapes its alloca and pins every plan
+        // field access to memory. Only dynamic ids materialize it.
+        const is_standard_class = class_id < class.ids.init_count;
+        var construction: class.Table.Construction = if (is_standard_class)
+            undefined
+        else
+            try rt.classes.beginConstruction(class_id);
+        defer if (!is_standard_class) construction.abort();
+        const definition: class.Table.DefinitionPlan = if (is_standard_class)
+            rt.classes.standardPlan(class_id)
+        else
+            construction.definition;
         const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         // qjs shape model (faithful): start from the SHARED, transition-cacheable
@@ -2173,8 +2183,9 @@ pub const Object = extern struct {
         // Reacquire by id after the complete fallible window and validate the
         // pinned generation. An unregister requested mid-construction remains
         // pending; this exact in-flight object atomically transfers that pin to
-        // its allocation before the object reaches the GC list.
-        construction.publishObject();
+        // its allocation before the object reaches the GC list. Standard ids
+        // never pin, so publish (like the deferred abort) is dynamic-only.
+        if (!is_standard_class) construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
