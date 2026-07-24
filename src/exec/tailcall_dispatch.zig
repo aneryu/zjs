@@ -2105,7 +2105,11 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+        // I-cache pin (see op_return): this handler is a 4-hop dependent load
+        // chain (frame->ptr->cell->pvalue->tag) whose cycle cost is exquisitely
+        // entry-alignment sensitive; keep it invariant under unrelated
+        // text-size changes in the dispatch unit.
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
                 .c1 => 1,
