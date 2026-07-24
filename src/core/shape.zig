@@ -229,9 +229,15 @@ pub const Registry = struct {
     }
 
     pub fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
-        var current = self.firstShapeWithHash(initialHash(proto));
+        // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
+        // co-residents on the already-loaded `hash` field before touching
+        // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
+        // sh1->prop_count == 0`. Mirror that check order.
+        const expected_hash = initialHash(proto);
+        var current = self.firstShapeWithHash(expected_hash);
         while (current) |shape| : (current = shape.registry_hash_next) {
-            if (shape.prop_count != 0 or shape.proto != proto) continue;
+            if (shape.hash != expected_hash) continue;
+            if (shape.proto != proto or shape.prop_count != 0) continue;
             shape.retain();
             return shape;
         }
@@ -240,8 +246,10 @@ pub const Registry = struct {
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
         if (property_capacity == 0) return self.createObjectRoot(proto);
-        var current = self.firstShapeWithHash(initialHash(proto));
+        const expected_hash = initialHash(proto);
+        var current = self.firstShapeWithHash(expected_hash);
         while (current) |shape| : (current = shape.registry_hash_next) {
+            if (shape.hash != expected_hash) continue;
             // The owning Object allocates a value buffer with exactly this
             // capacity. Reusing a larger root would make shape.prop_size exceed
             // the real buffer length, corrupting later appends and teardown.
@@ -852,7 +860,11 @@ pub const Registry = struct {
             self.shape_hash_buckets = try self.memory.alloc(?*Shape, bucket_count);
             @memset(self.shape_hash_buckets, null);
         }
-        if (self.shape_hash_count + additional <= self.shape_hash_buckets.len) return;
+        // qjs js_new_shape2 (quickjs.c:5245) resizes BEFORE the load factor
+        // reaches 1/2: `if (2 * (rt->shape_hash_count + 1) > rt->shape_hash_size)`.
+        // Growing only at load factor 1 doubles the average registry bucket
+        // chain that every transition-cache probe walks.
+        if (2 * (self.shape_hash_count + additional) <= self.shape_hash_buckets.len) return;
         if (self.shape_hash_bits == 32) return;
         const next_bits = self.shape_hash_bits + 1;
         const bucket_count = @as(usize, 1) << next_bits;
@@ -958,8 +970,14 @@ fn lockstepBucketCount(current_bucket_count: usize, new_prop_size: usize) usize 
 }
 
 pub fn initialHash(proto: ?*Object) u32 {
-    const value: u32 = @truncate(if (proto) |object| @intFromPtr(object) else 0);
-    return shapeHash(1, value);
+    // qjs shape_initial_hash (quickjs.c:5156-5163) folds BOTH halves of the
+    // 64-bit prototype pointer into the seed:
+    //   h = shape_hash(1, (uintptr_t)proto);
+    //   if (sizeof(proto) > 4) h = shape_hash(h, (uint64_t)(uintptr_t)proto >> 32);
+    const address: u64 = if (proto) |object| @intFromPtr(object) else 0;
+    const low: u32 = @truncate(address);
+    const high: u32 = @truncate(address >> 32);
+    return shapeHash(shapeHash(1, low), high);
 }
 
 pub fn transitionHash(seed: u32, atom_id: atom.Atom, flags: u6) u32 {
