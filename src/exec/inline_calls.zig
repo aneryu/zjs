@@ -1373,7 +1373,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
-        try vm_call.enterInlineCallDepth(ctx, global, function, 0);
+        try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
@@ -1435,7 +1435,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
-        try vm_call.enterInlineCallDepth(ctx, global, function, argc);
+        try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
@@ -1492,7 +1492,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
-        try vm_call.enterInlineCallDepth(ctx, global, function, 0);
+        try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
@@ -1556,7 +1556,7 @@ pub const Machine = struct {
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
-        try vm_call.enterInlineCallDepth(ctx, global, function, argc);
+        try vm_call.enterInlineCallDepthBytes(ctx, global, planned_stack_bytes);
         errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
@@ -1955,7 +1955,11 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
-        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
+        // K1 single pricing: one geometry derivation feeds admission, commit,
+        // and the persisted Entry charge (M1 dossier: the triple recompute was
+        // the top opCall residual).
+        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1966,7 +1970,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        vm_call.commitInlineCallDepth(ctx, function, 0);
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1999,7 +2003,9 @@ pub const Machine = struct {
         assertExactArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
         const ctx = self.ctx;
-        if (!vm_call.canEnterInlineCallDepth(ctx, function, argc)) return null;
+        // K1 single pricing (argc == arg_count: padded-argv prefix empty).
+        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2010,7 +2016,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        vm_call.commitInlineCallDepth(ctx, function, argc);
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2043,7 +2049,11 @@ pub const Machine = struct {
         assertCaptureLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(captures.len != 0);
         const ctx = self.ctx;
-        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
+        // K1 single pricing: one geometry derivation feeds admission, commit,
+        // and the persisted Entry charge (M1 dossier: the triple recompute was
+        // the top opCall residual).
+        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2054,7 +2064,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        vm_call.commitInlineCallDepth(ctx, function, 0);
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2095,7 +2105,9 @@ pub const Machine = struct {
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
         const ctx = self.ctx;
-        if (!vm_call.canEnterInlineCallDepth(ctx, function, argc)) return null;
+        // K1 single pricing (argc < arg_count allocates the qjs argv prefix).
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2106,7 +2118,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        vm_call.commitInlineCallDepth(ctx, function, argc);
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2743,7 +2755,11 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
-        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
+        // K1 single pricing: one geometry derivation feeds admission, commit,
+        // and the persisted Entry charge (M1 dossier: the triple recompute was
+        // the top opCall residual).
+        const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2754,7 +2770,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        vm_call.commitInlineCallDepth(ctx, function, 0);
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
