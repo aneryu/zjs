@@ -2117,9 +2117,14 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            // Keep Zig's boundary check for synthetic/legacy bytecode; normal
-            // parser output has construction-fixed length like qjs.
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4): finalize validates every
+            // var-ref operand against closure_var_count
+            // (validateVarRefOperandBounds), and frame construction sizes
+            // var_refs to exactly that count (captureSlice/initFrameVarRefs),
+            // so the resident read is unchecked like qjs OP_get_var_ref_check
+            // (quickjs.c:18655). The assert covers the test-only legacy
+            // adapter bridge, which bypasses finalize.
+            std.debug.assert(idx < vm.frame.var_refs.len);
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
             // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
@@ -2158,9 +2163,10 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            // Parser-produced bytecode has construction-fixed var-ref bounds.
-            // Retain the cold checked adapter for synthetic/legacy bytecode.
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+            // are finalize-validated, frames carry exactly closure_var_count
+            // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
+            std.debug.assert(idx < vm.frame.var_refs.len);
             const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp - 1, var_buf, vm);
@@ -2185,9 +2191,10 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
 pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    // Parser-produced bytecode has construction-fixed var-ref bounds; the cold
-    // checked adapter keeps serving synthetic/legacy bytecode (as opPutVarRef).
-    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands are
+    // finalize-validated, frames carry exactly closure_var_count cells —
+    // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
+    std.debug.assert(idx < vm.frame.var_refs.len);
     const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
     // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
     if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2203,8 +2210,8 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
 /// OP_set_var_ref, quickjs.c:18646-18654). Unlike put_var_ref, set_var_ref keeps
 /// the owned TOS value as the expression result, so the cell takes a retained
 /// copy. Publishing the copy before releasing the displaced value also makes a
-/// refcounted `captured = captured` safe. Synthetic/legacy bounds growth and
-/// generator/eval stop boundaries retain the checked cold adapter.
+/// refcounted `captured = captured` safe. Generator/eval stop boundaries
+/// retain the cold adapter; bounds are a compile-time contract (M2-刀4).
 pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -2220,7 +2227,10 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+            // are finalize-validated, frames carry exactly closure_var_count
+            // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
+            std.debug.assert(idx < vm.frame.var_refs.len);
             const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp, var_buf, vm);

@@ -10878,6 +10878,46 @@ pub const pipeline_finalize = struct {
         return std.math.add(usize, fd.args.len, fd.vars.len) catch return error.BytecodeOverflow;
     }
 
+    /// qjs's resolve_scope_var only ever emits a var-ref operand it obtained
+    /// from `fd->closure_var` (get_closure_var/add_closure_var append-only
+    /// indices, quickjs.c:32736-32760, 33290-33354), so the interpreter reads
+    /// `var_refs[idx]` with no bounds check at all (OP_get_var_ref 18627,
+    /// OP_get_var_ref_check 18655, OP_get_var 18461). zjs's lowering has the
+    /// same construction invariant: every producer (lookupClosureVar,
+    /// lookupGlobalClosureVar/emitGlobalVarOp, ensureGlobalClosureVar,
+    /// addOrFindClosureSource, lookupTopLevelModuleLexicalClosureVar) returns
+    /// an index into the append-only `fd.closure_var`. Enforce that invariant
+    /// once here, at the single production choke point every executable
+    /// FunctionBytecode passes through, so the resident var-ref handlers can
+    /// trust their operands exactly like qjs (Debug asserts remain in the
+    /// handlers for the test-only legacy adapter bridge).
+    fn validateVarRefOperandBounds(code: []const u8, closure_var_count: usize) FinalizeError!void {
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            if (size == 0 or size > code.len - pc) return error.InvalidBytecode;
+            switch (opcode.formatOf(op_id)) {
+                .var_ref => {
+                    if (size < 3) return error.InvalidBytecode;
+                    const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                    if (idx >= closure_var_count) return error.InvalidBytecode;
+                },
+                .none_var_ref => {
+                    const idx: usize = switch (op_id) {
+                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
+                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
+                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
+                        else => return error.InvalidBytecode,
+                    };
+                    if (idx >= closure_var_count) return error.InvalidBytecode;
+                },
+                else => {},
+            }
+            pc += size;
+        }
+    }
+
     /// The lowered side array is the owner ledger for atoms encoded inline in
     /// final bytecode. Validate both topology and the exact ID sequence before
     /// transferring those refs; a count-only check could free unrelated atoms.
@@ -10945,6 +10985,7 @@ pub const pipeline_finalize = struct {
 
         _ = try validateFinalArtifactShape(fd, &lowered);
         try validateFinalAtomOwners(lowered.code, lowered.atom_operands);
+        try validateVarRefOperandBounds(lowered.code, fd.closure_var.len);
 
         // Preflight the exact packed FunctionBytecode layout before the first
         // artifact allocation. Source and pc2line remain independent moved
