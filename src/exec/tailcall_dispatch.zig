@@ -454,22 +454,52 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
 /// poll must precede stack preflight, but an uncatchable interruption before
 /// the constructor runs leaves ownership with the caller; restore that top so
 /// normal frame unwind releases the complete region.
+///
+/// K7 scalarization: qjs js_poll_interrupts' inline leg is the bare cadence
+/// decrement (`--ctx->interrupt_counter <= 0`, quickjs.c:7877-7883, polled at
+/// call entry 17787). Keeping only that tick in the warm body stops the
+/// publishing poll's `!void` error union from materializing as a rodata
+/// constant + merge phi on every call (the op_goto8 tick/cold precedent).
+/// The cold half's re-poll decrements again, still lands <= 0, and runs the
+/// reset+handler leg exactly once per cadence hit.
+/// Returns true when the poll threw (pending_error published): the caller
+/// must `return .threw`. A bool keeps the whole contract in one register —
+/// an `?Outcome` result here re-materialized the merge as a memory phi
+/// (rodata null constant + sret + merged tag load), the exact phantom this
+/// scalarization removes.
 inline fn pollRetreatedCallRegion(
     vm: *Vm,
     region_start: [*]JSValue,
     value_count: usize,
-) ?Outcome {
+) bool {
+    if (!vm.ctx.pollInterruptTick()) return false;
+    return pollRetreatedCallRegionCold(vm, region_start, value_count);
+}
+
+/// Cold half of the call-entry poll: the publishing re-poll plus the
+/// region-restore semantics — an uncatchable interruption before the
+/// constructor runs leaves ownership with the caller, so the retreated top is
+/// restored before failing. noinline keeps the throw machinery (and the
+/// error-union materialization) off the warm call body.
+noinline fn pollRetreatedCallRegionCold(
+    vm: *Vm,
+    region_start: [*]JSValue,
+    value_count: usize,
+) bool {
     exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
         vm.stack.setTopPtr(region_start + value_count);
-        return vm.fail(err);
+        // vm.fail publishes pending_error and yields `.threw`; the bool
+        // carries that verdict to the caller's register-scalar return.
+        _ = vm.fail(err);
+        return true;
     };
-    return null;
+    return false;
 }
 
 inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout, comptime inline_exact: bool) Outcome {
     comptime std.debug.assert(layout == .plain or !inline_exact);
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(layout == .method));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (layout) {
         .plain => vm.machine.pushPlainCall(inline_exact, vm.global, vm.stack, target, region_start, argc),
         .method => vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc),
@@ -492,7 +522,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 /// realm global, strict preserves undefined.
 inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
@@ -509,7 +539,7 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// fixed handler body.
 inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
@@ -540,7 +570,7 @@ noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm
 /// Handler-side adapter for the outline warm constructor above.
 inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmExactArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -567,7 +597,7 @@ inline fn paddedLeafRegionHasCapacity(stack: *const stack_mod.Stack, region_star
 /// instance gains a new inline constructor (see `warmPaddedArgsLeafOutline`).
 inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmPaddedArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -583,7 +613,7 @@ inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls
 /// constructor captures as the resume record.
 inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
@@ -599,7 +629,7 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
 /// chain, and the resume record and return epilogue are identical from there.
 inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
@@ -613,7 +643,7 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// capture binding (two frame stores off the already-resolved closure record).
 inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
@@ -626,7 +656,7 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
 /// non-pivot sloppy plain twin; see `warmCaptureLeafOutline`).
 inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -642,7 +672,7 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
 /// into a shared discrimination head on the established arms.
 inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
