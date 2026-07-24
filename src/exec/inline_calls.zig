@@ -767,6 +767,12 @@ pub const Machine = struct {
         }
         std.debug.assert(chunk_index == self.chunk_count);
         const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
+        // Pre-define each slot's `frame.var_refs` so the warm borrowed-
+        // iterator constructor's store-elision compare
+        // (`finishBorrowedIteratorFrame`) reads defined memory even on a
+        // slot's first-ever push. Everything else in a virgin Entry stays
+        // undefined until its first constructor writes it.
+        for (chunk) |*virgin| virgin.frame.var_refs = &.{};
         self.chunks[chunk_index] = chunk;
         self.chunk_count += 1;
         return self.entryAt(index);
@@ -2663,7 +2669,7 @@ pub const Machine = struct {
     /// persistent `[iterator, next]` record from the suspended caller frame.
     /// A non-simple target returns null and retains the established dup/move
     /// path, whose general setup may outlive or mutate its source bindings.
-    pub fn pushBorrowedIteratorNext(
+    pub inline fn pushBorrowedIteratorNext(
         self: *Machine,
         global: *core.Object,
         target: *const InlineTarget,
@@ -2676,6 +2682,170 @@ pub const Machine = struct {
         const entry = try self.pushFrame(.borrowed_iterator, false, false, global, target, ArgsSource.initMoved(iterator_record, true));
         entry.return_action = .for_of_next;
         entry.continuation_payload = depth;
+        return entry;
+    }
+
+    /// Warm-eligibility witness for the borrowed-iterator fast constructor:
+    /// the dispatch arm gates on the borrowed-simple eligibility byte the
+    /// authoritative selector (`isBorrowedIteratorSimpleInlineFrame`) would
+    /// re-derive, plus a slab with no open var-ref tail — the shape whose
+    /// authoritative slab (`setupBorrowedIteratorEntry`) is exactly the
+    /// contiguous args/locals/operand windows carved below. `arg_count` and
+    /// `var_count` may be non-zero (the dominant sloppy `next()` lowers its
+    /// materialized `this` into loc0), both filled with undefined in place.
+    inline fn assertBorrowedIteratorWarmEligible(function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts) void {
+        const execution = call_facts.execution;
+        std.debug.assert(execution.simple_inline_eligible or
+            execution.strict_simple_inline_eligible or
+            execution.strict_simple_snapshot_inline_eligible);
+        std.debug.assert(frame_mod.frameOpenVarRefStorageCount(function) == 0);
+    }
+
+    /// Integer-pair JSValue read — the `loadValueAsIntPair` discipline from
+    /// the return chain, applied at frame construction: left to itself LLVM
+    /// copies the 16-byte record bindings through a q register, and the
+    /// callee's very next opcodes read the freshly-built frame with integer
+    /// loads (`push_this` reads the `this` tag word within a handful of
+    /// dispatches), so the SIMD store fails store-to-load forwarding across
+    /// the vector/integer domain. Two u64 loads keep the copy on integer
+    /// registers and the stores x-pair-shaped.
+    inline fn readValueAsIntPair(slot: *const core.JSValue) core.JSValue {
+        if (comptime @sizeOf(core.JSValue) != 2 * @sizeOf(u64)) {
+            return slot.*;
+        }
+        const words: *const [2]u64 = @ptrCast(@alignCast(slot));
+        const lo = words[0];
+        const hi = words[1];
+        return @bitCast([2]u64{ lo, hi });
+    }
+
+    /// Warm, allocation-free borrowed-iterator `next()` construction (M2
+    /// knife 3) — the borrowed_iterator family's twin of
+    /// `tryPushCaptureLeafCallFast`, kept as an INDEPENDENT instance with its
+    /// own publication tail (hot arms are never shared, including at the
+    /// template layer; see `pushExactArgsLeafFrame` for the tail-merge
+    /// re-scheduling hazard). The dispatch arm proved the borrowed-simple
+    /// eligibility byte plus an open-var-ref-free slab, so ONE active-chunk
+    /// carve covers the contiguous args/locals/operand windows and the
+    /// undefined fill happens in place — the same frame
+    /// `setupBorrowedIteratorEntry` builds, minus its noinline bl, the
+    /// generic depth-accounting shell, the acquireSlot round-trip, and the
+    /// mark/carve split. qjs anchor: JS_CallInternal's whole frame for
+    /// this shape is one alloca plus seven sf stores (quickjs.c:17841-17871).
+    /// A null result is the established pure miss contract: call depth,
+    /// arena watermark, the untouched caller iterator record, and Machine
+    /// links are unchanged, so the caller can invoke
+    /// `pushBorrowedIteratorNext` for first-use Entry allocation, chunk
+    /// switching, heap fallback, OOM, or stack-overflow handling.
+    pub inline fn tryPushBorrowedIteratorNextFast(
+        self: *Machine,
+        function: *const bytecode.FunctionBytecode,
+        call_facts: bytecode.CallFacts,
+        captures: []*core.VarRef,
+        iterator_record: []core.JSValue,
+        depth: u8,
+    ) ?*Entry {
+        assertBorrowedIteratorWarmEligible(function, call_facts);
+        std.debug.assert(iterator_record.len == 2);
+        const ctx = self.ctx;
+        // K1 single pricing: one geometry derivation feeds admission, commit,
+        // and the persisted Entry charge — the exact figure the generic path
+        // prices for its argc==0 borrowed source, so the teardown release
+        // stays in lockstep.
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+
+        const index = self.depth;
+        const chunk_index = index / entries_per_chunk;
+        if (chunk_index >= self.chunk_count) return null;
+        const entry = self.entryAt(index);
+
+        const rt = ctx.runtime;
+        const frame_arg_count: usize = @intCast(function.arg_count);
+        const var_count: usize = function.var_count;
+        const stack_count = @as(usize, function.stack_size) + 1;
+        const carve = rt.vm_stack.carveActiveMarked(frame_arg_count + var_count + stack_count) orelse return null;
+
+        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
+        entry.return_action = .for_of_next;
+        entry.continuation_payload = depth;
+        entry.catch_target = null;
+        entry.profile_guard = vm_call.enterCallProfile(rt);
+        entry.arena_mark = carve.mark;
+        return self.finishBorrowedIteratorFrame(entry, function, captures, iterator_record, carve.window, frame_arg_count, var_count);
+    }
+
+    /// Infallible publication tail for the warm borrowed-iterator frame —
+    /// SEPARATE body from every established finish tail (hot arms are never
+    /// shared). Field-for-field the frame `setupBorrowedIteratorEntry`
+    /// publishes for the zero-storage geometry: both call bindings borrow
+    /// the caller's iterator record (qjs JS_CallInternal reads
+    /// `func_obj`/`this_obj` without retaining either, quickjs.c:17815-17849;
+    /// the record slots stay untouched on the suspended caller stack and
+    /// root both values until the continuation returns), `var_refs` aliases
+    /// the closure's cell array (qjs `var_refs = p->u.func.var_refs`,
+    /// quickjs.c:17844), and the `.for_of_next` continuation was published
+    /// by the warm constructor above before this tail linked the Entry.
+    /// `teardown = {simple}` (no leaf bit): returns MUST route through the
+    /// general continuation-carrying pop so `popAndResume` hands the result
+    /// to the `.for_of_next` trampoline arm, and no teardown ever releases
+    /// the borrowed bindings.
+    inline fn finishBorrowedIteratorFrame(
+        self: *Machine,
+        entry: *Entry,
+        function: *const bytecode.FunctionBytecode,
+        captures: []*core.VarRef,
+        iterator_record: []core.JSValue,
+        slab: []core.JSValue,
+        frame_arg_count: usize,
+        var_count: usize,
+    ) *Entry {
+        const rt = self.ctx.runtime;
+        const args = slab[0..frame_arg_count];
+        const locals = slab[frame_arg_count..][0..var_count];
+        const stack_window = slab[frame_arg_count + var_count ..];
+        // One contiguous undefined fill for the adjacent args+locals prefix
+        // (qjs 17855-17865; zero for the capture-only `next()` shape, one
+        // slot for the dominant sloppy this-in-loc0 lowering).
+        @memset(slab[0 .. frame_arg_count + var_count], core.JSValue.undefinedValue());
+        // No failable operation follows; both bindings stay caller-owned.
+        // Field stores instead of a whole-struct literal so the one frame
+        // field the callee's per-op hot path reloads at its head —
+        // `frame.var_refs`, read by every get/put_var_ref dispatch — can be
+        // ELIDED when the Entry slot still holds the same slice from the
+        // previous iteration (the steady for-of state): re-storing it every
+        // push put the callee's first var-ref bound/pointer loads on a
+        // just-stored slot, and the measured stall on that head chain cost
+        // more cycles than the whole warm-entry instruction win. The elision
+        // is value-based (bitwise compare against defined slot contents —
+        // chunk allocation pre-defines the field), so it holds regardless of
+        // which frame shape last occupied the slot.
+        const frame = &entry.frame;
+        frame.function = function;
+        frame.pc = 0;
+        frame.this_value = readValueAsIntPair(&iterator_record[0]);
+        frame.current_function = readValueAsIntPair(&iterator_record[1]);
+        frame.actual_arg_count = 0;
+        frame.planned_stack_bytes = @intCast(vm_call.qjsBytecodeFrameAllocaSize(function, 0, false));
+        frame.locals = locals;
+        frame.args = args;
+        if (frame.var_refs.ptr != captures.ptr or frame.var_refs.len != captures.len) {
+            frame.var_refs = captures;
+        }
+        frame.open_var_refs = &.{};
+        frame.storage_values = &.{};
+        frame.ownership = .{
+            .this_value = .borrowed,
+            .current_function = .borrowed,
+            .var_refs = if (captures.len > 0) .borrowed else .owned,
+            .storage = .borrowed,
+        };
+        frame.cold = null;
+        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.teardown = .{ .simple = true };
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
         return entry;
     }
 

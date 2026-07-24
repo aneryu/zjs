@@ -1523,9 +1523,41 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
             const receiver = vm.stack.values[iterator_index];
             const method = vm.stack.values[iterator_index + 1];
             if (!receiver.isUndefined()) {
-                if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
+                if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
                     vm.frame.pc += 1;
                     const iterator_record = vm.stack.values[iterator_index..][0..2];
+                    // Warm borrowed-iterator arm (M2 knife 3): the borrowed
+                    // eligibility byte plus an open-var-ref-free slab (every
+                    // hot `next()` shape — capture-reading bodies and the
+                    // sloppy this-in-loc0 lowering alike) prove the frame the
+                    // authoritative constructor would build is one contiguous
+                    // args/locals/operand carve, so a warm hit goes poll →
+                    // warm carve → tail-jump into the callee's first opcode
+                    // with no noinline constructor bl, no generic
+                    // depth-accounting shell, and no acquireSlot round-trip —
+                    // qjs's alloca + seven sf stores (quickjs.c:17841-17871).
+                    // A warm miss (first use, chunk boundary, budget
+                    // shortfall) takes ONE outlined bl into the authoritative
+                    // constructor (poll already paid); open-binding targets
+                    // keep the established inline generic path below
+                    // unchanged.
+                    const execution = resolved.call_facts.execution;
+                    const borrowed_simple = execution.simple_inline_eligible or
+                        execution.strict_simple_inline_eligible or
+                        execution.strict_simple_snapshot_inline_eligible;
+                    if (borrowed_simple and resolved.fb.openVarRefCount() == 0) {
+                        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+                        const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
+                        if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
+                            return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr);
+                        }
+                        switch (pushBorrowedIteratorMiss(vm, &resolved, receiver, method, iterator_record, depth)) {
+                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
+                            .threw => return .threw,
+                            .recovered => return coldNext(vb, vm),
+                        }
+                    }
+                    const target = resolved.bind(receiver, method);
                     return pushBorrowedIteratorAndEnter(vb, vm, &target, iterator_record, depth);
                 }
             }
@@ -3367,6 +3399,33 @@ noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis,
             return .recovered;
         };
         return .{ .entry = slow };
+    };
+    return .{ .entry = entry };
+}
+
+// Borrowed-iterator warm-miss constructor (M2 knife 3): same
+// after-the-cluster placement as the O1/O2/Q3 outline bodies above.
+/// Authoritative fallback for a borrowed-iterator warm miss (first-use Entry
+/// allocation, chunk switching, heap fallback, OOM, stack overflow). The
+/// dispatch arm already paid the caller-Realm interrupt poll. The warm gate
+/// implies the borrowed-simple eligibility `pushBorrowedIteratorNext`
+/// re-proves, so its moved fallback (null) is unreachable here; keep the
+/// authoritative dup/move arm anyway so a future eligibility drift fails
+/// safe instead of executing an unproven frame shape.
+noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.ResolvedInlineFunction, receiver: JSValue, method: JSValue, iterator_record: []JSValue, depth: u8) EmptyLeafMiss {
+    const target = resolved.bind(receiver, method);
+    const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, &target, iterator_record, depth) catch |err| {
+        if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
+        return .recovered;
+    };
+    const entry = maybe_entry orelse {
+        var moved = [2]JSValue{ iterator_record[0].dup(), iterator_record[1].dup() };
+        defer for (moved) |value| value.free(vm.ctx.runtime);
+        const moved_entry = vm.machine.pushMovedCall(vm.global, &target, &moved, .method, .for_of_next, depth) catch |err| {
+            if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
+            return .recovered;
+        };
+        return .{ .entry = moved_entry };
     };
     return .{ .entry = entry };
 }
