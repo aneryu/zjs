@@ -3232,6 +3232,69 @@ test "M1.3: returned closure can update and return captured counter" {
     try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
 }
 
+test "resident set_var_ref preserves assignment results and refcounted self-assignment" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function __buildResidentSetVarRefProbes() {
+        \\  var shortTarget = 0;
+        \\  globalThis.__residentSetVarRefShort = function (next) {
+        \\    return shortTarget = next;
+        \\  };
+        \\  globalThis.__residentSetVarRefSelf = function () {
+        \\    return shortTarget = shortTarget;
+        \\  };
+        \\
+        \\  var capture0 = 0;
+        \\  var capture1 = 1;
+        \\  var capture2 = 2;
+        \\  var capture3 = 3;
+        \\  var genericTarget = 4;
+        \\  globalThis.__residentSetVarRefGeneric = function (next) {
+        \\    if (capture0 + capture1 + capture2 + capture3 !== 6) throw new Error("capture mismatch");
+        \\    return genericTarget = next;
+        \\  };
+        \\}
+        \\__buildResidentSetVarRefProbes();
+        \\
+        \\assert.sameValue(__residentSetVarRefShort(42), 42);
+        \\const shortObject = { marker: 1 };
+        \\assert.sameValue(__residentSetVarRefShort(shortObject), shortObject);
+        \\assert.sameValue(__residentSetVarRefSelf(), shortObject);
+        \\assert.sameValue(__residentSetVarRefSelf().marker, 1);
+        \\
+        \\const genericObject = { marker: 2 };
+        \\assert.sameValue(__residentSetVarRefGeneric(genericObject), genericObject);
+        \\assert.sameValue(__residentSetVarRefGeneric(43), 43);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const short = try globalFunctionBytecode(&js, "__residentSetVarRefShort");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(short.byteCode(), op.set_var_ref0));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(short.byteCode(), op.set_var_ref));
+
+    const self_assign = try globalFunctionBytecode(&js, "__residentSetVarRefSelf");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(self_assign.byteCode(), op.set_var_ref0));
+
+    const generic = try globalFunctionBytecode(&js, "__residentSetVarRefGeneric");
+    var generic_set_idx: ?u16 = null;
+    var pc: usize = 0;
+    while (pc < generic.byteCode().len) {
+        const opcode_id = generic.byteCode()[pc];
+        const size = bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0 or pc + size > generic.byteCode().len) return error.InvalidFunctionBytecode;
+        if (opcode_id == op.set_var_ref) {
+            generic_set_idx = std.mem.readInt(u16, generic.byteCode()[pc + 1 ..][0..2], .little);
+            break;
+        }
+        pc += size;
+    }
+    try std.testing.expect(generic_set_idx != null);
+    try std.testing.expect(generic_set_idx.? >= 4);
+}
+
 test "checked local replacement preserves int fast moves and refcounted fallbacks" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
