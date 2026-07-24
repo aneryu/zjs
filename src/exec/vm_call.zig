@@ -148,6 +148,20 @@ pub fn qjsBytecodeFrameAllocaSize(
         @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
 }
 
+/// Leaf-family pricing of `qjsBytecodeFrameAllocaSize`. Every published leaf
+/// commits with copy_argv=false and argc >= arg_count (empty/forwarded leaves
+/// are zero-arg bodies; the exact-args family asserts argc == arg_count), so
+/// the qjs padded-argv prefix is always empty and the figure collapses to
+/// function-header scalars — no argc load and no pricing select on the
+/// per-return release path.
+pub inline fn qjsBytecodeLeafFrameAllocaSize(
+    function: *const bytecode.FunctionBytecode,
+) usize {
+    const value_slots = @as(usize, function.var_count) + @as(usize, function.stack_size);
+    return value_slots * @sizeOf(core.JSValue) +
+        @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
+}
+
 inline fn bytecodeStackBudgetWouldOverflow(
     rt: *const core.JSRuntime,
     planned_stack_bytes: usize,
@@ -174,8 +188,18 @@ pub inline fn canEnterInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) bool {
+    return canEnterInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+}
+
+/// Byte-priced variants: constructors that already hold the planned frame
+/// bytes (to persist them into the Entry for the O(1) teardown release) check
+/// and commit that exact figure instead of re-deriving it from the function
+/// header.
+pub inline fn canEnterInlineCallDepthBytes(
+    ctx: *const core.JSContext,
+    planned_stack_bytes: usize,
+) bool {
     const rt = ctx.runtime;
-    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
     return rt.call_depth < maxLogicalJsCallDepth(ctx) and
         !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
 }
@@ -194,11 +218,30 @@ pub inline fn commitInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) void {
+    commitInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+}
+
+pub inline fn commitInlineCallDepthBytes(
+    ctx: *core.JSContext,
+    planned_stack_bytes: usize,
+) void {
     const rt = ctx.runtime;
-    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
     std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
     rt.active_bytecode_stack_bytes += planned_stack_bytes;
     rt.call_depth += 1;
+}
+
+/// Bytes-priced sibling of `enterInlineCallDepthMode` for callers that keep
+/// the planned figure alive across the push (Entry persistence + errdefer).
+pub inline fn enterInlineCallDepthBytes(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    planned_stack_bytes: usize,
+) !void {
+    if (!canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) {
+        return inlineCallDepthOverflow(ctx, global);
+    }
+    commitInlineCallDepthBytes(ctx, planned_stack_bytes);
 }
 
 pub inline fn leaveInlineCallDepthBytes(

@@ -859,9 +859,9 @@ pub const Machine = struct {
         );
         if (stack_preflighted) {
             std.debug.assert(!copy_argv);
-            vm_call.commitInlineCallDepthMode(self.ctx, target.fb, source.argCount(), copy_argv);
+            vm_call.commitInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         } else {
-            vm_call.enterInlineCallDepthMode(self.ctx, global, target.fb, source.argCount(), copy_argv) catch |err| {
+            vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
                 cleanupStackSource(self.ctx.runtime, source);
                 return err;
             };
@@ -2921,11 +2921,12 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
-            dying.frame.function,
-            dying.frame.actual_arg_count,
-            dying.teardown.copy_argv,
-        );
+        // Published empty-leaf geometry is zero-arg (bytecode.zig
+        // empty_leaf_geometry) and never copy_argv-priced, so the padded-argv
+        // prefix is statically empty.
+        std.debug.assert(!dying.teardown.copy_argv);
+        std.debug.assert(dying.frame.function.arg_count == 0);
+        const dying_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function);
         // Inline epilogue: the hot leg is an rc decrement plus the arena
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
@@ -2945,10 +2946,15 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
+        // This bit also covers the capture (argc==0) and padded (argc <
+        // arg_count) families, so the release stays argc-aware; only the
+        // copy_argv pricing select is statically false here (none of the
+        // exact/capture/padded finishers sets it).
+        std.debug.assert(!dying.teardown.copy_argv);
         const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
-            dying.teardown.copy_argv,
+            false,
         );
         dying.deinitExactArgsLeafInline(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
@@ -2967,11 +2973,11 @@ pub const Machine = struct {
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
-        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
-            dying.frame.function,
-            dying.frame.actual_arg_count,
-            dying.teardown.copy_argv,
-        );
+        // Forwarded leaves commit with copy_argv pricing, but the published
+        // body is zero-arg, so the padded-argv prefix is empty either way and
+        // the leaf figure releases the exact bytes charged.
+        std.debug.assert(dying.frame.function.arg_count == 0);
+        const dying_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function);
         dying.deinitForwardedLeafInline(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
