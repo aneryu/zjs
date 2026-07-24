@@ -680,6 +680,22 @@ inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb:
     return enterEntry(vm, entry, code_ptr);
 }
 
+/// Cold half of the moved/borrowed-region entry polls — the K7 sibling of
+/// `pollRetreatedCallRegionCold` without region-restore semantics: moved and
+/// borrowed sources keep ownership in their scoped caller cleanup (defer
+/// frees), so a poll throw needs only the publishing re-poll plus the
+/// pending_error store. noinline keeps the throw machinery (and the warm-path
+/// `vm.global` load it forces) off the warm entry bodies. Returns true when
+/// the poll threw: the caller must `return .threw` (bool-in-register
+/// contract, see pollRetreatedCallRegion).
+noinline fn pollCallEntryCold(vm: *Vm) bool {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        _ = vm.fail(err);
+        return true;
+    };
+    return false;
+}
+
 /// Same-Machine entry for a call region already moved out of the caller's
 /// operand layout. Proxy `get` uses this because its semantic arguments are
 /// `[target, key, receiver]`, while the caller must retain `[target, key]` for
@@ -694,7 +710,12 @@ inline fn pushMovedAndEnter(
     comptime interrupt_polled: bool,
 ) Outcome {
     if (!interrupt_polled) {
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        // K7 scalarization (see pollRetreatedCallRegion): warm body keeps only
+        // the qjs cadence tick (quickjs.c:7877-7883); the cold half's re-poll
+        // still lands <= 0 and runs the reset+handler leg once per hit.
+        if (vm.ctx.pollInterruptTick()) {
+            if (pollCallEntryCold(vm)) return .threw;
+        }
     }
     const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_payload) catch |err| {
         const recovered = if (return_action == .for_of_next)
