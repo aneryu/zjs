@@ -922,6 +922,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.put_var_ref2, .h = td.opPutVarRef(.c2) },
         .{ .o = op.put_var_ref3, .h = td.opPutVarRef(.c3) },
         .{ .o = op.put_var_ref, .h = td.opPutVarRef(.half) },
+        // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
+        // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
+        // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
+        .{ .o = op.put_var_ref_check, .h = td.op_put_var_ref_check },
         .{ .o = op.set_var_ref0, .h = td.opSetVarRef(.c0) },
         .{ .o = op.set_var_ref1, .h = td.opSetVarRef(.c1) },
         .{ .o = op.set_var_ref2, .h = td.opSetVarRef(.c2) },

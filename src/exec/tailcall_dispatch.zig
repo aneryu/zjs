@@ -2056,6 +2056,37 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
     }.h;
 }
 
+/// TDZ-checked closure var-ref write (qjs OP_put_var_ref_check,
+/// quickjs.c:18670-18682) — the per-iteration index write-back of the for-of
+/// `next()` body. The only difference from OP_put_var_ref is the uninitialized
+/// probe on the CURRENT cell value before the store; the throw leg
+/// (JS_ThrowReferenceErrorUninitialized2) falls to the cold op, which rebuilds
+/// the proper TDZ ReferenceError. Const violations and sloppy function-name
+/// writes never reach this opcode: they are consumed at lowering time exactly
+/// like qjs resolve_scope_var (quickjs.c:33301-33345 → bytecode.zig
+/// closureVarWriteThrowsReadOnly / the function_name drop arm), which is what
+/// lets the resident path be the bare qjs TDZ-check + set_value. Kept separate
+/// from opPutVarRef: put_var_ref is also the lexical-INIT opcode
+/// (scope_put_var_init lowering), so folding the TDZ probe into the shared
+/// handler would send every closure `let` initialization to the cold shell.
+/// No short forms exist for the check variant (qjs has none either).
+pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    // Parser-produced bytecode has construction-fixed var-ref bounds; the cold
+    // checked adapter keeps serving synthetic/legacy bytecode (as opPutVarRef).
+    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
+    if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // qjs set_value: publish the owned TOS value, release the displaced cell
+    // value. The freed value is the OLD cell value — never the (stale-window)
+    // operand slot — so no stack shrink is required before free (same GC-window
+    // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
+    value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+    return cont(pc + 3, sp - 1, var_buf, vm);
+}
+
 /// Assignment-expression closure/global var-ref write (qjs OP_set_var_ref0..3 /
 /// OP_set_var_ref, quickjs.c:18646-18654). Unlike put_var_ref, set_var_ref keeps
 /// the owned TOS value as the expression result, so the cell takes a retained
