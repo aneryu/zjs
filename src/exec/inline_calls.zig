@@ -2923,10 +2923,10 @@ pub const Machine = struct {
         else
             dying.deinit(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
-        std.debug.assert(self.ctx.runtime.call_depth >= chain_budget.extra_depth);
-        std.debug.assert(self.ctx.runtime.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
-        self.ctx.runtime.call_depth -= chain_budget.extra_depth;
-        self.ctx.runtime.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
+        std.debug.assert(self.ctx.runtime.hot.call_depth >= chain_budget.extra_depth);
+        std.debug.assert(self.ctx.runtime.hot.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
+        self.ctx.runtime.hot.call_depth -= chain_budget.extra_depth;
+        self.ctx.runtime.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).

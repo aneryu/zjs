@@ -3141,7 +3141,7 @@ pub fn qjsEvalGlobalScriptSource(
     // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
     // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
     // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.runtime.call_depth == 0) ctx.runtime.updateNativeStackTop();
+    if (ctx.runtime.hot.call_depth == 0) ctx.runtime.updateNativeStackTop();
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;

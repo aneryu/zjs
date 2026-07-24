@@ -674,6 +674,18 @@ pub const Stats = struct {
 
 /// Z-GE Registry
 pub const Registry = struct {
+    /// K4: `phase` is read by every JSValue release (value.zig
+    /// `freeObjectAssumeObject`/`free`, mirroring qjs `__JS_FreeValueRT`'s
+    /// `gc_phase` check) — including the per-return function rc-- on the hot
+    /// call path. QuickJS keeps `gc_phase` in the JSRuntime head
+    /// (quickjs.c:342); zjs auto layout had pushed it to the Registry tail at
+    /// rt+18-19KB, costing a `mov #imm` address materialization plus a cold
+    /// cache line on every release (M1 dossier K4). `align(64)` pins it to
+    /// Registry offset 0 and lifts the Registry field itself into JSRuntime's
+    /// highest-alignment (front) bucket, so `rt.gc.phase` is a single
+    /// imm-offset ldrb in the runtime's front cache lines.
+    phase: Phase align(64) = .none,
+
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
@@ -701,7 +713,6 @@ pub const Registry = struct {
     pin_entries: []PinEntry = &.{},
     pin_entries_capacity: usize = 0,
 
-    phase: Phase = .none,
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
     major_epoch: u64 = 0,

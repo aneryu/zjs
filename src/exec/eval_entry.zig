@@ -37,7 +37,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // outermost base. Doing it here — on the thread that will run the parser and
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
-    if (ctx.runtime.call_depth == 0) rt.updateNativeStackTop();
+    if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
     var module_name_buf: [64]u8 = undefined;
     const module_name: core.Atom = if (options.mode == .module) blk: {
         const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))

@@ -54,10 +54,10 @@ pub const CallDepthGuard = struct {
 
     pub fn deinit(self: CallDepthGuard) void {
         const rt = self.ctx.runtime;
-        std.debug.assert(rt.active_bytecode_stack_bytes >= self.planned_stack_bytes);
-        rt.active_bytecode_stack_bytes -= self.planned_stack_bytes;
-        rt.call_depth -= 1;
-        rt.native_call_depth -= 1;
+        std.debug.assert(rt.hot.active_bytecode_stack_bytes >= self.planned_stack_bytes);
+        rt.hot.active_bytecode_stack_bytes -= self.planned_stack_bytes;
+        rt.hot.call_depth -= 1;
+        rt.hot.native_call_depth -= 1;
     }
 };
 
@@ -91,8 +91,8 @@ pub fn enterCallDepth(
     planned_stack_bytes: usize,
 ) !CallDepthGuard {
     const rt = ctx.runtime;
-    if (rt.native_call_depth >= maxNativeJsCallDepth(ctx) or
-        rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+    if (rt.hot.native_call_depth >= maxNativeJsCallDepth(ctx) or
+        rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
@@ -100,9 +100,9 @@ pub fn enterCallDepth(
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
-    rt.native_call_depth += 1;
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
+    rt.hot.native_call_depth += 1;
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
@@ -168,7 +168,7 @@ inline fn bytecodeStackBudgetWouldOverflow(
 ) bool {
     const accumulated = std.math.add(
         usize,
-        rt.active_bytecode_stack_bytes,
+        rt.hot.active_bytecode_stack_bytes,
         planned_stack_bytes,
     ) catch return true;
     return rt.checkNativeStackOverflow(accumulated);
@@ -200,7 +200,7 @@ pub inline fn canEnterInlineCallDepthBytes(
     planned_stack_bytes: usize,
 ) bool {
     const rt = ctx.runtime;
-    return rt.call_depth < maxLogicalJsCallDepth(ctx) and
+    return rt.hot.call_depth < maxLogicalJsCallDepth(ctx) and
         !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
 }
 
@@ -226,9 +226,9 @@ pub inline fn commitInlineCallDepthBytes(
     planned_stack_bytes: usize,
 ) void {
     const rt = ctx.runtime;
-    std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
+    std.debug.assert(std.math.maxInt(usize) - rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
 }
 
 /// Bytes-priced sibling of `enterInlineCallDepthMode` for callers that keep
@@ -258,9 +258,9 @@ pub inline fn leaveInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) void {
-    std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes -= planned_stack_bytes;
-    rt.call_depth -= 1;
+    std.debug.assert(rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.hot.active_bytecode_stack_bytes -= planned_stack_bytes;
+    rt.hot.call_depth -= 1;
 }
 
 pub inline fn leaveInlineCallDepth(
@@ -284,7 +284,7 @@ pub fn checkTailCallChainStackBudget(
     planned_stack_bytes: usize,
 ) !void {
     const rt = ctx.runtime;
-    if (rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+    if (rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         return inlineCallDepthOverflow(ctx, global);
@@ -994,7 +994,7 @@ const native_depth_fallback_margin: usize = 8;
 /// path (which absorbs the remaining depth on the Machine at logical depth)
 /// instead of recursing. See ARCH-RECURSIVE-REWRITE.md "S2a-v3".
 pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
-    return ctx.runtime.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
+    return ctx.runtime.hot.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
 }
 
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
