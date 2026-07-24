@@ -3964,15 +3964,9 @@ pub fn setSuperPropertyValue(
         switch (desc.kind) {
             .accessor => {
                 if (desc.setter.isUndefined()) {
-                    if (throw_on_set_failure) {
-                        const exception = try throwSetFailureTypeError(
-                            ctx,
-                            global,
-                            atom_id,
-                            error.AccessorWithoutSetter,
-                        );
-                        exception.free(ctx.runtime);
-                    }
+                    // The throw helper always raises; its value arm is never
+                    // produced, so `try` is the whole control flow here.
+                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
                     return;
                 }
                 const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
@@ -3981,15 +3975,9 @@ pub fn setSuperPropertyValue(
             },
             .data => {
                 if (desc.writable == false) {
-                    if (throw_on_set_failure) {
-                        const exception = try throwSetFailureTypeError(
-                            ctx,
-                            global,
-                            atom_id,
-                            error.ReadOnly,
-                        );
-                        exception.free(ctx.runtime);
-                    }
+                    // The throw helper always raises; its value arm is never
+                    // produced, so `try` is the whole control flow here.
+                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
                     return;
                 }
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
