@@ -6827,6 +6827,64 @@ test "data to auto-init replacement stays traceable across allocation GC" {
     try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 }
 
+test "data to auto-init replacement rolls back descriptor OOM and retries in same runtime" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const array_prototype = try core.Object.createArray(rt, null);
+    defer array_prototype.value().free(rt);
+    const array_proto_slot = try global.cachedRealmValueSlot(rt, .array_prototype);
+    try global.setOptionalValueSlot(rt, array_proto_slot, array_prototype.value().dup());
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("oom-auto-init-replacement");
+    defer rt.atoms.free(key);
+    const flags = core.property.Flags.data(true, true, true);
+
+    try holder.defineOwnProperty(
+        rt,
+        key,
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+    try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.refCount());
+
+    const original_flags = holder.propFlagsAt(0);
+    const baseline_realm_refs = ctx.header.meta().rc;
+    const baseline_allocated_bytes = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(baseline_allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
+    try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(@as(?i32, 1), (try holder.getProperty(key)).asInt32());
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+    try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
+
+    try holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global);
+    try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
+    try std.testing.expectEqual(flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(baseline_realm_refs + 1, ctx.header.meta().rc);
+    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+
+    const materialized = try holder.getProperty(key);
+    defer materialized.free(rt);
+    const materialized_array = try core.array.expectArray(materialized);
+    try std.testing.expectEqual(@as(u32, 0), materialized_array.arrayLength());
+    try std.testing.expectEqual(core.property.Kind.data, holder.propFlagsAt(0).kind);
+    try std.testing.expectEqual(flags.bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(baseline_realm_refs, ctx.header.meta().rc);
+}
+
 test "replacing auto-init transfers the owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
