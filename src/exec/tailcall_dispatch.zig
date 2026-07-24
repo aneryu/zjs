@@ -2276,6 +2276,36 @@ pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
     return cont(pc + 2, sp + 1, var_buf, vm);
 }
 
+/// qjs OP_push_this (quickjs.c:17933-17954): a register-resident tag check on the
+/// raw receiver. The dominant arms inline — an object `this` dups directly
+/// (`likely(tag == JS_TAG_OBJECT) goto normal_this`, 17939-17940/17948-17950;
+/// mode-independent, strict pushes the same raw dup), and a sloppy
+/// undefined/null receiver substitutes the realm global
+/// (`JS_DupValue(ctx, ctx->global_obj)`, 17941-17943). qjs never writes
+/// `this_obj` back, so the global arm skips the frame-slot store too — a later
+/// direct-eval materializeFrameThisBinding substitutes the same singleton
+/// global, and the only raw `frame.this_value` reader outside the materialize
+/// hook (finishFunctionReturn's derived-ctor arm) is strict-only. The
+/// allocating primitive ToObject arm (17944-17946, which must cache the boxed
+/// wrapper in the frame slot for identity), the strict non-object raw push, and
+/// the derived-ctor uninitialized -> ReferenceError check stay on cold
+/// pushThisVm/materializeFrameThisBinding.
+pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const v = vm.frame.this_value;
+    if (v.isObject()) {
+        sp[0] = v.dup();
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
+    if ((v.isUndefined() or v.isNull()) and
+        !(vm.function.isStrictMode() or vm.function.runtimeStrictMode()))
+    {
+        sp[0] = vm.global.value().dup();
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 /// Frameless primitive constant pushes. QuickJS's `CASE(OP_null)` is the direct
 /// `*sp++ = JS_NULL; BREAK;` form; undefined, booleans, and immediate integers
 /// are the same register-resident primitive stores. `pushSmallIntMaybeFuse` is a
