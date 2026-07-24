@@ -12354,11 +12354,10 @@ pub const parser_core = struct {
                 }
                 if (export_decl) try addModuleExportName(s, atom_id, atom_id);
 
-                if (local_lexical_idx) |idx| {
-                    if (s.emit_lexical_tdz_at_decl) {
-                        try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
-                    }
-                }
+                // No decl-time set_loc_uninitialized: the enter_scope lowering
+                // (qjs OP_enter_scope, writeEnterScopeRefresh) owns the single
+                // TDZ arming, exactly as in QuickJS resolve_variables. Emitting
+                // here again produced a duplicate arming per for-head lexical.
 
                 // Check for initializer
                 if (s.peekKind() == '=') {
@@ -14442,9 +14441,10 @@ pub const parser_core = struct {
         const defined = try s.defineVar(name, binding.define_type);
         if (binding.define_type == .let_ or binding.define_type == .const_) {
             switch (defined) {
+                // No decl-time set_loc_uninitialized — see the simple-decl
+                // producer: the enter_scope lowering owns the single arming.
                 .local => |idx| if (s.emit_lexical_tdz_at_decl) {
                     s.cur_func().vars[idx].tdz_emitted_at_decl = true;
-                    try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
                 },
                 .global => {},
                 .argument => unreachable,
