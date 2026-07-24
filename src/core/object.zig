@@ -10650,17 +10650,6 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
-    /// Trusted variant of `addProperty` for callers that already hold a live
-    /// `atom_id` ref across the whole call (see `appendPreparedPropertyEntryTrusted`
-    /// for the guard-elision rationale). Used only by
-    /// `definePlainDataPropertyKnownFast` on the object-literal `OP_define_field`
-    /// path, where `atom_id` is the executing function bytecode's inline operand
-    /// and is rooted for the entire opcode.
-    fn addPropertyTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
-        try self.appendPreparedPropertyEntryTrusted(rt, atom_id, flagsFromDescriptor(desc), slot);
-    }
-
     /// Lean plain-object define for the object-literal fast path (OP_define_field
     /// on a fresh ordinary object). Mirrors qjs JS_DefineProperty -> JS_CreateProperty
     /// for a NON-exotic object (quickjs.c:10164 `if (p->is_exotic)` gates the whole
@@ -10670,9 +10659,19 @@ pub const Object = extern struct {
     /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
-    /// class_id==object, !hasExoticMethods, !is_array, extensible.
-    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+    /// class_id==object, !hasExoticMethods, !is_array, extensible, and a
+    /// NON-refcounted `value` (both call sites guard `requiresRefCount`).
+    ///
+    /// Takes the bare value instead of a `Descriptor`: qjs OP_define_field
+    /// carries its property flags as the constant int `JS_PROP_C_W_E`
+    /// (quickjs.c:19269) straight into add_property — no descriptor record is
+    /// ever materialized on the literal path. The Descriptor round-trip
+    /// (96B stack build in the handler + kind/flag re-derivation in the add
+    /// path) is confined to the rare duplicate-key branch, which feeds the
+    /// generic isCompatible/replaceProperty machinery.
+    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
         if (self.findPropertyIndexTrusted(atom_id)) |index| {
+            const desc = descriptor.Descriptor.data(data_value, true, true, true);
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
@@ -10684,8 +10683,16 @@ pub const Object = extern struct {
         // FunctionBytecode holds a ref on (dupBytecodeAtoms) and the frame's
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
-        // so use the trusted (guard-free) add.
-        try self.addPropertyTrusted(rt, atom_id, desc);
+        // so use the trusted (guard-free) add. Flags are the comptime C_W_E
+        // constant; the slot dup mirrors slotFromDescriptor's
+        // dupPropertyDataValue (a no-op rc path for the guarded
+        // non-refcounted value).
+        try self.appendPreparedPropertyEntryTrusted(
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = data_value.dup() },
+        );
     }
 
     /// Default entry point: the caller does NOT guarantee an independent live
@@ -10735,7 +10742,10 @@ pub const Object = extern struct {
             const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
             const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
-            @memcpy(next[0..old_len], self.prop_values[0..old_len]);
+            // The dominant grow is a fresh object's FIRST property (old_len ==
+            // 0, no storage yet): skip the memcpy-runtime call for the empty
+            // copy instead of paying a zero-length `bl memcpy` per literal.
+            if (old_len != 0) @memcpy(next[0..old_len], self.prop_values[0..old_len]);
             self.prop_values = next.ptr;
             current_capacity = next_capacity;
             grew_properties = true;
@@ -10778,7 +10788,13 @@ pub const Object = extern struct {
         if (is_array_index) {
             self.flags.may_have_indexed_properties = true;
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
+        // qjs add_property (quickjs.c:9209-9222) probes the transition cache
+        // and commits a hit (js_dup_shape + swap + js_free_shape) inline in its
+        // own frame; only the miss triage (shared clone / rc==1 in-place
+        // append) and the sparse array-index path pay an outlined call.
+        if (is_array_index or !rt.shapes.tryCachedTransition(&self.shape_ref, atom_id, entry_flags.bits(), current_capacity)) {
+            try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
+        }
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -10804,15 +10820,18 @@ pub const Object = extern struct {
         // add_property likewise relies on the single caller-held atom ref
         // through add_shape_property (which does the one owning JS_DupAtom).
         // Indexed properties mutate a unique sparse shape in place. Named
-        // properties use the qjs transition triage: cache hit, shared clone, or
-        // rc==1 in-place append. transitionProperty owns replacement releases
-        // and threads relocation back through self.shape_ref.
+        // properties reach here only after the caller's inline
+        // `tryCachedTransition` probe MISSED (qjs add_property cache-hit leg,
+        // quickjs.c:9209-9222, runs in the append frame); the remaining triage
+        // is shared clone or rc==1 in-place append. transitionPropertyUncached
+        // owns replacement releases and threads relocation back through
+        // self.shape_ref.
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity);
+        try rt.shapes.transitionPropertyUncached(&self.shape_ref, atom_id, flags, property_capacity);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {

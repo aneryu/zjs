@@ -59,7 +59,7 @@ pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: c
     if (target.proxyTarget() != null) return false;
     if (target.isArray()) return false;
     if (!target.flags.extensible) return false;
-    target.definePlainDataPropertyKnownFast(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch return false;
+    target.definePlainDataPropertyKnownFast(rt, atom_id, value) catch return false;
     return true;
 }
 
@@ -207,7 +207,7 @@ pub noinline fn defineField(
                 !target.isArray() and
                 target.flags.extensible)
             {
-                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, value);
                 return .done;
             }
         } else |_| {}

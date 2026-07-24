@@ -329,22 +329,33 @@ pub const Registry = struct {
         return shape;
     }
 
-    /// Apply a named-property transition to the shape owned by one object.
+    /// Inline transition-cache probe + commit for the named-property append hot
+    /// path. Mirrors the qjs `add_property` cache-hit leg (quickjs.c:9209-9222):
+    /// `find_hashed_shape_prop` hit -> `js_dup_shape(new_sh)` -> shape swap ->
+    /// `js_free_shape(sh)` all run inside the single add_property frame — no
+    /// per-property call boundary on a hit (only the parent's rc==0 teardown
+    /// leaves via the outlined destroyShape). Returns false on a miss with the
+    /// shape untouched; the caller falls to `transitionPropertyUncached` for
+    /// the shared-clone / rc==1 in-place legs.
+    pub inline fn tryCachedTransition(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) bool {
+        const parent = shape_ptr.*;
+        const cached = self.findHashedShapeProperty(parent, atom_id, flags, property_capacity) orelse return false;
+        cached.retain();
+        shape_ptr.* = cached;
+        self.release(parent);
+        return true;
+    }
+
+    /// Apply a named-property transition after a `tryCachedTransition` miss.
     ///
-    /// Mirrors qjs `add_property`: reuse a cached transition when present,
-    /// clone a shared miss, and append an rc==1 miss in place. `shape_ptr` is
-    /// threaded through the operation because either the cache/clone branch or
+    /// Mirrors the qjs `add_property` miss legs (quickjs.c:9223-9236): clone a
+    /// shared shape, and append to an rc==1 shape in place. `shape_ptr` is
+    /// threaded through the operation because either the clone branch or
     /// inline-FAM growth can replace the allocation. This function owns every
     /// old-shape release required by a replacement; the in-place branch never
     /// releases the shape whose ownership merely moved during relocation.
-    pub fn transitionProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
+    pub fn transitionPropertyUncached(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
         const parent = shape_ptr.*;
-        if (self.findHashedShapeProperty(parent, atom_id, flags, property_capacity)) |shape| {
-            shape.retain();
-            shape_ptr.* = shape;
-            self.release(parent);
-            return;
-        }
         if (parent.header.meta().rc != 1) {
             var child = try self.cloneShape(parent, parent.proto, @max(parent.prop_size, property_capacity), true);
             var child_owned = true;
@@ -375,7 +386,7 @@ pub const Registry = struct {
         }
     }
 
-    fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) ?*Shape {
+    inline fn findHashedShapeProperty(self: *Registry, parent: *Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) ?*Shape {
         if (!parent.is_hashed) return null;
         const expected_hash = transitionHash(parent.hash, atom_id, flags);
         const n = parent.prop_count;
