@@ -6761,6 +6761,72 @@ test "fresh object prototype rebinding reuses the shared empty root shape" {
     try std.testing.expectEqual(@as(u32, 0), first.shape_ref.prop_count);
 }
 
+test "data to auto-init replacement stays traceable across allocation GC" {
+    const ForceCollectionProbe = struct {
+        rt: *core.JSRuntime,
+        calls: usize = 0,
+        collection_failed: bool = false,
+
+        fn trigger(raw: ?*anyopaque, size: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (size != @sizeOf(core.property.AutoInit)) return;
+            self.calls += 1;
+
+            // Avoid recursively re-entering this test hook if the collection
+            // itself allocates. The production trigger is restored after the
+            // replacement call below.
+            const saved_trigger = self.rt.memory.trigger_gc_fn;
+            const saved_context = self.rt.memory.trigger_gc_ctx;
+            self.rt.memory.trigger_gc_fn = null;
+            self.rt.memory.trigger_gc_ctx = null;
+            defer {
+                self.rt.memory.trigger_gc_fn = saved_trigger;
+                self.rt.memory.trigger_gc_ctx = saved_context;
+            }
+            _ = self.rt.forceGC(null) catch {
+                self.collection_failed = true;
+            };
+        }
+    };
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.RealmContext.create(rt);
+    defer ctx.destroy();
+    const global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try global.ensureGlobalPayload(rt);
+    ctx.global = global;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("allocation-gc-auto-init-replacement");
+    defer rt.atoms.free(key);
+    const flags = core.property.Flags.data(true, true, true);
+
+    try holder.defineOwnProperty(
+        rt,
+        key,
+        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+    );
+
+    var probe = ForceCollectionProbe{ .rt = rt };
+    const saved_trigger = rt.memory.trigger_gc_fn;
+    const saved_context = rt.memory.trigger_gc_ctx;
+    rt.memory.trigger_gc_fn = ForceCollectionProbe.trigger;
+    rt.memory.trigger_gc_ctx = &probe;
+    {
+        defer {
+            rt.memory.trigger_gc_fn = saved_trigger;
+            rt.memory.trigger_gc_ctx = saved_context;
+        }
+        try holder.defineEmptyArrayAutoInitProperty(rt, key, flags, global);
+    }
+
+    try std.testing.expect(probe.calls > 0);
+    try std.testing.expect(!probe.collection_failed);
+    try std.testing.expectEqual(core.property.Kind.auto_init, holder.propFlagsAt(0).kind);
+    try std.testing.expectEqual(&ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+}
+
 test "replacing auto-init transfers the owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

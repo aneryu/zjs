@@ -9604,16 +9604,18 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
-            const old_flags = self.propFlagsAt(index);
-            const entry = &self.prop_values[index];
-            const old_slot = entry.slot;
-            entry.slot = .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
+            const next_slot = try self.createPropAutoInitSlot(rt, realm_global, .{
                 .name = "empty array",
                 .length = 0,
                 .kind = .empty_array,
-            }) };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.withKind(.auto_init).bits());
-            destroyPropertySlot(rt, atom_id, old_flags, old_slot);
+            });
+            self.setEntryKindAndSlot(
+                rt,
+                atom_id,
+                index,
+                flags.withKind(.auto_init),
+                .{ .auto_init = next_slot },
+            );
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
