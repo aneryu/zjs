@@ -9174,11 +9174,11 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Annex B creates the eval `var` in the caller variable environment while
-    // its initializer still resolves the catch cell, so the post-catch write is
-    // local. A later plain `var saved` eval follows pinned QuickJS and
+    // Pinned QuickJS stops eval declaration resolution at the first same-name
+    // catch binding, so no second caller-variable target is created and the
+    // post-catch write reaches the global. A later plain `var saved` eval
     // force-initializes the variable-object property to undefined.
-    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\nundefined\n", stream.buffered());
+    try std.testing.expectEqualStrings("500 500\n501 511\nlocal 42local\nundefined\n", stream.buffered());
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {

@@ -1256,7 +1256,7 @@ test "resolve_variables: eval declarations resolve ordered binding targets" {
     }
 }
 
-test "resolve_variables: catch var keeps initializer target and plans outer binding" {
+test "resolve_variables: catch var is the sole first-match eval declaration target" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1274,16 +1274,13 @@ test "resolve_variables: catch var keeps initializer target and plans outer bind
         .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
         else => try std.testing.expect(false),
     }
-    try std.testing.expectEqual(@as(?u16, 1), var_plan.eval_var_object_fallback);
 
-    // Function declarations retain the pinned-QuickJS first-match behavior;
-    // the Annex B exception above is intentionally scoped to `var`.
+    // Function declarations use the same pinned-QuickJS first-match walk.
     const function_plan = try resolveEvalDeclarationPlan(rt, name, x_atom, true, 0, &catch_then_var_object);
     switch (function_plan.eval_target) {
         .closure => |idx| try std.testing.expectEqual(@as(u16, 0), idx),
         else => try std.testing.expect(false),
     }
-    try std.testing.expectEqual(@as(?u16, null), function_plan.eval_var_object_fallback);
 }
 
 test "resolve_variables: direct eval var object probes unresolved reads" {

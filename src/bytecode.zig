@@ -1493,10 +1493,6 @@ pub const function_bytecode = struct {
         scope_level: i32,
         var_name: atom.Atom,
         eval_target: EvalBindingTarget = .unresolved,
-        /// Compile-only Annex B.3.4 plan: a same-name simple catch binding is
-        /// still the initializer target, while the caller's variable object
-        /// must acquire the `var` binding if it does not already own one.
-        eval_var_object_fallback: ?u16 = null,
     };
 
     /// Exact optional QuickJS debug tail (`JSFunctionBytecode.debug`). It is
@@ -6050,43 +6046,23 @@ pub const pipeline_resolve_variables = struct {
     /// walk: the first applicable entry is the declaration environment.
     fn resolveEvalGlobalVarTargets(fd: *function_def_mod.FunctionDef) Error!void {
         for (fd.global_vars) |*gv| {
-            gv.eval_var_object_fallback = null;
             if (!fd.is_eval) {
                 gv.eval_target = .global;
                 continue;
             }
 
             gv.eval_target = .global;
-            var matched_catch_var = false;
             for (fd.closure_var, 0..) |cv, idx| {
                 if (cv.var_name == gv.var_name) {
-                    if (matched_catch_var) {
-                        // An outer same-name binding means the declaration
-                        // environment already owns the binding. The nearer
-                        // catch remains the initializer reference target.
-                        break;
-                    }
+                    // instantiate_hoisted_definitions stops at the first
+                    // same-name closure, including a simple catch binding.
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
                     gv.eval_target = .{ .closure = @intCast(idx) };
-                    // Pinned QuickJS stops here. Annex B.3.4 instead ignores a
-                    // simple catch environment while deciding whether a
-                    // direct-eval `var` must be created in the caller's
-                    // VariableDeclarationEnvironment. Keep function
-                    // declarations on the pinned-QJS path until their distinct
-                    // initialization semantics have equally strong coverage.
-                    if (gv.cpool_idx < 0 and cv.varKind() == .catch_) {
-                        matched_catch_var = true;
-                        continue;
-                    }
                     break;
                 }
                 if (isEvalVarObjectAtom(cv.var_name) and closureVarIsRuntimeVarRef(cv)) {
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
-                    if (matched_catch_var) {
-                        gv.eval_var_object_fallback = @intCast(idx);
-                    } else {
-                        gv.eval_target = .{ .var_object = @intCast(idx) };
-                    }
+                    gv.eval_target = .{ .var_object = @intCast(idx) };
                     break;
                 }
             }
@@ -6114,18 +6090,6 @@ pub const pipeline_resolve_variables = struct {
         return false;
     }
 
-    fn evalVarObjectEnsureSize(ctx: *const JSContext, ref_idx: u16) usize {
-        return selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size +
-            opcode.sizeOf(opcode.op.dup) +
-            opcode.sizeOf(opcode.op.push_atom_value) +
-            opcode.sizeOf(opcode.op.swap) +
-            opcode.sizeOf(opcode.op.in) +
-            opcode.sizeOf(opcode.op.if_true) +
-            opcode.sizeOf(opcode.op.undefined) +
-            opcode.sizeOf(opcode.op.define_field) +
-            opcode.sizeOf(opcode.op.drop);
-    }
-
     fn globalHoistSize(
         ctx: *const JSContext,
         gv: function_def_mod.GlobalVar,
@@ -6140,18 +6104,14 @@ pub const pipeline_resolve_variables = struct {
                 opcode.sizeOf(opcode.op.define_field) + 1,
             .global, .unresolved => 0,
         };
-        return target_size + if (gv.eval_var_object_fallback) |idx|
-            evalVarObjectEnsureSize(ctx, idx)
-        else
-            0;
+        return target_size;
     }
 
     fn globalHoistAtomCount(gv: function_def_mod.GlobalVar) usize {
-        const target_count: usize = switch (gv.eval_target) {
+        return switch (gv.eval_target) {
             .var_object => 1,
             .closure, .global, .unresolved => 0,
         };
-        return target_count + @as(usize, if (gv.eval_var_object_fallback != null) 2 else 0);
     }
 
     const BodyHoistMetrics = struct {
@@ -6233,18 +6193,6 @@ pub const pipeline_resolve_variables = struct {
         }
 
         for (fd.global_vars) |gv| {
-            if (gv.eval_var_object_fallback) |ref_idx| {
-                try writeEvalVarObjectEnsure(
-                    ctx,
-                    func,
-                    output,
-                    out_idx,
-                    output_atoms,
-                    out_atom_idx,
-                    ref_idx,
-                    gv.var_name,
-                );
-            }
             switch (gv.eval_target) {
                 .closure => |ref_idx| {
                     if (gv.cpool_idx < 0) continue;
@@ -6275,55 +6223,6 @@ pub const pipeline_resolve_variables = struct {
             out_idx.* += opcode.sizeOf(opcode.op.return_undef);
             std.mem.writeInt(u32, output[jump_pc + 1 ..][0..4], @intCast(out_idx.*), .little);
         }
-    }
-
-    fn writeEvalVarObjectEnsure(
-        ctx: *const JSContext,
-        func: *bytecode_function.Bytecode,
-        output: []u8,
-        out_idx: *usize,
-        output_atoms: []atom.Atom,
-        out_atom_idx: *usize,
-        ref_idx: u16,
-        atom_id: atom.Atom,
-    ) Error!void {
-        const start_pc = out_idx.*;
-        const encoded_size = evalVarObjectEnsureSize(ctx, ref_idx);
-        if (start_pc + encoded_size > output.len or out_atom_idx.* + 2 > output_atoms.len) {
-            return error.InvalidBytecode;
-        }
-        const drop_pc = start_pc + encoded_size - opcode.sizeOf(opcode.op.drop);
-        if (drop_pc > std.math.maxInt(u32)) return error.InvalidBytecode;
-
-        writeVarRefForm(output, out_idx, selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), ref_idx);
-        output[out_idx.*] = opcode.op.dup;
-        out_idx.* += opcode.sizeOf(opcode.op.dup);
-
-        output[out_idx.*] = opcode.op.push_atom_value;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
-        out_atom_idx.* += 1;
-        out_idx.* += opcode.sizeOf(opcode.op.push_atom_value);
-
-        output[out_idx.*] = opcode.op.swap;
-        out_idx.* += opcode.sizeOf(opcode.op.swap);
-        output[out_idx.*] = opcode.op.in;
-        out_idx.* += opcode.sizeOf(opcode.op.in);
-        output[out_idx.*] = opcode.op.if_true;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], @intCast(drop_pc), .little);
-        out_idx.* += opcode.sizeOf(opcode.op.if_true);
-
-        output[out_idx.*] = opcode.op.undefined;
-        out_idx.* += opcode.sizeOf(opcode.op.undefined);
-        output[out_idx.*] = opcode.op.define_field;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
-        out_atom_idx.* += 1;
-        out_idx.* += opcode.sizeOf(opcode.op.define_field);
-
-        output[out_idx.*] = opcode.op.drop;
-        out_idx.* += opcode.sizeOf(opcode.op.drop);
-        if (out_idx.* != start_pc + encoded_size) return error.InvalidBytecode;
     }
 
     fn findClosureName(fd: *const function_def_mod.FunctionDef, atom_id: atom.Atom) ?u16 {
@@ -10586,9 +10485,31 @@ pub const pipeline_finalize = struct {
         target: *function_def_mod.FunctionDef,
         owner: *function_def_mod.FunctionDef,
         local_idx: usize,
+        normalize_unscoped: bool,
     ) FinalizeError!void {
         if (local_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        resolve_variables.threadParentLocalSource(target, owner, @intCast(local_idx)) catch |err| return switch (err) {
+        const source_idx: u16 = @intCast(local_idx);
+        if (source_idx >= owner.vars.len) return error.InvalidBytecode;
+        owner.captureLocal(source_idx) catch return error.InvalidBytecode;
+        const vd = owner.vars[source_idx];
+        // QuickJS add_eval_variables preserves scoped binding attributes, but
+        // deliberately forwards ancestor unscoped locals as non-const NORMAL
+        // rows. In particular, a named-function self binding loses its
+        // FUNCTION_NAME write protection only along this descendant-eval path.
+        _ = resolve_variables.threadClosureSource(
+            target,
+            owner,
+            source_idx,
+            function_def_mod.ClosureVar.init(.{
+                .closure_type = .local,
+                .is_lexical = vd.is_lexical,
+                .is_const = if (normalize_unscoped) false else vd.is_const,
+                .var_kind = if (normalize_unscoped) .normal else vd.var_kind,
+                .var_idx = source_idx,
+                .var_name = vd.var_name,
+            }),
+            .local,
+        ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.BytecodeOverflow => error.BytecodeOverflow,
             else => error.InvalidBytecode,
@@ -10601,7 +10522,26 @@ pub const pipeline_finalize = struct {
         arg_idx: usize,
     ) FinalizeError!void {
         if (arg_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        resolve_variables.threadParentArgSource(target, owner, @intCast(arg_idx)) catch |err| return switch (err) {
+        const source_idx: u16 = @intCast(arg_idx);
+        if (source_idx >= owner.args.len) return error.InvalidBytecode;
+        owner.captureArg(source_idx) catch return error.InvalidBytecode;
+        const arg = owner.args[source_idx];
+        // Ancestor arguments use the same add_eval_variables normalization:
+        // lexical provenance is retained, while const/kind are ordinary.
+        _ = resolve_variables.threadClosureSource(
+            target,
+            owner,
+            source_idx,
+            function_def_mod.ClosureVar.init(.{
+                .closure_type = .arg,
+                .is_lexical = arg.is_lexical,
+                .is_const = false,
+                .var_kind = .normal,
+                .var_idx = source_idx,
+                .var_name = arg.var_name,
+            }),
+            .arg,
+        ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.BytecodeOverflow => error.BytecodeOverflow,
             else => error.InvalidBytecode,
@@ -10686,7 +10626,7 @@ pub const pipeline_finalize = struct {
                     return error.InvalidBytecode;
                 }
                 visited += 1;
-                try captureEvalParentLocal(fd, parent, @intCast(scope_idx));
+                try captureEvalParentLocal(fd, parent, @intCast(scope_idx), false);
                 scope_idx = parent.vars[@intCast(scope_idx)].scope_next;
             }
 
@@ -10698,12 +10638,12 @@ pub const pipeline_finalize = struct {
                 }
                 for (parent.vars, 0..) |vd, local_idx| {
                     if (vd.scope_level != 0 or vd.var_name == atom.ids.ret or vd.var_name == atom.null_atom) continue;
-                    try captureEvalParentLocal(fd, parent, local_idx);
+                    try captureEvalParentLocal(fd, parent, local_idx, true);
                 }
             } else {
                 for (parent.vars, 0..) |vd, local_idx| {
                     if (vd.scope_level == 0 and isVarInArgumentScope(vd)) {
-                        try captureEvalParentLocal(fd, parent, local_idx);
+                        try captureEvalParentLocal(fd, parent, local_idx, true);
                     }
                 }
             }
