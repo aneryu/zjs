@@ -9434,18 +9434,17 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             if (!self.isAutoInitAt(index)) return error.TypeError;
             const ai_flags = flags.withKind(.auto_init);
-            if (self.propFlagsAt(index).bits() != ai_flags.bits()) {
+            // Prepare before publication: every fallible step (unique-shape
+            // clone, replacement slot construction) completes before any flag
+            // or slot byte is published, so an OOM leaves the entry untouched.
+            if (self.propFlagsAt(index).bits() != ai_flags.bits())
                 try self.ensureUniqueShapeForMutation(rt);
-                rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
-            }
             const next_slot = try self.createPropAutoInitSlot(rt, realm_global, .{
                 .name = name,
                 .length = length,
                 .native_builtin_id = native_builtin_id,
             });
-            const old_slot = self.prop_values[index].slot;
-            self.prop_values[index].slot = .{ .auto_init = next_slot };
-            destroyPropertySlot(rt, atom_id, ai_flags, old_slot);
+            self.setEntryKindAndSlot(rt, atom_id, index, ai_flags, .{ .auto_init = next_slot });
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }

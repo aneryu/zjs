@@ -6928,6 +6928,65 @@ test "replacing auto-init transfers the owned Realm edge" {
     try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 }
 
+test "replacing auto-init rolls back descriptor OOM and retries in same runtime" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_ctx = try core.RealmContext.create(rt);
+    defer first_ctx.destroy();
+    const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try first_global.ensureGlobalPayload(rt);
+    first_ctx.global = first_global;
+    const second_ctx = try core.RealmContext.create(rt);
+    defer second_ctx.destroy();
+    const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try second_global.ensureGlobalPayload(rt);
+    second_ctx.global = second_global;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("oom-replace-realm");
+    defer rt.atoms.free(key);
+
+    try holder.defineAutoInitPropertyWithRealmAndNative(
+        rt,
+        key,
+        "oom-replace-realm",
+        0,
+        core.property.Flags.data(true, false, true),
+        first_global,
+        0,
+    );
+    // A unique shape pins the replacement's only fallible allocation to the
+    // auto-init slot construction, after the old code had already published
+    // the new descriptor bits.
+    try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.refCount());
+
+    const original_flags = holder.propFlagsAt(0);
+    const first_realm_refs = first_ctx.header.meta().rc;
+    const second_realm_refs = second_ctx.header.meta().rc;
+    const baseline_allocated_bytes = rt.memory.allocated_bytes;
+    const next_flags = core.property.Flags.data(false, true, true);
+    rt.setMemoryLimit(baseline_allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_realm_refs, first_ctx.header.meta().rc);
+    try std.testing.expectEqual(second_realm_refs, second_ctx.header.meta().rc);
+    try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
+
+    try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0);
+    try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_realm_refs - 1, first_ctx.header.meta().rc);
+    try std.testing.expectEqual(second_realm_refs + 1, second_ctx.header.meta().rc);
+}
+
 test "deleting auto-init releases its owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
