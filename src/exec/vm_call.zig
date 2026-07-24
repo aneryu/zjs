@@ -248,7 +248,16 @@ pub inline fn leaveInlineCallDepthBytes(
     ctx: *core.JSContext,
     planned_stack_bytes: usize,
 ) void {
-    const rt = ctx.runtime;
+    leaveInlineCallDepthBytesRt(ctx.runtime, planned_stack_bytes);
+}
+
+/// rt-threaded sibling: the leaf pops load `rt` once BEFORE their inline
+/// teardown's arena store, whose aliasing otherwise blocks CSE of the
+/// ctx->runtime reload on the release path (M1 dossier K3).
+pub inline fn leaveInlineCallDepthBytesRt(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) void {
     std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
     rt.active_bytecode_stack_bytes -= planned_stack_bytes;
     rt.call_depth -= 1;

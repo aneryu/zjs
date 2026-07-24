@@ -1897,6 +1897,17 @@ pub const function_bytecode = struct {
 
         // Slice accessors materialize a `[]T` from the bare pointer + length pair.
         // The VM/readers use these instead of touching the raw fields.
+        /// Hot-path sibling of `byteCode` for callers holding a proven
+        /// materialization invariant: a resolved InlineTarget (its published
+        /// call_facts and code[0] eligibility reads exist only for finalized,
+        /// materialized FBs) or a resumed caller (its bytecode is executing).
+        /// Skips the optional probe branch the interpreter otherwise re-runs
+        /// on every call entry and return republication.
+        pub inline fn byteCodeAssumeMaterialized(self: *const FunctionBytecodeImpl) []u8 {
+            std.debug.assert(self.byte_code != null and self.byte_code_len > 0);
+            return self.byte_code.?[0..@intCast(self.byte_code_len)];
+        }
+
         pub inline fn byteCode(self: *const FunctionBytecodeImpl) []u8 {
             // Canonical compiler-produced FBs always have exact, non-empty
             // code in the QJS core pointer/length pair. Keep that path to the

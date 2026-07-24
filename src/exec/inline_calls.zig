@@ -2966,8 +2966,9 @@ pub const Machine = struct {
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
         // outline behind the rc==0 branch).
+        const rt = self.ctx.runtime;
         dying.deinitEmptyLeafInline(self.ctx);
-        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -2992,8 +2993,9 @@ pub const Machine = struct {
             dying.frame.actual_arg_count,
             false,
         ));
+        const rt = self.ctx.runtime;
         dying.deinitExactArgsLeafInline(self.ctx);
-        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -3015,8 +3017,9 @@ pub const Machine = struct {
         std.debug.assert(dying.frame.function.arg_count == 0);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
+        const rt = self.ctx.runtime;
         dying.deinitForwardedLeafInline(self.ctx);
-        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }

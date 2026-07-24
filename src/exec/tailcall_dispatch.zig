@@ -477,7 +477,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -674,7 +674,7 @@ inline fn pushMovedAndEnter(
         if (!recovered) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
@@ -698,7 +698,7 @@ inline fn pushBorrowedIteratorAndEnter(
         defer for (moved) |value| value.free(vm.ctx.runtime);
         return pushMovedAndEnter(vb, vm, target, &moved, .for_of_next, depth, true);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
@@ -765,7 +765,7 @@ inline fn pushForwardedAndEnter(
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
@@ -932,13 +932,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             // exactly like reloadAfterPop's entry arm.
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -988,13 +988,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = value;
             caller.stack.setTopPtr(resume_sp + 1);
@@ -1021,13 +1021,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            const resume_pc = caller_function.byteCode().ptr + caller.frame.pc;
+            const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
             const resume_sp = caller.stack.topPtr();
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: the retired target slot
             // at the caller's operand top is dead (its value transferred into
@@ -1435,7 +1435,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.stack.setTopPtr(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
-                        return enterEntry(vm, entry, target.fb.byteCode().ptr);
+                        return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
                     }
                     vm.stack.setTopPtr(sp);
                 }
