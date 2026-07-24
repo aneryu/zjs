@@ -30,6 +30,61 @@ const InterruptTestState = struct {
     }
 };
 
+const TailSetupOomArm = struct {
+    calls: usize = 0,
+    exhaust: bool = false,
+
+    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        if (self.exhaust) {
+            const rt = invocation.realm.runtime;
+            rt.setMemoryLimit(rt.memory.allocated_bytes);
+        }
+        return core.JSValue.undefinedValue();
+    }
+};
+
+const HostBacktraceErrorProbe = struct {
+    fn call(_: *anyopaque, _: core.host_function.ExternalCall) anyerror!core.JSValue {
+        return error.TypeError;
+    }
+};
+
+const NativeRecordStackProbe = struct {
+    var callable: core.JSValue = core.JSValue.undefinedValue();
+    var calls: usize = 0;
+    var recurse: bool = true;
+
+    const record: core.host_function.InternalRecord = .{
+        .length = 0,
+        .cproto = .generic,
+        .native_function = .{ .generic = call },
+    };
+
+    fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) anyerror!core.JSValue {
+        calls += 1;
+        if (!recurse or calls >= 256) return core.JSValue.int32(7);
+        return engine.exec.call.callValue(ctx, null, callable, &.{});
+    }
+};
+
+const InterruptOomArm = struct {
+    calls: usize = 0,
+    exhaust: bool = false,
+
+    fn call(ptr: *anyopaque, invocation: core.host_function.ExternalCall) anyerror!core.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        if (self.exhaust) {
+            invocation.realm.interrupt_counter = 1;
+            const rt = invocation.realm.runtime;
+            rt.setMemoryLimit(rt.memory.allocated_bytes);
+        }
+        return core.JSValue.undefinedValue();
+    }
+};
+
 test "eval lazily materializes a bare core context global before root closure construction" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -96,6 +151,105 @@ test "interrupt budget survives Machine replacement and bypasses catch markers" 
     try std.testing.expectEqualStrings("InternalError: interrupted", message);
     try std.testing.expect(!js.context.hasException());
     try std.testing.expect(!js.context.exceptionIsUncatchable());
+}
+
+test "interrupt remains uncatchable when error construction runs out of memory" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer js.runtime.setMemoryLimit(null);
+
+    var arm = InterruptOomArm{};
+    try js.defineGlobalExternalHostFunction(
+        "__w2ArmInterruptOom",
+        0,
+        &arm,
+        InterruptOomArm.call,
+        null,
+    );
+    const setup = try js.eval(
+        \\globalThis.__w2_interrupt_oom_caught = false;
+        \\globalThis.__w2_interrupt_oom = function (spin) {
+        \\    try {
+        \\        __w2ArmInterruptOom();
+        \\        while (spin) {}
+        \\        return 42;
+        \\    } catch (_) {
+        \\        globalThis.__w2_interrupt_oom_caught = true;
+        \\        return -1;
+        \\    }
+        \\};
+    );
+    setup.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const function_key = try js.runtime.internAtom("__w2_interrupt_oom");
+    defer js.runtime.atoms.free(function_key);
+    const caught_key = try js.runtime.internAtom("__w2_interrupt_oom_caught");
+    defer js.runtime.atoms.free(caught_key);
+    const function = try global.getProperty(function_key);
+    defer function.free(js.runtime);
+    const preallocated = js.context.preallocated_oom_error orelse return error.TestUnexpectedResult;
+
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 100;
+    arm.exhaust = true;
+
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            global,
+            core.JSValue.undefinedValue(),
+            function,
+            &.{core.JSValue.boolean(true)},
+            null,
+            null,
+        ),
+    );
+    js.runtime.setMemoryLimit(null);
+    arm.exhaust = false;
+
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expectEqual(@as(usize, 1), arm.calls);
+    try std.testing.expect(js.context.exceptionIsUncatchable());
+    const exception = js.context.takeException();
+    defer exception.free(js.runtime);
+    try std.testing.expect(preallocated.sameValue(exception));
+
+    const caught = try global.getProperty(caught_key);
+    defer caught.free(js.runtime);
+    try std.testing.expectEqual(false, caught.asBool().?);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+
+    js.runtime.setInterruptHandler(null, null);
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        function,
+        &.{core.JSValue.boolean(false)},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
+    try std.testing.expectEqual(@as(usize, 2), arm.calls);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
 test "uncatchable interrupt skips outer inline for-of close and catch" {
@@ -190,6 +344,7 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
         \\globalThis.__w2_forward_wrapper = function () {
         \\    return __w2_forwarded.call();
         \\};
+        \\globalThis.__w2_async = async function () { return 17; };
         \\globalThis.__w2_generator = (function* () { yield 1; yield 2; })();
     );
     setup.free(js.runtime);
@@ -203,6 +358,8 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     defer js.runtime.atoms.free(constructor_key);
     const forward_wrapper_key = try js.runtime.internAtom("__w2_forward_wrapper");
     defer js.runtime.atoms.free(forward_wrapper_key);
+    const async_key = try js.runtime.internAtom("__w2_async");
+    defer js.runtime.atoms.free(async_key);
     const generator_key = try js.runtime.internAtom("__w2_generator");
     defer js.runtime.atoms.free(generator_key);
     const next_key = try js.runtime.internAtom("next");
@@ -216,6 +373,8 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     defer constructor.free(js.runtime);
     const forward_wrapper = try global.getProperty(forward_wrapper_key);
     defer forward_wrapper.free(js.runtime);
+    const async_function = try global.getProperty(async_key);
+    defer async_function.free(js.runtime);
     const generator = try global.getProperty(generator_key);
     defer generator.free(js.runtime);
     const generator_object = try core.Object.expect(generator);
@@ -295,6 +454,25 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     try std.testing.expectEqual(@as(usize, 4), state.hits);
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset, js.context.interrupt_counter);
 
+    // Initial async invocation pays the outer JS_CallInternal entry, one
+    // async_func_resume entry, and the resolving-function call used to settle
+    // its Promise. async_func_init only prepares the resident frame; charging
+    // it as a fourth entry would fire this counter.
+    js.context.interrupt_counter = 4;
+    const async_promise = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        async_function,
+        &.{},
+        null,
+        null,
+    );
+    defer async_promise.free(js.runtime);
+    try std.testing.expectEqual(@as(usize, 4), state.hits);
+    try std.testing.expectEqual(@as(i32, 1), js.context.interrupt_counter);
+
     // Generator.next has one native call entry and one bytecode-resume entry.
     // The second next creates another Machine but continues the same counter.
     js.context.interrupt_counter = 3;
@@ -328,6 +506,88 @@ test "nested calls and generator resumes share one Realm interrupt cadence" {
     try std.testing.expectEqual(core.JSContext.interrupt_counter_reset - 2, js.context.interrupt_counter);
 }
 
+test "initial async resume rejects with the caller-Realm interrupt exception" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var parent_facade = zjs.JSContext.borrowCore(js.context);
+    const parent_global = try parent_facade.globalObject();
+    const child_holder = try engine.exec.call.createRealmObject(js.context);
+    defer child_holder.free(js.runtime);
+    const child_record = try core.Object.expect(child_holder);
+    const child = child_record.realmContext() orelse return error.TestUnexpectedResult;
+    const child_global = try engine.exec.zjs_vm.contextGlobal(child);
+
+    var child_facade = zjs.JSContext.borrowCore(child);
+    const setup = try child_facade.eval(
+        "globalThis.__w2_async_interrupt = async function () { return 17; };",
+        .{},
+    );
+    setup.free(js.runtime);
+
+    const function_key = try js.runtime.internAtom("__w2_async_interrupt");
+    defer js.runtime.atoms.free(function_key);
+    const async_function = try child_global.getProperty(function_key);
+    defer async_function.free(js.runtime);
+
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    var state = InterruptTestState{ .stop = true };
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    defer js.runtime.setInterruptHandler(null, null);
+    js.context.interrupt_counter = 2;
+    child.interrupt_counter = 100;
+
+    const promise_value = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        parent_global,
+        core.JSValue.undefinedValue(),
+        async_function,
+        &.{},
+        null,
+        null,
+    );
+    defer promise_value.free(js.runtime);
+    const promise = try core.Object.expect(promise_value);
+    try std.testing.expect(promise.promiseIsRejected());
+    const reason = promise.promiseResult() orelse return error.TestUnexpectedResult;
+    const reason_object = try core.Object.expect(reason);
+
+    const parent_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        parent_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    const child_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        child_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(parent_internal_error, reason_object.getPrototype().?);
+    try std.testing.expect(parent_internal_error != child_internal_error);
+
+    const name = try reason_object.getProperty(core.atom.ids.name);
+    defer name.free(js.runtime);
+    try helpers.expectStringValueBytes(name, "InternalError");
+    const message_key = try js.runtime.internAtom("message");
+    defer js.runtime.atoms.free(message_key);
+    const message = try reason_object.getProperty(message_key);
+    defer message.free(js.runtime);
+    try helpers.expectStringValueBytes(message, "interrupted");
+
+    try std.testing.expectEqual(@as(usize, 1), state.hits);
+    try std.testing.expect(!js.context.hasException());
+    try std.testing.expect(!js.context.exceptionIsUncatchable());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
 test "cross-Realm interrupt polls charge caller entry and callee body separately" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
@@ -347,6 +607,11 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
         \\    globalThis.__w2_body_ran = true;
         \\    while (true) {}
         \\};
+        \\globalThis.__w2_stack_body_ran = false;
+        \\globalThis.__w2_stack_foreign = function (a, b) {
+        \\    globalThis.__w2_stack_body_ran = true;
+        \\    return a + b;
+        \\};
     , .{});
     setup.free(js.runtime);
 
@@ -354,8 +619,14 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     defer js.runtime.atoms.free(foreign_key);
     const body_key = try js.runtime.internAtom("__w2_body_ran");
     defer js.runtime.atoms.free(body_key);
+    const stack_foreign_key = try js.runtime.internAtom("__w2_stack_foreign");
+    defer js.runtime.atoms.free(stack_foreign_key);
+    const stack_body_key = try js.runtime.internAtom("__w2_stack_body_ran");
+    defer js.runtime.atoms.free(stack_body_key);
     const foreign = try child_global.getProperty(foreign_key);
     defer foreign.free(js.runtime);
+    const stack_foreign = try child_global.getProperty(stack_foreign_key);
+    defer stack_foreign.free(js.runtime);
 
     var state = InterruptTestState{ .stop = true };
     js.runtime.setInterruptHandler(InterruptTestState.run, &state);
@@ -417,7 +688,387 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     const callee_error = try core.Object.expect(callee_exception);
     const callee_internal_error = object_ops.constructorPrototypeFromGlobal(js.runtime, child_global, "InternalError") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(callee_internal_error, callee_error.getPrototype().?);
-    try std.testing.expectEqual(@as(usize, 2), state.hits);
+
+    // The planned-frame guard also runs before the Realm switch, so its
+    // catchable InternalError belongs to the caller and the callee body never
+    // starts.
+    js.runtime.setInterruptHandler(null, null);
+    js.runtime.setNativeStackSize(1);
+    defer js.runtime.setNativeStackSize(0);
+    try std.testing.expectError(
+        error.StackOverflow,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            parent_global,
+            core.JSValue.undefinedValue(),
+            stack_foreign,
+            &.{ core.JSValue.int32(20), core.JSValue.int32(22) },
+            null,
+            null,
+        ),
+    );
+    const stack_body_before = try child_global.getProperty(stack_body_key);
+    defer stack_body_before.free(js.runtime);
+    try std.testing.expectEqual(false, stack_body_before.asBool().?);
+    const stack_exception = js.context.takeException();
+    defer stack_exception.free(js.runtime);
+    const stack_error = try core.Object.expect(stack_exception);
+    try std.testing.expectEqual(caller_internal_error, stack_error.getPrototype().?);
+
+    // When both limits are ready to fire, the caller interrupt wins and stays
+    // uncatchable, matching JS_CallInternal's poll-before-stack order.
+    js.runtime.setInterruptHandler(InterruptTestState.run, &state);
+    js.context.interrupt_counter = 1;
+    child.interrupt_counter = 100;
+    try std.testing.expectError(
+        error.Interrupted,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            parent_global,
+            core.JSValue.undefinedValue(),
+            stack_foreign,
+            &.{ core.JSValue.int32(20), core.JSValue.int32(22) },
+            null,
+            null,
+        ),
+    );
+    const precedence_exception = js.context.takeException();
+    defer precedence_exception.free(js.runtime);
+    const precedence_error = try core.Object.expect(precedence_exception);
+    try std.testing.expectEqual(caller_internal_error, precedence_error.getPrototype().?);
+    try std.testing.expectEqual(@as(usize, 3), state.hits);
+}
+
+test "tail-frame reuse charges planned stack bytes and fully restores both budgets" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    js.runtime.setNativeStackSize(128 * 1024);
+
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+
+    const setup = try js.eval(
+        \\globalThis.__w2SmallLinks = 0;
+        \\globalThis.__w2LargeLinks = 0;
+        \\function __w2Small(eval) {
+        \\    __w2SmallLinks++;
+        \\    return eval(eval);
+        \\}
+        \\function __w2Large(eval) {
+        \\    __w2LargeLinks++;
+        \\    let a00=0,a01=1,a02=2,a03=3,a04=4,a05=5,a06=6,a07=7;
+        \\    let a08=8,a09=9,a10=10,a11=11,a12=12,a13=13,a14=14,a15=15;
+        \\    let a16=16,a17=17,a18=18,a19=19,a20=20,a21=21,a22=22,a23=23;
+        \\    let a24=24,a25=25,a26=26,a27=27,a28=28,a29=29,a30=30,a31=31;
+        \\    let a32=32,a33=33,a34=34,a35=35,a36=36,a37=37,a38=38,a39=39;
+        \\    let a40=40,a41=41,a42=42,a43=43,a44=44,a45=45,a46=46,a47=47;
+        \\    let a48=48,a49=49,a50=50,a51=51,a52=52,a53=53,a54=54,a55=55;
+        \\    let a56=56,a57=57,a58=58,a59=59,a60=60,a61=61,a62=62,a63=63;
+        \\    if (a00 + a63 === -1) return "unreachable";
+        \\    return eval(eval);
+        \\}
+        \\function __w2Down(eval, n) {
+        \\    if (n === 0) return "done";
+        \\    return eval(eval, n - 1);
+        \\}
+        \\function __w2CatchOwn(eval) {
+        \\    try { return eval(eval); }
+        \\    catch (e) { return e.name + ":" + e.message; }
+        \\}
+        \\globalThis.__w2OuterLinks = 0;
+        \\function __w2Ordinary(inner) {
+        \\    return 1 + inner(inner);
+        \\}
+        \\function __w2Outer(eval, n, inner) {
+        \\    __w2OuterLinks++;
+        \\    if (n === 0) return 1 + __w2Ordinary(inner);
+        \\    return eval(eval, n - 1, inner);
+        \\}
+    );
+    setup.free(js.runtime);
+
+    const small_fb = try globalFunctionBytecode(&js, "__w2Small");
+    const large_fb = try globalFunctionBytecode(&js, "__w2Large");
+    try std.testing.expect(large_fb.var_count > small_fb.var_count);
+    try std.testing.expect(hasTailEvalReturn(small_fb));
+    try std.testing.expect(hasTailEvalReturn(large_fb));
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\try { __w2Small(__w2Small); }
+        \\catch (e) { print("small-1:" + e.name + ":" + e.message); }
+        \\const firstSmallLinks = __w2SmallLinks;
+        \\__w2SmallLinks = 0;
+        \\try { __w2Small(__w2Small); }
+        \\catch (e) { print("small-2:" + e.name + ":" + e.message); }
+        \\const secondSmallLinks = __w2SmallLinks;
+        \\try { __w2Large(__w2Large); }
+        \\catch (e) { print("large:" + e.name + ":" + e.message); }
+        \\assert.sameValue(firstSmallLinks > 0, true);
+        \\assert.sameValue(secondSmallLinks > 0, true);
+        \\assert.sameValue(__w2LargeLinks < secondSmallLinks, true);
+        \\print("weighted:true");
+        \\__w2SmallLinks = 0;
+        \\const outerSteps = Math.max(1, (secondSmallLinks / 16) | 0);
+        \\try { __w2Outer(__w2Outer, outerSteps, __w2Small); }
+        \\catch (e) { print("nested:" + e.name + ":" + e.message); }
+        \\assert.sameValue(__w2OuterLinks, outerSteps + 1);
+        \\assert.sameValue(__w2SmallLinks > 0, true);
+        \\assert.sameValue(__w2SmallLinks < secondSmallLinks, true);
+        \\print("nested-weighted:true");
+        \\print("own-catch:" + __w2CatchOwn(__w2CatchOwn));
+        \\print("bounded:" + __w2Down(__w2Down, 100));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "small-1:InternalError:stack overflow\n" ++
+            "small-2:InternalError:stack overflow\n" ++
+            "large:InternalError:stack overflow\n" ++
+            "weighted:true\n" ++
+            "nested:InternalError:stack overflow\n" ++
+            "nested-weighted:true\n" ++
+            "own-catch:InternalError:stack overflow\n" ++
+            "bounded:done\n",
+        stream.buffered(),
+    );
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+}
+
+test "tail target setup OOM remains catchable in the retiring caller" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    defer js.runtime.setMemoryLimit(null);
+
+    var arm = TailSetupOomArm{};
+    try js.defineGlobalExternalHostFunction(
+        "__w2ArmTailSetupOom",
+        0,
+        &arm,
+        TailSetupOomArm.call,
+        null,
+    );
+    const setup = try js.eval(
+        \\globalThis.__w2TailSetupBodyRuns = 0;
+        \\function __w2TailSetupOomTarget(value) {
+        \\    "use strict";
+        \\    __w2TailSetupBodyRuns++;
+        \\    return arguments[0];
+        \\}
+        \\function __w2TailSetupOomForward(eval) {
+        \\    __w2ArmTailSetupOom();
+        \\    return eval(41);
+        \\}
+        \\function __w2TailSetupOomDriver() {
+        \\    try {
+        \\        return 1 + __w2TailSetupOomForward(
+        \\            __w2TailSetupOomTarget
+        \\        );
+        \\    } catch (error) {
+        \\        return error.name === "InternalError" &&
+        \\            error.message === "out of memory" ? 100 : -1000;
+        \\    }
+        \\}
+    );
+    setup.free(js.runtime);
+
+    const forward_fb = try globalFunctionBytecode(&js, "__w2TailSetupOomForward");
+    const target_fb = try globalFunctionBytecode(&js, "__w2TailSetupOomTarget");
+    try std.testing.expect(hasTailEvalReturn(forward_fb));
+    try std.testing.expect(target_fb.isStrictMode());
+    try std.testing.expect(frame_mod.argumentsNeedsOriginalSnapshot(target_fb));
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const body_runs_key = try js.runtime.internAtom("__w2TailSetupBodyRuns");
+    defer js.runtime.atoms.free(body_runs_key);
+    const driver_key = try js.runtime.internAtom("__w2TailSetupOomDriver");
+    defer js.runtime.atoms.free(driver_key);
+    const driver = try global.getProperty(driver_key);
+    defer driver.free(js.runtime);
+
+    const warm = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        driver,
+        &.{},
+        null,
+        null,
+    );
+    defer warm.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 42), warm.asNumber());
+
+    const body_runs_before = try global.getProperty(body_runs_key);
+    defer body_runs_before.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 1), body_runs_before.asNumber());
+
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    // The host callback clamps the account after all native-call setup. argc=1
+    // keeps tail scratch inline; the strict target's `arguments` snapshot then
+    // makes FrameCold allocation the first growing target-setup operation.
+    // Keeping the forwarder live until setup commits lets ordinary unwind pop
+    // that faulting frame and deliver the error to the driver's catch.
+    arm.exhaust = true;
+    const caught = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        driver,
+        &.{},
+        null,
+        null,
+    );
+    js.runtime.setMemoryLimit(null);
+    arm.exhaust = false;
+    defer caught.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 100), caught.asNumber());
+    try std.testing.expectEqual(@as(usize, 2), arm.calls);
+    try std.testing.expect(!js.context.hasException());
+    const body_runs_after_oom = try global.getProperty(body_runs_key);
+    defer body_runs_after_oom.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 1), body_runs_after_oom.asNumber());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+    const stable_allocated_bytes = js.runtime.memory.allocated_bytes;
+    const stable_allocation_count = js.runtime.memory.allocation_count;
+
+    // The first catch may publish cold metadata after active-frame teardown
+    // creates headroom under the clamped limit. A second identical failure
+    // must not grow either live allocation metric.
+    arm.exhaust = true;
+    const caught_again = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        driver,
+        &.{},
+        null,
+        null,
+    );
+    js.runtime.setMemoryLimit(null);
+    arm.exhaust = false;
+    defer caught_again.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 100), caught_again.asNumber());
+    try std.testing.expectEqual(@as(usize, 3), arm.calls);
+    try std.testing.expect(!js.context.hasException());
+    const body_runs_after_second_oom = try global.getProperty(body_runs_key);
+    defer body_runs_after_second_oom.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 1), body_runs_after_second_oom.asNumber());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
+    try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+
+    const recovered = try engine.exec.call_runtime.callValueOrBytecode(
+        js.context,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        driver,
+        &.{},
+        null,
+        null,
+    );
+    defer recovered.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 42), recovered.asNumber());
+    try std.testing.expectEqual(@as(usize, 4), arm.calls);
+    const body_runs_after_recovery = try global.getProperty(body_runs_key);
+    defer body_runs_after_recovery.free(js.runtime);
+    try std.testing.expectEqual(@as(?f64, 2), body_runs_after_recovery.asNumber());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
+    try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
+test "raw tail call opcodes share the bounded tail-chain stack contract" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    js.runtime.setNativeStackSize(128 * 1024);
+
+    const plain_code = [_]u8{
+        op.special_object,
+        bytecode.opcode.special_object_subtype.current_function,
+        op.tail_call,
+        0,
+        0,
+    };
+    const method_code = [_]u8{
+        op.push_this,
+        op.special_object,
+        bytecode.opcode.special_object_subtype.current_function,
+        op.tail_call_method,
+        0,
+        0,
+    };
+    const plain = try createTailOpcodeFixture(&js, "__w2RawTail", &plain_code, 1);
+    defer plain.free(js.runtime);
+    const method = try createTailOpcodeFixture(&js, "__w2RawMethodTail", &method_code, 2);
+    defer method.free(js.runtime);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const plain_key = try js.runtime.internAtom("__w2RawTail");
+    defer js.runtime.atoms.free(plain_key);
+    const method_key = try js.runtime.internAtom("__w2RawMethodTail");
+    defer js.runtime.atoms.free(method_key);
+    try global.defineOwnProperty(
+        js.runtime,
+        plain_key,
+        core.Descriptor.data(plain, true, true, true),
+    );
+    try global.defineOwnProperty(
+        js.runtime,
+        method_key,
+        core.Descriptor.data(method, true, true, true),
+    );
+
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function __w2InvokeRaw(fn) { return 1 + fn(); }
+        \\function __w2ExpectRaw(label, fn) {
+        \\    try { __w2InvokeRaw(fn); print(label + ":missing"); }
+        \\    catch (e) { print(label + ":" + e.name + ":" + e.message); }
+        \\}
+        \\__w2ExpectRaw("plain", __w2RawTail);
+        \\__w2ExpectRaw("method", __w2RawMethodTail);
+        \\print("recovered:" + (20 + 22));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "plain:InternalError:stack overflow\n" ++
+            "method:InternalError:stack overflow\n" ++
+            "recovered:42\n",
+        stream.buffered(),
+    );
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
 }
 
 const CrossRealmNativeProbe = struct {
@@ -497,6 +1148,34 @@ fn createOversizedLeafFixture(
     return fixture;
 }
 
+fn createTailOpcodeFixture(
+    js: *helpers.TestEngine,
+    name_bytes: []const u8,
+    code: []const u8,
+    stack_size: u16,
+) !core.JSValue {
+    const name = try js.runtime.internAtom(name_bytes);
+    defer js.runtime.atoms.free(name);
+    const fb = try bytecode.FunctionBytecode.createFixture(js.runtime, .{
+        .name = name,
+        .realm = js.context,
+        .flags = .{
+            .has_simple_parameter_list = true,
+            .func_kind = .normal,
+        },
+        .stack_size = stack_size,
+        .byte_code = code,
+    });
+    fb.publishFixtureNoFail(js.runtime);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    return object_ops.createRootBytecodeFunctionObject(
+        js.context,
+        global,
+        core.JSValue.functionBytecode(&fb.header),
+        .root_global,
+    );
+}
+
 fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
     var count: usize = 0;
     var pc: usize = 0;
@@ -508,6 +1187,24 @@ fn finalOpcodeCount(code: []const u8, wanted: u8) !usize {
         pc += size;
     }
     return count;
+}
+
+fn hasTailEvalReturn(function: *const bytecode.FunctionBytecode) bool {
+    const code = function.byteCode();
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return false;
+        const next_pc = pc + size;
+        if ((op_id == op.eval or op_id == op.apply_eval) and
+            next_pc < code.len and code[next_pc] == op.@"return")
+        {
+            return true;
+        }
+        pc = next_pc;
+    }
+    return false;
 }
 
 fn expectSingleDerivedThisClosureCapture(function: *const bytecode.FunctionBytecode) !void {
@@ -1695,6 +2392,80 @@ test "vm executes push constants arithmetic comparisons and return" {
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
+test "Engine executes both paths of a threaded with atom-label destructuring probe" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function withThread(obj, y) {
+        \\  with (obj) { [x] = y; }
+        \\  return obj.x;
+        \\}
+        \\var threadedTotal = withThread({ x: 0, y: [4] }, [9]) * 10 +
+        \\  withThread({ x: 0 }, [2]);
+        \\assert.sameValue(threadedTotal, 42);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "signed bigint-i32 neg preserves inline and generic BigInt semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(-(0n), 0n);
+        \\assert.sameValue(-1n, -1n);
+        \\assert.sameValue(-(1n), -1n);
+        \\assert.sameValue(-(2147483647n), -2147483647n);
+        \\assert.sameValue(-(2147483648n), -2147483648n);
+        \\assert.sameValue(-(2147483649n), -2147483649n);
+        \\assert.sameValue(1n, 1n);
+        \\assert.sameValue(-(1), -1);
+        \\assert.sameValue(Object.is(-(0), -0), true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "numeric discarded immediates preserve comma control and completion semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function numericDiscardTail() { (1); }
+        \\function numericDiscardComma(value) { return (1, value); }
+        \\function numericDiscardControl(flag) { if (flag) (1); return flag ? 2 : 3; }
+        \\function numericDiscardUpdate() {
+        \\  let count = 0;
+        \\  for (; count < 2; (1), count++) {}
+        \\  return count;
+        \\}
+        \\assert.sameValue(numericDiscardTail(), undefined);
+        \\assert.sameValue(numericDiscardComma(42), 42);
+        \\assert.sameValue(numericDiscardControl(true), 2);
+        \\assert.sameValue(numericDiscardControl(false), 3);
+        \\assert.sameValue(numericDiscardUpdate(), 2);
+        \\assert.sameValue(void 0, undefined);
+        \\assert.sameValue(eval("1"), 1);
+        \\assert.sameValue(eval("-1"), -1);
+        \\assert.sameValue(Object.is(eval("-0"), -0), true);
+        \\assert.sameValue(eval("+1"), 1);
+        \\assert.sameValue(eval("-2147483648"), -2147483648);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const repl = try js.evalWithOptions("1", .{ .filename = "<repl>" });
+    defer repl.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), repl.asInt32());
+
+    const module = try js.evalModule("1; export const numericDiscardModule = 1;");
+    defer module.free(js.runtime);
+    try std.testing.expect(module.isUndefined());
+}
+
 test "vm executes stack constants source locations and return_undef" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2459,6 +3230,69 @@ test "M1.3: returned closure can update and return captured counter" {
     );
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
+test "resident set_var_ref preserves assignment results and refcounted self-assignment" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\function __buildResidentSetVarRefProbes() {
+        \\  var shortTarget = 0;
+        \\  globalThis.__residentSetVarRefShort = function (next) {
+        \\    return shortTarget = next;
+        \\  };
+        \\  globalThis.__residentSetVarRefSelf = function () {
+        \\    return shortTarget = shortTarget;
+        \\  };
+        \\
+        \\  var capture0 = 0;
+        \\  var capture1 = 1;
+        \\  var capture2 = 2;
+        \\  var capture3 = 3;
+        \\  var genericTarget = 4;
+        \\  globalThis.__residentSetVarRefGeneric = function (next) {
+        \\    if (capture0 + capture1 + capture2 + capture3 !== 6) throw new Error("capture mismatch");
+        \\    return genericTarget = next;
+        \\  };
+        \\}
+        \\__buildResidentSetVarRefProbes();
+        \\
+        \\assert.sameValue(__residentSetVarRefShort(42), 42);
+        \\const shortObject = { marker: 1 };
+        \\assert.sameValue(__residentSetVarRefShort(shortObject), shortObject);
+        \\assert.sameValue(__residentSetVarRefSelf(), shortObject);
+        \\assert.sameValue(__residentSetVarRefSelf().marker, 1);
+        \\
+        \\const genericObject = { marker: 2 };
+        \\assert.sameValue(__residentSetVarRefGeneric(genericObject), genericObject);
+        \\assert.sameValue(__residentSetVarRefGeneric(43), 43);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+
+    const short = try globalFunctionBytecode(&js, "__residentSetVarRefShort");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(short.byteCode(), op.set_var_ref0));
+    try std.testing.expectEqual(@as(usize, 0), try finalOpcodeCount(short.byteCode(), op.set_var_ref));
+
+    const self_assign = try globalFunctionBytecode(&js, "__residentSetVarRefSelf");
+    try std.testing.expectEqual(@as(usize, 1), try finalOpcodeCount(self_assign.byteCode(), op.set_var_ref0));
+
+    const generic = try globalFunctionBytecode(&js, "__residentSetVarRefGeneric");
+    var generic_set_idx: ?u16 = null;
+    var pc: usize = 0;
+    while (pc < generic.byteCode().len) {
+        const opcode_id = generic.byteCode()[pc];
+        const size = bytecode.opcode.sizeOf(opcode_id);
+        if (size == 0 or pc + size > generic.byteCode().len) return error.InvalidFunctionBytecode;
+        if (opcode_id == op.set_var_ref) {
+            generic_set_idx = std.mem.readInt(u16, generic.byteCode()[pc + 1 ..][0..2], .little);
+            break;
+        }
+        pc += size;
+    }
+    try std.testing.expect(generic_set_idx != null);
+    try std.testing.expect(generic_set_idx.? >= 4);
 }
 
 test "checked local replacement preserves int fast moves and refcounted fallbacks" {
@@ -3771,6 +4605,106 @@ test "generator object uses the prototype selected after parameter initializatio
         \\if (Object.getPrototypeOf(asyncGenerator()) !== asyncPrototype) throw new Error("async prototype order");
     );
     defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "initial_yield keeps sync generators in suspended-start after parameter initialization" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const initialYieldEvents = [];
+        \\function* initialYieldGenerator(
+        \\  factory = (initialYieldEvents.push("param"), function* () { yield 1; })
+        \\) {
+        \\  initialYieldEvents.push("body");
+        \\  yield factory().next().value;
+        \\}
+        \\const first = initialYieldGenerator();
+        \\assert.sameValue(initialYieldEvents.join(","), "param");
+        \\let step = first.next(99);
+        \\assert.sameValue(step.value, 1);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(initialYieldEvents.join(","), "param,body");
+        \\assert.sameValue(first.next().done, true);
+        \\const returned = initialYieldGenerator();
+        \\step = returned.return(9);
+        \\assert.sameValue(step.value, 9);
+        \\assert.sameValue(step.done, true);
+        \\const thrown = initialYieldGenerator();
+        \\let caught;
+        \\try { thrown.throw(11); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 11);
+        \\assert.sameValue(initialYieldEvents.join(","), "param,body,param,param");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "initial_yield keeps async generators in suspended-start" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const asyncInitialYieldEvents = [];
+        \\async function* asyncInitialYieldGenerator(
+        \\  value = (asyncInitialYieldEvents.push("param"), 3)
+        \\) {
+        \\  asyncInitialYieldEvents.push("body");
+        \\  yield value;
+        \\}
+        \\const first = asyncInitialYieldGenerator();
+        \\print("create", asyncInitialYieldEvents.join(","));
+        \\first.next(99).then(function(step) {
+        \\  print("next", step.value, step.done, asyncInitialYieldEvents.join(","));
+        \\  const returned = asyncInitialYieldGenerator();
+        \\  return returned.return(9);
+        \\}).then(function(step) {
+        \\  print("return", step.value, step.done, asyncInitialYieldEvents.join(","));
+        \\  const thrown = asyncInitialYieldGenerator();
+        \\  return thrown.throw(11).then(function() {
+        \\    print("throw resolved");
+        \\  }, function(reason) {
+        \\    print("throw", reason, asyncInitialYieldEvents.join(","));
+        \\  });
+        \\});
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(
+        "create param\n" ++
+            "next 3 false param,body\n" ++
+            "return 9 true param,body,param\n" ++
+            "throw 11 param,body,param,param\n",
+        stream.buffered(),
+    );
+}
+
+test "initial_yield executes exported generator bytecode in module mode" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalModule(
+        \\const moduleInitialYieldEvents = [];
+        \\export function* moduleInitialYieldGenerator(
+        \\  value = (moduleInitialYieldEvents.push("param"), 4)
+        \\) {
+        \\  moduleInitialYieldEvents.push("body");
+        \\  yield value;
+        \\}
+        \\const iterator = moduleInitialYieldGenerator();
+        \\assert.sameValue(moduleInitialYieldEvents.join(","), "param");
+        \\const step = iterator.next();
+        \\assert.sameValue(step.value, 4);
+        \\assert.sameValue(step.done, false);
+        \\assert.sameValue(moduleInitialYieldEvents.join(","), "param,body");
+    );
+    defer result.free(js.runtime);
+
     try std.testing.expect(result.isUndefined());
 }
 
@@ -6331,6 +7265,186 @@ test "native builtin errors capture a native callsite" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "external host errors capture the native host callsite" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var probe: u8 = 0;
+    try js.defineGlobalExternalHostFunction(
+        "hostBacktraceProbe",
+        0,
+        &probe,
+        HostBacktraceErrorProbe.call,
+        null,
+    );
+
+    var output_buffer: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOptions(
+        \\function captureHostBacktrace() {
+        \\    try {
+        \\        hostBacktraceProbe();
+        \\    } catch (error) {
+        \\        return String(error.stack);
+        \\    }
+        \\}
+        \\function captureInternalBacktrace() {
+        \\    try {
+        \\        [].map(null);
+        \\    } catch (error) {
+        \\        return String(error.stack);
+        \\    }
+        \\}
+        \\const hostStack = captureHostBacktrace();
+        \\const internalStack = captureInternalBacktrace();
+        \\print(hostStack.indexOf(
+        \\    "    at hostBacktraceProbe (native)\n    at captureHostBacktrace "
+        \\) === 0);
+        \\print(internalStack.indexOf(
+        \\    "    at map (native)\n    at captureInternalBacktrace "
+        \\) === 0);
+    , .{ .filename = "host-backtrace.js", .output = &stream });
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("true\ntrue\n", stream.buffered());
+}
+
+test "native record calls preflight the native stack and recover" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    js.runtime.setNativeStackSize(64 * 1024);
+    try js.ensureTest262GlobalsInstalled();
+
+    const function_value = try core.function.nativeFunction(js.context, "nativeRecordRecurse", 0);
+    defer function_value.free(js.runtime);
+    const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader().?);
+    function_object.nativeRecordSlot().* = &NativeRecordStackProbe.record;
+
+    const global = try js.context.globalObject();
+    const name = try js.runtime.internAtom("nativeRecordRecurse");
+    defer js.runtime.atoms.free(name);
+    try global.defineOwnProperty(
+        js.runtime,
+        name,
+        core.Descriptor.data(function_value, true, false, true),
+    );
+
+    NativeRecordStackProbe.callable = function_value;
+    NativeRecordStackProbe.calls = 0;
+    NativeRecordStackProbe.recurse = true;
+    defer NativeRecordStackProbe.callable = core.JSValue.undefinedValue();
+
+    const overflow = try js.eval(
+        \\let nativeStackResult = "missing";
+        \\try {
+        \\    nativeRecordRecurse();
+        \\} catch (error) {
+        \\    nativeStackResult = error.name + ":" + error.message;
+        \\}
+        \\assert.sameValue(nativeStackResult, "InternalError:stack overflow");
+    );
+    overflow.free(js.runtime);
+
+    NativeRecordStackProbe.recurse = false;
+    const recovery = try js.eval("assert.sameValue(nativeRecordRecurse(), 7);");
+    defer recovery.free(js.runtime);
+    try std.testing.expect(recovery.isUndefined());
+}
+
+test "external C function preflight uses caller realm and callback errors use callee realm" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var caller_facade = zjs.JSContext.borrowCore(js.context);
+    const caller_global = try caller_facade.globalObject();
+    const callee_holder = try engine.exec.call.createRealmObject(js.context);
+    defer callee_holder.free(js.runtime);
+    const callee_record = try core.Object.expect(callee_holder);
+    const callee = callee_record.realmContext() orelse return error.TestUnexpectedResult;
+    const callee_global = try engine.exec.zjs_vm.contextGlobal(callee);
+
+    var probe: CrossRealmNativeProbe = .{};
+    const external_id = try js.runtime.registerExternalHostFunction(.{
+        .ptr = &probe,
+        .call = crossRealmNativeProbe,
+    });
+    const native_value = try core.function.nativeFunction(callee, "realmProbe", 0);
+    defer native_value.free(js.runtime);
+    const native_object = try core.Object.expect(native_value);
+    native_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    native_object.externalHostFunctionIdSlot().* = external_id;
+
+    js.runtime.setNativeStackSize(1);
+    defer js.runtime.setNativeStackSize(0);
+    try std.testing.expectError(
+        error.StackOverflow,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            caller_global,
+            core.JSValue.undefinedValue(),
+            native_value,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expect(probe.seen_realm == null);
+    try std.testing.expect(js.context.hasException());
+
+    const overflow_value = js.context.takeException();
+    defer overflow_value.free(js.runtime);
+    const overflow_error = try core.Object.expect(overflow_value);
+    const caller_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        caller_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    const callee_internal_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        callee_global,
+        "InternalError",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(caller_internal_error, overflow_error.getPrototype().?);
+    try std.testing.expect(caller_internal_error != callee_internal_error);
+
+    js.runtime.setNativeStackSize(0);
+    try std.testing.expectError(
+        error.JSException,
+        engine.exec.call_runtime.callValueOrBytecode(
+            js.context,
+            null,
+            caller_global,
+            core.JSValue.undefinedValue(),
+            native_value,
+            &.{},
+            null,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(callee, probe.seen_realm.?);
+    try std.testing.expectEqual(callee_global, probe.seen_global.?);
+    // Pending exceptions are runtime-wide; the Error prototype below is the
+    // realm discriminator.
+    try std.testing.expect(js.context.hasException());
+
+    const callback_error_value = callee.takeException();
+    defer callback_error_value.free(js.runtime);
+    const callback_error = try core.Object.expect(callback_error_value);
+    const caller_type_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        caller_global,
+        "TypeError",
+    ) orelse return error.TestUnexpectedResult;
+    const callee_type_error = object_ops.constructorPrototypeFromGlobal(
+        js.runtime,
+        callee_global,
+        "TypeError",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(callee_type_error, callback_error.getPrototype().?);
+    try std.testing.expect(caller_type_error != callee_type_error);
+}
+
 test "Error stack preserves construction frames across delayed access" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -7383,12 +8497,8 @@ test "job queue symbol roots preserve weak map values" {
     value.value().free(rt);
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
-        try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
-    } else {
-        // TODO(S3): weak-collection liveness under forced GC.
-    }
+    try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
+    try std.testing.expectEqual(&value.header, weak_map.weakCollectionEntries()[0].value.refHeader().?);
 
     queue.deinit();
     _ = rt.runObjectCycleRemoval();
@@ -8064,11 +9174,11 @@ test "Engine direct eval shares top-level lexical cells across nested closures" 
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    // Annex B creates the eval `var` in the caller variable environment while
-    // its initializer still resolves the catch cell, so the post-catch write is
-    // local. A later plain `var saved` eval follows pinned QuickJS and
+    // Pinned QuickJS stops eval declaration resolution at the first same-name
+    // catch binding, so no second caller-variable target is created and the
+    // post-catch write reaches the global. A later plain `var saved` eval
     // force-initializes the variable-object property to undefined.
-    try std.testing.expectEqualStrings("500 500\n501 511\nglobal 42local\nundefined\n", stream.buffered());
+    try std.testing.expectEqualStrings("500 500\n501 511\nlocal 42local\nundefined\n", stream.buffered());
 }
 
 test "Engine constructor parameter defaults use the initialized this binding" {
@@ -9283,7 +10393,7 @@ test "async mapped arguments and closures retain one alias across await" {
     );
 }
 
-test "cycle collection closes escaped generator arg aliases before releasing resident backing" {
+test "escaped generator arg aliases retain resident backing across cycle collection" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -9317,7 +10427,12 @@ test "cycle collection closes escaped generator arg aliases before releasing res
     const release = try js.eval("__argCycleHolder = null;");
     release.free(js.runtime);
     _ = js.runtime.runObjectCycleRemoval();
-    try std.testing.expect(!cell.is_open);
+    // QuickJS's attached JSVarRef owns the parked async-function state. The
+    // escaped arguments object and closures therefore keep this generator
+    // frame resident even after its direct global reference is gone.
+    try std.testing.expect(cell.is_open);
+    try std.testing.expect(cell.value.isObject());
+    try std.testing.expectEqual(core.class.ids.generator, (try property_ops.expectObject(cell.value)).class_id);
     try std.testing.expectEqual(@as(?i32, 41), cell.varRefValue().asInt32());
 
     const escaped = try js.eval(
@@ -11864,6 +12979,76 @@ test "computed proxy bytecode trap continuations preserve nested calls throws an
     try std.testing.expect(result.isUndefined());
 }
 
+test "native tail calls preserve iterator and proxy continuation success and throws" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let nextIndex = 0;
+        \\const nativeResultIterator = {
+        \\    results: [
+        \\        { value: 43, done: false },
+        \\        { done: true },
+        \\    ],
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        "use strict";
+        \\        return Object(this.results[nextIndex++]);
+        \\    },
+        \\};
+        \\let iteratorSum = 0;
+        \\for (const value of nativeResultIterator) iteratorSum += value;
+        \\assert.sameValue(iteratorSum, 43);
+        \\assert.sameValue(nextIndex, 2);
+        \\
+        \\let closeCalls = 0;
+        \\const nativeThrowIterator = {
+        \\    [Symbol.iterator]() { return this; },
+        \\    next() {
+        \\        "use strict";
+        \\        return Number(Symbol("iterator native tail throw"));
+        \\    },
+        \\    return() {
+        \\        closeCalls++;
+        \\        return { done: true };
+        \\    },
+        \\};
+        \\let iteratorThrew = false;
+        \\try {
+        \\    for (const value of nativeThrowIterator) {}
+        \\} catch (error) {
+        \\    iteratorThrew = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(iteratorThrew, true);
+        \\assert.sameValue(closeCalls, 0);
+        \\
+        \\const key = ["native", "tail", "continuation"].join("-");
+        \\const nativeResultProxy = new Proxy({}, {
+        \\    get() {
+        \\        "use strict";
+        \\        return Number("47");
+        \\    },
+        \\});
+        \\assert.sameValue(nativeResultProxy[key], 47);
+        \\
+        \\const nativeThrowProxy = new Proxy({}, {
+        \\    get() {
+        \\        "use strict";
+        \\        return Number(Symbol("proxy native tail throw"));
+        \\    },
+        \\});
+        \\let proxyThrew = false;
+        \\try {
+        \\    nativeThrowProxy[key];
+        \\} catch (error) {
+        \\    proxyThrew = error instanceof TypeError;
+        \\}
+        \\assert.sameValue(proxyThrew, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "ordinary arrow and method recursion exhaust the logical stack budget" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -12171,6 +13356,51 @@ test "arrow super property call keeps the enclosing method receiver" {
         \\Object.setPrototypeOf(Derived.prototype, ReplacementBase.prototype);
         \\assert.sameValue(callSuper(), 84);
         \\assert.sameValue(callSuper.call({ ignored: true }), 84);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "super property assignment respects strictness when inherited descriptors reject writes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const superSetBase = {};
+        \\Object.defineProperty(superSetBase, "lockedData", {
+        \\    value: 1,
+        \\    writable: false,
+        \\    configurable: true,
+        \\});
+        \\Object.defineProperty(superSetBase, "getterOnly", {
+        \\    get() { return 2; },
+        \\    configurable: true,
+        \\});
+        \\class StrictSuperSet {
+        \\    setData() { super.lockedData = 10; }
+        \\    setAccessor() { super.getterOnly = 20; }
+        \\}
+        \\Object.setPrototypeOf(StrictSuperSet.prototype, superSetBase);
+        \\const strictReceiver = new StrictSuperSet();
+        \\assert.throws(TypeError, () => strictReceiver.setData());
+        \\assert.throws(TypeError, () => strictReceiver.setAccessor());
+        \\const sloppyReceiver = {
+        \\    __proto__: superSetBase,
+        \\    setData() { super.lockedData = 10; },
+        \\    setAccessor() { super.getterOnly = 20; },
+        \\};
+        \\sloppyReceiver.setData();
+        \\sloppyReceiver.setAccessor();
+        \\assert.sameValue(superSetBase.lockedData, 1);
+        \\assert.sameValue(superSetBase.getterOnly, 2);
+        \\assert.sameValue(
+        \\    Object.prototype.hasOwnProperty.call(sloppyReceiver, "lockedData"),
+        \\    false
+        \\);
+        \\assert.sameValue(
+        \\    Object.prototype.hasOwnProperty.call(sloppyReceiver, "getterOnly"),
+        \\    false
+        \\);
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -15905,6 +17135,117 @@ test "direct eval inside a module function forwards module live bindings" {
         \\assert.sameValue(readModuleBindingByEval(), 37);
     );
     defer result.free(js.runtime);
+}
+
+test "dynamic global put keeps cell and global-object legs semantically separate" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .name = "initialized-cell-hit",
+            .source =
+            \\var cell = 1;
+            \\function writeCell() { cell = 2; return cell; }
+            \\print(writeCell(), cell);
+            ,
+            .expected = "2 2\n",
+        },
+        .{
+            .name = "uninitialized-global-object-hit",
+            .source =
+            \\globalThis.dynamicHit = 1;
+            \\function writeDynamicHit() { dynamicHit = 2; return dynamicHit; }
+            \\print(writeDynamicHit(), globalThis.dynamicHit);
+            ,
+            .expected = "2 2\n",
+        },
+        .{
+            .name = "uninitialized-global-object-miss",
+            .source =
+            \\delete globalThis.dynamicMiss;
+            \\function writeDynamicMiss() { dynamicMiss = 3; return dynamicMiss; }
+            \\print(writeDynamicMiss(), globalThis.dynamicMiss);
+            ,
+            .expected = "3 3\n",
+        },
+        .{
+            .name = "strict-miss",
+            .source =
+            \\delete globalThis.strictMissing;
+            \\function writeStrictMissing() { "use strict"; strictMissing = 3; }
+            \\try { writeStrictMissing(); print("no throw"); }
+            \\catch (error) { print(error.name, typeof strictMissing); }
+            ,
+            .expected = "ReferenceError undefined\n",
+        },
+        .{
+            .name = "lexical-tdz",
+            .source =
+            \\function writeTdz() { lexicalTdz = 3; }
+            \\try { writeTdz(); print("no throw"); }
+            \\catch (error) { print(error.name); }
+            \\let lexicalTdz;
+            \\print(lexicalTdz);
+            ,
+            .expected = "ReferenceError\nundefined\n",
+        },
+        .{
+            .name = "lexical-const",
+            .source =
+            \\const fixedCell = 1;
+            \\function writeConst() { fixedCell = 2; }
+            \\try { writeConst(); print("no throw"); }
+            \\catch (error) { print(error.name, fixedCell); }
+            ,
+            .expected = "TypeError 1\n",
+        },
+        .{
+            .name = "proxy-global-prototype",
+            .source =
+            \\(function () {
+            \\  var emit = print;
+            \\  var global = globalThis;
+            \\  var ObjectCtor = Object;
+            \\  var oldPrototype = ObjectCtor.getPrototypeOf(global);
+            \\  var log = [];
+            \\  var proxy = new Proxy({}, {
+            \\    has: function (_, key) {
+            \\      log.push("has:" + key);
+            \\      return key === "proxiedDynamic";
+            \\    },
+            \\    set: function (_, key, value, receiver) {
+            \\      log.push("set:" + key + ":" + value + ":" + (receiver === global));
+            \\      return true;
+            \\    },
+            \\  });
+            \\  function writeProxy() { proxiedDynamic = 9; }
+            \\  ObjectCtor.setPrototypeOf(global, proxy);
+            \\  writeProxy();
+            \\  ObjectCtor.setPrototypeOf(global, oldPrototype);
+            \\  emit(
+            \\    log.join("|"),
+            \\    ObjectCtor.prototype.hasOwnProperty.call(global, "proxiedDynamic"),
+            \\  );
+            \\})();
+            ,
+            .expected = "has:proxiedDynamic|set:proxiedDynamic:9:true false\n",
+        },
+    };
+
+    for (cases) |case| {
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+
+        var output_buffer: [256]u8 = undefined;
+        var output = std.Io.Writer.fixed(&output_buffer);
+        const result = try js.evalWithOutput(case.source, &output);
+        defer result.free(js.runtime);
+
+        try std.testing.expect(result.isUndefined());
+        try std.testing.expectEqualStrings(case.expected, output.buffered());
+    }
 }
 
 test "get_var uninitialized-cell inline global-object leg preserves the cold waterfall semantics" {

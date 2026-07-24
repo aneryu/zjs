@@ -5223,6 +5223,10 @@ pub const parser_core = struct {
             try self.appendBytes(&[_]u8{op_id});
         }
 
+        fn emitOpAt(self: *State, op_id: u8, line_num: u32, col_num: u32) Error!void {
+            try self.appendBytesAt(&[_]u8{op_id}, line_num, col_num);
+        }
+
         fn emitOpNoSource(self: *State, op_id: u8) Error!void {
             try self.emitOpcodeBytesNoSource(&[_]u8{op_id});
         }
@@ -7015,33 +7019,39 @@ pub const parser_core = struct {
     pub fn parseLogicalAndOr(s: *State, op_kind: tok.TokenKind, flags: ParseFlags) Error!void {
         if (op_kind == tok.TOK_LOR) {
             try parseLogicalAndOr(s, tok.TOK_LAND, flags);
-            while (s.peekKind() == tok.TOK_LOR) {
-                try s.advance();
-                // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
-                try s.emitOp(opcode.op.dup);
-                const skip_jump = try emitForwardJump(s, opcode.op.if_true);
-                try s.emitOp(opcode.op.drop);
-                try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
-                try patchForwardJump(s, skip_jump);
-                s.last_anonymous_function_expr = false;
-                if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                    return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_LOR) {
+                const end_label = newParserLabel(s);
+                while (s.peekKind() == tok.TOK_LOR) {
+                    try s.advance();
+                    // `a || b` → `dup ; if_true L_skip ; drop ; <b> ; L_skip:`
+                    try s.emitOpNoSource(opcode.op.dup);
+                    try emitParserLabelJumpNoSource(s, opcode.op.if_true, end_label);
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try parseLogicalAndOrWithoutPendingFunctionName(s, tok.TOK_LAND, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LOR and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
+                    }
                 }
+                try emitParserLabelNoSource(s, end_label);
             }
         } else {
             try parseExprBinary(s, 8, flags);
-            while (s.peekKind() == tok.TOK_LAND) {
-                try s.advance();
-                // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
-                try s.emitOp(opcode.op.dup);
-                const skip_jump = try emitForwardJump(s, opcode.op.if_false);
-                try s.emitOp(opcode.op.drop);
-                try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
-                try patchForwardJump(s, skip_jump);
-                s.last_anonymous_function_expr = false;
-                if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
-                    return Error.UnexpectedToken;
+            if (s.peekKind() == tok.TOK_LAND) {
+                const end_label = newParserLabel(s);
+                while (s.peekKind() == tok.TOK_LAND) {
+                    try s.advance();
+                    // `a && b` → `dup ; if_false L_skip ; drop ; <b> ; L_skip:`
+                    try s.emitOpNoSource(opcode.op.dup);
+                    try emitParserLabelJumpNoSource(s, opcode.op.if_false, end_label);
+                    try s.emitOpNoSource(opcode.op.drop);
+                    try parseExprBinaryWithoutPendingFunctionName(s, 8, forceResultNeeded(flags));
+                    s.last_anonymous_function_expr = false;
+                    if (s.peekKind() != tok.TOK_LAND and s.peekKind() == tok.TOK_DOUBLE_QUESTION_MARK) {
+                        return Error.UnexpectedToken;
+                    }
                 }
+                try emitParserLabelNoSource(s, end_label);
             }
         }
     }
@@ -7134,15 +7144,13 @@ pub const parser_core = struct {
             return;
         }
         if (k == @as(tok.TokenKind, @intCast('-'))) {
+            const operator_line_num = s.token.line_num;
+            const operator_col_num = s.token.col_num;
             try s.advance();
-            if (s.cur_func().use_short_opcodes and s.peekKind() == tok.TOK_NUMBER) {
-                if (s.token.payload.num.is_bigint) {
-                    if (parseBigIntI32(s.token.payload.num.bigint_text, true)) |small| {
-                        try s.emitOpI32(opcode.op.push_bigint_i32, small);
-                        try s.advance();
-                        return;
-                    }
-                }
+            if (s.cur_func().use_short_opcodes and
+                s.peekKind() == tok.TOK_NUMBER and
+                !s.token.payload.num.is_bigint)
+            {
                 const value = s.token.payload.num.value;
                 if (value != 0 and numberIsExactI32(value)) {
                     try s.emitOpI32(opcode.op.push_i32, -@as(i32, @intFromFloat(value)));
@@ -7151,7 +7159,18 @@ pub const parser_core = struct {
                 }
             }
             try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted, .yield_forbidden = true });
-            try s.emitOp(opcode.op.neg);
+            const last_opcode_is_inline_bigint = blk: {
+                const last_opcode_pos = s.cur_func().last_opcode_pos;
+                if (last_opcode_pos < 0) break :blk false;
+                const pos: usize = @intCast(last_opcode_pos);
+                const code = s.currentCode();
+                break :blk pos + 5 == code.len and code[pos] == opcode.op.push_bigint_i32;
+            };
+            if (last_opcode_is_inline_bigint) {
+                try s.emitOpAt(opcode.op.neg, operator_line_num, operator_col_num);
+            } else {
+                try s.emitOp(opcode.op.neg);
+            }
             return;
         }
         if (k == @as(tok.TokenKind, @intCast('~'))) {
@@ -8365,28 +8384,28 @@ pub const parser_core = struct {
         return .applied;
     }
 
-    fn emitStringLiteralBytes(s: *State, bytes: []const u8) Error!void {
-        if (bytes.len == 0) {
-            try s.emitOp(opcode.op.push_empty_string);
-        } else {
-            const atom_id = try s.function.atoms.internString(bytes);
-            defer s.function.atoms.free(atom_id);
-            try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
-        }
-    }
-
     fn parseRegExpLiteral(s: *State) Error!void {
         const slash_offset = s.lex.mark_pos;
         s.lex.freeToken(&s.token);
         s.token = try s.lex.rescanRegexp(slash_offset);
         const pattern = s.token.payload.regexp.pattern;
         const flags = s.token.payload.regexp.flags;
+
+        // QuickJS publishes the source pattern as the first constant-pool
+        // operand before compiling the regexp. Keep the raw source spelling,
+        // but decode its UTF-8 bytes into the runtime's Latin-1/UTF-16 string
+        // representation instead of interning it as an atom.
+        const pattern_string = core.string.String.createUtf8(s.runtime.?, pattern) catch |err| switch (err) {
+            error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
+            error.InvalidUtf8 => return Error.InvalidUtf8,
+        };
+        try s.emitPushConstOwned(pattern_string.value());
+
         var compiled = regexp_lib.compilePatternAndFlags(s.function.memory.allocator, pattern, flags) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.InvalidRegExp,
         };
         defer compiled.deinit(s.function.memory.allocator);
-        try emitStringLiteralBytes(s, pattern);
         // qjs compiles a literal once while parsing, stores the lre bytecode as
         // an 8-bit JSString constant, and lets OP_regexp share that immutable
         // string with each fresh RegExp instance (quickjs.c:26891-26913,
@@ -8420,9 +8439,9 @@ pub const parser_core = struct {
                 try s.advance();
             },
             tok.TOK_STRING => {
-                // QuickJS emits `OP_push_atom_value <atom>` for short string
-                // literals (`quickjs.c:25510`). We always intern; the empty
-                // string is special-cased to `push_empty_string`.
+                // QuickJS emits `OP_push_atom_value <atom>` here, including
+                // for the empty string. resolve_labels selects the short
+                // push_empty_string form only when the value stays live.
                 try emitStringLiteralValue(s, s.token.payload.str.bytes);
                 try s.advance();
             },
@@ -8663,13 +8682,7 @@ pub const parser_core = struct {
             if (part_payload.cooked_invalid) return Error.InvalidEscape;
 
             if (bytes.len != 0 or depth == 0) {
-                if (bytes.len == 0) {
-                    try s.emitOp(opcode.op.push_empty_string);
-                } else {
-                    const atom_id = try s.function.atoms.internString(bytes);
-                    defer s.function.atoms.free(atom_id);
-                    try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
-                }
+                try emitStringLiteralValue(s, bytes);
                 if (depth == 0) {
                     if (part == .no_substitution) {
                         // Whole template is a single string constant; skip
@@ -10566,13 +10579,25 @@ pub const parser_core = struct {
     }
 
     fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
-        if (bytes.len == 0) {
-            try s.emitOp(opcode.op.push_empty_string);
-        } else {
-            const atom_id = try s.function.atoms.internString(bytes);
-            defer s.function.atoms.free(atom_id);
-            try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
+        const atom_id = try s.function.atoms.internString(bytes);
+        defer s.function.atoms.free(atom_id);
+
+        // QuickJS's emit_push_const(..., as_atom = true) keeps ordinary
+        // string atoms as push_atom_value, but a canonical numeric name is a
+        // tagged-int atom and therefore falls back to an owned cpool string.
+        // Runtime-less parser fragments cannot own JSValues and retain their
+        // existing atom-only fallback, like the tagged-template test path.
+        if (atom_module.isTaggedInt(atom_id)) {
+            if (s.runtime) |rt| {
+                const string = core.string.String.createUtf8(rt, bytes) catch |err| switch (err) {
+                    error.OutOfMemory, error.StringTooLong => return Error.OutOfMemory,
+                    error.InvalidUtf8 => return Error.InvalidUtf8,
+                };
+                try s.emitPushConstOwned(string.value());
+                return;
+            }
         }
+        try s.emitOpAtom(opcode.op.push_atom_value, atom_id);
     }
 
     fn parseEnumDeclaration(s: *State) Error!void {
@@ -13681,10 +13706,7 @@ pub const parser_core = struct {
         var parameters = try parseFunctionParameters(s, func_kind, capture_child);
         defer parameters.deinit(s);
         if (capture_child and (func_kind == .generator or func_kind == .async_generator)) {
-            try s.emitOp(opcode.op.push_false);
-            try s.emitOp(opcode.op.drop);
-            try s.emitOp(opcode.op.push_true);
-            try s.emitOp(opcode.op.drop);
+            try s.emitOp(opcode.op.initial_yield);
         }
         // Break/continue label resolution does not cross function boundaries.
         const saved_control_frames = s.enterControlBoundary();
@@ -13742,13 +13764,10 @@ pub const parser_core = struct {
                 } else if (func_kind == .derived_class_constructor) {
                     try s.emitScopeGetVarCheckThis(atom_this);
                     try s.emitOp(opcode.op.@"return");
-                } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
-                    // In-place drop → return_undef keeps code.len unchanged, so
-                    // it is only sound when nothing jumps to the current end
-                    // (the jump would still land past the rewritten byte).
-                    var mutable_code = s.currentCode();
-                    mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                 } else {
+                    // Keep QuickJS's parser shape: the expression-statement
+                    // drop remains before the appended terminator. Final
+                    // bytecode rules decide whether that drop can disappear.
                     try s.emitOp(opcode.op.return_undef);
                 }
             }
@@ -14219,11 +14238,6 @@ pub const parser_core = struct {
                     if (is_async) {
                         try s.emitOp(opcode.op.undefined);
                         try s.emitOp(opcode.op.return_async);
-                    } else if (!jump_to_end and code.len != 0 and code[code.len - 1] == opcode.op.drop) {
-                        // In-place rewrite keeps code.len unchanged — only
-                        // sound when nothing jumps to the current end.
-                        var mutable_code = s.currentCode();
-                        mutable_code[mutable_code.len - 1] = opcode.op.return_undef;
                     } else {
                         try s.emitOp(opcode.op.return_undef);
                     }

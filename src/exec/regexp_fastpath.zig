@@ -188,6 +188,7 @@ pub fn qjsRegExpConstructCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    try builtin_dispatch.preflightInternalRecordCFunction(ctx, global, constructor, regexp_construct_ref);
     var native_scope = builtin_dispatch.NativeBacktraceScope.init(ctx, constructor);
     native_scope.push();
     defer native_scope.deinit();

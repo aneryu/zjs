@@ -689,6 +689,12 @@ pub const Registry = struct {
     // destructor append work instead of recursing through the native stack.
     zero_ref_head: ?*GCObjectHeader = null,
     zero_ref_tail: ?*GCObjectHeader = null,
+    // Header currently owned by the zero-ref drain. It has been detached from
+    // both intrusive lists so its destructor may reuse the links, but remains
+    // runtime-owned until the destructor performs final accounting/raw free.
+    // `containsHeader` includes this slot so synchronous class finalizers see
+    // the same live-object lifetime as qjs `free_object`.
+    zero_ref_current: ?*GCObjectHeader = null,
     external_tokens: []ExternalTokenEntry = &.{},
     external_tokens_capacity: usize = 0,
     next_external_token_id: u64 = 1,
@@ -735,6 +741,7 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry, rt: anytype) void {
         std.debug.assert(self.zero_ref_head == null);
         std.debug.assert(self.zero_ref_tail == null);
+        std.debug.assert(self.zero_ref_current == null);
         self.phase = .deinit;
 
         // Phase 1: free object resources. Function bytecodes, Shapes, and
@@ -1544,7 +1551,10 @@ pub const Registry = struct {
         self.stats.zero_ref_drains +|= 1;
         while (self.popZeroRef()) |queued| {
             std.debug.assert(queued.meta().rc == 0);
+            std.debug.assert(self.zero_ref_current == null);
+            self.zero_ref_current = queued;
             destroyZeroRefNow(rt, queued);
+            self.zero_ref_current = null;
         }
     }
 
@@ -1731,6 +1741,11 @@ pub const Registry = struct {
     }
 
     pub fn containsHeader(self: Registry, header: *const GCObjectHeader) bool {
+        if (self.zero_ref_current == header) return true;
+        var queued = self.zero_ref_head;
+        while (queued) |candidate| : (queued = candidate.next) {
+            if (candidate == header) return true;
+        }
         var iterator = self.objectIterator();
         while (iterator.next()) |candidate| {
             if (candidate == header) return true;

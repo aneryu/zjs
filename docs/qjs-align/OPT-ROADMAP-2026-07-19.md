@@ -1,8 +1,16 @@
 # OPT-ROADMAP 2026-07-19 — QuickJS 机制忠实对齐计划
 
-> 当前 main 审计基线：`936111c5fd6d1b0be522672d681b3eb0eeda1a50`。
-> `M-FCLOSURE-WIDTH` 已在该点完成并合入；当前
-> `perf/hoist-construction-qjs-align` 是以它为 base 的**未合入审计候选**，不能当成新 baseline。
+> **状态阅读规则（2026-07-24 收口后）**：本文顶部的“W1–W6原阶段收口与终态复核”和
+> §10“最终状态权威”表是**唯一当前状态权威**。其余带日期的反向复核、worktree
+> 快照及§§1–7中的“当前 / 下一步 / 红灯 / 未完成”均是当时审计或执行记录，只描述
+> 对应日期的状态；若与终态表冲突，以§10和顶部最终门禁证据为准。
+> W1–W6阶段工作已经按§10各行执行；2026-07-24终态复核新确认的两条direct-eval
+> correctness红灯也已修复并补定向证据，W1恢复完整收口。最终修复树上的checkpoint、
+> full test262、OOM、force-GC与唯一一次ReleaseSafe门禁均已完成并回填。
+>
+> 路线图起始 main 审计基线：`936111c5fd6d1b0be522672d681b3eb0eeda1a50`。
+> `M-FCLOSURE-WIDTH` 已在该点完成并合入；当时的
+> `perf/hoist-construction-qjs-align` 是以它为 base 的**历史未合入审计候选**，不能当成当前 baseline。
 >
 > named-function compiler correctness 前置已由 `c034597c` 合入，宽 `fclosure` correctness 前置已由
 > `936111c5` 合入；两者均不计作后续 plain-put 收益。旧 M-CELL binary 只保留历史证据用途。
@@ -11,7 +19,8 @@
 > `.scratch/m-hoist-construction/baseline/zjs`：完整 SHA-256
 > `e718f917c30191b372cd2b464c91f7ae7ffc0b3776dd52013817814ad9073642`；`.text`
 > SHA-256 `d20da48f6f353fca62be1a1ac1af06c794f152685190f9afeaedb06560af11ca`
->（4,035,952 bytes）。它只用于本候选审计；P1 真正收口后仍须重新冻结 M-CELL。
+>（4,035,952 bytes）。它只用于历史候选审计；P1收口后的重冻结已由下方最终P1c
+> production-code freeze完成。
 >
 > 性能参照 qjs：完整 SHA-256
 > `b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d`；`.text`
@@ -23,9 +32,57 @@
 > `5e331bf92e236c8e2c3bd88032b3c1ec2c2e9e0cfe2e1bd40b4ce2bbeaacd365`，与性能 qjs 的
 > `.text` 逐字节相同。完整 hash 差异来自非 `.text` 构建产物，性能仍固定使用前一个二进制。
 >
+> 2026-07-24 post-W1、post-P1c-put、pre-P1c-set recon 冻结在代码点
+> `91ad97dc9248d7f0ab8fdb8604f2b0e5201ec7a5`：ReleaseFast zjs 完整 SHA-256
+> `6386f600d28771641db1140a1f8cad73431b529229da62bab5ea1d2e30f60e9d`，`.text`
+> `b9f23389912267fb04a69b832e46a8f60503be6c6ae1b6cc3b24211f29c1406d`。
+> 该历史冻结件用于确认RegExp Zoo仍领先及resident-set值得开独立候选；当时约定若set候选改变共享dispatcher
+> 并获保留，最终P1c/RegExp须在新`.text`上再冻结。该条件已由紧随其后的最终P1c freeze兑现，
+> 不能把这里的数字跨baseline拼接。
+>
+> 最终P1c production-code freeze为
+> `c44288432db4cacb5a87e101ffe8db901009bf1c`；ReleaseFast zjs完整SHA-256
+> `6e145e51456a8021466946a0dce57b31bb4135d4565e2e9938f40a0b382e4fcd`，`.text`
+> `3ee63dbb786011571de080ad40b76eeb96b1889738cac04368e6ea18c7d64524`。
+> 其后的路线图证据提交不改变production `.text`；最终总门禁仍以最后一个文档提交后的HEAD执行。
+>
+> **W1–W6 原阶段收口与终态复核（2026-07-24）**：原阶段门禁没有通过改测试或放宽
+> exclude/known-error 制造绿色，而是形成四个独立、可审计的小提交：
+> `74f4f988`按Shape-before-object后的真实GC边界修正阈值回归断言；
+> `9ced17b3`让reachability消费conditional+goto规范化后的真实successor；
+> `c0caecbc`让`super` Set failure按caller strictness分别抛错或静默失败；
+> `5f621c03`先完整构造AutoInit slot，再以无失败事务同步发布slot kind与union，
+> 修复force-GC在fallible RHS中观察到半发布tag的问题。
+>
+> 两条direct-eval终态修复前的阶段证据为：`checkpoint-check + engine-production-gate` 37/37 steps，
+> 其中统一Debug 1967/1967、Debug/ReleaseFast CLI smoke各3/3、test262-smoke
+> 12/12、full test262 prepared 49775且0 unexpected（passed 44542、known 24）；
+> `test-oom` 14/14。最后一处AutoInit修复后的当前production code点
+> `5f621c03`另有core 289/289、统一force-GC 1968/1968及`perf-self-check`
+> 75/75；self geomean 1.0008→0.9769（-2.4%），不产生性能回退声明。
+> 这些门禁当时未覆盖后来重新确认的两条direct-eval红灯；现已完成两项窄修复：
+> **【FINAL-CORRECTION-COMPLETE(eval-function-name)】** `4ea0e859`让ancestor unscoped capture丢弃
+> `is_const`并把`var_kind`归一为`.normal`，pinned QJS与新`zjs-dev`均输出
+> `false\nfalse\n`，direct-eval builtins slice 44/44；
+> **【FINAL-CORRECTION-COMPLETE(eval-simple-catch)】** `4ea0e859`删除
+> `eval_var_object_fallback`第二target，pinned QJS与新`zjs-dev`均输出`g 42g`，
+> bytecode targeted 1/1，精确test262为known 1且路径已加入`test262_errors.txt`。
+> **【FINAL-EVIDENCE-COMPLETE(post-eval-fixes-checkpoint)】** 修复后的`checkpoint-check`
+> 26/26 steps，统一Debug 1969/1969、Debug CLI smoke 3/3、test262-smoke 12/12，
+> architecture与public API门禁全绿；`engine-production-gate`亦为26/26 steps，
+> 其中统一Debug 1969/1969、ReleaseFast CLI smoke 3/3并包含下列完整test262结果；
+> **【FINAL-EVIDENCE-COMPLETE(post-eval-fixes-full-test262)】** `test262-gate` 5/5 steps，
+> prepared 49775且0 unexpected（passed 44541、known 25）；
+> 同一最终修复树另有`test-oom` 14/14和统一force-GC 1969/1969（9/9 steps）；
+> `0acd73f9`承载data→AutoInit descriptor OOM rollback/retry回归。
+> **【FINAL-EVIDENCE-COMPLETE(final-head-release-safe)】** 源码、测试、known-error与报告树冻结后，
+> 唯一一次运行`zig build test -Doptimize=ReleaseSafe --seed 0 --summary all`：
+> 9/9 steps，统一套件1969 passed、0 skipped、0 failed。门禁后只把本段占位改为实际证据，
+> 未改变任何构建输入；承载证据的是包含本完成标记的收口提交。
+>
 > 本文取代 2026-07-18 版本；基于 2026-07-19 对当前代码、QuickJS 源码、历史战报和 PMU 的重新审计。
 >
-> **第七次 QuickJS 反向复核与 CORE 收口（2026-07-20，当前状态）**：第六次复核列出的
+> **第七次 QuickJS 反向复核与 CORE 收口（2026-07-20，历史快照；已由§10终态取代）**：第六次复核列出的
 > `M-LVALUE-PROVENANCE-CORE`缺口已按机制落地，但结论严格限于ordinary reference/call surface：
 >
 > 1. private member producer已恢复为普通field transport；`delete`按atom的private kind拒绝，而不是按`#`字符串猜测。
@@ -43,11 +100,12 @@
 > 5. optional chain整链只创建一个共享label identity，每个短路边引用该identity；getter后的raw label不覆盖last-op。
 >    binder先验证全部definition/reference，再一次分配映射并commit；不存在固定16项数组、per-exit vector或signature scan。
 >    257-site普通/delete/closed-call/optional-call回归均通过。
-> 6. 当前证据：QuickJS差分5/5逐字节输出一致；`test-parser`397/397、`test-bytecode`98/98、`test-exec`284/284、
+> 6. 当时证据：QuickJS差分5/5逐字节输出一致；`test-parser`397/397、`test-bytecode`98/98、`test-exec`284/284、
 >    OOM injection 8/8、`quick-check`8/8 steps、`checkpoint-check`32/32 steps（统一Debug 1613/1613、test262-smoke 12/12）
 >    全绿；定向test262 optional-chaining 38/38、class statements/elements准备1534项且1532通过、2项feature skip、0 error。
->    下一步因此是`M-PARSER-CONTROL-CLEANUP`，随后进入不可拆的M-DSTR traversal checkpoint；不得回头用特性fast path
->    替代这次建立的last-op/transaction/label机制。
+>    当时排定的下一步是`M-PARSER-CONTROL-CLEANUP`，随后进入不可拆的M-DSTR traversal checkpoint；
+>    后续各项已按§10的W1-core-close/W1-full-close收口，不得回头用特性fast path替代这里建立的
+>    last-op/transaction/label机制。
 >
 > **第六次 QuickJS 反向复核（2026-07-20，历史裁决；边界规则仍适用）**：本轮以
 > `emit_op/get_prev_opcode → get_lvalue/put_lvalue → call rewrite → js_parse_delete →
@@ -99,7 +157,7 @@
 >    `scope_no_dynamic_env_flag/selected_reference/emitScopePutVarNoDynamicEnv`零生产，并删除仅服务call/source-tail补偿的
 >    状态；`active_with_atom`若暂由旧destructuring binding transport读取，只能具名留到M-DSTR，普通expression consumer必须为零。
 >
-> **最新 worktree 复审快照（未提交）**：W1b1 的 ordinary/parameter-eval **语义表契约**已完成：最终
+> **2026-07-20 worktree 复审快照（历史未提交状态；已由§10终态取代）**：W1b1 的 ordinary/parameter-eval **语义表契约**已完成：最终
 > vardef 为 args→locals 单表，eval operand 为最终链头，parameter environment 由 `ARG_SCOPE_END` 表达，
 > compile/final closure row 均已删除 `source_depth`，dynamic-env lookup 按表序，eval identity 为不向子函数传播的
 > combined bit。dynamic-env 的 producer 也已按 QuickJS 分成两条路径：只有函数自身含 direct eval 时才由
@@ -108,23 +166,26 @@
 > closure 共享 8B/align4 storage，final vardef 为 12B/align4，`VarKind` 恢复 QJS 0..10，临时
 > `class_static_this` 只占未用 11，uncaptured final row 以 `is_captured=0,var_ref_idx=0` 表示。零填充
 > QJS C probe 与 Zig raw golden 逐字节一致；15 轮 Zoo paired median 为 -1.10%，低于裁决线，故性能收益明确记零。
-> 仍有一个明确未封闭项：static class-field initializer 还以内联代码执行，因此 `eval/apply_eval` 暂占
+> 该快照当时仍有一个明确未封闭项：static class-field initializer 还以内联代码执行，因此 `eval/apply_eval` 暂占
 > `0x8000` 传递 grammar capability，并把可用链头限制在 15 位；它归 W1d“把 static initializer 也迁入
-> `<class_fields_init>` child”所有，不能写成 Zig 限制或已对齐。此次复审还修正了遗留 `0x3fff` mask，
+> `<class_fields_init>` child”所有；该项后来由§10的W1d收口，不能把这里的历史状态写成
+> Zig限制或终态缺口。此次复审还修正了遗留 `0x3fff` mask，
 > `0x4000` 已恢复为普通 scope 数据。2026-07-20 最新 declaration/body-identity slice 已重跑
 > `test-parser` 395/395、`test-bytecode` 98/98、`test-exec` 282/282、`test-builtins` 175/175；
 > 随后`quick-check` 3/3与`checkpoint-check` 32/32 steps全绿，其中统一Debug 1609/1609、architecture/public API、
 > Debug/ReleaseFast smoke及test262-smoke 12/12均通过。ReleaseFast完整test262仍是更早证据：当时准备49775项，
 > 44599通过、2项与`test262_errors.txt`完全相同、0项unexpected；3518项配置排除、5174项因feature跳过。
 > 该full-test262证据包含旧的spec-over-QJS catch-var行为，不能再作为本轮“忠实QJS”出口；OOM injection与最终唯一一次
-> ReleaseSafe仍未运行，因此这仍不是合入结论；W1b2的Zoo数字只证明当时isolated row-layout候选性能中性，后续
+> ReleaseSafe当时仍未运行，因此该快照不是合入结论；W1b2的Zoo数字只证明当时isolated row-layout候选性能中性，后续
 > correctness变化已经使“当前worktree总体性能”基线失效；ordinary/core compiler可在W1b2.5独立收口，但总体性能基线要等
 > W1b2.6移除剩余using runtime helper/cache后再冻结，避免把产品特性初始化债务带进后续Realm/FB归因。
 > 最新focused gate覆盖了普通block/function-body分界、body pre-scan删除、generic for-in/of非声明LHS单遍构造、
 > parser-time visible scope head、catch wrapper、if/classic-for/for-in-of/switch/with/class scope节点及lexical-for单一binding。
 > 两个direct-eval assignment测试原预期不是pinned QuickJS行为；源码oracle与当前`zjs-dev`都输出
-> `1 0 / 12 3 / 1 0`和`10 10`，测试已改为该reference结果。尚未重跑
-> full test262/ReleaseSafe/OOM injection，也没有封闭下述destructuring child/cpool源码顺序红灯；因此当前仍不是compiler exact或可合入结论。
+> `1 0 / 12 3 / 1 0`和`10 10`，测试已改为该reference结果。该快照尚未重跑
+> full test262/ReleaseSafe/OOM injection，也没有封闭下述destructuring child/cpool源码顺序红灯；
+> 这些缺口后来均由§10的W1 close及顶部最终门禁收口；最终HEAD的ReleaseSafe仅按
+> `FINAL-EVIDENCE-COMPLETE(final-head-release-safe)`回填。
 >
 > **第五次QuickJS反向调用点复核（历史快照；状态与裁决均受上方第六次复核覆盖）**：
 > 1. `M-BODY-SCOPE-IDENTITY`的identity部分已经落地：root script/module/direct/indirect eval、block/concise arrow、普通函数和
@@ -150,7 +211,10 @@
 >    “所有检查后置”：module-eval function对已有同scope GlobalVar的检查、block lexical `define_var(FUNCTION)`以及Annex-B eligibility都仍在
 >    child前；只把QuickJS确实在child完成后执行的outer/body/global carrier commit及其错误/OOM时序后置。
 > 5. “test262/规范优于pinned QuickJS”的三个旧reference exception已取消。body同名`var + eval`已改回QuickJS的`undefined`；ordinary
->    descendant direct eval改写named-function self binding以及simple-catch同名eval `var`仍是当前红灯，必须按pinned QuickJS对齐。
+>    descendant direct eval改写named-function self binding以及simple-catch同名eval `var`在该快照中仍是红灯。
+>    2026-07-24终态复核重新证实两项仍可复现，随后已分别由
+>    `FINAL-CORRECTION-COMPLETE(eval-function-name)`和
+>    `FINAL-CORRECTION-COMPLETE(eval-simple-catch)`完成窄修复与定向验证；W1现已完整覆盖这两项。
 >    test262差异只记录为reference已知行为，不再授权optimization分支保留另一套语义；若未来要做spec模式，必须另立产品决策且不得称为QJS对齐。
 > 6. 当前收口顺序固定为：先关本checkpoint及gate；随后`M-LVALUE-PROVENANCE-CORE → M-PARSER-CONTROL-CLEANUP →
 >    [M-DSTR-SOURCE-ORDER → M-DEFINE-VAR-CLOSE → M-DSTR-STACK]不可拆checkpoint → M-FINALLY-SINGLE-BODY → M-SCOPE-EVENT-PRODUCERS →
@@ -372,27 +436,32 @@ QuickJS 自身存在的 invariant-based fast path 可以忠实镜像；它必须
 而不是服务某个 benchmark。已有且正确、同时证明优于 qjs 的 zjs 机制也不为“代码长得一样”
 而主动退化；此时要记录为什么它仍满足语义和机制边界。
 
-### 0.1 当前代码的 no-cheating 前置审计
+### 0.1 历史 no-cheating 前置审计（已完成）
 
-最新调用图复核确认，当前 main 继承了若干**绕过通用 parser/eval/closure 机制的源码特判**。
-它们不是本 P1 候选新增；本候选已逐个给出 active caller、最小反例和 qjs 对照后删除，尚未合入
-main。删除这些 bypass 的成本与收益全部记 correctness，不进入后续 construction PMU 归因：
+2026-07-20调用图复核曾确认，当时的main继承了若干**绕过通用
+parser/eval/closure机制的源码特判**。它们不是当时P1候选新增；候选逐个给出active
+caller、最小反例和qjs对照后删除。删除结果随后随`fde49b15`及§10的
+W1-core-close/W1-full-close合入并通过终态门禁。删除这些bypass的成本与收益全部记
+correctness，不进入后续construction PMU归因：
 
-| 当前实现 | 已确认事实 | 裁决 |
+| 历史实现 | 已确认事实 | 最终裁决 |
 |---|---|---|
-| `isWhitespaceSeparatedNumericScript` | parser 拒绝后把空白分隔数字源码当 `undefined`；`qjs -e '1 2'` 抛 `SyntaxError` | **本候选已删除**；Engine 与 CLI 红灯先失败、删除后通过，qjs/zjs 均以非零状态抛 `SyntaxError`。这是 correctness 修复，收益记零 |
-| `simpleEvalRegExpLiteral`、`evalSimpleCallerExpression`、`simpleEvalStringLiteral` | 在 generic eval parse/root closure 前解释特定源码；caller helper 还把 named-function assignment completion 错成异常/`undefined` | **本候选已删除**；exact/terminated RegExp、string、`this`、sloppy/strict named assignment 均由 generic parser/VM 处理并与 qjs 对齐，收益记零 |
-| `sourceHasOnlyStrictFlag`、`sourceHasUseStrictDirective` | engine 对源码/frontmatter 再做字符串扫描；例如注释中的 `flags: [onlyStrict]` 被误当 strict | **本候选已删除**；host/runner option 与 parser directive prologue 是唯一真源，frontmatter 注释不改变 engine strictness |
-| `canReturnUndefinedWithoutVm` | 空/无副作用脚本按最终字节码形状跳过 VM，qjs 没有对应 entry bypass | **本候选已删除**；empty/comment/no-effect 统一进入 root runner。real root function object 仍属于 P1b，不再与 bypass 删除绑定 |
-| `nativeTypedArraySubclassBase` | `Function(body)` 按 `class … extends TypedArray` 源码片段把**整个 body**替换为 `return <base>`；qjs 得到 `false X`，旧 zjs 得到 `true Uint8Array` 且吞掉 body side effect | **本候选已删除**；现有真实 class/Reflect.construct/typed-array subclass 机制已足够，Dynamic Function 现保留原 body，identity/name/instance/side-effect 与 qjs 一致 |
-| `parameterSourceContainsAwait`、`parameterInitializerContainsAwait`、`arrowBlockStartsUseStrict`、`defaultInitializerHitsParameterTdz` | 在统一 grammar/scope resolution 前扫描 token/source，或用永远 TDZ 的匿名 local 伪造参数错误；合法 `({await:1}).await`、nested async function 被误拒绝 | **本候选已删除**；AwaitExpression 在 parser production 处裁决，directive prologue 解析后裁决 strict，parameter `enter_scope` + 最终名字解析提供真实 TDZ cell |
+| `isWhitespaceSeparatedNumericScript` | parser 拒绝后把空白分隔数字源码当 `undefined`；`qjs -e '1 2'` 抛 `SyntaxError` | **已删除并合入**；Engine 与 CLI 红灯先失败、删除后通过，qjs/zjs 均以非零状态抛 `SyntaxError`。这是 correctness 修复，收益记零 |
+| `simpleEvalRegExpLiteral`、`evalSimpleCallerExpression`、`simpleEvalStringLiteral` | 在 generic eval parse/root closure 前解释特定源码；caller helper 还把 named-function assignment completion 错成异常/`undefined` | **已删除并合入**；exact/terminated RegExp、string、`this`、sloppy/strict named assignment 均由 generic parser/VM 处理并与 qjs 对齐，收益记零 |
+| `sourceHasOnlyStrictFlag`、`sourceHasUseStrictDirective` | engine 对源码/frontmatter 再做字符串扫描；例如注释中的 `flags: [onlyStrict]` 被误当 strict | **已删除并合入**；host/runner option 与 parser directive prologue 是唯一真源，frontmatter 注释不改变 engine strictness |
+| `canReturnUndefinedWithoutVm` | 空/无副作用脚本按最终字节码形状跳过 VM，qjs 没有对应 entry bypass | **已删除并合入**；empty/comment/no-effect 统一进入 root runner。real root function object 后由W1收口，不再与 bypass 删除绑定 |
+| `nativeTypedArraySubclassBase` | `Function(body)` 按 `class … extends TypedArray` 源码片段把**整个 body**替换为 `return <base>`；qjs 得到 `false X`，旧 zjs 得到 `true Uint8Array` 且吞掉 body side effect | **已删除并合入**；现有真实 class/Reflect.construct/typed-array subclass 机制已足够，Dynamic Function 保留原 body，identity/name/instance/side-effect 与 qjs 一致 |
+| `parameterSourceContainsAwait`、`parameterInitializerContainsAwait`、`arrowBlockStartsUseStrict`、`defaultInitializerHitsParameterTdz` | 在统一 grammar/scope resolution 前扫描 token/source，或用永远 TDZ 的匿名 local 伪造参数错误；合法 `({await:1}).await`、nested async function 被误拒绝 | **已删除并合入**；AwaitExpression 在 parser production 处裁决，directive prologue 解析后裁决 strict，parameter `enter_scope` + 最终名字解析提供真实 TDZ cell |
 
 源码中特化 helper 的**存在本身**不等于 active cheating。本次 reachability 检查显示 regexp 中若干
 literal/pattern 命名 helper 当前无 caller；它们先作为 dead-code cleanup 候选记录，不据此否定
 `cb41f7fe` 已验证的 generic split/match 路径。以后 no-cheating 审计必须同时给出 caller/reachability、
 触发样例和 qjs 对照，不能只凭函数名定罪。
 
-## 1. 当前事实基线
+## 1. 历史事实基线与证据档案
+
+> 本节冻结2026-07-19至2026-07-20的起始事实和来源审计；其中“当前”“尚未”
+> 等词均指当时状态，不是未关闭任务。W1–W6最终状态只看§10。
 
 ### 1.1 已完成，不再列为未来工作
 
@@ -401,9 +470,9 @@ literal/pattern 命名 helper 当前无 caller；它们先作为 dead-code clean
 - shape transition 已有 cache hit / shared clone / `rc==1` in-place 三臂的拓扑；但 cache key 和
   property-storage reconciliation 尚未完全对齐，不再重做三臂，只继续审计其命中资格；
 - Array.push 已在 `ToObject` 前走 qjs 式 direct dense-array arm，并直接维护 count/length；
-- `resolve_labels` 及相关 finalize 已实现 dup+put→set、逻辑链、nullish/typeof、constant branch、
-  push-neg、return-undef、dead code、inc/add-loc 等 matcher/fuse；完整 coverage 仍由 M-EMIT
-  的最终字节码矩阵封账；
+- `resolve_variables`已按pinned QuickJS phase拥有logical-chain fold；`resolve_labels`继续实现
+  dup+put→set、nullish/typeof、constant branch、push-neg、return-undef、dead code、
+  inc/add-loc等matcher/fuse；完整coverage仍由M-EMIT的最终字节码矩阵封账；
 - 内建 Array/Map/Set/generator iterator 已有与 `JS_IteratorNext2` 对应的 result-object-free
   路径；
 - 默认 64 位 16-byte JSValue、inline dup/free、zero-ref queue，以及 `[]*VarRef` + `pvalue`
@@ -415,7 +484,7 @@ literal/pattern 命名 helper 当前无 caller；它们先作为 dead-code clean
 
 后续 profile 可以证明这些机制仍有残差，但不得再以“缺少该机制”为前提开刀。
 
-### 1.2 2026-07-19 当前 zjs/qjs 基线测量
+### 1.2 2026-07-19 zjs/qjs 历史基线测量
 
 环境：Cortex-X925 CPU19、ReleaseFast、`taskset -c 19`、`armv8_pmuv3_1`，9 轮交错；
 下表用 paired 样本的中位比，不使用 best-of-min 作为主结论。
@@ -439,6 +508,54 @@ median。下表来自历史冻结件
 | short set | 1.349x | 1.293x | 与 put 分开，作为第二候选 |
 | short post-inc | 2.276x | 1.953x | 混入 read/number/update/lowering，只作后续 consumer |
 
+2026-07-24在W1全部construction机制收口后，又以CPU19、ReleaseFast、ASLR-off和15轮交错
+paired重新冻结`91ad97dc`：
+
+- JavaScript Zoo `regexp.js`的adaptive score zjs/qjs paired median为`1.12546584x`
+  （zjs `+12.5466%`），MAD `0.01095469x`、范围`1.10539–1.19603x`，15/15轮zjs胜；
+  因两侧都按一秒自适应循环，PMU只保留为envelope，不作fixed-work归因；
+- fixed-work `cell-set-short-20m.js`的zjs/qjs cycles为`2.27380809x`、instructions为
+  `2.02820703x`，cycles MAD `0.00374563x`，30/30 stdout完全相同。该结果只批准独立
+  resident-set单刀，不把2.27x整体预先归因给residency；
+- qjs仍为上方固定二进制；Zoo源码为`javascript-zoo@a17d4e0`。combined raw分别在
+  `/tmp/zjs-post-w1-refreeze-91ad97dc/{zoo,cell-set}-paired-raw.csv`，SHA-256为
+  `ebf6e1877fe34248f90e3c8b7e3badc169b481ec5e49c0e9aae32958b7804e77`和
+  `b17756d111fbfcebd237bbd2b467ee503e69d491a0b14b903c5a5f0425693ab0`；
+  完整summary SHA-256为
+  `1e9edc03fc8fb5e395f90b1ffce94675cc74b270562a267b4ff3397b53662995`。
+
+最终P1c按plain put与set两个独立生产刀完成。`f9289ec7`先以final-bytecode矩阵锁定owning
+local/arg、strict/sloppy mutable/readonly captured ref、script global、module generic index 4
+初始化/后续写、import、direct eval及function-name的授权边界；generic set另由实际执行idx≥4的
+refcount/self-assignment fixture锁定。随后在CPU19、ReleaseFast、ASLR-off、15轮交错paired环境裁决：
+
+| 最终P1c候选 | candidate/baseline cycles | candidate/baseline instructions | controls与裁决 |
+|---|---:|---:|---|
+| resident set `03aa0351` | 0.79303208x | 0.79949087x | put 1.00132265x、read 0.99349305x、post-inc 0.99641528x；全部未越+1%，**保留** |
+| resident plain put `9b7a97e5`（最终上下文`c4428843`） | 0.73573436x | 0.70303898x | set 0.99906019x、read 1.00450038x、post-inc 0.82243910x；全部未越+1%，**保留** |
+
+set包的baseline为只反转set production mapping的`5c440ea2`；baseline/candidate完整及`.text`
+SHA-256分别为
+`d8af15fc90e16cd6856d5925178925ee650f99d456b418dd478da984c71c3b86`/
+`b9f23389912267fb04a69b832e46a8f60503be6c6ae1b6cc3b24211f29c1406d`与
+`52ff93b3a075d4868da7478591990847588de014ca8c65e1743b3543f3c8a95c`/
+`de87d9ded2a3916559b008bb32ed700da0c5135a0c4338da903454888824ae8c`。
+plain-put包的baseline为只删除`9b7a97e5` 31行handler及5条mapping、同时保留resident set的
+`f5bc5d0e`；baseline完整/`.text`为
+`ae509649e7c3ef5f74df2dcb77832582991f63d350cc449424d1ce1dd86f3072`/
+`c503ead4b30f4ae6b0eeb4e18e70af41fb5ef89863e9811c1b55257dab761dd3`，
+candidate即页首最终freeze。candidate/qjs direct仍有set
+`1.75519372x/1.62153287x`及put`2.17093750x/1.98431799x`
+cycles/instructions差距；这里只归因本次candidate/baseline已删除的冷dispatch成本，不把全部QJS差距冒充收益。
+
+最终同一candidate binary上的RegExp Zoo score为zjs/qjs `1.12136536x`（`+12.1365%`），
+MAD `0.00693653x`、范围`1.10657–1.16753x`，15/15轮zjs胜。set与plain-put证据根分别为
+`/tmp/zjs-p1c-set-final-03aa0351.1PtT4I/`和
+`/tmp/zjs-p1c-plain-put-final-c4428843.MzYYFJ/`，summary SHA-256分别为
+`8efd82828a3d7ca5b140720fef539ac2e0f303506417399534116905c7986216`和
+`13069f9528cf921e16e10b566799ca9e29c70c3a1db262e007d55dbe8a51557d`；
+两包的raw/artifact manifest均自校验通过，stdout逐字节一致，PMU事件100% enabled。
+
 已做过一次“plain read 与 checked read 分 handler”的干净候选，并在独立重建后跑 15 轮 paired
 复核。它删除了 plain read 的 TDZ compare，instructions 如预期下降约 1.26%，但没有 cycles 收益，
 同时无关 put/set controls 超过 +1%：
@@ -453,8 +570,9 @@ median。下表来自历史冻结件
 
 按 §8 该候选已回退，保留最终 opcode 契约测试。结论不是“分流机制错误”，而是这次 read-only
 布局变化没有转化为 cycles，且污染了更重要的 write controls；没有新的源码事实、handler-cluster
-策略或工具链变化，不得换名重跑。当前先完成 P1a/P1b 构造对齐，重冻后 P1c 直接转向
-plain put，再单独做 set。
+策略或工具链变化，不得换名重跑。当时排定先完成P1a/P1b构造对齐，重冻后P1c
+直接转向plain put，再单独做set；该顺序已经执行完成，最终P1c裁决与freeze见本节
+上方`c4428843`证据及§10的W1-core-close。
 
 这些数字只是本计划的最新快照。正式候选开始前，M0 必须把原始逐轮数据、二进制 hash、
 命令和环境固化到当前工作项；计划文本不代替可审计的原始证据。
@@ -477,8 +595,9 @@ plain put，再单独做 set。
 4. object literal 当前热点仍包含 `adoptShapeForNewProperty`、object/shape create/destroy、
    root-shape lookup 和 MemoryAccount。因为 `rc==1` 臂已完成，必须先扣除空对象 lifecycle，
    再解释 property publish 残差。
-5. “alloc-empty 在 07-08 曾为 0.96x”尚无同一入库脚本和原始数据可复核；该脚本到
-   07-14 才入库。复现前只称“当前残差”，不称“已知回归”。
+5. “alloc-empty 在 07-08 曾为 0.96x”没有同一入库脚本和原始数据可复核；该脚本到
+   07-14 才入库。最终W4 recon仍无法建立同脚本的07-08冻结对照，因此该说法已从active
+   hypothesis删除；这里只称“当前残差”，不称“已知回归”。
 
 ### 1.4 对 pinned QuickJS 实现的逐段复核
 
@@ -508,7 +627,7 @@ plain put，再单独做 set。
 | job执行事务 | `JS_ExecutePendingJob`每次只摘一个entry，以entry realm调用；随后free argv/result/entry并free context，返回`-1/0/1`。异常停止本次host loop，后续FIFO不被消费；`pctx`已标obsolete，且只在job ref之外仍有owner时才给borrowed ctx | generic `Queue.runAll`连续跑完整queue并无条件free result；Promise/Finalization另有两套drain。公开`job.drain`又忽略`budget`，把“曾有work”硬报为drained=1 | W1b3d2建立唯一`runOne` transaction：empty/success/exception显式返回，异常保留Runtime current exception并停止，后续entry原序不动。public drain作为zjs adapter精确循环至budget/empty/error并返回真实count/has_more；释放entry RealmRef后不得返回悬空raw ctx |
 | job enqueue/OOM publication | `JS_EnqueueJob2`分配entry后dup ctx/args再挂FIFO；但Promise reaction、thenable与dynamic-import内部调用都忽略失败，FinalizationRegistry用`no_exception`后也忽略，可能丢work/留下pending promise。Promise reject另有state/result→host tracker→旧reactions enqueue的可重入phase | Promise settle已有`qjsPreparePromiseReactionJobs`+capacity preflight后commit；其他producer与分散queue各自处理，统一时既可能退回先改state再enqueue/silent catch，也可能把tracker phase错误折叠进“原子commit” | 建立producer transaction矩阵：generic显式enqueue失败不消费输入；Promise/thenable先reserve entries/RealmRefs/args，再按QJS state→tracker→reaction次序no-fail publish，reservation须耐reentry；dynamic import区分promise暴露前的reject/throw与暴露后的typed pending completion retry；Finalization/waitAsync保留pending retry。全部是具名GUIDE safety divergence，收益零 |
 | empty object | `OP_object → JS_NewObject → JS_NewObjectFromShape`：GC trigger、Object alloc、按 shape `prop_size` 分配 property array、rc=1、挂 GC list | zjs 使用 shared root，但空对象 lazy-skip property array，并承担 MemoryAccount/Registry；这是已有 zjs 优化，不是 Zig 限制 | 按事件和关键链比较，不以分配次数机械求同 |
-| shape transition | `find_hashed_shape_prop` 不比较 `prop_size`；cache hit 后若容量不同就 realloc 对象 property array，再采用目标 shape | zjs 三臂已存在，但 `findHashedShapeProperty` 要求 candidate `prop_size == property_capacity` | M-SHAPE-PUBLISH 的第一项改为验证并对齐 cache-hit 资格/容量协调 |
+| shape transition | `find_hashed_shape_prop` 不比较 `prop_size`；cache hit 后若容量不同就 realloc 对象 property array，再采用目标 shape | zjs 三臂已存在，但 `findHashedShapeProperty` 要求 candidate `prop_size == property_capacity` | `10348b7d`已证明可对齐资格与OOM-safe容量协调，但PMU direct/control均越过硬门槛并由`5cb2dda5`完整回滚；当前allocator表示下关闭该子方向 |
 | RC/free | inline `JS_DupValue/JS_FreeValue`；对象到 0 后入 `gc_zero_ref_count_list`，由最外层 drain 调 `free_object/free_gc_object` | 默认 value representation 和 zero-ref queue 已同构 | 不重开抽象；只在 allocation direct profile 证明重复记账或关键链差异时动 |
 | compiler topology | 单次正式parse按遇见顺序建FunctionDef；for-in/of与destructuring均以label/operand stack分离源码构造顺序和运行顺序，后者再以iterator catch-offset承载且不复制child/temp；finally只生成一个`gosub/ret` body。随后对每个FunctionDef执行scope-link rebuild→`add_eval_variables → add_global_variables → 递归 finalize children → resolve_variables → resolve_labels → compute_stack_size`；`capture_var`在第一次真实capture时编号，scope close/body hoist均由真实事件锚定 | candidate已删除closure permutation/remap、grouped open-index、forward retrofit与ancestor fallback，并完成body pre-scan删除、ordinary block/body、generic-for普通LHS单遍、scope/body identity、lexical-for单一VarDef与non-pattern `defineVar` core；剩余pattern ledger/arguments scan、statement carrier偏早、通用lvalue source shape、destructuring replay、finally复制及scope/finalizer/body双表示、全树prepass、entry预刷新与derived `this`伪capture。`using`和TS namespace是独立产品控制面 | P0只冻结row schema/identity规则；W1b2.5从M-LVALUE-PROVENANCE-CORE开始按control→DSTR source→DEFINE close→DSTR stack→finally→scope events→derived this→finalizer/body/close原子checkpoint推进。特别禁止在destructuring双parse尚存时宣称define owner完成，也禁止在current-before-children前提前用future capture降低leave。W1b2.6再隔离M-USING-TYPED-CONTROL；correctness变化不计性能 |
 | final bytecode语义表 | `OP_eval/apply_eval` 在`resolve_variables`中把parser scope改写为`vardefs`链头；最终`JSBytecodeVarDef[arg_count + var_count]`按args→locals连续打包，direct eval只沿`scope_next`；最终`JSClosureVar`没有来源深度 | row schema、args→locals容器、final chain head、`ARG_SCOPE_END`与table-order lookup已同构，scope/body identity和non-pattern declaration core也已落地；但pattern旁路、statement carrier时机、destructuring topology与Annex-B仍可改变VarDef顺序/loc operand，static class-field inline eval仍占`0x8000` | W1b1 lookup契约与W1b2物理表示冻结；具体index/final bytecode不冻结。pattern、destructuring、carrier/Annex-B与高位分别由DEFINE-CLOSE、M-DSTR、finalizer/body原子checkpoint与W1d收口 |
@@ -843,49 +962,53 @@ const value = Reflect.construct(Object, [], newTarget);
 创建期的fallible准备之后成为no-fail；每个carrier有独立mark/free测试。module registry在W1e收口，interrupt budget在W2-0
 收口，二者都是已登记的context差异，不能从ordinary core-close结论中消失。
 
-## 2. 正确性前置依赖
+## 2. 历史正确性前置依赖（W1–W5 已关闭）
 
-正确性任务可以在独立 worktree 开发，但不能在 PMU 基线冻结后无条件并行合入。它们会改变
-相关机制的成本或可验证边界；合入后必须重建基线。
+下表是2026-07-20用于排定执行顺序的历史快照。表中的前置后来均由§10对应W阶段
+关闭；它现在只保留复现、机制边界和证据来源，不再列出活动阻塞项。W6则因重开条件
+未满足而按计划关闭。正确性变更会使性能基线失效、必须重冻的规则继续有效。
 
-| 正确性项 | 当前复现 | 阻塞的性能机制 |
+| 正确性项 | 2026-07-20复现/当时状态 | 最终处置 |
 |---|---|---|
-| eval entry 不得吞 parser error | 本候选已令 public `-e '1 2'` 与 Engine eval 都抛 `SyntaxError`；CLI 非零退出，和 qjs 一致 | **correctness 子项已完成但未合入**；不得把删除 fallback 的性能变化计入收益 |
-| generic eval/root closure 唯一路径 | 本候选已删除 active `simpleEval*`/caller-expression helper及`canReturnUndefinedWithoutVm`；所有源码进入parser/root runner，但root仍是裸Bytecode而非真实function object | entry no-cheating子项已完成；real root/capture array/current-function仍阻塞 M-CLOSURE2-ONEPASS、M-CELL-EXEC |
-| entry environment 与current-function身份解耦 | candidate已让direct-eval var environment、implicit `arguments`、`new.target`/`super`资格与global IC读取显式`EntryContract`；负向`rg`只剩generator optional-state/首次resume fallback | **迁移前置已完成但未合入**；它解除undefined-sentinel阻塞，不代表contract是最终模型。real root前新增的硬前置是M-FINAL-BYTECODE-CONTRACT；root完成后再按QJS vardef/closure事实删减contract |
-| force-GC heap accounting | 已在 `0c7a46f8` 重验：`zig build test-exec -Dzjs_force_gc=true --summary all` 仍在 `gc.zig:1662` 抛 `HeapLiveBytesMismatch`，栈经 collection destroy/deferred weak-value free | M-ALLOC-LIFECYCLE、M-SHAPE-PUBLISH |
-| tail-call reuse 的等价 stack budget | 已在 `0c7a46f8` 重验：`function f(){"use strict";return f()} f()` 的 zjs 1s 超时，qjs 由 `js_check_stack_overflow` 抛 `InternalError: stack overflow` | M-RETURN-CONT、M-FRAME-CONT |
-| interrupt counter lifetime | call/jump poll point已存在，但zjs budget随VM Machine/call重建为1024且无handler时不持续；QJS counter属于Context，raw初值0在首次poll重置到10000，随后跨call/backedge持续 | W2-0 M-INTERRUPT-BUDGET；其后重冻M-RETURN-CONT/M-FRAME-CONT，不与tail stack合刀 |
-| realm identity/carrier/call phase | 当前host Context不可被FB/native/job安全持有，global token与20处payload borrowed pointer代偿；另有可观察`__realm_*`属性、tag和function/ordinary cache代偿；bound/proxy又可能把target realm提前用于wrapper | W1b3a–c先建立RealmContext、真实C_FUNCTION/FB carrier与caller-wrapper/final-arm协议；W1b3d1–d3补deferred owner/FIFO，W1b3e退全部non-carrier补偿。未完成前阻塞canonical root/closure2与其PMU基线 |
-| OOM realm与恢复模型 | zjs Runtime preallocated Error来自首realm；pinned QJS没有预制对象，普通/首层OOM按active ctx的InternalError prototype，递归分配失败退`JS_NULL`；仓库`oom_cap`另钉fully-exhausted catchable object与零分配delivery | W1b3a先恢复active-realm来源；per-realm fallback只作为既存OOM-cap/recovery safety adaptation，bootstrap使用runtime-neutral sentinel。正常可分配路径仍新建Error，fully-exhausted对象复用/无stack是显式偏离。该correctness变化收益记零，且禁止把“字段搬进Context”称为QJS exact |
-| internal control伪callable与binding lifetime | `internal_destructuring_helpers[14]`把六个dstr/八个using动作物化为runtime-cached无realm C_FUNCTION；`MethodRuntime.prototype`又通过external record→persistent handle钉住安装realm，公开`JSObject.Binding.prototype:*Object`则在另一端没有owner而可能悬空。公开value handle还会在runtime destroy时被静默clear成悬空slot | W1b2.5先恢复QJS destructuring单遍/stack/opcode协议，W1b2.6再把using收为typed product control；W1b3b随后从callee RealmContext解析method prototype，W1b3a把public Binding分成ctx-lifetime borrow与显式RealmRef owner，并先释放host owner后验证全部public root slots。未完成时不能宣称“所有C_FUNCTION都有carrier”或context teardown exact |
-| plugin HostClass prototype绕过Context | `InstalledPlugin.host_classes[].prototype`经external record活到Runtime teardown，opaque wrapper creation不读callback ctx；zjs动态class注册也只让发生set的Context延迟扩slot。QJS class definition在Runtime，注册时先扩全部live Context的null slot，prototype只在指定Context，`JS_NewObjectClass`按调用ctx取slot并把prototype交shape | W1b3a补齐all-live/future RealmContext slot-capacity invariant，把plugin prototype迁construction slot并删除InstalledPlugin JSValue edge；W1b3b用真实C_FUNCTION callback ctx创建opaque object。opaque wrapper只经shape保活prototype，不得升级成RealmRef owner。未完成前阻塞alternate realm独立回收、registration OOM、class teardown与external-record owner census封口 |
-| wrapper布局与EventLoop owner | EventLoop/test262 production以及TestEngine/string-view fixture仍把`*core.JSContext`反向cast成outer binding wrapper；wrapper拆分或先销毁即悬空。quickjs-libc loop不存ctx，但zjs现有`runUntilIdle(self)`会存 | W1b3a删除全树layout cast；loop因existing API own单一host RealmRef并只保存稳定core context，明确登记为API-lifetime adaptation。vtable直用core ctx，deinit按detach→callback roots→RealmRef释放；未完成前阻塞公开context拆分、callback ABI及Runtime teardown exact |
-| Atomics.waitAsync裸context与跨线程JS | pinned QJS无waitAsync；其同步waiter只在栈上等待cond。zjs heap waiter挂全局链表并持Promise+裸ctx，notify可从foreign thread直接修改JS heap，settle失败又被`catch {}`吞掉后销毁node | W1b3a先建立node RealmRef owner以阻断UAF；W1b3d2再实现no-alloc host completion→owner-runtime FIFO settlement及OOM retry/cancel。未完成前阻塞RealmContext last-ref、Runtime teardown和“deferred work统一由job承载”的封口 |
-| AUTOINIT允许域/opaque/error/publication | zjs把CGETSET、number/int常量和alias cache也做lazy，以`AutoInitRef{rt,id}`查runtime table；generic `getProperty`又把builder OOM变undefined、native builder同read双试，成功global slot仍是data。QJS仅三类ID、direct opaque，accessor/常量/alias eager，builder一次调用并上传异常，global当场发布VARREF，MODULE_NS可发布原export VarRef | W1b3d1 M-AUTOINIT-QJS-DOMAIN-PUBLISH；先按producer恢复QJS允许域/direct descriptor并删除shared alias cache，再修owner/error/global publication；MODULE_NS真实producer随W1e接入。它先于ordinary GLOBAL selector；correctness/OOM变化收益记零，完成后construction/cell/Zoo基线全部重冻 |
-| generator 函数表达式作默认参数 | 已在 `0c7a46f8` 重验：`function f(x=function*(){yield 1}){...}` 在 zjs 为 `UnexpectedToken`，qjs 返回 `1` | M-EMIT 的 parser/发码面 |
+| eval entry 不得吞 parser error | 当时候选已令 public `-e '1 2'` 与 Engine eval 都抛 `SyntaxError`；CLI 非零退出，和 qjs 一致 | **已合入并关闭**：`fde49b15`及§10 W1-core-close/W1-full-close；删除fallback的性能变化仍不计收益 |
+| generic eval/root closure 唯一路径 | 当时候选已删除 active `simpleEval*`/caller-expression helper及`canReturnUndefinedWithoutVm`；所有源码进入parser/root runner，但root当时仍是裸Bytecode | **已关闭**：no-cheating删除由`fde49b15`合入，real root/capture/current-function由§10 W1c1及W1-full-close收口 |
+| entry environment 与current-function身份解耦 | 当时候选以显式`EntryContract`接管direct-eval var environment、implicit `arguments`、`new.target`/`super`资格与global IC | **已关闭**：EntryContract完成迁移脚手架职责，终态由§10 W1a、W1c1及W1-full-close证明 |
+| force-GC heap accounting / weak liveness | ✅ `f221dfee`恢复open VarRef owned edge；`2ecbf301`、`951726e1`、`1f67bdbc`锁定WeakMap/deep weak chain/job-queue root，`ad3218dd`锁定exhausted-heap OOM delivery | **已关闭**：§10 W4及W4-shape-before-object；阶段末core 289/289、`test-oom` 14/14、统一force-GC 1968/1968 |
+| tail-call reuse 的等价 stack budget | `0c7a46f8`曾复现zjs超时而qjs抛`InternalError: stack overflow` | **已关闭**：§10 W2-tail（tail stack guard与回归证据） |
+| interrupt counter lifetime | 当时budget随VM Machine/call重建，未具备QJS Context级持续counter | **已关闭**：§10 W2-0，RealmContext直接own interrupt counter并完成跨Machine/Realm/call矩阵 |
+| realm identity/carrier/call phase | 当时host Context不能被FB/native/job安全持有，并存在global token、borrowed pointer、`__realm_*`和cache代偿 | **已关闭**：§10 W1b3a–e、W1-core-close与W1-full-close |
+| OOM realm与恢复模型 | 当时Runtime preallocated Error来自首realm，active-realm来源与fully-exhausted adaptation边界未分离 | **已关闭**：§10 W1b3a及W1终态；最终`test-oom` 14/14，安全adaptation仍不得冒充QJS exact |
+| internal control伪callable与binding lifetime | 当时六个dstr/八个using动作物化为C_FUNCTION，MethodRuntime/Binding的prototype owner又不一致 | **已关闭**：§10 W1b2.5/2.6、W1b3a及W1b3b；`131a396e`完成typed disposal transport |
+| plugin HostClass prototype绕过Context | 当时plugin prototype由external record保活，opaque wrapper creation不读callback ctx，class slot也未覆盖全部live/future Context | **已关闭**：§10 W1b3a、W1b3a-plugin-unload及W1b3b |
+| wrapper布局与EventLoop owner | 当时EventLoop/test262/fixture把`*core.JSContext`反向cast成outer binding wrapper | **已关闭**：§10 W1b3a；EventLoop改为命名host RealmRef owner并删除layout cast |
+| Atomics.waitAsync裸context与跨线程JS | 当时heap waiter持裸ctx，foreign notify直接修改JS heap且settle错误会丢失 | **已关闭**：§10 W1b3d2；host completion改为owner-runtime FIFO settlement与OOM retry/cancel |
+| AUTOINIT允许域/opaque/error/publication | 当时AutoInit域过宽、经runtime ID间接查找，builder错误与global publication均未对齐 | **已关闭**：§10 W1b3d1和W1e；最终半发布边界由`5f621c03`关闭 |
+| generator 函数表达式作默认参数 | ✅ `fde49b15` 已把nested function grammar恢复为fresh function boundary：进入child后不再沿用outer FormalParameters的`in_parameter_initializer`。正例`function f(x=function*(){yield 1}){return x().next().value} f()`在qjs/zjs均返回`1`；真正位于外层参数初始化器的direct-yield负例`function* g(x=yield 1){}`在两边仍均为`SyntaxError` | parser correctness blocker已解除，不再列为M-EMIT红灯；该修复改变compiler基线，后续diagnostic/PMU必须从包含`fde49b15`的状态重冻 |
 | named function-expression self-binding construction | 原冻结点的 lazy materialization 沿用旧 scope-linked/unconditional-const metadata，且参数默认值 `function f(x=f)` 被错发为 global read。`dbe50d7d` 已按 qjs 修复并由 `c034597c` 合入；checkpoint 1507/1507、相关 test262 30/30、full gate 0/49775 errors | 已解除 correctness 阻塞并废弃旧 M-CELL A/B；这一项本身不授权删 runtime publication，后者仍受 M-HOIST-CONSTRUCTION 阻塞 |
 | `fclosure` cpool 宽度 | 260 个 expression 的 parser panic 已修；producer 保留宽 index，最终只对 ≤255 缩短 | `936111c5` 已合入并通过相关 parser/exec/checkpoint/full gates；DONE，不计性能收益 |
 | module link-time wide-function hoist | 260 个 exported function 的 cycle TDZ 已修；link consumer 同时解码 `fclosure8/fclosure` | `936111c5` 已合入；P0 DONE。它只证明 operand transport，不证明 module guarded prefix 已与 qjs 同构 |
-| script/direct-eval 函数声明的创建阶段 | qjs `js_closure2` 只建/别名 cell，最终字节码执行 `fclosure; put_var_ref`；statement child解析完成后才给body local/arg写`func_pool_idx`或追加GlobalVar，block lexical则先于child、Annex-B outer var后于child | eager function-value publication虽已删除，但zjs仍在child前建立body/global/Annex-B outer carrier来补偿当前全树staging；FunctionDef构造顺序尚未对齐。归`M-FINALIZER-PRECHILD + M-BODY-HOIST-ANCHOR`原子checkpoint，之后才进入FB/closure2基线 |
-| Function-constructor typed-array 源码替换 | `Function("return class X extends Uint8Array {}")()` 返回真实 subclass，`X !== Uint8Array` 且 `X.name === "X"`；helper已删除，真实subclass、name、双instanceof、length与body side effect均通过 | **correctness 子项已完成但未合入**；性能变化记零 |
-| 参数语法/TDZ旁路 | token级await扫描误拒绝合法IdentifierName/nested async，裸`a=b`曾用synthetic TDZ local强制报错；pre-scan/synthetic local已删除，参数scope发真实`enter_scope/leave_scope`，AwaitExpression与directive由parser production裁决 | **correctness/机制子项已完成但未合入**；结构与行为测试均覆盖 |
+| script/direct-eval 函数声明的创建阶段 | qjs `js_closure2` 只建/别名 cell；statement child完成后才建立body/global carrier | **已关闭**：§10 W1b2.5的`7e604a85` finalizer/body-hoist checkpoint及W1c1 |
+| Function-constructor typed-array 源码替换 | 真实subclass、name、双instanceof、length与body side effect在当时候选均通过 | **已合入并关闭**：`fde49b15`及§10 W1 close；收益记零 |
+| 参数语法/TDZ旁路 | 当时候选已删除token/source pre-scan和synthetic TDZ local，改由parser production与真实scope裁决 | **已合入并关闭**：`fde49b15`及§10 W1 close |
 | direct eval 下 function-name 与同名 body `var` | pinned qjs返回`undefined`，旧zjs/test262导向预期为`11` | 已改回pinned QuickJS；回归明确记录这是`add_eval_variables`的function-name append/lookup顺序，不再保留spec-over-reference分支 |
-| ordinary descendant direct eval转发function-name | pinned qjs在`add_eval_variables` unscoped parent-var分支把`var_kind`归一为normal；最小复现输出`false / false`，不会保留原函数或抛TypeError | **当前红灯**：zjs仍输出`true / TypeError / true`。在dynamic-env/finalizer checkpoint按QJS row type与表序对齐；test262差异只记账，不授权继续偏离 |
-| direct eval 的 simple-catch 同名 `var` | pinned qjs的`instantiate_hoisted_definitions`在首个同名catch closure停止，最小复现输出`g 42g`；其自身failure ledger也记录相应test262差异 | **当前红灯**：删除“outer variable environment第二target”的spec补偿，恢复pinned QuickJS declaration/initializer target；仅GUIDE要求的OOM rollback可作为安全差异，不能改变成功语义 |
+| ordinary descendant direct eval转发function-name | 终态复核曾确认zjs输出`true / TypeError / true`而非pinned qjs的`false / false` | **已解决**：ancestor unscoped capture丢弃`is_const`并归一`var_kind=.normal`；QJS/新zjs均输出`false / false`，direct-eval builtins 44/44；见`FINAL-CORRECTION-COMPLETE(eval-function-name)` |
+| direct eval 的 simple-catch 同名 `var` | 终态复核曾确认zjs输出`global-x 42g`而非pinned qjs的`g 42g` | **已解决**：删除`eval_var_object_fallback`第二target；QJS/新zjs均输出`g 42g`，bytecode 1/1，精确test262 known 1并登记`test262_errors.txt`；见`FINAL-CORRECTION-COMPLETE(eval-simple-catch)` |
 
-上述两个未完成红灯都必须保留最小qjs/zjs复现与相关test262差异，但验收oracle固定为pinned QuickJS。
+上述两个红灯已经关闭；最小qjs/zjs复现与相关test262差异继续保留为回归证据，
+验收oracle固定为pinned QuickJS。修复后的checkpoint/full test262证据已回填到顶部具名终态记录。
 若未来产品要提供spec模式，应从该QJS基线另立模式与API；不得让optimization branch同时维护两套默认声明语义。
 
-依赖规则：
+以下为当时使用、现已执行完毕的依赖规则；它们仍约束未来重开或回归修复：
 
 - W1 的第一出口是 M-EVAL-ENTRY-INTEGRITY：public eval/CLI 的 parser error 不得被源码识别器改写，
   active direct/indirect eval 必须进入同一 parser→root closure→call 链。该清理是正确性前置，收益为零；
   删除 shortcut 导致的性能变化不能计入 closure construction 候选；
-- M-ALLOC-LIFECYCLE/M-SHAPE-PUBLISH 的生产改动前先修 force-GC，恢复该门禁；
+- M-ALLOC-LIFECYCLE/M-SHAPE-PUBLISH 的 force-GC liveness 前置已按上表收口；这只解除生产候选的
+  正确性前置，不替代 W4 阶段末统一 force-GC/OOM gate；
 - 再动 M-RETURN-CONT/M-FRAME-CONT 前，先为复用 frame 的 tail chain 实现并验证与 qjs stack guard
   等价的可观察终止；现有 call/jump interrupt polling 单独保留并回归，不把两种机制揉成一个计数器；
-- parser 正确性修复可独立进行，但若合入，M-EMIT 的 bytecode 基线必须重冻；
+- parser 默认参数correctness已由`fde49b15`合入；generator初始停点又由`b8f7e0d2`改变最终bytecode，
+  因此M-EMIT的diagnostic/PMU基线必须从同时包含二者的状态重冻，不能继续引用旧blocker或旧四-op marker快照；
 - M-FCLOSURE-WIDTH 已由 `936111c5` 完成；后续不得把它的 correctness 变化并入 construction 或
   plain-put 收益。当前候选已删除 module declaration scanner/body skip，宽度测试只继续证明同一 guarded
   bytecode 的 `fclosure8/fclosure` 两种编码；
@@ -908,10 +1031,11 @@ const value = Reflect.construct(Object, [], newTarget);
 这些项不是全局串行屏障：不依赖它们的 source recon 和机制可以先推进；但某机制的最终
 baseline/candidate PMU 必须在自己的正确性前置合入后冻结，禁止跨前置状态拼 A/B。
 
-## 3. 机制地图与当前优先级
+## 3. 历史机制地图与执行优先级（最终处置见§10）
 
-优先级按“当前可约绝对 cycles × 服务面 × QuickJS 对齐确定性”排列，不按 benchmark ratio
-排列。M0 完成后可以重新排序，但必须用定量证据更新，而不是凭名称调整。
+本表保留2026-07-20的机制拆分和执行排序；其中P编号、“先做”“仍缺”等均是历史计划语气，
+不表示活动工作。W1–W5已经完成，W6因重开条件未满足而关闭，唯一终态以§10为准。
+当时优先级按“可约绝对 cycles × 服务面 × QuickJS 对齐确定性”排列，不按benchmark ratio排列。
 
 | 顺序 | 机制 | QuickJS 锚点 | 当前判断 |
 |---:|---|---|---|
@@ -952,17 +1076,17 @@ baseline/candidate PMU 必须在自己的正确性前置合入后冻结，禁止
 | P1b.2 | M-FB-COMMIT-TRANSFER：finalize move ownership | `js_create_function`成功提交与`free_function_bytecode` | 当前atoms/values/debug buffers重复dup/copy/free；先完成所有真实fallible准备并收紧no-fail GC publication，再move，单独做refcount/OOM归因 |
 | P1b.3 | M-FB-CORE-LAYOUT：QJS header offset/alignment | `JSFunctionBytecode` base/debug layout与DWARF | 先建立唯一production raw builder/fixture builder，再把header改成96B base + optional 32B debug tail（full 128B）/align8及显式flag masks；非QJS事实与临时`artifact_block_base`置header后的可计算extension，tables/code block暂不合并但双析构位退场，单独归因load chain/prefix/slab |
 | P1b.4 | M-FB-PACK-CORE：QJS-order common artifact | `function_size → js_mallocz → self pointers` | 用唯一checked layout公式从稳定header把cpool/vardefs/closures/code并入同一allocation，extension移到code后并显式记录对齐padding；source/pc2line仍独立。只归因allocation topology，W1d内另做total exact-close |
-| P1e（部分完成） | M-MODULE-REALM-PERSISTENT-LINK：per-Realm registry、persistent function、indexed imports/exports、namespace varref、guarded prefix | context-owned `loaded_modules`、`js_create_module_function`、`js_inner_module_linking`、`js_build_module_ns` | candidate已有同一guarded bytecode入口并删除scanner/body-skip；registry仍Runtime-global，file graph重复编译/不持有同一function，link phase/cells/namespace/rollback均未对齐。先隔离realm registry再迁persistent owner |
-| P1c | M-CELL-EXEC：plain put/set 执行与 opcode residency | `JSVarRef.pvalue`、plain/short/checked var-ref CASE labels、`set_value` | 表示已对齐；read direct已约0.90x qjs且split候选失败；W1-core-close后先重测并证明compiler已拒绝各owner的非法写，再决定是否做resident plain put、resident set。已登记的class/private/import closure side channel与module full-close不无条件阻塞ordinary cell基线；realm pointer/property/cache补偿必须已按W1b3e退场 |
-| P1d recon | M-DYNAMIC-VAR：`.global/.global_ref` 的 `get_var/put_var` 两腿 | qjs `OP_get_var/OP_put_var` CASE 内先直接 cell，只在 uninitialized/const 时进 global-object slow leg | zjs get 侧已有对齐历史，`put_var` 目前整体仍在 `h_put_var/coldStd`。P1a改变 carrier拓扑、P1b改变 cell source；两者合入后才能建 direct probe/重排，不混入 plain-var-ref收益 |
-| P2-0（correctness） | M-INTERRUPT-BUDGET：跨call持续的per-realm/context poll counter | `JS_INTERRUPT_COUNTER_INIT=10000`、`js_poll_interrupts` | poll points已有但budget随Machine/call重建且handler关闭时不持续；先锁nested call/backedge/handler cadence，不与tail stack或dispatch性能归因混合 |
-| P2 | M-RETURN-CONT：bytecode callee 返回后的 non-`.next` continuation transport | `JS_CallInternal` 的嵌套 call/return、`JS_IteratorNext` | tail-chain stack correctness与M-INTERRUPT-BUDGET分别重冻后，只审计`return_action/payload → op_post_call_continuation`；普通call/return已排除，iterator/Proxy只是消费者 |
-| P3 | M-PROPERTY-LOOKUP：named property shape/prototype walk | `GET_FIELD_INLINE`、`find_own_property`、`JS_GetPropertyInternal` | push/pop 最大前置面之一；已部分对齐，先找 fallback/transport 残差 |
-| P4 | M-NATIVE-CALL：callable→native frame→cproto/record | `JS_CallInternal`、`js_call_c_function`、各 cproto | 与 lookup 分离；push/pop/regexp/Math 等共享 |
-| P5 | M-ALLOC-LIFECYCLE：object create/free/accounting | `JS_NewObjectFromShape`、`js_malloc/free`、`__JS_FreeValueRT`、`free_gc_object` | 当前 1.149x；force-GC 修复后执行 |
-| P6 | M-SHAPE-PUBLISH：root/transition/property publish | `find_hashed_shape_prop`、`add_property`、`add_shape_property` | 三臂已有，但 capacity-independent cache hit 尚未对齐；扣除 allocation 后执行 |
-| P7 | M-EMIT：当前仍缺的 qjs lowering/peephole | `resolve_variables`、`resolve_labels` | 先按最终 bytecode 重建规则清单，不按 pass 位置猜测 |
-| P8 | M-FRAME-CONT：通用 frame/prologue/epilogue | `JSStackFrame`、`JS_CallInternal` | 调用已在 0.98–1.16x；tail guard 修复且新 profile 证明共同杠杆才重开 |
+| DONE/W1e | M-MODULE-REALM-PERSISTENT-LINK：per-Realm registry、persistent function、indexed imports/exports、namespace varref、guarded prefix | context-owned `loaded_modules`、`js_create_module_function`、`js_inner_module_linking`、`js_build_module_ns` | **已完成**：persistent function/cell/namespace、indexed linking、Tarjan SCC与rollback的终态证据见§10 W1e/W1-full-close |
+| DONE/P1c（plain put/set均保留） | M-CELL-EXEC：plain put/set 执行与 opcode residency | `JSVarRef.pvalue`、plain/short/checked var-ref CASE labels、`set_value` | `f9289ec7`锁定compiler授权矩阵；`9b7a97e5`让五个plain put常驻，最终上下文direct cycles/instructions下降26.43%/29.70%；`03aa0351`让五个set常驻并保持TOS/refcount/self-assignment，direct下降20.70%/20.05%。两刀controls均未越+1%止损线，最终RegExp Zoo仍+12.14%、15/15胜，故均保留。read split失败结论不重开 |
+| DONE/P1d recon（候选拒绝） | M-DYNAMIC-VAR：`.global/.global_ref` 的 `get_var/put_var` 两腿 | qjs `OP_get_var/OP_put_var` CASE 内先直接 cell，只在 uninitialized/const 时进 global-object slow leg | `bf3e3ace`锁定cell/global-object/TDZ/const/Proxy七臂语义，`1f2dccdb`建立独立resident候选；最终15轮虽使cell direct/consumer cycles下降38.44%/10.51%，却使global-object slow control回退2.94%，故`91ad97dc`按§8撤销生产handler/mapping并保留测试与probe。`put_var`继续整体走`h_put_var/coldStd`，本方向收益记零关闭 |
+| DONE/W2-0 | M-INTERRUPT-BUDGET：跨call持续的per-realm/context poll counter | `JS_INTERRUPT_COUNTER_INIT=10000`、`js_poll_interrupts` | **已完成并重冻**：见§10 W2-0 |
+| DONE/W2-cont | M-RETURN-CONT：bytecode callee 返回后的 non-`.next` continuation transport | `JS_CallInternal` 的嵌套 call/return、`JS_IteratorNext` | **已完成架构差异审计**：tail guard见W2-tail，continuation完整census与收益零裁决见§10 W2-cont |
+| DONE/W3-property（候选回退） | M-PROPERTY-LOOKUP：named property shape/prototype walk | `GET_FIELD_INLINE`、`find_own_property`、`JS_GetPropertyInternal` | correctness证据保留，性能候选因cycles回退越线完整撤销；见§10 W3-property |
+| DONE/W3-native（correctness完成、候选回退） | M-NATIVE-CALL：callable→native frame→cproto/record | `JS_CallInternal`、`js_call_c_function`、各 cproto | correctness完成，transport候选因controls回退越线完整撤销；见§10 W3-native |
+| P5（**已关闭，收益记零**） | M-ALLOC-LIFECYCLE：object create/free/accounting | `JS_NewObjectFromShape`、`js_malloc/free`、`__JS_FreeValueRT`、`free_gc_object` | `eeff93ac`冻结recon中两个Object direct的causal cycles变化均在±1%不申报区，empty-array control则+5.400%越过硬否决线；没有新的construct/accounting/destroy/allocator-geometry候选获批。`5f621c03`关闭AutoInit半发布窗口后，阶段末`test-oom` 14/14与统一force-GC 1968/1968均通过。只有新的分层计数或源码/工具链事实证明重复语义工作，才按§8重开 |
+| DONE/W4（候选回退、收益记零） | M-SHAPE-PUBLISH：root/transition/property publish | `find_hashed_shape_prop`、`add_property`、`add_shape_property` | correctness与最终recon已关闭；cache-hit候选因PMU硬回退撤销，终态与重开条件见§10 W4 |
+| DONE/P7（**已完成并通过阶段门禁**） | M-EMIT：qjs lowering/peephole final-bytecode对齐 | `resolve_variables`、`resolve_labels` | 源码/phase/consumer残项归零；`9ced17b3`关闭normalized branch reachability的最终consumer偏差。所有发码刀只申报correctness/final-bytecode且收益记零；checkpoint/production 37/37、full test262 0/49775 unexpected与OOM 14/14通过，W5关闭 |
+| CLOSED/W6（条件未满足） | M-FRAME-CONT：通用 frame/prologue/epilogue | `JSStackFrame`、`JS_CallInternal` | tail guard已修，但没有frozen post-W2 profile证明共同杠杆；按§10 W6不重开、收益记零 |
 
 M-ARRAY-STORAGE 暂停：qjs 式 fast push/count/length 已存在，当前 profile 不支持它是主杠杆。
 RegExp、Array、for-of、spread、objlit 等只作为机制消费者和语义验证面，不各自成立性能战役。
@@ -971,9 +1095,26 @@ RegExp、Array、for-of、spread、objlit 等只作为机制消费者和语义�
 额外发布/恢复 pc/sp，且 direct profile 证明该段在关键链上时，才能把**一个完整语义 family**
 迁入 resident handler。这是逐 opcode 对齐，不是 benchmark fast path，也不允许顺手改 next-dispatch 架构。
 
-P1d 是本次查漏保留的**强制 recon 项**，不是已批准的生产刀。它的 direct probe 必须分开
+P1d 当时是查漏保留的**强制 recon 项**，不是已批准的生产刀。它的direct probe被要求分开
 initialized-cell hit、uninitialized global-object hit/miss、strict miss、lexical TDZ/const 和 Proxy/exotic global；只有
 cell-hit 差距与实际 consumer 同时成立，才按 opcode-residency 规则排到 P2 之前。
+
+该强制recon现已完成。`bf3e3ace`的exec矩阵分别锁定initialized cell、global-object hit、
+sloppy miss、strict miss、TDZ、const及Proxy prototype `HasProperty`/`Set`，它是语义证据，
+不冒充七臂PMU。post-P1c-put、pre-P1c-set的owning decision context中，
+candidate/baseline 15轮paired结果为：
+cell direct cycles/instructions `0.615642x/0.631286x`，consumer
+`0.894874x/0.879231x`，global-object slow control
+`1.029370x/1.025310x`，local control `0.998167x/1.000000x`，
+var-ref control `0.999644x/0.999776x`。slow leg同时越过cycles与instructions的+1%止损线，
+所以没有进入可保留的三方候选，`91ad97dc`只撤销production mapping。
+baseline完整/`.text` SHA-256为
+`922d0ea1fe503a639b5e6bc9a6eb08b51891e0faaa7a15c7abf3629c5271138c`/
+`1c0a2da1a1f6c37616e91ae1157005bbe2f22f883200899f2f29551ea5ddcede`；
+candidate为
+`2dded49afb2e209fc16f39cecbb48e69894e53a1d47f72fef6c57e3407b79adc`/
+`ee61b60b48f67954317c05f46ab640fdc98ca8d8ebe5e982ccb23b129ca0bade`；
+逐轮raw位于`/tmp/p1d-pmu-final-9b7/`。
 
 ## 4. M0：每个生产改动的统一证据包
 
@@ -1031,9 +1172,15 @@ compiler/bytecode recon 另建一个同 commit 的 diagnostic qjs（当前源码
 - raw 数据放在当前 `.scratch/<mechanism>/` 工作项或等价临时证据包，结论写进 owning commit/
   issue；不新增全局历史账本。
 
-## 5. 第一阶段：解释执行共同热机制
+## 5. 历史第一阶段执行规格（W1–W3最终处置见§10）
+
+> 本节是W1–W3实施前及实施中的机制规格。“当前候选”“下一步”“必须先变红”
+> 均保留为审计轨迹，不是活动任务；W1/W2已完成，W3的correctness保留且性能候选均按§8回退。
 
 ### 5.1 M-HOIST-CONSTRUCTION → M-CELL-EXEC
+
+**终态：已完成。** ordinary/core、private/class、module与最终P1c的分层收口分别见
+§10 W1-core-close、W1d、W1e、W1-full-close；下文只保留当时的执行规格。
 
 这里有两个必须分开的机制：**cell/函数值在什么阶段被创建与发布**，以及最终
 `put_var_ref/set_var_ref` **如何执行一次已授权的 cell 写入**。前者改变可达字节码和 runtime
@@ -1126,9 +1273,9 @@ compiler/bytecode recon 另建一个同 commit 的 diagnostic qjs（当前源码
 全局 prepend 在 allocation、GC、OOM 和最终 bytecode 上等价。module default 的 `set_name(default)`、
 module link-only guard 与 `fclosure8/fclosure` 宽度只是这套序列的消费者，不能另造规则。
 
-#### 当前候选的真实状态
+#### 2026-07-20候选状态快照（历史）
 
-当前 worktree 已完成但尚未合入的 P1a/W1b1-semantic 及module-prefix子集为：
+当时worktree已完成但尚未合入的P1a/W1b1-semantic及module-prefix子集为：
 
 - 最终closure row已呈现`eval prefix → global declarations → child-demanded captures → parent bytecode encounter`
   的QJS provenance；ordinary phase-1 reference不再parser-time eager建capture row。调度仍是全树
@@ -1271,13 +1418,13 @@ full test262/OOM injection/ReleaseSafe均未重跑，后者仍只在最终pre-co
 | module namespace/default name | normal export property直接VARREF，cycle-dependent才AUTOINIT；anonymous default由prefix`set_name default` | namespace仍data snapshot+parallel cells；default child仍parser预命名 | **W1e未对齐**；core已有VARREF，不是Zig限制 |
 | descriptor / failure | successful descriptor surgery遵循qjs；仓库要求OOM完整传播与same-runtime recovery | plain-data normalization、global lexical flags仍需裁决；module/link及closure失败顺序未形成统一rollback证明 | 成功路径忠实对齐；仅GUIDE安全要求允许更强transactionality，不复制qjs failure quirk |
 
-因此当前 P1 diff **按现状不允许整体合入 main，也不允许据此重冻 M-CELL**。先保留已证明的metadata/direct-eval
+因此当时的P1 diff **按该快照不允许整体合入main，也不允许据此重冻M-CELL**。后续执行曾先保留已证明的metadata/direct-eval
 语义修复，先撤掉broken private半迁移，再按declaration scope topology→declaration owner→phase-1 emitter/reference/call（含simple var）→parser control cleanup→[destructuring source-order→define-var close→operand-stack control]不可拆checkpoint→single-body finally→scope-exit cell close/唯一scope事件→derived-`this`单一authority→逐FunctionDef pre-child/capture-once→全body producer hoist anchor→using typed product isolation→RealmRef/state→call/FB/deferred carrier→non-carrier compensation-retire→terminator→canonical root→direct-FB→GLOBAL/closure2→pc2line→
 move commit→QJS core layout→QJS-order core pack完成core-close后
 拆分审计、独立合入并立即重测Zoo/cell；不再让class/private/module
-扩展无条件阻塞ordinary核心落地。W1d/W1e仍分别阻塞各自机制及“全部construction已对齐”的声明。
+扩展无条件阻塞ordinary核心落地。该快照中的W1d/W1e阻塞后来分别由§10同名完成行关闭。
 
-#### 新的机制收敛顺序
+#### 当时拟定的机制收敛顺序（历史）
 
 1. **M-ENTRY-NO-CHEATING：候选已完成，保持为永久前置门禁。**
    - numeric/eval regexp/string/caller-expression shortcut、源码strict第二真源、empty-root VM bypass、typed-array
@@ -2236,7 +2383,7 @@ move commit→QJS core layout→QJS-order core pack完成core-close后
    - 第19步sidechannel与第20步module各自独立收口/合入并重冻受影响consumer；它们阻塞“全部construction对齐”的声明，
      但不阻塞ordinary regexp/cell的因果测量。plain put与set若进入生产候选仍各自单刀，read split不重开。
 
-#### 必须先变红的最小矩阵
+#### 当时要求先变红的最小矩阵（历史）
 
 - entry integrity：public `-e '1 2'`/`eval('1 2')` 必须 SyntaxError；empty/comment/direct/indirect eval都经过
   parser和 real root function；direct eval frame 的 current-function是 eval function，caller只作为 capture source；
@@ -2497,6 +2644,8 @@ cell 与构造契约；不借本战役引入 pointer cache、第二套 cell layo
 
 ### 5.2 M-INTERRUPT-BUDGET — poll point之外的counter lifetime
 
+**终态：已完成并重冻。** 见§10 W2-0；下文为实施前规格与验收设计。
+
 QuickJS的`JS_INTERRUPT_COUNTER_INIT=10000`只是reset阈值常量；`JS_NewContextRaw`来自零填充分配且不另写counter，
 所以新Context的第一次poll会从0进入slow arm、先重置为10000再读取handler，之后callback间隔才恰好为10000。关键机制是counter属于
 `JSContext`：每次call entry先减caller context的counter，最终function arm切换后jump/backedge再减callee context的counter；
@@ -2525,6 +2674,8 @@ uncatchable；frame unwind跳过catch/finally与for-of IteratorClose扫描，直
 
 ### 5.3 M-RETURN-CONT — 通用 post-call continuation transport
 
+**终态：已完成架构差异审计，收益记零。** 见§10 W2-tail与W2-cont。
+
 QuickJS 在 `JS_IteratorNext2` 中递归 `JS_Call`；callee 返回后，C 控制流直接继续读取 result。
 zjs 不递归第二个 VM；普通 `.next` call/return 已在专用 handler 内完成 teardown/resume，不经过
 通用 `op_post_call_continuation`。只有 `for_of_next`、Proxy 等需要 callee 返回后继续作业的
@@ -2546,7 +2697,33 @@ Recon 顺序：
 生产修改受 §2 tail-chain stack budget与W2-0 interrupt counter lifetime共同阻塞。若剩余差异只是 resident Machine 的架构成本，记录为
 “zjs architecture divergence”；只有真实编译器/ABI 证据才能进一步归为 Zig 限制。
 
+W2-cont收口裁决（2026-07-24）：生产callsite census确认非`.next` action只有
+`for_of_next`与`proxy_get`。前者以u8 depth为borrowed/moved iterator call携带返回后的
+`done/value`作业，后者以owned Atom携带Proxy trap返回后的target descriptor invariant检查；
+两者均经`popAndResume → op_post_call_continuation`消费，tail replacement则显式转移同一
+continuation ownership。普通call/method/constructor/generator/async entry都初始化为
+`.next + payload 0`，返回时直接恢复caller，不进入该cold handler。
+
+QuickJS的对应状态由递归`JS_Call`上层的C locals保存：`JS_IteratorNext2`返回后继续读
+`done/value`，`js_proxy_get`返回后继续验证descriptor invariant。resident Machine没有可借用的
+C caller frame，因此当前tag+u32 payload是这两类post-call work的最小durable state；把tag塞进
+payload会与完整32-bit Atom域冲突，改用heap/cold frame会引入allocation，function pointer则扩大
+entry状态，均不形成符合本节约束的共同候选。裁决为**zjs architecture divergence**，不归因为
+Zig限制，收益记零，生产代码不改。
+
+ReleaseFast语义direct/control以同一脚本逐项对照qjs：self-result iterator为
+`2000000 2000000`，constant-result iterator为`2000000 2000000`，zero-arg iterator为
+`-1455759936 2000000`，普通zero-arg method为`10000000`，static/computed Proxy constant trap
+均为`1000000`。现有exec回归继续锁定无备用operand capacity的Proxy continuation、
+for-of result/abrupt顺序，以及computed Proxy nested call/throw/invariant。新增
+`native tail calls preserve iterator and proxy continuation success and throws`直接迫使两类
+continuation经driver `.returned`消费，并覆盖native tail-call成功与抛错。for-of的局部value释放
+顺序与Proxy key临时root lifetime仍分别属于consumer ownership审计，不反向扩大本transport机制。
+这里没有生产候选，不伪造PMU收益；W2 call/return与dispatch继续冻结。
+
 ### 5.4 M-PROPERTY-LOOKUP — named property shape/prototype walk
+
+**终态：correctness证据保留，性能候选回退。** 见§10 W3-property。
 
 QuickJS 的 `OP_get_field/get_field2/get_length` 共用 `GET_FIELD_INLINE`：直接查当前 shape hash chain，
 data hit dup，miss 沿 `shape->proto` 继续；property kind 或 exotic/primitive 才进入
@@ -2566,7 +2743,35 @@ fast path，而是核对当前链为何仍比 qjs 贵：
 4. 只有证明当前 qjs-style walk 仍承担 qjs 没有的通用工作才改生产代码。新 site IC 属 zjs 超集，
    不在本阶段提出；已有正确 IC 也只作为 control，不拿模块名替代实际调用链。
 
+M-PROPERTY-LOOKUP收口裁决（2026-07-24）：final bytecode census与既有W1d递归回归确认
+`get_field/get_field2`不携带private Atom，private field/method/accessor均已降为专用operandless
+opcode。因此试做了只让这两个final handler跳过`mightBePrivate`的trusted-public候选；generic、
+computed、internal与`get_length`入口仍保留原guard。候选通过exec 367/367与三方语义stdout，
+并新增static true-miss与global VARREF固定probe。
+
+ReleaseFast三方冻结件为baseline `a2499f4c` SHA
+`8d26990fd07d00f2f51ba6de1c164ead6517626336d463a3c661db4b1ff89d65`、candidate SHA
+`cec79a6e70aaf0ea7576a1ababcb8cabffb2c739e6c6c8d310cc29e450926547`与qjs SHA
+`b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d`。CPU19、
+ASLR-off、显式big-core PMU、5次warmup、18个位置平衡block的paired median如下；true-miss有
+16个完整有效block，另两个整block按协议剔除：
+
+| direct | candidate/baseline cycles | candidate/baseline instructions | candidate/qjs cycles |
+|---|---:|---:|---:|
+| own data | 1.01695x | 0.98457x | 1.84145x |
+| prototype data | 0.99333x | 0.98524x | 1.77618x |
+| true miss | 0.99586x | 0.98813x | 2.22880x |
+
+候选虽每次direct read稳定减少约3～4条指令，own-data的18个paired block却全部回退，
+范围为+1.13%～+2.32%，中位+1.695%，明确越过§8的+1% cycles回退线。反汇编同时确认
+`op_get_field2/op_get_field`各缩短32B且后者entry前移32B，但代码形态变化不能替代cycles
+裁决，也不能用padding把失败包装成收益；生产候选已完整回退。结论是当前private-atom guard
+仍属源码差异，却没有可保留的独立性能收益；ordinary lookup机制继续冻结，下一步只进入
+M-NATIVE-CALL。
+
 ### 5.5 M-NATIVE-CALL — callable 到 native frame/cproto record
+
+**终态：correctness完成，性能候选回退。** 见§10 W3-native。
 
 property lookup 完成后，QuickJS `OP_call_method → JS_CallInternal → js_call_c_function`：从 c-function
 object 直接读取 realm、function union、cproto、magic，建立 `JSStackFrame`，保证至少 formal length
@@ -2586,15 +2791,67 @@ Recon 顺序：
 4. 只删除所有 native domains 共同承担且 qjs 不承担的 transport。收益至少在两个 builtin domain
    复现；regexp Zoo 是 breadth/semantic consumer，不是 direct attribution probe。
 
+M-NATIVE-CALL correctness 前置收口（2026-07-24）：对照 pinned QuickJS
+`js_call_c_function`，确认 observable `C_FUNCTION` 必须先在 caller realm 以
+`formal length × sizeof(JSValue)`做 native-stack preflight，成功后才切 function realm 并建立
+native frame。zjs 此前的 resolved `InternalRecord` terminal 没有这层 preflight，External
+HostCall 同时缺 native frame；String/Date/RegExp construct 的外层 coercion scope 也会让过晚
+preflight 错误地带上 callee frame。现已把 guard 放到最终 C_FUNCTION 入口及 constructor
+外层 scope 之前，`C_FUNCTION_DATA`与`func_obj == null`的 synthetic record reuse 保持 caller
+semantics；External HostCall 的单一 native frame 覆盖 callback 及其 host-error materialization。
+回归锁定递归 record 的 catchable `InternalError: stack overflow`与同 runtime 恢复、external
+host native backtrace，以及 cross-realm overflow Error 属 caller prototype而 callback
+`TypeError`属 callee prototype；changed-area exec 370/370 通过。该补丁只计 correctness、收益
+记零；下一步仍只审计已解析 `NativeCallTarget{record, realm}` 的重复 transport，不把本修复包装
+成性能候选。
+
+M-NATIVE-CALL transport 候选收口（2026-07-24）：唯一候选删除
+`NativeCallEnvironment/FinalCallEnvironment/NativeCall`重复保存的`callable_realm`，让 observable
+call 从同一 final-arm 已有的`ctx/global/func_obj`导出 callable view；ordinary/cross-realm、
+`C_FUNCTION_DATA`、constructor、synthetic record reuse 与 nested native call 的语义审计及
+定向 exec/builtins 回归均通过。CPU19、ASLR-off、显式 big-core PMU、六种平衡顺序×3轮的
+18-block 三方测量中，Object.is plain/method 与 Math.abs plain/method 的 exact/missing-argc
+探针稳定减少每次约6/4与4/2条指令；首个候选布局的 direct cycles 中位从
+Object.is plain exact 的-1.689%到 Math.abs plain exact 的+0.393%不等。冻结 baseline
+SHA256=`80ce7c9495c8ca53669a605f1223fc3aa4cd4330e166fcffba863ebd472a7a39`，
+`.text`为3,780,812B /
+`bcba789ff3a4acb7a23b67925f6d0adbf8c69023b6d50496ff9f7cb32a3134a5`；首个 candidate
+SHA256=`6bc8ae46385f6f312cfd68c1c923ec393bdb28a357b13055c95559b127f04cfc`，
+`.text`为3,778,164B /
+`a9833b679efff06c7cd28d05d034c56d6336535c1ec3fb98e99cdf9e08b8b6fd`。
+
+按§8对小于1%的形状做空cache/独立prefix重建后，candidate
+SHA256=`3886fce7b12926e57f10b840f158e87ce21210653d0b2f88aa9d2d4017330c0d`，
+`.text`为3,780,596B /
+`baa47a765f1f2f061c0bf9932a5e183040a1efc573a3c839584f87ce740abbac`。同一18-block协议仍精确得到
+Object.is plain/Math.abs plain/Math.abs method 每次-6.005/-4.000/-1.997条指令，direct cycles
+分别-1.229%/-0.748%/-0.053%；但与native transport无关的property-read和allocation controls
+分别回退+1.477%和+1.660%，均越过+1%否决线，且property control相对首个布局的-3.211%发生
+方向翻转。这是未解释的code-layout回退，不能用padding或挑选首个artifact掩盖；生产候选已完整
+回退，九个固定direct/control探针与否决结论保留。结论是重复view确有静态transport成本，但
+当前变换没有可保留的独立cycles收益，W3-native至此冻结。
+
 在 direct storage 探针证明前，不改 Array capacity/count 算法；不得把 push/pop 名称或 builtin id
 本身当成新的生产分支依据。
 
-## 6. 第二阶段：对象生命周期与属性发布
+## 6. 历史第二阶段执行规格（W4最终处置见§10）
+
+> W4已完成correctness收口，两个性能方向均未获批，收益记零；下文保留当时的
+> source recon、候选设计和止损依据。
 
 ### 6.1 M-ALLOC-LIFECYCLE — create/free/accounting
 
-前置：先修复当前 `test-exec -Dzjs_force_gc=true` 在 `gc.zig:1662` 的
-`HeapLiveBytesMismatch`；否则 allocation/ownership 候选没有可靠门禁。
+**终态：已关闭，收益记零。** 见§10 W4、W4-shape-before-object及
+`025d4f08`、`eeff93ac`、`5f621c03`证据。
+
+前置已经收口：`f221dfee` 修复 open VarRef 对 parked generator backing 的 owner 边，停止把
+borrowed `pvalue` 当作 owned edge 追踪造成的 trial-RC double count；`2ecbf301`、`951726e1`、
+`1f67bdbc` 分别把 preserved WeakMap、deep weak chain 和 job-queue symbol root 的精确
+liveness 断言扩到 force-GC，`ad3218dd` 把 exhausted-heap OOM delivery 的零分配断言也扩到
+force-GC。`src/tests/core.zig` 剩余的 force 条件只区分 synthetic collection 对 pending request、
+major count、timing 与 threshold 的 instrumentation 语义，不是 weak/liveness skip。该证据允许
+allocation/ownership 候选进入独立测量，但不等于阶段收口；W4 结束时仍须执行统一 force-GC
+与相关 OOM/`test-oom` 门禁。
 
 QuickJS 空对象链是 `OP_object → JS_NewObject → JS_NewObjectProtoClass →
 JS_NewObjectFromShape`：先找/retain empty prototype shape，再 `js_trigger_gc`，分配 `JSObject` 和
@@ -2620,21 +2877,93 @@ M-CLASS-RECORD-LIFETIME改成最小scalar plan + publication前按id重取/校�
 另外证明 pointer view 的必需标量读、allocator limit 或其他记账在关键链上，必须以新的
 QuickJS 对照事实单独立项，不从已关闭收益外推。
 
-Recon 顺序：
+`M-ALLOC-STANDARD-OBJECT-CONSTRUCT-PLAN` 候选已回退（2026-07-24）：候选只让
+`createInternal(class.ids.object)`合成immutable ordinary `DefinitionPlan`，以optional
+`Construction`绕过标准Object的class-table lookup，同时保留owner-thread assertion、测试态
+standard exotic覆盖以及dynamic/custom/其他standard class的既有路径。`951726e1` discovery
+中empty-object与`Object.create(null)`的cycles/instructions分别改善
+11.969%/7.554%与6.613%/5.103%；在当前`b8f7e0d2`布局，冻结baseline binary/text
+SHA256为`ea502823ca797558bfa646ff3aa92eab2b3ab4f8e31183bedad257712e869563` /
+`48b9c44de2980be8fc7ff3769eaac2fdd630a4aeb7ee958c00948a58fa095845`，candidate为
+`919d467d046081e85bdff75f704f113935b8ff82441c34042741a0274f8f9e09` /
+`bfa99683dc6715278f804b57c251374e93cd103b075c4c1af5ddf552d89a3afb`，Object direct小样本仍有
+11.76% cycles改善；但pure `[]` allocation control在CPU19、ASLR-off、5次warmup、18/18有效
+位置平衡block中稳定回退cycles +11.787%、instructions +1.680%，越过§8硬否决线。不得以
+Object direct收益忽略non-object regression；生产代码已完整回退。下一项M-ALLOC候选必须不改变
+其他class的codegen，否则关闭这一子方向。
 
-1. 用当前同一 `allocation-empty-object-2m.js` 跨 07-08 候选提交复现 0.96x；无法复现就删除
-   “回归”叙事，从当前 1.149x 残差重新开始；
-2. 将 root-shape lookup/retain、object alloc、property-storage alloc、GC trigger/list link、
-   MemoryAccount、zero-ref enqueue/drain、property/shape release 和 raw free 分开计数；
-3. 对照 qjs `JSMallocState`/`js_malloc` 记账、`JS_NewObjectFromShape` 和 `free_object` 的关键链；
-   比较“同一语义工作是否重复”，不要求两侧 malloc 次数相同；
-4. 先验证已对齐的 zero-ref queue 没有额外 per-object policy，再依次裁决 construct、accounting、
-   destroy、allocator geometry；一次只动一个子机制。
+后续 `M-ALLOC-STANDARD-OBJECT` 隔离审计已关闭第二候选空间：冻结ReleaseFast中
+`Object.createInternal`是独立的2676B（`0xa74`）符号，out-of-line
+`Table.beginConstruction`为676B（`0x2a4`）；两个direct消费者实际只需覆盖三处生产调用点：
+`vm_literal.object`的OOM cold路径、`vm_literal.newPlainObjectValue`的`OP_object`热路径，以及
+`object_builtin_ops.qjsObjectCreateCall`。A）comptime-specialized shared body会复制约一份完整
+构造器并重新生成non-object实例；B）抽取shared prepared body会改变generic wrapper/call边界；
+C）保持`createInternal`原样的独立ordinary helper仍须复制约50–80行、预计1–2KB的
+fallible ownership transaction；D）只在out-of-line `beginConstruction`特判Object虽可保持
+`createInternal`逻辑形状，却让Array及其他class多走compare/branch，仍不满足完整non-object隔离。
+新增text还可能改变PC-relative relocation，故源码未动也不能先验保证raw symbol hash不变。
+四案均不进入生产：`M-ALLOC-STANDARD-OBJECT`子方向关闭、收益记零，首候选代码不保留；该步
+当时不关闭整个`M-ALLOC-LIFECYCLE`，accounting、destroy或allocator geometry只有出现新的
+profile事实才可另立独立候选。下述最终recon没有找到满足该条件的新候选。
+
+`M-ALLOC-OBJECT-FREE-ORDER` correctness 子项已由`48f6d61d`收口：对象进入zero-ref FIFO后，
+先释放own properties与原shape/prototype，再以原object identity同步调用class payload
+finalizer，callback返回后才释放其余class-owned edge、从GC/accounting注销并raw free。zjs公开
+读helper要求非空shape，因此callback窗口使用process-lifetime空FAM tombstone表达qjs的
+`shape=NULL/prop=NULL`，`getPrototype`、`hasOwnProperty`、`getProperty`均只能看到已剥离空对象；
+当前drain项与排队项仍属于Runtime，使callback内`ownsObject`与qjs zero-ref list lifetime一致。
+per-object deferred-finalizer reservation及生产enqueue已删除，inline/external payload均同步、
+无分配且恰好一次；旧deferred queue API的独立清理不在本刀扩张删除。最终回滚shape候选后的
+`test-core`为286/286，runtime wrapper相关8/8，`zig fmt --check`与`git diff --check`通过；
+full `test-runtime`唯一失败是未改动的既有plugin OOM pending-exception旧断言，不归入本机制。
+这一步只关闭finalizer/free顺序，不把accounting或allocator geometry宣称为性能收益。
+
+最终recon已在2026-07-24收口，**收益记零**：
+
+- 冻结提交为`eeff93ac2485c82a38edd0c5671824a2a766d98c`；ReleaseFast binary为
+  28,594,496B、SHA256 `e697b04fe48d0ad37d572cacb7c983fc0b01bcfd0964750505d081459a8153c3`，
+  `.text`为3,776,752B、SHA256
+  `e32871300042e0cbc98857c22ba9bb62535ccae60443f4d2486153b13a30d4c5`。pinned qjs binary
+  SHA256仍为`b76d154265e829e64d14dafba9e8f3eb8f2215ac947ffb62cc31379d1171364d`。
+- CPU19、ASLR-off、5次warmup、18个位置平衡AB/BA block的同引擎causal A/B以
+  `b8f7e0d2`冻结件为baseline、`eeff93ac`为current，四组均18/18有效：
+  `allocation-empty-object-2m` cycles/instructions为-0.843%/+1.819%，
+  `Object.create(null)`为-0.594%/+1.228%，两个Object direct的cycles均落在§8的
+  `|cycles| <= 1%`不申报区；`allocation-empty-array-2m` control为+5.400%/+1.238%，
+  越过+1%硬否决线；refcount control为-1.145%/+0.0065%。因此不得把correctness收口后的
+  布局变化申报为Object收益，也不回退已经成立的correctness。
+- 同协议current/qjs只确认残差仍在：empty-object、`Object.create(null)`、empty-array和
+  refcount的cycles分别为1.722x、1.687x、2.243x、1.309x；它不是causal候选A/B，不能单独
+  授权改码。07-08的0.96x又因fixture到07-14才入库且无原始冻结数据而不可复现，故不再保留
+  “已知回归”叙事。
+- 仓内现有Debug opcode/memory统计相对同结构2m no-object control显示，empty-object约增加
+  2,000,002次create、2,000,001次destroy和2,000,004次logical allocation，却没有per-iteration
+  property-buffer alloc/free；这支持“每轮一个Object、root Shape lookup/retain命中、没有每轮
+  Shape或property-storage allocation”。empty-array则每轮另有一次storage alloc/free。
+  ReleaseFast sampling把self time定位到`Object.createInternal`、`destroyFromHeader`、
+  class construction/destruction plan、MemoryAccount、GC link与zero-ref/free链，但没有证明
+  其中任何一项执行了可删除的重复语义工作。析构路径可静态确认weak/borrowed unregister各出现
+  两次，但两helper包含必要与重复两轮的合计self sample仅1.29%；没有causal candidate A/B就
+  不能把该占比换算成超过§8噪声线的cycles收益。
+- ReleaseFast CLI目前不导出root-Shape hit/miss、GC trigger/list-link、zero-ref drain及
+  accounting/raw-free的分层事件数，非特权`perf probe`也不能写tracefs。本轮不为结论临时修改
+  产品代码或埋点；原始本地证据在
+  `/tmp/zjs-w4-close.tGelCY/{b8-vs-head-paired.json,zjs-vs-qjs-paired.json,profile-debug-deltas-vs-no-object.json,perf-empty-object-{zjs,qjs}.report.txt}`，
+  不作为仓内ledger。
+
+`M-ALLOC-LIFECYCLE`据此关闭。未来只有两类新事实可以重开：一是可复核的分层事件计数明确证明
+zjs对同一语义工作存在重复；二是新的源码或工具链能力给出当前四个已拒方案之外的隔离实现。
+重开时仍须冻结binary/`.text`，一次只裁决construct、accounting、destroy或allocator geometry
+中的一个子机制；广域机制在至少两个真实消费者复现，direct收益超过噪声，且任何control
+cycles回退不得超过+1%。仅有qjs ratio、函数self-time、源码行数或已删除的0.96x叙事均不构成
+授权。
 
 必须保留公开 `gcStats()`、live=0、OOM 恢复、weak/finalizer、deferred cleanup 和 GC pacing
 契约。若要把累计统计移出热路，必须先决定兼容实现，不能静默降低公共统计语义。
 
 ### 6.2 M-SHAPE-PUBLISH — 扣除 allocation 后的 shape/property 残差
+
+**终态：已关闭，性能候选回退。** 见§10 W4。
 
 旧计划的 `rc==1` 主刀已完成，不再重做；但源码复核确认三臂的 cache-hit 资格仍不完全相同：
 qjs `find_hashed_shape_prop` 只比较 hash/proto/property sequence，不比较 `prop_size`，命中后若
@@ -2652,20 +2981,35 @@ let/var/pinned 和不同预留容量对象为 property-publish 差分：
 5. qjs object literal 仍是 `OP_object + OP_define_field/add_property`，没有普通 literal template。
    因此候选必须适用于普通 property addition，不得新增 object-literal-only template。
 
+首个capacity-independent候选`10348b7d`已完成语义实现与PMU裁决，并由`5cb2dda5`完整回滚。
+direct trigger对cap4→8与cap8→4分别达到1000/1000 cache hit且stdout一致，但CPU19、ASLR-off、
+5次warmup、18个位置平衡block中，cap4→8 cycles/instructions回退+33.4913%/+22.0071%，
+cap8→4回退+1.4031%/+0.3308%；`object_literal_let` control cycles也回退+1.0305%，均触发
+§8硬否决。根因不是缺少realloc调用：16B `property.Entry`的cap4/cap8 buffer为64/128B，
+对应72/144B small-slab block；`MemoryAccount.remap`在old或new任一为small slab时必定拒绝，
+所以候选只能alloc/copy/free，且内联reconcile令caller `.text`增加约504B、stack frame从
+0x70增至0xa0。qjs增长同样alloc/copy/free，但其slab header自带class，收缩时可保留大块；
+zjs当前free按slice length反推class，不能安全保留oversized block。不得为了本候选顺带改
+allocator header表示；只有该表示变化先由独立机制与controls获批，或新profile证明hash/FAM
+另有残差，才可重开M-SHAPE-PUBLISH。当前capacity子方向收益记零，生产代码不保留。
+
 RegExp result、iterator result、arguments 等对象只能作为同机制消费者；如果它们使用预制
 shape/template，则不得用其收益证明普通 shape publish 已改善。
 
-## 7. 第三阶段：发码与帧协议
+## 7. 历史第三阶段执行规格（W5/W6最终处置见§10）
 
-### 7.1 M-EMIT — 只做当前仍缺的 QuickJS 规则
+### 7.1 M-EMIT — 历史缺口清单（W5已完成）
+
+**终态：源码/phase/consumer残项归零，correctness/final-bytecode收口，收益记零。**
+见§10 W5及其细分完成行，最终consumer修复为`9ced17b3`。
 
 先从当前 QuickJS `resolve_variables/resolve_labels` 和当前 zjs pipeline 自动或人工生成一份
 规则映射：`qjs producer/phase → phase-1 input → final-bytecode rule → ownership/source/OOM → tests → status`。
 最终bytecode相同只是必要条件，不足以证明机制等价：pass位置若会改变parser provenance、child/cpool/VarDef
 构造顺序、atom retain、source位置、OOM点或某条opcode能否被后续通用规则消费，就必须忠实回到QuickJS的phase，
 除非先记录可复核的Zig/LLVM限制与等价证明。只有上述事件全部相同、位置纯属内部组织差异时，才允许zjs在
-parser提前发short form而不机械搬代码；`get_length`提前发射和parser tail-call rewrite不能再仅凭final bytes获得豁免，
-必须先过各自producer/consumer审计。
+parser提前发short form而不机械搬代码；`get_length`提前发射仍不能仅凭final bytes获得豁免，
+必须先过producer/consumer审计；parser tail-call producer的审计结论则按下表单独封账。
 
 本次静态源码复核得到的初始清单如下；“待 diff”不是已确认缺失，必须先由 diagnostic qjs 的
 final bytecode 与 zjs snapshot 证明：
@@ -2674,13 +3018,96 @@ final bytecode 与 zjs snapshot 证明：
 |---|---|---|
 | binding resolution 与 hoist construction：single parse、scope/arg/function-name/eval-object/with/closure/global优先级，以及final vardef、root function、capture index、cell/value创建阶段 | candidate已恢复bytecode function-value producer并对齐row schema/closure identity/pseudo staging、args→locals lookup、eval链头、8B/12B row和guarded module prefix；仍缺单遍declaration/lvalue、destructuring source-order/internal stack、single-body finally、完整scope event/exit cell close、derived-this真实capture、唯一finalizer/body anchor与Annex-B producer，以及RealmRef/carriers/terminator/root/direct-FB/closure2/pc2line/move/pack/module | 当前compiler缺口严格归W1b2.5，product-only using transport归W1b2.6；随后才进入M-REALM-STATE-REF至M-FB-PACK-CORE，最后由W1d exact-close/W1e补齐class/module producer。不是peephole，不进行“只缩短序列”的PMU归因 |
 | pipeline order、short loc/arg/var-ref、const8/fclosure8 | 普通 pipeline/encoding 已有，`fclosure` 255/256 producer/consumer 已由 `936111c5` 修复 | P0 封账；其他 short family 只补矩阵证据，不重做 |
-| tail call、`get_field(length)`、empty string short form | zjs多在parser提前输出，但三者不能因“最终更短”合并裁决：pinned QJS parser没有tail-call pushdown；`get_length`又会改变last-op/delete/call consumer，empty-string才可能只是纯表示 | tail-call producer在M-PARSER-CONTROL-CLEANUP删除；未来product tail-call只能是baseline默认关闭的后置CFG pass。`get_length`先做producer/consumer/source/OOM审计，不能只比final bytes；empty-string确认不改变任何phase事件后才允许保留等价pass位置 |
-| logical chain、null/undefined/typeof、constant branch、push-neg、dup-put/set、return-undef、dead code、inc/add-loc | 已有 matcher 或独立 fuse | 逐条钉 snapshot 后封账；不能再用旧的粗粒度族数代替 coverage |
-| `insert3 + put_array_el/put_ref_value + drop` | 待 final-bytecode diff | 若 zjs 最终仍保留该序列，一条规则一刀 |
-| redundant `to_propkey` before simple producer + `put_array_el` | 待 final-bytecode diff | 先覆盖 symbol/object coercion 反例，再裁决 |
-| `insert2 + put_field + drop` | 待 final-bytecode diff | 先证明 stack effect/atom ownership，再裁决 |
-| post-inc/dec store rewrites（loc/arg/var-ref/field/array） | loc 已有部分 fuse，其余待 diff | 按 destination family 分刀，不合批 |
-| `put_x(n); get_x(n) → set_x(n)` 与 bigint-i32 neg | 待 coverage/diff | 只有最终差异且有可达脚本才进入 PMU |
+| generator parameter/body初始停点 | ✅ `fde49b15`先修复nested generator function expression的fresh grammar boundary；`b8f7e0d2`再按pinned qjs producer/consumer发canonical `OP_initial_yield`，替换`push_false; drop; push_true; drop` marker并删除runtime `generatorBodyPc`扫描。sync generator与async-generator保持suspended-start，首次`next`不注入resume value，pre-start `throw/return`不进入body；ordinary async function、legacy adapter与空packed fixture仍按既有pc 0入口准备resident frame | correctness/lowering子项封账并冻结script/module bytecode snapshot及sync/async-generator exec回归；它只关闭initial-yield这一刀，不代表M-EMIT完成 |
+| tail call、`get_field(length)`、empty string short form | ✅ tail-call producer审计确认pinned QJS parser没有tail-call pushdown，zjs已在M-PARSER-CONTROL-CLEANUP删除该producer；当前deliberate baseline policy刻意只产ordinary call/method call + return。✅ `cd6dec96`补齐method-return coverage：`return obj.method("")` final固定为`get_var/get_field2/push_empty_string/call_method/return`且`tail_call_method`为零，精确过滤1/1；这只锁定当前deliberate baseline形状，不据此宣称QJS final tail exact。✅ `ac6aa9a3`完成`get_length` producer/consumer、owner、source与OOM证据：parser仍统一产`get_field(length)`；ordinary value与optional value到`resolve_labels`才折为`get_length`并从final atom ledger删除`length`，method与optional method call则先由consumer改为`get_field2(length)`并保留该atom owner。混合dynamic keep/`length`输入证明fold后keep owner/refcount与source pc重映射正确；positions、sizes、final code、remapped-atoms四个分配点逐点OOM时，`resolve_labels.run`保持旧code/source/atom三组owner不变并可在同一Bytecode上重试。✅ 复核`2b5a1129`（实现与证据）及`119915c6`（discard roadmap封账）确认ordinary string literal与untagged template的empty-string producer均在phase 1产带owner的wide `push_atom_value(empty)`，只由`resolve_labels`后置缩为`push_empty_string`；final atom ledger删除empty owner，replacement起点source、jump boundary、共享`resolve_labels` OOM transaction/retry与VM/fast-path consumer均已有证据，因此这两个可达producer的late short-form phase子项封账。RegExp pattern不在empty-string等价域；✅ `5c54e8db`已把其producer从atom operand改为先发布UTF-8解码pattern cpool constant，再发布compiled Latin1 constant，flags不入池；合法zero-length RegExp body不可达（`//`为注释），故仍不会进入empty short form | tail-call producer policy保持既有封账；未来product tail-call只能是baseline默认关闭的后置CFG pass，不为当前baseline新增matcher或PMU。`get_length`子项封账，定向证据为bytecode 2/2、parser length 5/5及`git diff --check`；事务结论严格限`resolve_labels.run`，不得外推为整个`runPhases` transactional。empty-string short form只关闭ordinary与untagged template，不把RegExp纳入该规则；RegExp pattern cpool producer由`5c54e8db`独立封账，且本行不关闭M-EMIT |
+| logical chain、null/undefined/typeof、constant branch、push-neg、dup-put/set、return-undef、dead code、inc/add-loc | 已有 matcher 或独立 fuse。✅ `ae26826b`只完成logical-chain第一刀：删除matcher任意的32-hop语义上限，改以`code.len`作cycle-safe结构界限；33-prefix合法深链、`if_false`/`if_true`双branch两跳、source slots、interior-target保留，以及parser真实consumer `if (a && b && c)` / `if (a || b || c)`均已锁定。✅ `f727ea54`封账null/undefined strict fold：opcode域此前已完整，`resolve_labels`将两种常量的`strict_eq`折为`is_null/is_undefined`，并将`strict_neq + if_false/if_true`折为同一test加反向branch；本次把被消费compare及branch的source marker回映到replacement起点。两常量、两种branch方向、loose `eq/neq`不折、interior jump边界，以及parser的`=== null`、`=== void 0`、`!== null` condition、`== null`不折均已锁定。✅ `a30bb551`封账typeof test lowering：既有matcher接受域已与pinned QJS一致，只折`typeof + push_atom_value("undefined"/"function") + strict_eq/eq`，或`strict_neq/neq + if_false`并反向为`if_true`，short-opcode与消费区间jump guard保持不变；本次将equality compare source，以及branch形的compare后最终`if_false` source，依QJS顺序回映到replacement起点。undefined/function equality、`neq`/`strict_neq + if_false`的branch source/target、`neq + if_true`反例、fold后atom ledger及parser最终short-opcode快照均已锁定。✅ `f891c158`封账constant-test lowering：`resolve_labels`覆盖`push_false`、`push_true`、`null`、`undefined`四个1B producer与5B `push_i32`，且只消费紧邻的`if_false`/`if_true`；五producer×两branch锁定taken→`goto`、untaken→删除，被消费branch的source marker回映到replacement起点，外部jump进入消费区间内部时保持原序列，parser真实producer的`true`/`false`/`null`/`0`/`1`/`void 0`最终snapshot均已冻结。✅ `28229419`封账dup-put lowering：既有matcher已覆盖`dup + put_x → set_x`、`dup + put_x + drop → put_x`、`dup + put_x + drop + get_x(same idx) → set_x`三形状及loc/arg/var-ref/loc-check四族；本次把被消费put及可选drop的source marker回映到replacement起点，并按pinned QJS `line2`让trailing get source只在replacement之后生效。different idx不吞get，外部jump进入put/drop/get边界时只保留可安全折叠的前缀，function-local assignment result锁定真实parser producer。✅ `88fe654a`封账canonical inc/dec_loc lowering并删除冗余phase：审计确认`pipeline_finalize`的`fuseIncLoc` prepass没有production producer，故整体删除唯一调用、pass及prepass-only decode/jump/remap helpers，移除每次`runPhases`的2–3个临时allocation/copy/OOM面；`resolve_labels`继续只接受QJS 8B post与9B prefix四形状，保留idx<256和interior jump guard，并把post的pc+3/+4/+7、prefix的pc+3/+4/+5/+8 source marker回映到replacement。✅ `03546bd3`锁定add_loc精确wide producer域，`88fe654a`删除compact compatibility入口，使`resolve_labels`成为唯一canonical matcher；RHS只接受non-tagged `push_atom_value`、`push_i32`、`get_loc/get_arg/get_var_ref`，ordinary atom/i32/slot为正例，cpool Number、tagged numeric-string、idx≥256与不同idx均保持未折叠。✅ `3a45b34f`依QJS `code_match` line顺序把get_loc、RHS、add、dup、put_loc、drop六个opcode起点统一回映到replacement RHS start，input end仍映output end；跨行function-local assignment证明最终由operator source覆盖RHS start。✅ `24bf5144`封账undefined+return source映射：既有matcher原本就以`hasJumpTargetTo(pc + 1)`阻止外部控制流进入被消费return，本次只把该return的source marker回映到replacement `return_undef`；conditional external jump进入return的负例确认不折叠，并锁定short branch与undefined/return source重定位 | logical-chain第一刀定向证据为bytecode 3/3、parser 1/1，合计4/4；但zjs规则仍位于`resolve_labels`，pinned QJS位于`resolve_variables`，phase owner及source/OOM等价尚未审完，因此不封账logical chain或M-EMIT。null/undefined strict fold子项封账，定向证据为bytecode 4/4、parser 1/1；typeof test lowering定向证据为bytecode 5/5、parser 3/3。两者的OOM均只复用`ac6aa9a3`对`resolve_labels.run`的事务证据，不外推到整个`runPhases`。constant-test lowering子项封账，定向证据为bytecode 2/2、parser 1/1；OOM也只复用`ac6aa9a3`对同一`resolve_labels.run`的事务证据，不外推到整个`runPhases`。dup-put lowering定向证据为bytecode 3/3、parser 1/1；无atom/value owner，OOM只复用`ac6aa9a3`的`resolve_labels.run`事务证据。inc/dec_loc lowering子项封账，定向证据为bytecode 2/2、parser 1/1；canonical matcher OOM只复用`ac6aa9a3`的`resolve_labels.run`证据。add_loc lowering整体封账：`03546bd3`、`88fe654a`与`3a45b34f`共同锁定唯一phase、精确producer域、interior jump guard及source的R×6/E边界，定向证据为bytecode 3/3、parser 2/2；OOM只复用`ac6aa9a3`对`resolve_labels.run`的事务证据。undefined+return source映射子项封账，定向证据为bytecode 1/1；interior-return guard是既有行为，本次只补source并验证，不能记作新增guard。删除prepass减少`runPhases`的2–3个allocation/copy/failure面，但这只是OOM surface reduction，不证明整个`runPhases` transactional。dead code、logical chain与M-EMIT均未关闭 |
+| discarded pure expression（如`(1);`、`("x");`） | numeric子项✅ `08e4bbdb`按pinned qjs finalizer规则删除`push_i32 + drop`及可安全取负的`push_i32 + neg + drop`，并把通用`drop + return_undef`折为单个terminator；parser恢复QJS producer形状，统一先追加terminator再由final pass裁决。jump target/source位置随删除区间重映射，`-0`、`INT32_MIN`、unary plus、BigInt、cpool Number及completion/eval/module边界均有反例锁定。ordinary/empty string子项✅ `2b5a1129`，并由`119915c6`记录初次封账：ordinary non-tagged discard与ordinary/untagged-template empty producer在phase 1统一发带owner的`push_atom_value`；`resolve_labels`只删除non-tagged `push_atom_value; drop`，live empty则缩为`push_empty_string`，atom ledger、source位置与jump边界随final code重建。✅ `00287898`对齐pinned QuickJS `emit_push_const(as_atom=1)`：字符串intern为tagged-int atom时，production runtime路径回落为owned cpool String；canonical numeric ordinary string与numeric untagged template走cpool，`"01"`、普通非numeric string/template仍走atom，tagged template仍只产template-object cpool。runtime-less fragment保留为明确的test-helper atom fallback；RegExp pattern producer另由`5c54e8db`独立封账 | ordinary/empty string discard emission及ordinary/untagged-template empty short-form子项继续按原证据封账。`00287898`另以phase-1 owner、cpool顺序/index/source、discard与add_loc不折叠边界及focused parser 7项锁定tagged numeric-string producer；这里只关闭该producer，不把结论外推为整个discard family或M-EMIT完成。RegExp pattern cpool producer仍按`5c54e8db`独立封账 |
+| `insert3 + put_array_el/put_ref_value + drop` | ✅ `8a09960f`已在`resolve_variables`按pinned qjs同一phase折为单个store；外部jump进入被删除的`put/drop`边界时保持原序列 | 本行封账；2026-07-24复跑`zig build test-bytecode --seed 0 --summary all -- discarded`覆盖indexed/reference正例及interior-target反例，5个相关filtered用例全绿 |
+| redundant `to_propkey` before simple producer + `put_array_el` | ✅ pinned QJS与zjs逐producer census的五类相关producer均不产生相邻`to_propkey + simple producer + put_array_el` phase-1形状，因此没有可达脚本或final-bytecode差异 | 不新增不可达matcher，不进入PMU，本行封账；只读窄门禁`resolve_labels` 41/41全绿 |
+| `insert2 + put_field + drop` | ✅ `8a09960f`已在`resolve_labels`折为atom-bearing `put_field`，transactional atom-ledger rebuild保留唯一owner；interior jump target阻止折叠 | 本行封账；同一2026-07-24 `discarded`窄门禁覆盖field正例、atom operand与target反例 |
+| post-inc/dec store rewrites（loc/arg/var-ref/field/array） | ✅ `8a09960f`已按destination family覆盖arg/var-ref/field/array discarded postfix，并保留loc既有独立fold；field atom ownership随最终输出重建 | 本行封账；同一2026-07-24 `discarded`窄门禁覆盖全部新增destination形状；不把这些correctness规则合并申报PMU收益 |
+| `put_x(n); get_x(n) → set_x(n)` | ✅ `02c486e5`确认并锁定pinned QJS的四个wide phase-2同idx族：loc、loc-check、arg与var-ref均由`resolve_labels`折为对应`set_x`并在final选择short form；被删除`get_x`前的source marker映回replacement `set_x`起点。idx不同时保留原put/get；外部jump进入get边界时禁止fold，进入put边界时允许fold并正确重定位。该族不改变atom/cpool owner | 本行封账；`zig build test-bytecode --seed 0 --summary all -- 'put/get'`定向3/3全绿。OOM复用`ac6aa9a3`对同一`resolve_labels.run` positions/sizes/final-code安装边界的逐点失败、旧owner不变与同Bytecode重试证据；不得外推为整个`runPhases` transactional。本项是correctness/coverage收口，不进入PMU，也不代表M-EMIT完成 |
+| signed bigint-i32 literal neg | ✅ `b39eb39c`按pinned qjs producer/finalizer边界完成：parser仍先发正的`push_bigint_i32`与`neg`，`resolve_labels`只对相邻两条做无ownership peephole；`0/1/INT32_MAX`折为带符号immediate，输入`INT32_MIN`为避免溢出不折，`2147483648n`及更大值继续保持owned cpool BigInt + `neg`，不窥看或回写cpool；折叠后的source位置挂回unary minus，括号、正BigInt、Number neg与Number `-0`均有反例锁定 | 本子项封账；`zig build test-parser test-bytecode test-exec --seed 0 --summary all -- bigint`证据为parser 4/4、bytecode 1/1、exec 1/1，且`git diff --check`通过。这里只完成signed BigInt一行，不代表M-EMIT完成，discarded pure expression及表中其他差异仍待逐项裁决 |
+
+2026-07-24 completion audit 对上表的增量状态如下；这些结论及§10的W5细分行取代相应旧中间状态，
+但不追溯改写每个已封账窄机制的历史证据：
+
+- `24018694` 已把pinned QuickJS的phase-2 dead-code边界带回`resolve_variables`：
+  先按phase-1 instruction/label图求entry reachability，再只让live binding event参与capture/cell、
+  atom与source重建。referenced live merge、dead-only jump cycle、八种精确phase-2 terminal、
+  `return_async`仍留给phase 3、live indexed-store target及真实nested capture反例均已锁定；
+  完整`test-bytecode`为171/171。这里只关闭dead binding event及其phase owner，不关闭
+  empty-finalizer `gosub`或resolve-labels中由新fold产生的dead CFG。
+- `cf7f6e88` 已补齐signed inline BigInt的discard consumer：
+  `push_bigint_i32; neg; drop`在无interior target时整体删除，`0/1/INT32_MAX`、source回映与
+  targeted-neg边界均有bytecode证据；production `(-1n);`只剩`return_undef`，
+  cpool `(-2147483648n);`继续保留。提交前bigint bytecode 2/2、parser 4/4及
+  numeric-discard producer 1/1全绿，随后完整bytecode 173/173继续覆盖。本项关闭
+  signed-inline BigInt discard，不把positive/cpool BigInt或整个discard family一并关闭。
+- `124f475e` 已按pinned QuickJS instruction boundary实现三条通用branch normalization：
+  `goto L; L:`删除goto，`if_false/if_true L; L:`改为`drop`，以及
+  `if_* L1; goto L2; L1:`在无外部入口时翻转branch并直指L2。两种branch方向、source回映、
+  independent-entry反例、logical/typeof/put-get下游consumer及真实parser producer均已锁定；
+  完整`test-bytecode` 173/173、完整`test-parser` 458/458、production branch专项1/1全绿。
+  本项只关闭这三条相邻边界规则，不外推为constant-fold后的CFG fixed point。
+- `a3a610a6` 让constant-test变换以共享action同时驱动reachability、layout与emission：
+  untaken与raw-next都继续pair end，taken terminal直接发终止指令，ordinary target保留synthetic
+  goto且不追加第二轮adjacency pass。`b1f5c17b`随后锁定四个真实parser producer；terminal dead arm、
+  else dead arm、raw-next无goto以及dead-consumer压缩后仍保留goto均与pinned QuickJS一致。
+  focused bytecode 3/3、parser 2/2全绿，本项关闭constant-fold后CFG dead残项。
+- `4286c344` 为独立`undefined; drop` matcher补上QuickJS `code_match`不跨label的entry guard：
+  外部控制流进入drop时不再整体删除pair，同时允许后续通用`drop; return_undef`从该入口折为
+  terminator；positive discard、targeted drop与input-end/source回映由focused bytecode 1/1锁定。
+- `7c74c8b2` 补齐`add_loc`对empty-string RHS的内层short-form consumer：整体matcher先识别
+  owned `push_atom_value(empty)`，layout/emission再按pinned QuickJS发
+  `push_empty_string; add_loc`，最终atom ledger只释放empty owner。nonempty/tagged/cpool与
+  targeted RHS边界保持；focused bytecode 6/6、parser 2/2及五个`resolve_labels`分配点逐点
+  OOM/retry全绿。
+- `0050384e` 把empty-finalizer `gosub`删除从phase 3迁回pinned QuickJS的
+  `resolve_variables`：phase-2 CFG不再沿仅含`ret`的finalizer边，size/write同相位删除
+  gosub，orphan `ret`随之成为dead；final pass再把相邻`undefined; drop`及前序pure discard
+  级联删除。direct `nop; ret`、`goto→ret`、source/atom owner和逐分配点OOM/retry均锁定；
+  focused bytecode四项、parser两项全绿。
+- `b5e8d185` 让五族`with_*` atom-label probe与普通goto共用pinned QuickJS的bounded
+  `find_jump_target`：taken edge的reachability和final relocation同时穿过最多十跳，
+  probe自身不做adjacency删除或terminal替换。五族、adjacent terminal、independent catch
+  entry、cycle、invalid target、dead atom/source与真实parser/exec consumer均锁定；
+  focused bytecode 5/5、parser 1/1、exec 1/1全绿。
+
+M-EMIT在该执行点已确认源码/phase/consumer残项归零；当时规则是在阶段末
+test262/OOM/checkpoint与总体门禁完成前只称“机制完成、门禁待验”。这些门禁后来均已完成，
+最终由§10 W5/W5-emit-audit-remaining及顶部终态证据关闭W5。
+本批所有发码刀只申报QuickJS correctness/final-bytecode对齐，性能收益统一记零：它们没有获批
+独立runtime-residency候选，consumer PMU会混入执行器而不能归因给source/phase owner，因此不以
+byte数减少代替§8的direct收益。三方PMU只用于随后真正获批的P1c/P1d执行候选；W5由最终
+bytecode矩阵、完整test262、OOM和阶段门禁裁决，不继承其他机制的性能数字。
+
+`return_async` terminal dead-tail 子项由 `69e3e389` 封账：修复前 focused fixture 复现 atom-bearing
+死尾及末尾 `return_undef` 残留；修复后 bytecode focused 1/1，只保留
+`get_loc0; return_async`，死 atom ledger/refcount 与死尾 source-to-output-end 映射均已验证。
+这里只关闭 `return_async` 后的线性 dead tail，不外推为死区 CFG 整体闭环。
+
+dead CFG/final-bytecode 的两个独立子机制及一个raw-source-marker边界现已封账：
+
+- `923e288c` 用 instruction-boundary CFG reachability 取代“原始 jump target 即 live”的局部
+  dead-tail 判断，删除只被死跳转引用的目标、不可达 jump 环及其 atom/source owner；边集覆盖
+  conditional、catch、gosub 与 with atom-label，最终 code、atom ledger 和 source slots 在新增
+  CFG state/worklist 后仍由同一 `resolve_labels.run` 六个 allocation 点完整事务重建并支持
+  同一 Bytecode retry。证据为 `resolve_labels` 63/63、`test-bytecode` 161/161 与
+  `git diff --check`；
+- `4b2edf67` 对齐 pinned QuickJS `find_jump_target`：threaded `goto` 指向
+  `return`/`return_undef`/`throw` 时直接折为对应终止指令，指向一个或多个
+  `drop` 后、且raw phase-2中间没有`OP_line_num`时，同样折为`return_undef`；普通
+  relocation、jump threading 与`goto8`由显式non-terminal fixtures独立保留；
+- `6255fdd8` 修正上述折叠的side-table表示边界：zjs把`OP_line_num`移到source slots后，
+  matcher仍必须把首个`drop`之后的source marker视为QuickJS raw byte scan的阻断点。
+  `with (s) m?.()`因此继续在共享return处暴露pinned QuickJS同款stack mismatch，而不是被
+  提前terminal fold掩盖。新增source-marked `drop; return_undef` final-bytecode fixture、
+  terminal focused 4/4及既有call-consumer exec 1/1均通过。
+
+这里只把收益/正确性归因于上述 dead graph reachability、goto-terminal final-bytecode及其
+source-marker边界；logical phase owner及M-EMIT总体状态由后续W5细分行裁决。tagged
+numeric-string/cpool producer 已由 `00287898` 单独封账，不借此扩大 dead-code 结论。
 
 执行纪律：
 
@@ -2698,6 +3125,9 @@ final bytecode 与 zjs snapshot 证明：
 
 ### 7.2 M-FRAME-CONT — 最后才重开通用帧战役
 
+**终态：W6已关闭，重开条件未满足。** `a11f99d3`完成tail stack guard，
+`a2499f4c`关闭continuation审计；无post-W2 profile证明共同frame热点，故不重开。
+
 调用战役已把主形态压到 0.98–1.16x，并积累大量反证：共享 source/setup、scalar transport、
 descriptor/interface 包装、额外长期活跃参数、raw resume、target 字段删除等都曾因寄存器压力、
 `.text`、L1I 或其他形态 cycles 回退而撤销。
@@ -2713,6 +3143,11 @@ descriptor/interface 包装、额外长期活跃参数、raw resume、target 字
   单体 dispatcher 3,504B spill 二分、224-arm A/B 和 next-dispatch 指令数封账，不得从 frame
   战役侧面重开。`preserve_none` 是明确工具链缺口，但不是当前结论的唯一证据；
 - 架构可维护性重构另立工作项，不把“代码更少”记成性能收益。
+
+当前裁决（2026-07-24）：`a11f99d3`已完成tail stack等价修复，`a2499f4c`已关闭
+continuation审计；但现有W3 property/native数据不覆盖frame关键链，也没有冻结binary hash的
+post-W2 fib/closure/borrowed-continuation profile证明至少两个frame shape共享同一新热点。
+重开条件未满足，M-FRAME-CONT关闭、收益记零；只有补齐上述frozen profile后才可重新裁决。
 
 ## 8. 候选判定与止损协议
 
@@ -2750,29 +3185,50 @@ QJS ratio 用于确认差距是否收敛；baseline zjs → candidate zjs 才是
 3. **阶段收口**：
    - parser/exec/可观察语义改动：完整 `test262-gate`；
    - value representation：`test-altrepr`，并按项目规则跑 nan-boxing test262；
-   - allocation/GC/ownership：恢复后的 force-GC、相关 OOM，阶段关闭时 `test-oom`；
+   - allocation/GC/ownership：阶段关闭时统一执行 force-GC、相关 OOM 与 `test-oom`；迭代期
+     已恢复的 focused liveness 门禁不能替代该统一出口；
    - final pre-commit：唯一一次 ReleaseSafe 全套；
    - `git diff --check`、干净工作树、无临时 profile/log。
 
 不要每个小改动都跑全套；也不要用测试成本为理由跳过变更面必需的门禁。测试、exclude、
 known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 
-## 10. 执行顺序与交付物
+## 10. 最终状态权威、执行顺序与交付物
+
+下表是W阶段的当前状态权威；它取代§§1–7及本节详细账本中所有较早的“当前/下一步/
+未完成”措辞。2026-07-24终态复核新确认的两条direct-eval红灯已经完成窄修复与定向验证；
+修复后的checkpoint/full test262已按顶部完成证据回填，没有沿用更早的full-gate结果。
+
+| 阶段 | 当前终态 | 证据锚点 |
+|---|---|---|
+| W1 | **已完成并重冻**；终态复核的两项correctness红灯已修复 | W1-core-close、W1d、W1e、W1-full-close；`FINAL-CORRECTION-COMPLETE(eval-function-name)`与`FINAL-CORRECTION-COMPLETE(eval-simple-catch)` |
+| W2 | **已完成并冻结** | W2-0、W2-tail、W2-cont |
+| W3 | **已完成**；correctness保留，两个性能候选均按§8回退 | W3-property、W3-native |
+| W4 | **已完成**；correctness关闭，性能收益记零 | W4、W4-shape-before-object；`025d4f08`、`eeff93ac`、`5f621c03` |
+| W5 | **已完成**；correctness/final-bytecode关闭，性能收益记零 | W5及全部细分完成行；最终consumer修复`9ced17b3` |
+| W6 | **已关闭，重开条件未满足** | W6；`a11f99d3`、`a2499f4c` |
+
+最终修复树上的checkpoint与full test262已由顶部
+`FINAL-EVIDENCE-COMPLETE(...)`回填；ReleaseSafe仍由顶部唯一占位回填。
+这些是最终门禁证据，不是W阶段实现项。
+
+下方大表是按发生顺序保留的执行账本。未显式写“已完成”的中间切片、进入条件和禁止事项
+均为历史阶段边界；上方当前终态表及后续同阶段close行优先。
 
 | 阶段 | 工作 | 出口 |
 |---|---|---|
 | M0 | 维持可追溯 performance/diagnostic qjs；按**当前机制**逐个做 source/final-bytecode recon | 当前候选的 qjs/zjs 差异、direct/control、收益上限齐全；不等待 P1–P7 全部完成，也不把早期 PMU 当最终 baseline |
-| W1a（当前候选冻结面） | no-cheating entry cleanup → closure row schema/type+source identity规则 → 显式EntryContract → 删除零reader `DirectCallSite` | 保持lookup语义、row表示与identity测试；具体VarDef/closure/open-binding index不冻结。body/semantic prescan、finally复制、scope event/close、derived-this伪capture、全树hint replay、Annex-B与body hoist全部交W1b2.5；`get_var(arguments)` adapter只允许证伪/退场；correctness变化均不计性能 |
-| W1b1-semantic（候选完成，correctness） | args+locals单表 → eval operand改vardef链头/ARG_SCOPE_END → dynamic env按自身eval capture/实际lookup跨越两路生产且table-order消费 → 删除final scope graph/parameter高位 → compile/final closure去depth → combined eval传播范围 | 96/373/281/160及quick-check 3/3保持绿；只冻结语义表，收益记零。static class-field `0x8000`明确转交W1d，不虚报物理或全量同构 |
+| W1a（**已完成；历史冻结面**） | no-cheating entry cleanup → closure row schema/type+source identity规则 → 显式EntryContract → 删除零reader `DirectCallSite` | 当时只冻结lookup语义、row表示与identity；后续交给W1b2.5的项目均已由同表close行关闭 |
+| W1b1-semantic（**已完成，correctness**） | args+locals单表 → eval operand改vardef链头/ARG_SCOPE_END → dynamic env按自身eval capture/实际lookup跨越两路生产且table-order消费 → 删除final scope graph/parameter高位 → compile/final closure去depth → combined eval传播范围 | 96/373/281/160及quick-check 3/3保持绿；收益记零；static class-field `0x8000`后来由W1d关闭 |
 | W1b2（**已完成，表示候选**） | VarKind恢复QJS 0..10、临时class kind移到11 → closure compile/final共享8B storage → vardef 12B storage/accessor → uncaptured row zero → masked raw bytes/size/alignment/offset锁定 | focused gates通过；Zoo paired median -1.10%低于裁决线，性能收益记零。后续只复用表示，不重开wire/packed/layout或继承噪声 |
-| W1b2.5（correctness，当前阶段） | 已完成body pre-scan删除、block/body语法边界、generic-for普通LHS单遍、M-DECL-SCOPE-TOPOLOGY、M-BODY-SCOPE-IDENTITY、M-DEFINE-VAR-CORE/simple producer与M-LVALUE-PROVENANCE-CORE（后者已随`fde49b15`合入，private已恢复baseline transport，结论严格限ordinary reference/call surface）。M-PARSER-CONTROL-CLEANUP的tail-call/return单遍清理已合入main（`6e83f394`，忠实对齐、全绿：tail-call pushdown/return-comma-rescan/droppable-rethrow删除，深递归改抛catchable InternalError，test262 tail-call-optimization=skip）；其using单遍部分因与runtime disposal transport耦合（两次返工均栽在per-exit sync/async异常传播——early-exit须sync处置并同步传异常，而非promote-to-async）改与W1b2.6 runtime typed transport一起做，不在PCC阶段单独完成。✅**W1b2.5/2.6 core全链已合main全绿**（2026-07-22）：M-DSTR-QJS-TRAVERSAL(`a08ac398`)→M-FINALLY-SINGLE-BODY(`90982b18`)→M-SCOPE-EVENT-PRODUCERS(`1d0704ac`)→M-DERIVED-THIS-CANONICAL(`82d70a47`)→finalize checkpoint三合一 M-FINALIZER-PRECHILD+M-BODY-HOIST-ANCHOR+M-SCOPE-CLOSE-LOWERING(`7e604a85`)→M-USING-TYPED-CONTROL(`131a396e`，W1b2.6 typed disposal transport)。test262 **0/49775全绿，passed 44537→44542(+5)，known 29→24**；load-bearing early-break await-using sync案例已修（typed disposal走handleCatchableRuntimeError同步、8条special_object host-call链退役）。**W1 core闭合，解锁性能门**。残余：#7 return-endpoint统一（收益零、跟踪中，emitReturnValue非唯一终点+生成默认derived-ctor在State-bound emitter外）、W1d(private完整slot/brand/class-fields aggregator/static-block wrapper)、W1e(module local-export index)。下一步 → Realm/FB规范化（首个性能门） | row schema/identity/record bytes保持；parser scope/`defineVar`/last-op分别成为scope、declaration、reference/call唯一owner，source semantic scan、parser tail-call pushdown、per-exit optional状态、selected-reference与bounded reference-tail scan为零；ordinary/Annex-B/destructuring raw vardef与child/cpool、finally code、scope-exit、parameter/body final bytecode及derived capture index逐项同构；parent/child/sibling、loop cell identity与Nth-OOM正确。只可声明ordinary/core compiler construction close；private完整slot/brand/lowering、class-fields aggregator/static-block wrapper与提前`<class_fields_init>` row归W1d，module local-export index归W1e，using/TS namespace不在QJS-core结论内。W1b2.5完成前不得进入Realm/FB/pack，总体PMU重冻仍等待W1b2.6 |
-| W1b2.6（product correctness，独立） | M-USING-TYPED-CONTROL现同时承接从PCC移入的using parser单遍（block/program全文预扫→per-scope typed record/anchor；PCC两次返工证实它与runtime disposal transport耦合、不能先于本步单独做）→ 八个using `special_object + call` helper改typed opcode/continuation，使per-exit sync/async处置能正确同步/异步传播disposer异常 → 删除剩余internal-helper cache/trace/free | sync/async using的structured unwind、suppressed-error precedence与Nth-OOM通过；无QJS exact声明、收益记零。不得拖住W1b2.5 ordinary/core finalizer，但必须在总体性能重冻与W1b3b callable inventory前完成 |
+| W1b2.5（**已完成，correctness**） | body/grammar/scope/declaration/lvalue链 → `6e83f394` parser control cleanup → `a08ac398` DSTR traversal → `90982b18` single-body finally → `1d0704ac` scope events → `82d70a47` derived-this → `7e604a85` finalizer/body-hoist/scope-close | 2026-07-22 core链已合main；当时转交W1d/W1e的边界后来也由同表完成行关闭。终态复核新发现的两条direct-eval红灯另由上方两个`FINAL-CORRECTION-COMPLETE(...)`关闭，不错误归给旧`fde49b15` |
+| W1b2.6（**已完成，product correctness**） | using parser单遍与八个`special_object + call` helper一起改为typed opcode/continuation，保持per-exit sync/async异常传播 | `131a396e`完成typed disposal transport；structured unwind、suppressed-error precedence与Nth-OOM通过，收益记零 |
 | W1b3a（correctness，**中间态不可独立合入**） | 先把global判定从RealmPayload拆为显式class/flag并字段级split global payload → 拆分cycle-GC/refcount RealmContext、append GC kind并补全collector switch/typed child traversal，按GC-header `.constructing`/context-list `.live`两阶段发布并另建non-owning runtime context list → 冻结owner-runtime-thread或具名Runtime mutation lock二选一契约，覆盖Context/class/plugin/GC/list mutation → pointer-sized move-only public owner与typed callback view → `$262.createRealm`创建真实context/harness base owner → global/eval/intrinsic+custom class prototypes/random迁RealmContext，并把五个QJS initial shape改为direct Shape owner、删除layout-only template Object；先拆caller-owned stable class-ID namespace/per-Runtime definition/per-Realm slot，再让capacity覆盖所有live/future realm、限制record pointer为no-reentry view且definition publish/prototype consume分步，plugin HostClass只留Runtime metadata，公开Native Binding改live ctx-slot borrow+显式OwnedBinding，per-realm OOM预制对象只登记为zjs safety adaptation → EventLoop改命名host RealmRef owner并删wrapper cast，RootProvider只留diagnostic/host-owned external edge → waitAsync node裸ctx改RealmRef → public `realm_global`只扫描context list → exception/stack归Runtime或stack-local → runtime teardown验证全部context/value handles；interrupt留给W2-0整机制落地 | 本阶段只验RealmContext自身及已迁入edge：alternate state/identity、global payload、base/external RealmRef、legacy adapter、wrapper回收与destroy precondition；`.realm_context`全collector switch、construction Nth-OOM、双link、direct initial shapes/props move transaction、class slot/capacity/record lifetime/plugin metadata/Binding/EventLoop/waitAsync owner及Runtime mutation contract通过。不得声称native/FB/AUTOINIT/job/finalization cycle已闭合，也不得为中间绿灯增加temporary generic owner；这些生产escape carrier分别由W1b3b/c/d1/d2/d3关闭后才做联合cycle/teardown结论。shared alias cache只作临时debt，收益记零 |
 | W1b3a-plugin-unload（zjs extension correctness；生产出口依赖W1b3b typed callback） | InstalledPlugin不持prototype/RealmRef → 每次DSO callback持temporary execution pin，last-owner只标pending → deferred native/class-payload callback node持installation/definition pin → zero-live-owner/zero-active/zero-queued证明binding record/opaque payload为零 → context-list按本installation IDs take-null全部live slots → unregister Runtime definition → 最后close DSO；RealmContext teardown复用同一slot take | plugin-first、realm-first、callback内self-remove/last-release、teardown中last-binding reentry、finalizer/tracer reentry、queued-finalizer-after-last-live-owner、仅opaque-wrapper存活及多class rollback矩阵通过；callback返回前及queued callback存在时绝不close，slot/record/node/lib各清一次，close后无descriptor callback，且opaque creation已用W1b3b callback RealmContext slot；收益记零且不宣称QJS机制 |
 | W1b3a-array-guard（correctness后独立A/B） | 先逐reader区分own overwrite/CreateDataProperty/logical-end Set/already-walked Set/hole与zjs-only fill-unshift-bulk → 以stable context list实现per-realm `is_std_array_prototype` publication/invalidation → 仅QJS `can_extend_fast_array`对应reader改direct guard → 退掉runtime-wide sticky/`is_prototype`传播；product full-chain proof隔离 | A/B跨realm污染、Array/Object prototype新增属性及其publication Nth-OOM、setPrototype同值/失败/成功、dense conversion/delete/custom/Proxy、own-vs-hole setter、Set-vs-Define、push/splice及fill/unshift隔离矩阵通过；从W1b3a二进制独立测append/push与generic controls，未过裁决线仍保留correctness但不宣称收益，zjs-only fast path收益不并入 |
 | W1b3b（correctness） | 以前置W1b2.5已删除六个dstr、W1b2.6已删除八个using伪callable为负向门禁 → §1.8全callable inventory映射C_FUNCTION/caller-data/专用class/job-only并冻结每类object-surface golden → 删除零reader`prepared_call_ok`及过期gate注释 → realm-aware constructor直接装final prototype、eager normal name/length且只有C_FUNCTION own RealmRef → callback ABI按callee/caller原子传稳定RealmContext+同realm global/slots，`ExternalCall.ctx`/typed FFI borrow不再经owner-wrapper cast，binding method/plugin HostServices/public Binding都从对应live RealmContext class_proto查prototype并删平行authority → bootstrap先Object.prototype再Function.prototype → 删除后补realm/prototype/lazy-name与silent catch → FunctionRealm限定四类consumer → wrapper caller/final-arm phase切换 | `internal_destructuring_helpers[14]`、对应special-object+call/record/state-scan继续为零且不在本阶段重构；13个InternalCallableTag、Proxy/module/iterator captured helper与product extension各有唯一class；MethodRuntime无JSValueHandle、InstalledPlugin无prototype JSValue、Binding无raw prototype且runtime存活时alternate realm可独立回收；own descriptors/toString/callable/constructible、跨realm/handle-destroy后的callback ctx/global identity、realm-local binding/plugin class prototype contract、Promise self-resolution caller error、async resume FB realm及其余data-callback controls、constructor/bootstrap OOM、bound/Proxy/newTarget、foreign/active intrinsic与ordinary species、return逐阶段对齐。全部ExternalCall consumer cast与多权威global fallback为零；raw FFI opaque字段若保留，只能call-duration borrow且`ZigCall.ctx` typed。“c_function+tag切caller”与`prepared_call_ok` reader/writer/comment在function/data-class producer为零；job-only三项显式交W1b3d2并阻塞联合封口，收益记零 |
 | W1b3c（correctness） | production `CompileContext{realm,policy}`递归进入finalizer → 每个child/root FB独立retain → runtime-strict发布前唯一写入 → 删除first-closure/后置tree mutation | parent failure/child release、escaped closure、GC/accounting/OOM通过；production null realm与`bindBytecodeFunctionRealmGlobal` reader/producer均为零，收益记零 |
-| W1b3d1（correctness） | 现役AutoInit producer映射三种QJS ID或eager → CGETSET/常量/alias安装期发布并删shared cache → slot改typed `realm_and_id` owner+direct stable opaque → builder/error fallible、单次且不自改slot → PROP/PROTOTYPE发布normal、MODULE_NS typed result contract允许namespace或原VarRef、global发布VARREF并让C_FUNCTION独立retain → failure保留placeholder但向当前read抛错 | alias/accessor/constant descriptor与identity、caller shape/VarRef prepare、stored-realm builder错误prototype、fixture module-result/global cell identity、materialize/delete/redefine/destroy/clone-move/cycle-mark owner转换、Nth-OOM同runtime retry通过；过宽AutoInitKind producer、`AutoInitRef{rt,id}`/runtime-ID lookup、descriptor rt/realm/cache、optional吞错、同read双试、self-mutating builder、target-object代持均为零。当前data-snapshot module producer仍明确未对齐并由W1e接入，收益记零 |
+| W1b3d1（**已完成，correctness**） | 现役AutoInit producer映射三种QJS ID或eager → CGETSET/常量/alias安装期发布并删shared cache → slot改typed `realm_and_id` owner+direct stable opaque → builder/error fallible、单次且不自改slot → PROP/PROTOTYPE发布normal、MODULE_NS typed result contract允许namespace或原VarRef、global发布VARREF并让C_FUNCTION独立retain → failure保留placeholder但向当前read抛错 | alias/accessor/constant descriptor与identity、caller shape/VarRef prepare、stored-realm builder错误prototype、fixture module-result/global cell identity、materialize/delete/redefine/destroy/clone-move/cycle-mark owner转换、Nth-OOM同runtime retry通过；过宽AutoInitKind producer、`AutoInitRef{rt,id}`/runtime-ID lookup、descriptor rt/realm/cache、optional吞错、同read双试、self-mutating builder、target-object代持均为零。当时转交W1e的data-snapshot module producer后来由W1e接入；最终半发布边界由`5f621c03`关闭，收益记零 |
 | W1b3d2（correctness） | Promise/dynamic-import/generic ECMAScript job统一runtime FIFO entry+enqueue RealmRef+typed payload → producer按promise暴露前/后各自reserve/commit/pending-retry，并保留state→tracker→reaction的QJS可重入phase，禁止复制ignored-enqueue OOM或把事务合并过头 → 删除ECMAScript `runAll`并建立run-one empty/success/exception transaction → 公开`job.drain`按`0/1/N/null`精确循环并报告count/has_more、ctx只选Runtime不筛realm → dynamic-import沿entry ctx并删除state realm authority → waitAsync foreign notify/timeout改no-alloc host completion并由owner runtime按node RealmRef入FIFO → 删除fake function、裸Context及平行queue | generic/Promise/thenable/import Nth-OOM无owner消费、半settle、丢job或永久pending；tracker reentrant-then先于旧batch且handled通知phase一致，host-report OOM不回滚promise；初始import可reject/throw，已暴露promise的loader/TLA completion由typed node按序重试，resolve/reject不暗中丢reaction；creator facade销毁后仍以enqueue realm运行；A异常/B后继需两次drain，首错保留Runtime exception且B顺序不动，A enqueue C时剩余B→C，entry cleanup恰好一次且无dangling ctx；budget/count/has_more矩阵通过；DynamicImport不忽略ctx，scoped userdata仅在queue/continuation清空后释放；waitAsync foreign path不碰allocator/JS heap，race single winner，OOM按序重试，teardown无本runtime edge；跨realmFIFO/host adapter明确；三个job-only function producer/tag/payload、waiter裸ctx与settle `catch {}`为零，收益记零 |
 | W1b3d3（correctness） | FinalizationRegistry own construction RealmRef → GC cleanup接入d2 FIFO → no-drop enqueue OOM恢复；weak cells仍走真实weak-edge registry | cleanup使用construction realm且不重排/重复；registry/context cycle、GC mark/free、pending retry与same-runtime recovery通过，收益记零 |
 | W1b3e（correctness patch train） | 按QuickJS reader map依次迁generator/async、bound/proxy、Promise/jobs、ordinary/prototype/namespace与host payload → 删除generic realm slots/resolver → 删除`__realm_*`property/tag/copy/reflect与primitive/error/typed-array cache → realm退出borrowed-holder职责 → 沿Runtime/opaque ptr/root slot/value edge做传递性owner census | 20处pointer声明/视图、两个value槽、旧`host_function_realm_global`整数token、realm matcher及全部observable/cache side channel为零；AUTOINIT的typed `realm_and_id`、C_FUNCTION、FB、job、FinalizationRegistry/explicit host carrier之外无RealmRef，且内部Runtime-owned value/opaque record无未分类的RealmContext传递根。alternate/dynamic Function own-key与Proxy-newTarget trap矩阵通过；公开embedding handles仍是显式owner，weak-edge registry及WeakRef/weak collection/finalization tests保持，收益记零 |
@@ -2784,16 +3240,32 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W1c3（**已完成，单独ownership候选**） | 只按当前full-debug production contract建立source NUL owner+pc2line exact-size producer → 完成真实fallible准备并收紧no-fail publication → atoms/values/内嵌atom ownership move → debug buffers转移 → 清空FunctionDef slots | ✅ source producer持有`logical_len+1`且写NUL，pc2line两遍计长后仅一次exact allocation；FB/DebugInfo/main block/ClassMeta/class-init box与count/layout全部在commit前准备，class sibling先全量验证再无失败安装，commit后只做owner move、Realm retain与no-fail GC publication。func/filename/script、vardef/closure/class atom、cpool child/value、code atom ledger、source/pc2line均直接转移并清源槽；析构按code→vardef→cpool→closure/class→realm→func/debug顺序。refcount无临时`+1`、child cpool RC、FD先析构、source指针/NUL、single-owner pc2line、malformed atom ledger、Nth真实OOM、abrupt/same-runtime recovery与class sibling原子性均锁定；未新增strip/shrink/registry伪失败点，也未计入后续layout/pack收益。2026-07-23证据：bytecode 118/118、parser 422/422、core 274/274、exec 330/330、builtins 193/193、OOM 12/12、quick-check 3/3、test262-smoke 12/12、`git diff --check`通过 |
 | W1c4（**已完成，表示/layout候选**） | 唯一production raw builder+fixture builder → `createWithFam`并zero完整payload → 96B/align8 QJS base+32B production debug tail（fixture可显式no-debug）→ flag masks/ROM zero hole/zero-count NULL → 临时extension；tables/code暂不合并 | ✅ `FunctionBytecodeImpl`冻结为96B/align8 QJS core、可选inline 32B `DebugInfo`和可选40B extension；production保持full-debug，fixture可显式no-debug，唯一raw `createWithFam` builder归零完整FAM，zero-FAM/deferred-cycle free走同一析构契约。独立artifact owner仍明确暂存在extension并留给W1c5合并；flags（含ROM固定零hole）、zero-count NULL、raw offset/golden、rollback及legacy adapter矩阵均锁定。热调用路径以单次4B `CallFacts` load传递execution/behavior facts，消除重复extension定位且不缓存可变状态。2026-07-23证据：bytecode 124/124、exec 330/330、quick-check 3/3、统一Debug 1801/1801、alternate表示1801/1801、OOM 13/13、checkpoint 26/26（含test262-smoke 12/12）、perf-self-check 75/75、`git diff --check`通过；冻结Debug二进制baseline `28159a247dbed32f9001994aecda770940e17fde9f752985e7d8f4dcd50c998e`与candidate-v7 `c8de56ced0c446e8d793d64f32a9a13b5e4b63d8273d0d8cfc3d5291a253d435`做9轮interleaved A/B：no-call total -3.858%、first-call -6.736%、closure controls +1.408%/+1.438%、zero-arg call +4.690%、inline-add +0.246%；2k finalize alloc/free各-8002且peak allocation count -1。原始本地证据为`/tmp/w1c4-v7-final-ab-result.json`，不作为仓内ledger |
 | W1c5（**已完成，单独allocation/layout候选**） | 统一checked `FunctionLayout.famBytes`把cpool/vardefs/closures/exact code并入同一`createWithFam` allocation并删除临时artifact block/base/allocation；source/pc2line继续独立move-owned；code后zjs tail拆成exact `code_end`处8B Hot（CallFacts+ScriptAtom，align1访问）与`align8(code_end+8)`处24B Side（三个指针），总尺寸恒等旧`align8(code_end)+32`；析构先capture layout/tails | ✅ production只剩一次main FAM allocation，物理顺序为96B core→可选32B debug→cpool→vardefs→closures→exact code→Hot/padding/Side；默认16B与alternate 8B JSValue的order、raw offsets、全部`code_end % 8`、zero-code fixture、no-extension、legacy Hot@96/Side@104/size128、heap accounting、cycle/deinit、cross-runtime与OOM均锁定。legacy以唯一`byte_code_len=-1`判别并在base+104直接取adapter，canonical table access不再定位Side；production callable冷发布验证non-empty/self-owned/extension，inline resolver以Debug contract使用3-load canonical CallFacts。2k finalize的logical alloc/free各减少4001且peak allocation count -1；backing slab/page几何的Debug噪声不伪称收益。2026-07-23证据：bytecode 131/131、OOM 13/13、alternate统一1809/1809、checkpoint 26/26（统一1809/1809、CLI 3/3、test262-smoke 12/12、architecture全绿）、perf-self-check 75/75、`git diff --check`通过。最终ReleaseFast候选`/tmp/zjs-w1c5-releasefast-candidate-v8`，sha256 `5d8087c097b3ea3d5c0e6be43756037c7c3f5b20dabb774d1114a0122aba5778`，28,707,536B；CPU19、ASLR-off、显式big-core PMU、六种平衡顺序的有效三方A/B相对W1c4：zero-arg cycles -0.548%/instructions -1.972%，inline-add control +0.368%/+0.000%，closure-hold cycles -0.262%/instructions +0.123%，nested-hold +0.156%/+0.180%。直接no-call/first-call的cycles受恒定12.1万page-fault与allocator微架构模式影响仍不稳定，未挑最快样本制造结论；原始证据为`/tmp/w1c5-v8-threeway-{hot,hold}-perf-result.json`与诊断JSON，均不作为仓内ledger |
-| W1-core-close | W1a–W1c5 focused/checkpoint/test262/OOM → 该合入候选唯一一次ReleaseSafe → 审计后独立合入 → 重冻M-CELL与regexp Zoo | ordinary script/direct/indirect-eval及其realm carrier construction形成可落地基线，generic pointer与observable/cache realm补偿已退场；明确不包含per-realm module registry、class/private/import closure sidechannel或interrupt budget；按新profile重排plain put/set |
+| W1-core-close（**已完成并重冻**） | W1a–W1c5 focused/checkpoint/test262/OOM → 审计后独立合入 → 重冻M-CELL与regexp Zoo | ordinary script/direct/indirect-eval及其realm carrier construction已形成可落地基线，generic pointer与observable/cache realm补偿已退场；2026-07-24最终P1c plain put/set分别按单刀A/B保留，最终RegExp Zoo +12.14%、15/15胜 |
 | W1d（**已完成，correctness/layout**） | PRIVATE-BINDING/CLASS-INIT迁移后，object/function private remap、ordinary `is_class_constructor` FB carrier、arrow/static runtime/FB side channel，以及finalization/final/runtime owners中的`ClassMeta`、FunctionDef/Bytecode `private_bound_names/class_private_names`、canonical `FunctionBytecodeSideExtension`均已删除；`Parser.State.class_private_elements/class_private_bound_names`仅保留为grammar/early-error/direct-eval parse临时表，不进入FunctionDef/Bytecode/FB/object/runtime；`<class_fields_init>`由真实child与lexical binding承载。ScriptOrModule因escaped direct-eval的referrer/diagnostic分离而保留在8B Hot documented product extension中 | ✅ canonical allocation止于`code_end + 8B Hot`，即“canonical Side carrier删除 + documented 8B Hot保留”，不是止于code。2026-07-23阶段收口证据：focused core/bytecode/parser/exec/builtins 1377项；最终修复后NaN-boxing exec 347/347、builtins 193/193，原production未知test262 25/25；OOM 14/14；alternate representation统一1837/1837；`engine-production-gate` 26/26（统一Debug 1837/1837、ReleaseFast CLI 3/3、architecture dependency/OOM-panic/public API snapshot全绿、full test262 0/49775 errors，passed 44542、known 24）。ReleaseSafe仍按总体路线图最终pre-commit/pre-push门禁唯一执行 |
 | W1e（**已完成，correctness/ownership**） | ✅ ordinary root继续只产`FunctionBytecode`，module root改产唯一`ModuleArtifact{function_bytecode,record}`；request/import/local-export/indirect-export/star-export/attribute全部冻结为indexed metadata与final `var_idx`。RealmContext地址稳定`ModuleRecord`持久own精确module function、retained export cells、namespace/import-meta/eval-exception强边；module function从首次声明到SCC link/eval/TLA resume始终复用同一对象与nullable capture table，named import只在indexed link时接入最终VarRef，namespace import/`export * as`由canonical VARREF/AUTOINIT发布。link改Tarjan SCC与active-stack rollback，evaluation postorder从record request graph重建，static/dynamic import、synthetic module与Context.eval共享persistent status/result/error，TLA沿runtime FIFO reaction恢复且不重复load/evaluate。export resolver递归穿透`import {x}; export {x}`到最终binding，同时保留namespace identity；namespace `[[HasProperty]]`不读取TDZ，`super` Set按base descriptor→Receiver descriptor顺序传播ReferenceError/TypeError | ✅ registry地址稳定/跨Realm隔离、publication retry、GC/cycle/value rooting、persistent function/capture identity、indexed linking/ambiguity、namespace live binding与TDZ、Tarjan cycle、TLA FIFO、synthetic/static/dynamic import及same-path single-load均有回归。2026-07-23收口证据：focused parser 433/433、bytecode 134/134、core 282/282、exec 357/357、builtins 193/193；checkpoint 26/26（统一Debug 1856/1856、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot全绿）；OOM 14/14；定向`language/module-code`+`expressions/dynamic-import`为prepared 1540、feature-skipped 346、passed 1193、known 1、unexpected 0；`git diff --check`通过。ReleaseSafe仍按总体路线图留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
-| W1-full-close | W1d/W1e分别完成各自gate、审计、合入与affected-consumer重冻 | 此时才可声明全部closure/module construction对齐；若仍有product extension只能声明“QJS core exact + documented extension”，不追溯改写core-close或plain-put既有A/B |
+| W1-full-close（**已完成并重冻**） | W1d/W1e分别完成各自gate、审计、合入与affected-consumer重冻 | 全部closure/module construction已按各自行证据收口；保留的8B Hot等明确称“QJS core exact + documented extension”。最终cell/RegExp重冻未追溯改写core-close历史A/B |
 | W2-0（**已完成，correctness**） | ✅ RealmContext直接own raw-zero/10000-reset interrupt counter，VM-local 1024 `InterruptPoller`与active gate删除；call/method/native/array/inline/tail/Function.prototype.call融合快路、constructor/Bound/Proxy及simple-field constructor按QJS entry次数扣caller，jump/branch只在唯一handler扣一次；最终bytecode arm后body扣callee。Interrupted按被poll Realm构造真实InternalError并以Runtime uncatchable flag跨inline unwind，catch/finally/IteratorClose不得洗掉；regexp counter、tail stack均未改 | ✅ 无handler推进、首poll与连续10000 cadence、Realm隔离、跨Machine、nested/tail、numeric cold branch、constructor双poll、fused forwarding、generator resume、cross-Realm caller-entry/callee-body及error prototype、outer inline for-of/catch均有回归。2026-07-23证据：focused core 283/283、exec 361/361；checkpoint 26/26（统一Debug 1861/1861、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；OOM 14/14；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
-| W2 | tail-chain stack correctness → 重冻 → 只审计非 `.next` 的 M-RETURN-CONT | stack与interrupt两个机制均稳定；continuation候选不跨correctness状态，不重开整体dispatch |
-| W3 | M-PROPERTY-LOOKUP → M-NATIVE-CALL | ordinary/global-varref lookup probe 分开；lookup 与 callable dispatch 分开保留/回退 |
-| W4 | force-GC correctness → 重冻 → M-ALLOC-LIFECYCLE → M-SHAPE-PUBLISH | 门禁恢复后先空对象 lifecycle，后 transition/capacity 差分；不重做已关闭的 per-alloc page-geometry/按值 class-record 刀 |
-| W5 | parser 默认参数 correctness → 重冻 diagnostic/PMU → M-EMIT | hoist construction 不算 peephole；只做 final bytecode 确认仍缺的 qjs rule |
-| W6 | 条件性重开 M-FRAME-CONT | tail stack guard + 新共同热点证明同时满足 |
+| W2-tail（**已完成，correctness**） | ✅ Runtime同时记录native/logical depth与按QJS `JS_CallInternal` alloca公式计算的planned bytecode-stack bytes；普通、inline、generator/async resident entry及COPY_ARGV forwarding均精确charge/release。proper-tail-call先在caller仍存活时完整准备target，全部fallible setup成功后才以no-fail transaction转移continuation、最早arena mark、profile restore chain和累计tail budget并复用物理Entry；失败继续由原caller正常unwind/catch。caller guard/poll先于callee Realm切换，async init只准备resident frame，首次resume独占单次guard→poll；interrupt跨Promise边界只局部转移原caller-Realm uncatchable InternalError为rejection reason，不放宽通用error matcher；interrupt error构造OOM时以预制OOM对象维持unconditional uncatchable | ✅ 尾递归/大小frame混合/逻辑深度/stack overflow、raw tail opcode、COPY_ARGV、cross-Realm interrupt-vs-stack次序、generator/async cadence及async rejection Realm、interrupt×OOM catch bypass、target setup deterministic OOM与同Runtime恢复均有回归。2026-07-23证据：focused exec 366/366；OOM 14/14；alternate representation统一1866/1866；opcode-profile启用构建及tail smoke通过；checkpoint 26/26（统一Debug 1866/1866、CLI 3/3、test262-smoke 12/12、architecture dependency/OOM-panic/public API snapshot与OOM-cap全绿）；三份独立终审PASS，`git diff --check`通过。收益记零并重冻；ReleaseSafe仍留到W1e–W6最终pre-commit/pre-push门禁唯一执行 |
+| W2-cont（**已完成，架构差异审计**） | ✅ production非`.next` action census仅有`for_of_next`与`proxy_get`；两者分别own depth与Atom，并在callee返回后执行不同但必需的post-work。普通call全为`.next + payload 0`并直接resume；tail replacement只转移既有continuation ownership | ✅ QuickJS以递归C caller locals保存同等post-call状态，resident Machine必须显式持久化；tag+u32已是无allocation且覆盖完整Atom域的共同表示，无符合约束的生产候选。self/constant/zero-arg iterator、ordinary method及static/computed Proxy direct/control输出与qjs逐项一致；exec回归补齐driver `.returned`上的native tail-call成功/抛错矩阵，收益记零、不作PMU声明，W2继续冻结 |
+| W3-property（**已完成，候选回退**） | ✅ ordinary/global-varref probe分开；只让final `get_field/get_field2`跳过private-atom guard的干净候选通过exec与语义矩阵，direct instructions稳定下降约1.2%～1.5% | ❌ own-data 18-block paired cycles全部回退，中位+1.695%，越过+1%门槛；生产代码完整回退，固定static-miss/global-VARREF probe与失败结论保留 |
+| W3-native（**已完成，correctness + 候选回退**） | ✅ observable C_FUNCTION caller-realm native-stack preflight、constructor pre-scope guard与External HostCall单一native frame已补齐；递归恢复/backtrace/cross-realm prototype回归及exec 370/370通过，收益记零。重复`callable_realm`transport候选在ordinary/cross-realm/C_FUNCTION_DATA/constructor/synthetic/nested语义矩阵通过，并在两个builtin domain的plain/method与exact/missing形状稳定减少每次2～6条指令 | ❌ 独立布局重建虽保留direct指令削减，却使property-read/allocation controls回退+1.477%/+1.660%，越过+1%门槛且暴露code-layout方向翻转；生产候选完整回退，九个direct/control probe与失败结论保留，W3冻结 |
+| W4（**已完成，correctness收口；性能收益记零**） | ✅ force-GC liveness前置（`f221dfee` + `2ecbf301`/`951726e1`/`1f67bdbc`/`ad3218dd`）→ ✅ `48f6d61d`对齐properties/shape→同步class finalizer→accounting/raw-free顺序 → ✅ `025d4f08`对齐Shape-before-object allocation order；❌ standard-object与cross-capacity shape候选均按§8撤销；✅ `eeff93ac`最终recon关闭其余M-ALLOC-LIFECYCLE；✅ `5f621c03`关闭data→AutoInit union的fallible半发布窗口 | `b8f7e0d2`→`eeff93ac`的18/18 paired结果中empty-object/Object.create(null) cycles为-0.843%/-0.594%，均不申报；empty-array control +5.400%硬否决。现有统计与sampling没有证明construct/accounting/destroy/allocator geometry存在可删除的重复语义工作，0.96x叙事不可复现并删除，W4收益记零、生产代码不新增性能候选。阶段出口已由core 289/289、`test-oom` 14/14、统一force-GC 1968/1968关闭；只有新的分层计数或源码/工具链事实才可按§8重开 |
+| W5（**已完成，correctness/final-bytecode；收益记零**） | M-EMIT的源码/phase/consumer残项已归零；下列W5细分行及最终`W5-emit-audit-remaining`行取代本行过去的“进行中/继续M-EMIT”中间叙述 | `9ced17b3`补齐规范化conditional+goto的reachability successor后，所有发码刀仍只申报correctness/final-bytecode且收益记零；bytecode 187/187、checkpoint/production 37/37、full test262 0/49775 unexpected、OOM 14/14，W5阶段出口关闭 |
+| W5-dead-CFG（**已完成，两个窄子机制及source-marker边界**） | ✅ `923e288c`以instruction-boundary CFG reachability删除只被死jump引用的目标和不可达jump环，覆盖conditional/catch/gosub/with边并事务重建atom/source；✅ `4b2edf67`对齐pinned QuickJS `find_jump_target`，把threaded `goto`到`return`/`return_undef`/`throw`及无raw `OP_line_num`阻断的`drop*; return_undef`折为终止指令，同时保留ordinary relocation、threading与`goto8`独立fixture；✅ `6255fdd8`让side-table source marker继续具备QuickJS raw byte scan的阻断语义 | 第一刀证据为`resolve_labels` 63/63、bytecode 161/161；第二刀为63/63、162/162；source-marker修正由新增final-bytecode fixture、terminal focused 4/4及call-consumer exec 1/1锁定，且`git diff --check`通过。只关闭dead graph reachability、goto-terminal final-bytecode及其source-marker边界，不关闭整个dead-code family或M-EMIT；logical chain phase owner继续独立，tagged numeric-string/cpool producer另由`00287898`封账 |
+| W4-shape-before-object（**已完成，窄correctness机制**） | ✅ `025d4f08`让template路径先retain prepared Shape、cache-miss路径先创建并own root Shape，再进入`collectBeforeObjectAllocation`和raw Object allocation；post-Shape Object OOM统一回滚shape hash/live count、heap accounting、prototype ref与class construction pin，并允许同Runtime重注册、重试 | cache-miss GC边界与post-Shape OOM/retry均有定向回归。该项只关闭Shape-before-object allocation order；其后的`eeff93ac`最终recon把整个M-ALLOC-LIFECYCLE以收益零关闭，`5f621c03`补齐AutoInit publication边界，阶段末core 289/289、`test-oom` 14/14与统一force-GC 1968/1968通过 |
+| W5-dead-pc2line（**已完成，窄correctness机制**） | ✅ `ea959805`在`resolve_labels`最终layout后以allocation-free in-place compaction只保留`pc < final code len`的source slot；不可达suffix中的line marker仍可更新scanner状态，但不再制造指向bytecode end的dead pc2line record | 既有goto-terminal、async-return与dead-CFG fixture锁定无末端source record；本批完整bytecode在新增最后一条tagged-label OOM fixture前为166/166。只关闭dead-end pc2line record，不关闭整个dead-code family或M-EMIT |
+| W5-logical-producer（**已完成，窄correctness机制**） | ✅ `180faaf2`把`parseLogicalAndOr`的每条`&&`/`||`链改为单一shared tagged `ParserLabelRef`，所有prefix共同引用该target，synthetic `dup/branch/drop`及链尾label均no-source；最终OR prefix共同落到最终consumer，opcode种类与语义保持 | raw phase-1锁定同label/同target/零synthetic source slot，multiline final pc2line锁定source progression；parser logical 9/9。该producer子项已闭，但不单独关闭logical全项或M-EMIT |
+| W5-logical-phase-owner（**已完成，窄correctness机制**） | ✅ `a4be78cd`把logical fold迁到pinned QuickJS同相位的`resolve_variables`，在wide label与line marker仍存在时处理shared label、line marker和bounded goto target，并删除`resolve_labels` matcher/fallback；interior target继续阻止消费branch/drop suffix | bytecode logical 8/8；本批完整bytecode在新增最后一条tagged-label OOM fixture前166/166，`quick-check` 8/8。absolute-target OOM只对该路径声明byte/source/atom全事务并支持同Bytecode retry；tagged-label OOM只声明无泄漏与同Bytecode retry，不声明原始byte逐字节回滚。logical实现/phase-owner证据已闭，阶段末checkpoint/production、full test262及`test-oom`门禁均已通过 |
+| W5-phase2-dead-binding（**已完成，窄correctness/phase-owner机制**） | ✅ `24018694`在`resolve_variables`按phase-1 CFG reachability先裁掉dead binding event，再进行capture/cell、atom与source重建；terminal集合精确排除`return_async`，dead-only cycle不自保活，live merge与indexed-store入口仍保留 | focused fixture覆盖owner refcount、closure row、`var_ref_count`、source remap与真实parser nested capture；完整bytecode 171/171。只关闭phase-2 dead binding，不关闭empty `gosub`级联、constant-fold后dead CFG或M-EMIT |
+| W5-bigint-discard（**已完成，窄correctness机制**） | ✅ `cf7f6e88`让signed inline `push_bigint_i32; neg; drop`按QJS整体消失，并保留interior-target与cpool BigInt边界 | bigint bytecode 2/2、parser 4/4、numeric-discard producer 1/1；随后完整bytecode 173/173。只关闭signed-inline BigInt discard，不关闭整个discard family |
+| W5-branch-normalization（**已完成，三条窄correctness规则**） | ✅ `124f475e`完成goto-to-next删除、conditional-to-next改drop、conditional+goto翻转三条pinned QJS规则，并把source/target边界接入既有layout；✅ `9ced17b3`让reachability读取同一normalized action的target与fallthrough，避免仍按threaded input CFG误删活分支 | 新增final-bytecode回归先稳定复现3B错误输出、修复后为预期6B；完整bytecode 187/187，原九项full-gate红灯中的八项由该根因一次关闭。只关闭三条相邻instruction-boundary规则及其CFG consumer一致性；constant-test不做第二轮adjacency的既有边界不变 |
+| W5-constant-CFG（**已完成，窄correctness/phase-consumer机制**） | ✅ `a3a610a6`以共享constant-test action驱动reachability/layout/emission，严格保持raw-next→terminal→ordinary jump优先级；`b1f5c17b`补齐真实parser producer | bytecode focused 3/3、parser focused 2/2；锁定terminal/else dead arm、raw-next及不做第二轮goto adjacency四形状。只关闭constant-fold后dead CFG |
+| W5-undefined-discard（**已完成，窄correctness边界**） | ✅ `4286c344`让`undefined; drop`不跨独立drop入口，并保留后续通用terminator fold | bytecode focused 1/1；source与input-end映射均锁定。无新增allocation，OOM继续只复用既有`resolve_labels.run`事务证据 |
+| W5-empty-gosub（**已完成，phase-owner机制**） | ✅ `0050384e`在`resolve_variables`删除empty-finalizer gosub并让orphan ret进入dead CFG，phase 3 owner退场 | focused bytecode四项、parser两项；source/atom owner与逐分配点OOM/retry锁定 |
+| W5-add-loc-empty（**已完成，short-form consumer**） | ✅ `7c74c8b2`在canonical add_loc matcher内部发empty-string short form并重建atom ledger | bytecode 6/6、parser 2/2；五分配点OOM/retry及nonempty/tagged/target反例全绿 |
+| W5-with-threading（**已完成，五族target规则**） | ✅ `b5e8d185`让五族atom-label probe的taken edge按bounded `find_jump_target`同步参与reachability/relocation | bytecode 5/5、parser 1/1、exec 1/1；cycle、independent entry、invalid target与owner/source均锁定 |
+| W5-emit-audit-remaining（**已完成**） | 已确认源码/phase/consumer残项归零，且normalized branch reachability的最终consumer偏差由`9ced17b3`关闭 | 本行与上面完成行取代W5主行的旧状态；checkpoint/production 37/37、full test262 0/49775 unexpected及OOM 14/14已完成，M-EMIT/W5关闭 |
+| W6（**已关闭，条件未满足**） | ✅ `a11f99d3`完成tail stack guard；`a2499f4c`关闭continuation审计 | ❌ 现有W3数据不覆盖frame，且无frozen post-W2 profile证明至少两个frame shape共享同一新热点；M-FRAME-CONT不重开，收益记零 |
 
 每个机制工作项只交付四类内容：最小代码改动、红灯/语义测试、三方性能证据、简短机制结论。
 失败候选删除代码但保留结论；完成后更新本计划的当前优先级，不追加逐日流水账。
@@ -2846,11 +3318,13 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 - **不可见sentinel会变成真实生产语义。** 只要root/eval或branch-to-end会读取`code[len]`，它就不是fixture安全垫。
   必须先按QJS发显式return并拒绝reachable falloff，才有资格删除`+1`和相关dispatch假设。
 - **realm field不等于realm机制。** QJS Context中的global/intrinsics/class prototypes/eval/random/modules是realm state，
-  当前exception/stack/job queue则属于Runtime；zjs不能机械refcount整个host Context，也不能把global header提前写进FB就宣告完成。
-  先从host handle拆出唯一GC/refcount RealmContext与RealmRef/state map，再逐consumer删除global/Context/Runtime上的平行realm slot。
+  exception/stack/job queue则属于Runtime。W1b3a–e已完成从host handle拆出唯一GC/refcount
+  RealmContext与RealmRef/state map，并删除平行realm slot；未来不得机械refcount整个host Context，
+  也不能把global header提前写进FB就宣告机制完成。
 - **RootProvider不是RealmContext GC。** QuickJS用GC header所在的`gc_obj_list`对Context做trial-decref child traversal，另用
-  `context_list`做class扩槽/枚举和realm-local Array prototype guard失效；zjs当前RootProvider只服务external `traceRoots` visitor，cycle collector不会读取它。
-  RealmContext必须有独立GC kind、owned-child visitor和runtime context link；三条路径均不得互相冒充或偷偷retain。新增kind要覆盖
+  `context_list`做class扩槽/枚举和realm-local Array prototype guard失效。W1b3a已建立独立RealmContext
+  GC kind、owned-child visitor和runtime context link；RootProvider只服务external `traceRoots` visitor，
+  cycle collector不读取它。三条路径均不得互相冒充或偷偷retain。新增kind要覆盖
   size/candidate/revive/zero-ref/remove-cycles/deinit/deferred-free/accounting全部switch，不能只让一个cycle测试碰巧通过。
   RealmContext-owned slot只进GC child visitor；RootProvider保留时只作诊断或枚举EventLoop等真正host-owned edge，不能把同一owned child再算成external base。
 - **GC header publication与live-context publication是两件事。** null class slots/no-child scaffolding先准备，随后header以`.constructing`进入collector；
@@ -2864,8 +3338,8 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   并在该realm的Array/Object prototype进入tagged-small（0...`2^31-1`）property publication attempt时、或Array.prototype的prototype成功改变时永久清零；
   前者早于fallible shape growth，后续OOM也不恢复，后者只在真实commit后发生，两类失败事务不能混成同一规则。
   同值set-prototype提前成功返回而不失效，更大的字符串ArrayIndex不扩大该域。
-  zjs的sticky runtime bool+逐链scan语义安全但拓扑不同且跨realm污染，
-  不是Zig限制；待context list稳定后单独迁移、单独A/B，删除属性也不得擅自重新开启guard。
+  zjs历史sticky runtime bool+逐链scan虽语义安全却拓扑不同且跨realm污染；该迁移和独立A/B已由
+  §10 W1b3a-array-guard完成。永久约束是删除属性不得擅自重新开启guard。
 - **`is_std_array_prototype`不是通用chain-clean capability。** pinned QuickJS只在`can_extend_fast_array`对应的Set/put/push/splice等extension
   reader消费它；已有own dense slot、CreateDataProperty、已经完成prototype walk的append和hole Set各有不同协议。zjs现有fill/growing-unshift/bulk
   fast path不能因新flag而被“顺便证明”：要么保留独立actual-chain product proof并单独封账，要么退generic。先画reader map再改authority，
@@ -2955,8 +3429,9 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   per-realm preallocated Error属于明确的failure-path safety adaptation，不能写成QJS Context字段、不能由首realm做Runtime强root，也不能据此
   跳过普通/可分配OOM的caller/callee phase测试。fully-exhausted fallback无stack且同realm重复时可能复用identity/用户mutation，这也是必须明示的
   product divergence；预制对象尚不可用时只能走runtime-neutral emergency state。
-- **lazy不是吞错许可。** QJS AUTOINIT用stored context只调用builder一次并把exception上传；当前zjs optional builder、undefined
-  fallback和同read双试会隐藏真实OOM。GUIDE允许失败时事务性保留placeholder以支持same-runtime retry，但本次read必须抛错，
+- **lazy不是吞错许可。** QJS AUTOINIT用stored context只调用builder一次并把exception上传；W1b3d1前的zjs
+  optional builder、undefined fallback和同read双试会隐藏真实OOM，现已由§10 W1b3d1删除，
+  最终半发布边界由`5f621c03`关闭。GUIDE允许失败时事务性保留placeholder以支持same-runtime retry，但本次read必须抛错，
   且成功时slot RealmRef→materialized C_FUNCTION RealmRef的owner转换仍逐项对齐。不能把QJS失败后留下undefined的quirk或zjs现有
   “OOM反正致命”注释用来绕过错误通道。
 - **lazy允许域也必须对齐。** QuickJS low bits只有PROTOTYPE/MODULE_NS/PROP，且PROP只延迟C function/string/object；
@@ -2986,17 +3461,20 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   把伪helper改成C_FUNCTION_DATA或专用class只能隐藏carrier矛盾，不能算对齐；Runtime不得缓存这类helper JSValue。
 - **无reference产品特性不能反排QJS core优先级。** `using`的全块预扫会污染所有普通parser construction，故其共享parser债务必须在
   M-PARSER-CONTROL-CLEANUP消除；但八个helper的typed runtime迁移属于独立product correctness，不应阻塞ordinary/core finalizer。
-  它仍须在总体性能重冻和callable/realm inventory前完成。这样既不让feature拖住机制，也不把feature债务藏进下一条基线。
+  该顺序已由`131a396e`在总体性能重冻和callable/realm inventory前完成；未来仍不得让feature
+  拖住core机制或把feature债务藏进下一条基线。
 - **embedding brand偏离必须显式命名。** QuickJS `JS_GetOpaque2`按class id，不检查当前prototype；zjs `docs/public-api-contract.md`与tests要求
   exact realm-local prototype。保留该公开contract时，应由method C_FUNCTION的callee RealmContext查`class_proto[class_id]`，而非让
   runtime record强持prototype；它是product/API divergence，不是QuickJS行为或Zig限制。若改变brand语义，必须另做API兼容裁决。
-- **JS prepared call不能凭死flag复活。** 当前`prepared_call_ok`零reader；QuickJS C_FUNCTION的realm、prototype和object identity都在
-  真实function object上。任何未来从JS call opcode/callable dispatch跳过对象的候选必须另有等价carrier与不可观察证明，并单独A/B；
+- **JS prepared call不能凭死flag复活。** W1b3b已删除零reader的`prepared_call_ok`及过期gate注释；
+  QuickJS C_FUNCTION的realm、prototype和object identity都在真实function object上。任何未来从JS call
+  opcode/callable dispatch跳过对象的候选必须另有等价carrier与不可观察证明，并单独A/B；
   一个table布尔不能授权跳过FunctionRealm/call phase。已处于某算法active realm的内部typed-handler复用不是JS调用，单独分类；live
   `forwards_call`也有独立consumer，不能因字段相邻被误删。
 - **loaded module identity是per-realm state。** runtime级文件读取/cache可以共享，`loaded_modules` record/function/cell/namespace/error
-  不能共享；但QJS是`JSContext.loaded_modules` list持ModuleDef base ref，而非每个ModuleDef dup Context，不能过度补一个record RealmRef。W1e未完成前禁止把
-  ordinary realm对齐扩写成完整context/module exact。
+  不能共享；但QJS是`JSContext.loaded_modules` list持ModuleDef base ref，而非每个ModuleDef dup Context，
+  不能过度补一个record RealmRef。W1e已完成per-Realm registry和persistent module artifact；
+  未来不得把ordinary realm对齐单独扩写成完整context/module exact。
 - **poll point存在不等于interrupt机制已对齐。** counter lifetime、阈值、跨call持续性和handler cadence与poll位置是两组契约；
   call entry扣caller context，最终arm切换后的backedge扣callee context，handler为null时counter仍推进。interrupt counter也不是
   tail-recursion stack budget或regexp execution counter，三者不得共享一个“够用”的计数器。
@@ -3011,14 +3489,14 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
   没有其中的environment/binding位；real root/vardef topology可表达同一事实后必须删减，而不是把过渡字段改名成架构。
 - **short opcode 是最终编码选择，不是数据模型。** qjs 先保留宽 `fclosure` index，只在
   index≤255 时缩短。历史 zjs 的直接 `u8` cast 与 short-only consumer 已由 `936111c5` 修复；永久教训是
-  producer 与所有 consumer 必须成对审计；当前scanner已删除，但仍不能因P0完成而跳过persistent module
-  function、indexed slot和guarded-call时序审计。
+  producer 与所有 consumer 必须成对审计。scanner删除和persistent module
+  function/indexed slot/guarded-call时序已由W1e收口，但不得因P0完成而在未来回归中跳过这些consumer。
 - **顺序必须来自 provenance，不能来自事后 permutation。** qjs 的 eval prefix、declarations、child-demanded
   captures、parent body captures 分别在固定阶段产生；把最终 closure table 全局“child-first”排序会直接破坏
   nested-eval 前缀。没有 provenance 的 reorder 不是 post-order finalization 的等价替代。
 - **grammar lookahead不能变成semantic producer。** QJS只为参数、解构、for/arrow等语法歧义做有源码锚点且
-  不改声明表的lookahead；zjs历史body `var/eval`及simple catch/for扫描已删除，当前只剩pattern/switch账本与
-  implicit-arguments future-function scan仍替正式producer/final resolver作决定。任何重扫只要会写binding、capture、strict状态或环境transport，
+  不改声明表的lookahead；zjs历史body `var/eval`、simple catch/for、pattern/switch账本与
+  implicit-arguments future-function scan均已在W1b2.5链中退场。任何重扫只要会写binding、capture、strict状态或环境transport，
   就不再是lookahead，必须删除或给出对应QJS producer；普通`var`与Annex-B都按正式parse遇见顺序建立。
 - **validation也不能维护第二套grammar。** QJS在正式destructuring traversal遇到binding时立即查duplicate；zjs另跑
   `collect*BindingNamesSnapshot`，即使不创建child，也会重复property-name解析、atom retain/free、临时name-array allocation与OOM点。
@@ -3060,8 +3538,12 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 - **非空指针切片是设计选择，不是 Zig 限制。** 若 qjs module link 需要暂时为空的 import slots，应使用
   optional staging/link plan，link 完再 seal typed refs；不能因当前 `[]*VarRef` 不容 null 而改变链接阶段。
 - **本轮没有“规范/test262优于QuickJS”的成功语义例外。** 历史三项必须按pinned QuickJS重判：same-body function-name
-  `var + eval`已经回到`undefined`；ordinary descendant direct eval仍是红灯，需把转发行归一为ordinary kind并得到`false / false`；
-  simple-catch同名direct-eval `var`仍是红灯，需删除额外第二target并锁定QJS declaration/initializer顺序。test262与规范证据继续记录，
+  `var + eval`已经回到`undefined`；2026-07-24终态复核发现ordinary descendant direct eval曾输出
+  `true / TypeError / true`而非QJS的`false / false`，现已归一ancestor unscoped capture；
+  simple-catch同名direct-eval `var`曾输出`global-x 42g`而非QJS的`g 42g`，现已删除
+  `eval_var_object_fallback`第二target。两项完成证据分别为
+  `FINAL-CORRECTION-COMPLETE(eval-function-name)`与
+  `FINAL-CORRECTION-COMPLETE(eval-simple-catch)`。test262与规范证据继续记录，
   但不改变本计划的目标。唯一可接受的实现差异是有具体证据的Zig/LLVM/ABI或内存安全约束，且必须证明可观察行为和所有权等价。
 - **复合 benchmark 必须最小化。** for-of 同时混入 cell/property/arith；push/pop 混入
   lookup/call/length。症状比值不能直接给机制排功劳。

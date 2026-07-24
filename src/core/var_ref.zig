@@ -2,7 +2,9 @@
 //!
 //! This is an internal GC node, not a JS Object. It mirrors QuickJS's
 //! JSVarRef shape: an open ref aliases a live frame slot through `pvalue`;
-//! a closed ref owns `value` and points `pvalue` at it.
+//! when that frame is parked in a generator, `value` owns the generator that
+//! owns the backing slot. A closed ref owns the binding value itself and
+//! points `pvalue` at it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -13,6 +15,10 @@ const JSValue = @import("value.zig").JSValue;
 pub const VarRef = struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.var_ref);
     header: gc.Header = .{},
+    // Closed: the binding value. Open: the optional parked-frame owner.
+    // QuickJS stores the async-function-state pointer in the open-cell union;
+    // `value` is otherwise idle in this state, so it carries the equivalent
+    // owned GC edge without widening VarRef.
     value: JSValue = JSValue.undefinedValue(),
     pvalue: *JSValue = undefined,
     is_const: bool = false,
@@ -60,7 +66,9 @@ pub const VarRef = struct {
 
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        if (!self.is_open) self.value.free(rt);
+        // Closed cells own their binding value. Open cells own only the parked
+        // generator whose frame backs pvalue; both live in the same field.
+        self.value.free(rt);
         // Cycle removal: keep the struct alive for the Pass-B drain so a sibling
         // still decref-ing this var_ref does not read freed memory (qjs defers
         // non-value GC types to gc_zero_ref_count_list, quickjs.c:6790).
@@ -81,18 +89,11 @@ pub const VarRef = struct {
     /// while every referenced GC object is still structurally valid.
     pub fn prepareForRuntimeDeinit(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        if (!self.is_open) {
-            const old_value = self.value;
-            self.value = JSValue.undefinedValue();
-            self.pvalue = &self.value;
-            old_value.free(rt);
-        } else {
-            // A surviving open cell may point into a frame that has already
-            // unwound. It never owns that slot's value.
-            self.value = JSValue.undefinedValue();
-            self.pvalue = &self.value;
-            self.is_open = false;
-        }
+        const old_value = self.value;
+        self.value = JSValue.undefinedValue();
+        self.pvalue = &self.value;
+        self.is_open = false;
+        old_value.free(rt);
     }
 
     pub fn valueRef(self: *VarRef) JSValue {
@@ -132,13 +133,31 @@ pub const VarRef = struct {
         self.freeCell(rt);
     }
 
+    /// Attach the GC owner of an open cell's parked frame.
+    ///
+    /// A running ordinary frame cannot participate in a removable cycle, so
+    /// open cells start with no owner. Before a generator frame is parked, its
+    /// object is retained here exactly once. This mirrors QuickJS get_var_ref's
+    /// async_func retain and makes the open-cell edge `cell -> frame owner`,
+    /// never the borrowed `cell -> *pvalue`.
+    pub fn attachOpenOwner(self: *VarRef, owner: JSValue) void {
+        std.debug.assert(self.is_open);
+        std.debug.assert(owner.isObject());
+        if (!self.value.isUndefined()) {
+            std.debug.assert(self.value.same(owner));
+            return;
+        }
+        self.value = owner.dup();
+    }
+
     pub fn close(self: *VarRef, rt: anytype) void {
         if (!self.is_open) return;
         const closed_value = self.pvalue.*.dup();
+        const open_owner = self.value;
         self.value = closed_value;
         self.pvalue = &self.value;
         self.is_open = false;
-        _ = rt;
+        open_owner.free(rt);
     }
 
     pub fn setVarRefValue(self: *VarRef, rt: anytype, next_value: JSValue) void {

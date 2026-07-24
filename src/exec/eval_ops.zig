@@ -359,7 +359,7 @@ pub fn execDirectEval(
             return eval_err;
         }
     else
-        callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
+        call_runtime.callValueOrBytecodePreRootedInternal(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
                 return .continue_loop;
             }

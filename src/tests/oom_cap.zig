@@ -192,7 +192,5 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     try expectStringValue(result, "InternalError");
 
     try std.testing.expect(state.window_allocations != null);
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        try std.testing.expectEqual(@as(usize, 0), state.window_allocations.?);
-    }
+    try std.testing.expectEqual(@as(usize, 0), state.window_allocations.?);
 }

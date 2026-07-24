@@ -859,6 +859,7 @@ fn moduleRecord(function: *const engine.bytecode.Bytecode) !*const engine.byteco
 fn rootCode(function: anytype) []const u8 {
     const T = @TypeOf(function);
     if (comptime T == *const parser.Result or T == *parser.Result) return function.byteCode();
+    if (comptime T == *const engine.bytecode.FunctionBytecode or T == *engine.bytecode.FunctionBytecode) return function.byteCode();
     return function.code;
 }
 
@@ -1007,6 +1008,19 @@ fn countPutVarRefStores(code: []const u8) usize {
         countOpcode(code, op.put_var_ref3);
 }
 
+fn countCheckedPutVarRefStores(code: []const u8) usize {
+    return countOpcode(code, op.put_var_ref_check) +
+        countOpcode(code, op.put_var_ref_check_init);
+}
+
+fn countSetVarRefStores(code: []const u8) usize {
+    return countOpcode(code, op.set_var_ref) +
+        countOpcode(code, op.set_var_ref0) +
+        countOpcode(code, op.set_var_ref1) +
+        countOpcode(code, op.set_var_ref2) +
+        countOpcode(code, op.set_var_ref3);
+}
+
 fn countOpcodeInFunctionBytecode(fb: *const engine.bytecode.FunctionBytecode, opcode: u8) usize {
     var count = countOpcode(fb.byteCode(), opcode);
     for (fb.cpoolSlice()) |value| {
@@ -1023,6 +1037,27 @@ fn countOpcodeRecursive(function: anytype, opcode: u8) usize {
         if (functionBytecodeFromValue(value)) |fb| {
             count += countOpcodeInFunctionBytecode(fb, opcode);
         }
+    }
+    return count;
+}
+
+fn countVarRefStoresRecursive(function: anytype) usize {
+    var count: usize = 0;
+    inline for ([_]u8{
+        op.put_var_ref,
+        op.put_var_ref_check,
+        op.put_var_ref_check_init,
+        op.put_var_ref0,
+        op.put_var_ref1,
+        op.put_var_ref2,
+        op.put_var_ref3,
+        op.set_var_ref,
+        op.set_var_ref0,
+        op.set_var_ref1,
+        op.set_var_ref2,
+        op.set_var_ref3,
+    }) |opcode_id| {
+        count += countOpcodeRecursive(function, opcode_id);
     }
     return count;
 }
@@ -1286,7 +1321,76 @@ test "F4: large bigint literal lowers to constant pool value" {
     try std.testing.expect(value.isBigInt());
 }
 
-test "F4: regexp literal stores parse-time compiled bytecode in the constant pool" {
+test "W5: signed bigint-i32 neg matches QuickJS final bytecode boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const inline_cases = [_]struct {
+        source: []const u8,
+        expected: i32,
+    }{
+        .{ .source = "-(0n)", .expected = 0 },
+        .{ .source = "-1n", .expected = -1 },
+        .{ .source = "-(1n)", .expected = -1 },
+        .{ .source = "-(2147483647n)", .expected = -2147483647 },
+    };
+    for (inline_cases) |case| {
+        var fn_bc = try parseExpr(&env, case.source);
+        defer fn_bc.deinit(env.rt);
+
+        try std.testing.expectEqual(@as(usize, 5), fn_bc.code.len);
+        try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
+        try std.testing.expectEqual(case.expected, readI32(fn_bc.code, 1));
+        try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.neg));
+        try std.testing.expectEqual(@as(usize, 0), fn_bc.cpoolSlice().len);
+    }
+
+    for ([_][]const u8{ "-(2147483648n)", "-(2147483649n)" }) |source| {
+        var fn_bc = try parseExpr(&env, source);
+        defer fn_bc.deinit(env.rt);
+
+        try expectOpcodeSequence(fn_bc.code, &.{ op.push_const8, op.neg });
+        try std.testing.expectEqual(@as(usize, 1), fn_bc.cpoolSlice().len);
+        const constant = fn_bc.constantAt(readConstIndexAtOpcode(fn_bc.code, 0)).?;
+        defer constant.free(env.rt);
+        try std.testing.expect(constant.isBigInt());
+    }
+
+    var positive_bigint = try parseExpr(&env, "1n");
+    defer positive_bigint.deinit(env.rt);
+    try std.testing.expectEqual(op.push_bigint_i32, positive_bigint.code[0]);
+    try std.testing.expectEqual(@as(i32, 1), readI32(positive_bigint.code, 1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(positive_bigint.code, op.neg));
+
+    var negative_number = try parseExpr(&env, "-(1)");
+    defer negative_number.deinit(env.rt);
+    try expectOpcodeSequence(negative_number.code, &.{op.push_minus1});
+
+    var negative_zero = try parseExpr(&env, "-(0)");
+    defer negative_zero.deinit(env.rt);
+    try expectOpcodeSequence(negative_zero.code, &.{ op.push_0, op.neg });
+}
+
+test "W5: folded parenthesized bigint keeps the unary minus source position" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var fn_bc = try parseExpr(&env,
+        \\
+        \\-(
+        \\  1n
+        \\)
+    );
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
+    try std.testing.expectEqual(@as(i32, -1), readI32(fn_bc.code, 1));
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(fn_bc.pc2lineBuf(), 0);
+    try std.testing.expectEqual(@as(i32, 2), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 1), source_loc.col_num);
+}
+
+test "F4: regexp literal stores pattern then parse-time bytecode in the constant pool" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var parsed = try compileForTest(env.rt, "/a+/gi;", .{ .mode = .script, .filename = "regexp-literal.js" });
@@ -1312,12 +1416,22 @@ test "F4: regexp literal stores parse-time compiled bytecode in the constant poo
     }
 
     try std.testing.expect(regexp_pc != null);
-    try std.testing.expectEqual(op.push_atom_value, code[previous_previous_pc.?]);
+    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
     try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
-    try std.testing.expectEqual(@as(usize, 1), constants.len);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), constants.len);
 
-    const constant_index = readConstIndexAtOpcode(code, previous_pc.?);
-    const compiled_value = constants[constant_index].dup();
+    const pattern_index = readConstIndexAtOpcode(code, previous_previous_pc.?);
+    const compiled_index = readConstIndexAtOpcode(code, previous_pc.?);
+    try std.testing.expectEqual(@as(u32, 0), pattern_index);
+    try std.testing.expectEqual(@as(u32, 1), compiled_index);
+
+    const pattern_value = constants[pattern_index].dup();
+    defer pattern_value.free(env.rt);
+    const pattern_string = pattern_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(pattern_string.eqlBytes("a+"));
+
+    const compiled_value = constants[compiled_index].dup();
     defer compiled_value.free(env.rt);
     const compiled_string = compiled_value.asStringBodyRaw() orelse return error.TestExpectedEqual;
     try std.testing.expect(!compiled_string.isWide());
@@ -1325,6 +1439,76 @@ test "F4: regexp literal stores parse-time compiled bytecode in the constant poo
     var expected = try engine.libs.regexp.compilePatternAndFlags(std.testing.allocator, "a+", "gi");
     defer expected.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, expected.bytecode, compiled_string.borrowLatin1().?);
+}
+
+test "F4: regexp pattern constant decodes UTF-8 before the following constant" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var parsed = try compileForTest(env.rt, "print(/π+/u, 1.5);", .{
+        .mode = .script,
+        .filename = "regexp-unicode-cpool.js",
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const code = parsed.byteCode();
+    const constants = parsed.constants();
+    try std.testing.expectEqual(@as(usize, 3), constants.len);
+
+    var regexp_pc: ?usize = null;
+    var previous_previous_pc: ?usize = null;
+    var previous_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        if (code[pc] == op.regexp) {
+            regexp_pc = pc;
+            break;
+        }
+        previous_previous_pc = previous_pc;
+        previous_pc = pc;
+        const opcode_size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(opcode_size != 0);
+        pc += opcode_size;
+    }
+
+    try std.testing.expect(regexp_pc != null);
+    try std.testing.expectEqual(op.push_const8, code[previous_previous_pc.?]);
+    try std.testing.expectEqual(op.push_const8, code[previous_pc.?]);
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(code, previous_previous_pc.?));
+    try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(code, previous_pc.?));
+
+    const pattern = constants[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(pattern.isWide());
+    try std.testing.expectEqualSlices(u16, &.{ 0x03c0, '+' }, pattern.utf16());
+
+    var following_constant_pc: ?usize = null;
+    pc = regexp_pc.? + engine.bytecode.opcode.sizeOf(op.regexp);
+    while (pc < code.len) {
+        if (code[pc] == op.push_const8 or code[pc] == op.push_const) {
+            following_constant_pc = pc;
+            break;
+        }
+        const opcode_size = engine.bytecode.opcode.sizeOf(code[pc]);
+        try std.testing.expect(opcode_size != 0);
+        pc += opcode_size;
+    }
+    try std.testing.expect(following_constant_pc != null);
+    try std.testing.expectEqual(@as(u32, 2), readConstIndexAtOpcode(code, following_constant_pc.?));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), constants[2].asFloat64().?, 0.0);
+}
+
+test "F4: invalid regexp releases its published pattern constant" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(env.rt, "/(/;", .{
+        .mode = .script,
+        .filename = "invalid-regexp.js",
+    });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expectEqual(parser.CompilePath.syntax_error_guard, parsed.parse_path);
+    try std.testing.expect(std.mem.indexOf(u8, parsed.syntax_error.?.message, "InvalidRegExp") != null);
 }
 
 test "F4: boolean and null literals" {
@@ -1414,6 +1598,33 @@ test "F4: comparison operators map to op.lt/op.lte/op.eq/op.strict_eq" {
     try std.testing.expectEqual(op.strict_eq, seq_bc.code[seq_bc.code.len - 1]);
 }
 
+test "F4: null comparison lowering keeps strict folds and loose equality distinct" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var strict_null = try parseExpr(&env, "value === null");
+    defer strict_null.deinit(env.rt);
+    try expectOpcodeSequence(strict_null.code, &.{ op.get_var, op.is_null });
+
+    var strict_undefined = try parseExpr(&env, "value === void 0");
+    defer strict_undefined.deinit(env.rt);
+    try expectOpcodeSequence(strict_undefined.code, &.{ op.get_var, op.is_undefined });
+
+    var strict_neq_condition = try parseStatement(&env, "if (value !== null) result;");
+    defer strict_neq_condition.deinit(env.rt);
+    try expectOpcodeSequence(strict_neq_condition.code, &.{
+        op.get_var,
+        op.is_null,
+        op.if_true8,
+        op.get_var,
+        op.drop,
+    });
+
+    var loose_null = try parseExpr(&env, "value == null");
+    defer loose_null.deinit(env.rt);
+    try expectOpcodeSequence(loose_null.code, &.{ op.get_var, op.null, op.eq });
+}
+
 test "F4: bitwise levels 6/7/8 (and/xor/or) and shifts" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -1481,13 +1692,36 @@ test "F4: typeof optional chain parses full chain" {
     try std.testing.expectEqual(op.typeof, fn_bc.code[fn_bc.code.len - 1]);
 }
 
-test "F4: void evaluates and discards then pushes undefined" {
+test "F4: typeof comparisons select final short tests at the condition boundary" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var equality = try parseExpr(&env, "typeof x === \"undefined\"");
+    defer equality.deinit(env.rt);
+    try expectOpcodeSequence(equality.code, &.{ op.get_var_undef, op.typeof_is_undefined });
+
+    var inequality_condition = try parseStatement(&env, "if (typeof x !== \"function\") result;");
+    defer inequality_condition.deinit(env.rt);
+    try expectOpcodeSequence(inequality_condition.code, &.{
+        op.get_var_undef,
+        op.typeof_is_function,
+        op.if_true8,
+        op.get_var,
+        op.drop,
+    });
+    const branch_pc =
+        engine.bytecode.opcode.sizeOf(op.get_var_undef) +
+        engine.bytecode.opcode.sizeOf(op.typeof_is_function);
+    try std.testing.expectEqual(inequality_condition.code.len, readRelTarget32(inequality_condition.code, branch_pc));
+}
+
+test "F4: numeric discard in void keeps only undefined" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "void 0");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.push_0, op.drop, op.undefined });
+    try expectOpcodeSequence(fn_bc.code, &.{op.undefined});
 }
 
 test "M3.1 F4: strict eval and arguments update targets are rejected" {
@@ -1526,6 +1760,150 @@ test "F4: logical || uses dup + if_true short-circuit" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.if_true8, op.drop, op.get_var });
     const target = readRelTarget32(fn_bc.code, 4);
     try std.testing.expectEqual(fn_bc.code.len, target);
+}
+
+test "F4: if consumes three-term logical chains with final branch snapshots" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var and_bc = try parseStatement(&env, "if (a && b && c) result;");
+    defer and_bc.deinit(env.rt);
+    try expectOpcodeSequence(and_bc.code, &.{
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.drop,
+    });
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 3));
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 8));
+    try std.testing.expectEqual(and_bc.code.len, readRelTarget32(and_bc.code, 13));
+
+    var or_bc = try parseStatement(&env, "if (a || b || c) result;");
+    defer or_bc.deinit(env.rt);
+    try expectOpcodeSequence(or_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.if_true8,
+        op.drop,
+        op.get_var,
+        op.dup,
+        op.if_true8,
+        op.drop,
+        op.get_var,
+        op.if_false8,
+        op.get_var,
+        op.drop,
+    });
+    try std.testing.expectEqual(@as(usize, 17), readRelTarget32(or_bc.code, 4));
+    try std.testing.expectEqual(@as(usize, 17), readRelTarget32(or_bc.code, 11));
+    try std.testing.expectEqual(or_bc.code.len, readRelTarget32(or_bc.code, 17));
+}
+
+test "F4: logical producer uses one source-less shared parser label" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const fixtures = [_]struct {
+        source: []const u8,
+        branch_op: u8,
+    }{
+        .{ .source = "a && b && c", .branch_op = op.if_false },
+        .{ .source = "a || b || c", .branch_op = op.if_true },
+    };
+
+    for (fixtures) |fixture| {
+        var function = try parseRawExprWithRuntime(&env, fixture.source);
+        defer function.deinit(env.rt);
+
+        var branch_target: ?u32 = null;
+        var branch_count: usize = 0;
+        var label_id: ?u32 = null;
+        var label_count: usize = 0;
+        var synthetic_count: usize = 0;
+        var pc: usize = 0;
+        while (pc < function.code.len) {
+            const opcode_id = function.code[pc];
+            const size: usize = @intCast(engine.bytecode.opcode.sizeOfPhase1(opcode_id));
+            try std.testing.expect(size != 0 and pc + size <= function.code.len);
+
+            const is_synthetic = opcode_id == op.dup or
+                opcode_id == fixture.branch_op or
+                opcode_id == op.drop;
+            if (is_synthetic) {
+                synthetic_count += 1;
+                for (function.source_loc_slots) |slot| {
+                    try std.testing.expect(slot.pc != @as(u32, @intCast(pc)));
+                }
+            }
+
+            if (opcode_id == fixture.branch_op) {
+                const target = readU32(function.code, pc + 1);
+                try std.testing.expect((target & op.parser_label_tag) != 0);
+                if (branch_target) |expected_target| {
+                    try std.testing.expectEqual(expected_target, target);
+                } else {
+                    branch_target = target;
+                }
+                branch_count += 1;
+            } else if (opcode_id == op.label) {
+                label_id = readU32(function.code, pc + 1);
+                label_count += 1;
+            }
+            pc += size;
+        }
+
+        try std.testing.expectEqual(@as(usize, 2), branch_count);
+        try std.testing.expectEqual(@as(usize, 1), label_count);
+        try std.testing.expectEqual(@as(usize, 6), synthetic_count);
+        try std.testing.expectEqual(
+            op.parser_label_tag | (label_id orelse return error.TestExpectedEqual),
+            branch_target orelse return error.TestExpectedEqual,
+        );
+    }
+}
+
+test "F4: collapsed multiline logical branches retain source progression" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var function = try parseStatement(&env,
+        \\if (a &&
+        \\    b &&
+        \\    c) result;
+    );
+    defer function.deinit(env.rt);
+
+    const expected_sources = [_]struct {
+        line_num: i32,
+        col_num: i32,
+    }{
+        .{ .line_num = 1, .col_num = 4 },
+        .{ .line_num = 2, .col_num = 5 },
+        .{ .line_num = 3, .col_num = 6 },
+    };
+    var branch_count: usize = 0;
+    var pc: usize = 0;
+    while (pc < function.code.len) {
+        const opcode_id = function.code[pc];
+        const size: usize = @intCast(engine.bytecode.opcode.sizeOf(opcode_id));
+        try std.testing.expect(size != 0 and pc + size <= function.code.len);
+        if (opcode_id == op.if_false8) {
+            try std.testing.expect(branch_count < expected_sources.len);
+            const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+                function.pc2lineBuf(),
+                @intCast(pc),
+            );
+            try std.testing.expectEqual(expected_sources[branch_count].line_num, source_loc.line_num);
+            try std.testing.expectEqual(expected_sources[branch_count].col_num, source_loc.col_num);
+            branch_count += 1;
+        }
+        pc += size;
+    }
+    try std.testing.expectEqual(expected_sources.len, branch_count);
 }
 
 test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
@@ -1595,17 +1973,15 @@ test "F4: discarded conditional assignment arms keep function stack balanced" {
     }
 }
 
-test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
+test "F4: ternary cond ? a : b folds the fragment exit goto to its terminator" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a ? b : c");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.goto8, op.get_var });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.return_undef, op.get_var });
     const else_target = readRelTarget32(fn_bc.code, 3);
-    try std.testing.expectEqual(@as(usize, 10), else_target);
-    const end_target = readRelTarget32(fn_bc.code, 8);
-    try std.testing.expectEqual(fn_bc.code.len, end_target);
+    try std.testing.expectEqual(@as(usize, 9), else_target);
 }
 
 test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
@@ -1617,6 +1993,19 @@ test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.dup, op.put_var });
 }
 
+test "F4: function-local assignment result reaches dup put to set fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatementWithTopLevelChildren(
+        &env,
+        "function f() { var x; return x = 1; }",
+    );
+    defer fn_bc.deinit(env.rt);
+
+    const child = findFunctionConstantNamed(&fn_bc, env.rt, "f") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(child.byteCode(), &.{ op.push_1, op.set_loc0, op.@"return" });
+}
+
 test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -1626,13 +2015,13 @@ test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" 
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.push_1, op.add, op.dup, op.put_var });
 }
 
-test "F4: comma operator drops left, keeps right" {
+test "F4: numeric discard in comma removes pure left and keeps right" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1, 2");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.push_1, op.drop, op.push_2 });
+    try expectOpcodeSequence(fn_bc.code, &.{op.push_2});
 }
 
 test "F4: member access a.b emits get_var + get_field" {
@@ -1756,9 +2145,15 @@ test "M3.1 F4: computed object property emits define_array_el" {
     var fn_bc = try parseExpr(&env, "{ [\"x\"]: 1 }");
     defer fn_bc.deinit(env.rt);
 
-    try std.testing.expectEqual(op.object, fn_bc.code[0]);
-    try std.testing.expectEqual(op.define_array_el, fn_bc.code[fn_bc.code.len - 2]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    // The final property-value cleanup is also the discarded expression
+    // result, so the final-bytecode drop; return_undef fold removes it.
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.object,
+        op.push_atom_value,
+        op.to_propkey,
+        op.push_1,
+        op.define_array_el,
+    });
 }
 
 test "M3.1 F4: object spread emits copy_data_properties" {
@@ -2023,6 +2418,28 @@ test "F4: method call obj.m(x) uses get_field2 + call_method" {
     try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 11));
 }
 
+test "F4: get_length final fold consumes the ordinary length atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a.length");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_length });
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
+}
+
+test "F4: length call consumer preserves get_field2 and its atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a.length()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.get_field2, op.call_method });
+    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 4));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 8));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
+}
+
 test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2254,6 +2671,24 @@ test "F4: final bytecode applies QuickJS discarded lvalue and loop update peepho
     try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.drop));
 }
 
+test "F5: local x++ and --x reach the canonical final inc_loc snapshots" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const cases = [_]struct {
+        source: []const u8,
+        expected_op: u8,
+    }{
+        .{ .source = "function f() { var x; x++; }", .expected_op = op.inc_loc },
+        .{ .source = "function f() { var x; --x; }", .expected_op = op.dec_loc },
+    };
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, "f") orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualSlices(u8, &.{ case.expected_op, 0, op.return_undef }, child.byteCode());
+    }
+}
+
 test "F4: dotted assign value remains on stack via insert2 (chained)" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -2342,11 +2777,54 @@ test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
     var fn_bc = try parseExpr(&env, "a?.b");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field });
     const next_target = readRelTarget32(fn_bc.code, 5);
-    try std.testing.expectEqual(@as(usize, 11), next_target);
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try std.testing.expectEqual(@as(usize, 10), next_target);
+}
+
+test "F4: optional length value reaches the get_length final fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a?.length");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.return_undef,
+        op.get_length,
+    });
+    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 11), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
+}
+
+test "F4: optional length call consumer preserves get_field2 and its atom operand" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "a?.length()");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.dup,
+        op.is_undefined_or_null,
+        op.if_false8,
+        op.drop,
+        op.undefined,
+        op.return_undef,
+        op.get_field2,
+        op.call_method,
+    });
+    try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
+    try std.testing.expectEqual(@as(usize, 18), fn_bc.code.len);
+    try std.testing.expectEqual(core.atom.ids.length, readU32(fn_bc.code, 11));
+    try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 15));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
 }
 
 test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
@@ -2355,7 +2833,7 @@ test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
     var fn_bc = try parseExpr(&env, "a?.[i]");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_var, op.get_array_el });
 }
 
 test "F4: optional chain a?.b.c — chain test only at the ?. site" {
@@ -2364,9 +2842,7 @@ test "F4: optional chain a?.b.c — chain test only at the ?. site" {
     var fn_bc = try parseExpr(&env, "a?.b.c");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field, op.get_field });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field, op.get_field });
 }
 
 test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
@@ -2376,14 +2852,10 @@ test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
     defer fn_bc.deinit(env.rt);
 
     try expectOpcodeSequence(fn_bc.code, &.{
-        op.get_var,   op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
-        op.get_field, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8,
+        op.get_var,   op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef,
+        op.get_field, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef,
         op.get_field,
     });
-    const exit_target_1 = readRelTarget32(fn_bc.code, 9);
-    const exit_target_2 = readRelTarget32(fn_bc.code, 22);
-    try std.testing.expectEqual(exit_target_1, exit_target_2);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target_1);
 }
 
 test "F4: optional call a?.() emits chain_test + plain call" {
@@ -2392,9 +2864,7 @@ test "F4: optional call a?.() emits chain_test + plain call" {
     var fn_bc = try parseExpr(&env, "a?.()");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0 });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.call0 });
 }
 
 test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
@@ -2403,8 +2873,8 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
     var fn_bc = try parseExpr(&env, "obj?.b(x)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_field2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 19));
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_field2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
 }
 
 test "F4: parenthesized optional member call preserves receiver" {
@@ -2454,7 +2924,7 @@ test "F4: optional call after parenthesized optional member keeps balanced exits
         op.drop,
         op.drop,
         op.undefined,
-        op.goto8,
+        op.return_undef,
         op.call_method,
     });
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, fn_bc.code.len - 3));
@@ -2482,8 +2952,8 @@ test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method
     var fn_bc = try parseExpr(&env, "obj?.[k](x)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.get_var, op.get_array_el2, op.get_var, op.call_method });
-    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 18));
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.get_var, op.get_array_el2, op.get_var, op.call_method });
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 17));
 }
 
 // ---- F4 finish: tagged templates -----------------------------------
@@ -2536,9 +3006,7 @@ test "F4: optional call without chain receiver a?.()(b) — chain only on first 
     var fn_bc = try parseExpr(&env, "a?.()(b)");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.goto8, op.call0, op.get_var, op.call1 });
-    const exit_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, exit_target);
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.dup, op.is_undefined_or_null, op.if_false8, op.drop, op.undefined, op.return_undef, op.call0, op.get_var, op.call1 });
 }
 
 // ---- F4 slice 5: template literals -----------------------------------
@@ -2729,13 +3197,13 @@ test "F5: empty statement" {
     try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
 }
 
-test "F5: block statement" {
+test "F5: block statement folds only the final expression discard" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ x; y; }");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop, op.get_var });
 }
 
 test "F5: return statement without value" {
@@ -2757,27 +3225,30 @@ test "F5: return statement with value" {
     try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.@"return" });
 }
 
-test "F5: return comma and conditional expressions use one final return" {
+test "F5: return comma and conditional expressions follow terminal goto folding" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
 
-    const cases = [_][]const u8{
-        "return a, b;",
-        "return a ? b : c, d;",
-        "return a, b ? c : d;",
-        "return (a, (b, c));",
-        "return c ? g() : h()\n, 42;",
+    const cases = [_]struct {
+        source: []const u8,
+        return_count: usize,
+    }{
+        .{ .source = "return a, b;", .return_count = 1 },
+        .{ .source = "return a ? b : c, d;", .return_count = 1 },
+        .{ .source = "return a, b ? c : d;", .return_count = 2 },
+        .{ .source = "return (a, (b, c));", .return_count = 1 },
+        .{ .source = "return c ? g() : h()\n, 42;", .return_count = 1 },
     };
-    for (cases) |source| {
-        var fn_bc = try parseFunctionBodyStatement(&env, source);
+    for (cases) |case| {
+        var fn_bc = try parseFunctionBodyStatement(&env, case.source);
         defer fn_bc.deinit(env.rt);
-        try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+        try std.testing.expectEqual(case.return_count, countOpcode(fn_bc.code, op.@"return"));
         try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
         try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
     }
 }
 
-test "F5: return conditional expression merges before one plain return" {
+test "F5: return conditional expression folds the then goto to a plain return" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return p ? f() : g();");
@@ -2785,7 +3256,7 @@ test "F5: return conditional expression merges before one plain return" {
 
     try std.testing.expectEqual(@as(usize, 2), countCalls(fn_bc.code));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.@"return"));
 }
 
 test "F5: return call remains plain call plus return" {
@@ -2797,6 +3268,26 @@ test "F5: return call remains plain call plus return" {
     try std.testing.expectEqual(@as(usize, 1), countCalls(fn_bc.code));
     try std.testing.expectEqual(@as(usize, 1), countOpcode(fn_bc.code, op.@"return"));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call));
+}
+
+test "F5: return method call remains call_method plus return" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseFunctionBodyStatement(&env, "return obj.method(\"\");");
+    defer fn_bc.deinit(env.rt);
+
+    try expectOpcodeSequence(fn_bc.code, &.{
+        op.get_var,
+        op.get_field2,
+        op.push_empty_string,
+        op.call_method,
+        op.@"return",
+    });
+    const call_pc = engine.bytecode.opcode.sizeOf(op.get_var) +
+        engine.bytecode.opcode.sizeOf(op.get_field2) +
+        engine.bytecode.opcode.sizeOf(op.push_empty_string);
+    try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, call_pc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.tail_call_method));
 }
 
 test "F5: throw statement" {
@@ -2819,17 +3310,195 @@ test "F5: if statement without else" {
     try std.testing.expectEqual(fn_bc.code.len, if_false_target);
 }
 
+test "F5: constant test conditions reach the final QuickJS fold" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{ .source = "if (true) x;", .expected = &.{ op.get_var, op.drop } },
+        .{ .source = "if (false) x;", .expected = &.{} },
+        .{ .source = "if (null) x;", .expected = &.{} },
+        .{ .source = "if (0) x;", .expected = &.{} },
+        .{ .source = "if (1) x;", .expected = &.{ op.get_var, op.drop } },
+        .{ .source = "if (void 0) x;", .expected = &.{} },
+    };
+    for (cases) |case| {
+        var fn_bc = try parseStatement(&env, case.source);
+        defer fn_bc.deinit(env.rt);
+        try expectOpcodeSequence(fn_bc.code, case.expected);
+    }
+}
+
+test "W5: constant tests prune only the QuickJS-selected control-flow arm" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        name: []const u8,
+        expected: []const u8,
+        retained_goto: bool = false,
+    }{
+        .{
+            .source = "function constFalse(){ if (false) x; }",
+            .name = "constFalse",
+            .expected = &.{op.return_undef},
+        },
+        .{
+            .source = "function constTrueElse(){ if (true) x; else y; }",
+            .name = "constTrueElse",
+            .expected = &.{ op.get_var, op.drop, op.return_undef },
+        },
+        .{
+            .source = "function constFalseThen(){ if (false) x; y(); }",
+            .name = "constFalseThen",
+            .expected = &.{ op.goto8, op.get_var, op.call0, op.return_undef },
+            .retained_goto = true,
+        },
+        .{
+            .source = "function constRawNext(){ if (false); y(); }",
+            .name = "constRawNext",
+            .expected = &.{ op.get_var, op.call0, op.return_undef },
+        },
+    };
+
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, case.name) orelse return error.TestExpectedEqual;
+        try expectOpcodeSequence(child.byteCode(), case.expected);
+        if (case.retained_goto) {
+            try std.testing.expectEqual(@as(usize, 2), readRelTarget32(child.byteCode(), 0));
+        }
+    }
+}
+
 test "F5: if statement with else" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "if (x) y; else z;");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.goto8, op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.if_false8, op.get_var, op.drop, op.return_undef, op.get_var, op.drop });
     const if_false_target = readRelTarget32(fn_bc.code, 3);
-    try std.testing.expectEqual(@as(usize, 11), if_false_target);
-    const goto_target = readRelTarget32(fn_bc.code, 9);
-    try std.testing.expectEqual(fn_bc.code.len, goto_target);
+    try std.testing.expectEqual(@as(usize, 10), if_false_target);
+}
+
+test "W5: final branches normalize at QuickJS instruction boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const cases = [_]struct {
+        source: []const u8,
+        name: []const u8,
+        expected: []const u8,
+        branch_pc: ?usize,
+        branch_target: ?usize,
+    }{
+        .{
+            .source = "function ifNext(x){ if (x); }",
+            .name = "ifNext",
+            .expected = &.{ op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = null,
+            .branch_target = null,
+        },
+        .{
+            .source = "function invert(x){ if (x); else x; }",
+            .name = "invert",
+            .expected = &.{ op.get_arg0, op.if_true8, op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = 1,
+            .branch_target = 5,
+        },
+        .{
+            .source = "function gotoNext(x){ if (x) x; else; }",
+            .name = "gotoNext",
+            .expected = &.{ op.get_arg0, op.if_false8, op.get_arg0, op.drop, op.return_undef },
+            .branch_pc = 1,
+            .branch_target = 5,
+        },
+        .{
+            .source = "function keepBoth(x){ if (x) x; else x = 1; }",
+            .name = "keepBoth",
+            .expected = &.{
+                op.get_arg0,
+                op.if_false8,
+                op.get_arg0,
+                op.drop,
+                op.return_undef,
+                op.push_1,
+                op.put_arg0,
+                op.return_undef,
+            },
+            .branch_pc = 1,
+            .branch_target = 6,
+        },
+    };
+
+    for (cases) |case| {
+        var root = try parseStatementWithTopLevelChildren(&env, case.source);
+        defer root.deinit(env.rt);
+        const child = findFunctionConstantNamed(&root, env.rt, case.name) orelse return error.TestExpectedEqual;
+        try expectOpcodeSequence(child.byteCode(), case.expected);
+        if (case.branch_pc) |branch_pc| {
+            try std.testing.expectEqual(case.branch_target.?, readRelTarget32(child.byteCode(), branch_pc));
+        }
+    }
+}
+
+test "W5: production with atom-label target threads past destructuring fallback goto" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+    const y_atom = try env.rt.internAtom("y");
+    defer env.rt.atoms.free(y_atom);
+
+    var root = try parseStatementWithTopLevelChildren(
+        &env,
+        "function withThread(obj, y) { with (obj) { [x] = y; } }",
+    );
+    defer root.deinit(env.rt);
+    const child = findFunctionConstantNamed(&root, env.rt, "withThread") orelse return error.TestExpectedEqual;
+    const code = child.byteCode();
+
+    var with_pc: ?usize = null;
+    var loop_entry: ?usize = null;
+    var fallback_goto_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const opcode_id = code[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size != 0 and pc + size <= code.len);
+        if (opcode_id == op.with_get_var and
+            std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) == y_atom)
+        {
+            with_pc = pc;
+        } else if (opcode_id == op.dup and pc + 1 < code.len and code[pc + 1] == op.for_of_start) {
+            loop_entry = pc;
+        } else if (opcode_id == op.goto8 or opcode_id == op.goto16 or opcode_id == op.goto) {
+            if (with_pc != null) fallback_goto_pc = pc;
+        }
+        pc += size;
+    }
+
+    const probe_pc = with_pc orelse return error.TestExpectedEqual;
+    const expected_target = loop_entry orelse return error.TestExpectedEqual;
+    const target_i64 =
+        @as(i64, @intCast(probe_pc + 5)) +
+        @as(i64, std.mem.readInt(i32, code[probe_pc + 5 ..][0..4], .little));
+    try std.testing.expect(target_i64 >= 0);
+    const probe_target: usize = @intCast(target_i64);
+
+    // Pinned QuickJS phase 2 emits `with_get_var y, L; get_arg y; L: goto
+    // destructure`. resolve_labels retargets the taken edge straight to the
+    // destructuring entry while retaining the fallback path's own goto.
+    try std.testing.expect(expected_target < probe_pc);
+    try std.testing.expectEqual(expected_target, probe_target);
+    try std.testing.expectEqual(op.dup, code[probe_target]);
+    const fallback_pc = fallback_goto_pc orelse return error.TestExpectedEqual;
+    try std.testing.expect(fallback_pc > probe_pc);
+    try std.testing.expectEqual(expected_target, readRelTarget32(code, fallback_pc));
 }
 
 test "F5: while statement" {
@@ -2867,13 +3536,308 @@ test "F5: for update moves optional chain code with atom operands" {
     try std.testing.expectEqual(@as(usize, 2), countOpcode(fn_bc.code, op.is_undefined_or_null));
 }
 
-test "F5: expression statement" {
+test "F5: final expression statement discard folds into the terminator" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "x;");
     defer fn_bc.deinit(env.rt);
 
-    try expectOpcodeSequence(fn_bc.code, &.{ op.get_var, op.drop });
+    try expectOpcodeSequence(fn_bc.code, &.{op.get_var});
+}
+
+test "W5: numeric discarded immediates respect statement and completion boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    const immediate_statements = [_][]const u8{
+        "0;",
+        "1;",
+        "7;",
+        "8;",
+        "127;",
+        "128;",
+        "32767;",
+        "32768;",
+        "2147483647;",
+    };
+    for (immediate_statements) |source| {
+        var fn_bc = try parseStatement(&env, source);
+        defer fn_bc.deinit(env.rt);
+        try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
+    }
+
+    var large_number = try parseStatement(&env, "2147483648;");
+    defer large_number.deinit(env.rt);
+    // The generic drop; return_undef rule removes only the tail drop.
+    try expectOpcodeSequence(large_number.code, &.{op.push_const8});
+
+    var bigint = try parseStatement(&env, "1n;");
+    defer bigint.deinit(env.rt);
+    // BigInt is not in the numeric-immediate discard family and remains live.
+    try expectOpcodeSequence(bigint.code, &.{op.push_bigint_i32});
+
+    var negative_bigint_root = try parseStatementWithTopLevelChildren(&env, "function bigintNegative(){ (-1n); }");
+    defer negative_bigint_root.deinit(env.rt);
+    const negative_bigint = findFunctionConstantNamed(&negative_bigint_root, env.rt, "bigintNegative") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, negative_bigint.byteCode());
+
+    var large_negative_bigint_root = try parseStatementWithTopLevelChildren(&env, "function bigintLargeNegative(){ (-2147483648n); }");
+    defer large_negative_bigint_root.deinit(env.rt);
+    const large_negative_bigint = findFunctionConstantNamed(&large_negative_bigint_root, env.rt, "bigintLargeNegative") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(large_negative_bigint.byteCode(), &.{ op.push_const8, op.neg, op.return_undef });
+
+    var tail_root = try parseStatementWithTopLevelChildren(&env, "function numericTail(){ (1); }");
+    defer tail_root.deinit(env.rt);
+    const tail = findFunctionConstantNamed(&tail_root, env.rt, "numericTail") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, tail.byteCode());
+
+    var negative_root = try parseStatementWithTopLevelChildren(&env, "function numericNegative(){ (-1); }");
+    defer negative_root.deinit(env.rt);
+    const negative = findFunctionConstantNamed(&negative_root, env.rt, "numericNegative") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{op.return_undef}, negative.byteCode());
+
+    var negative_zero_root = try parseStatementWithTopLevelChildren(&env, "function numericNegativeZero(){ (-0); }");
+    defer negative_zero_root.deinit(env.rt);
+    const negative_zero = findFunctionConstantNamed(&negative_zero_root, env.rt, "numericNegativeZero") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_0, op.neg, op.return_undef }, negative_zero.byteCode());
+
+    var min_root = try parseStatementWithTopLevelChildren(&env, "function numericMin(){ (-2147483648); }");
+    defer min_root.deinit(env.rt);
+    const min = findFunctionConstantNamed(&min_root, env.rt, "numericMin") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_const8, 0, op.neg, op.return_undef }, min.byteCode());
+    try std.testing.expectEqual(@as(usize, 1), min.cpoolSlice().len);
+
+    var plus_root = try parseStatementWithTopLevelChildren(&env, "function numericPlus(){ (+1); }");
+    defer plus_root.deinit(env.rt);
+    const plus = findFunctionConstantNamed(&plus_root, env.rt, "numericPlus") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualSlices(u8, &.{ op.push_1, op.plus, op.return_undef }, plus.byteCode());
+
+    var control_root = try parseStatementWithTopLevelChildren(&env, "function numericControl(x){ if (x) (1); return x; }");
+    defer control_root.deinit(env.rt);
+    const control = findFunctionConstantNamed(&control_root, env.rt, "numericControl") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(control.byteCode(), op.drop));
+
+    var update_root = try parseStatementWithTopLevelChildren(&env, "function numericUpdate(x){ for (; x; (1)) { x = 0; } return x; }");
+    defer update_root.deinit(env.rt);
+    const update = findFunctionConstantNamed(&update_root, env.rt, "numericUpdate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(update.byteCode(), op.push_1));
+
+    var completion = try compileForTest(env.rt, "1", .{
+        .mode = .script,
+        .filename = "<repl>",
+        .return_completion = true,
+    });
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
+    try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
+
+    var module = try compileForTest(env.rt, "1;", .{ .mode = .module, .filename = "numeric-discard.mjs" });
+    defer module.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_1));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
+    try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
+}
+
+test "W5: tagged-int numeric strings use cpool without changing other string producers" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var parsed = try compileForTest(
+        env.rt,
+        \\function numericString() {
+        \\  return "123" +
+        \\    1.5;
+        \\}
+        \\function numericTemplate() { return `456`; }
+        \\function ordinaryString() { return "01"; }
+        \\function ordinaryTemplate() { return `plain-template`; }
+        \\function taggedTemplate(tag) { return tag`789`; }
+    ,
+        .{ .mode = .script, .filename = "tagged-int-string-cpool.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const numeric_string = findFunctionConstantNamed(&parsed, env.rt, "numericString") orelse return error.TestExpectedEqual;
+    const numeric_code = numeric_string.byteCode();
+    const numeric_constants = numeric_string.cpoolSlice();
+    try std.testing.expectEqual(@as(usize, 2), numeric_constants.len);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_code, op.push_atom_value));
+
+    const string_pc = firstOpcodeOffset(numeric_code, op.push_const8) orelse return error.TestExpectedEqual;
+    const number_pc = string_pc + engine.bytecode.opcode.sizeOf(op.push_const8);
+    try std.testing.expectEqual(op.push_const8, numeric_code[number_pc]);
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(numeric_code, string_pc));
+    try std.testing.expectEqual(@as(u32, 1), readConstIndexAtOpcode(numeric_code, number_pc));
+
+    const numeric_string_value = numeric_constants[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(numeric_string_value.eqlBytes("123"));
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), numeric_constants[1].asFloat64().?, 0.0);
+
+    const string_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(string_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 2), string_source.line_num);
+    try std.testing.expectEqual(@as(i32, 3), string_source.col_num);
+    const number_source = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        numeric_string.pc2lineBuf(),
+        @intCast(number_pc),
+    );
+    try std.testing.expectEqual(@as(i32, 3), number_source.line_num);
+    try std.testing.expectEqual(@as(i32, 5), number_source.col_num);
+
+    const numeric_template = findFunctionConstantNamed(&parsed, env.rt, "numericTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), numeric_template.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(numeric_template.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(numeric_template.byteCode(), op.push_atom_value));
+    const numeric_template_value = numeric_template.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(numeric_template_value.eqlBytes("456"));
+
+    const ordinary_string = findFunctionConstantNamed(&parsed, env.rt, "ordinaryString") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), ordinary_string.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ordinary_string.byteCode(), op.push_atom_value));
+
+    const ordinary_template = findFunctionConstantNamed(&parsed, env.rt, "ordinaryTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), ordinary_template.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(ordinary_template.byteCode(), op.push_atom_value));
+
+    const tagged_template = findFunctionConstantNamed(&parsed, env.rt, "taggedTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), tagged_template.cpoolSlice().len);
+    try std.testing.expect(tagged_template.cpoolSlice()[0].isObject());
+}
+
+test "W5: string discard follows QuickJS atom and completion boundaries" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var raw_empty = try parseRawStatement(&env, "\"\";");
+    defer raw_empty.deinit(env.rt);
+    const raw_empty_pc = (try findPhase1Opcode(raw_empty.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty.code, raw_empty_pc + 1));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty.atom_operands);
+
+    var raw_tagged = try parseRawExprWithRuntime(&env, "\"123\"");
+    defer raw_tagged.deinit(env.rt);
+    const raw_tagged_pc = (try findPhase1Opcode(raw_tagged.code, op.push_const, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(raw_tagged.code, raw_tagged_pc));
+    try std.testing.expectEqual(@as(usize, 0), raw_tagged.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 1), raw_tagged.constants.values.len);
+    const raw_tagged_string = raw_tagged.constants.values[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(raw_tagged_string.eqlBytes("123"));
+
+    var raw_tagged_template = try parseRawExprWithRuntime(&env, "`456`");
+    defer raw_tagged_template.deinit(env.rt);
+    const raw_tagged_template_pc = (try findPhase1Opcode(raw_tagged_template.code, op.push_const, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u32, 0), readConstIndexAtOpcode(raw_tagged_template.code, raw_tagged_template_pc));
+    try std.testing.expectEqual(@as(usize, 0), raw_tagged_template.atom_operands.len);
+    try std.testing.expectEqual(@as(usize, 1), raw_tagged_template.constants.values.len);
+    const raw_tagged_template_string = raw_tagged_template.constants.values[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(raw_tagged_template_string.eqlBytes("456"));
+
+    var raw_empty_template = try parseRawStatement(&env, "``;");
+    defer raw_empty_template.deinit(env.rt);
+    const raw_template_pc = (try findPhase1Opcode(raw_empty_template.code, op.push_atom_value, 0)) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(core.atom.ids.empty_string, readU32(raw_empty_template.code, raw_template_pc + 1));
+    try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.empty_string}, raw_empty_template.atom_operands);
+
+    var ordinary = try parseStatement(&env, "\"hello\";");
+    defer ordinary.deinit(env.rt);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.code.len);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.atom_operands.len);
+
+    var empty = try parseStatement(&env, "\"\";");
+    defer empty.deinit(env.rt);
+    try std.testing.expectEqual(@as(usize, 0), empty.code.len);
+    try std.testing.expectEqual(@as(usize, 0), empty.atom_operands.len);
+
+    var live_empty_template = try parseExpr(&env, "``");
+    defer live_empty_template.deinit(env.rt);
+    try std.testing.expectEqualSlices(u8, &.{op.push_empty_string}, live_empty_template.code);
+    try std.testing.expectEqual(@as(usize, 0), live_empty_template.atom_operands.len);
+
+    var empty_matching_regexp = try compileForTest(env.rt, "/(?:)/;", .{
+        .mode = .script,
+        .filename = "empty-regexp.js",
+    });
+    defer empty_matching_regexp.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(empty_matching_regexp.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(empty_matching_regexp.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_matching_regexp.byteCode(), op.regexp));
+    try std.testing.expectEqual(@as(usize, 2), empty_matching_regexp.constants().len);
+
+    var tagged_root = try compileForTest(
+        env.rt,
+        "function numericStringDiscard(){ 0; \"123\"; return 0; }",
+        .{ .mode = .script, .filename = "numeric-string-discard.js" },
+    );
+    defer tagged_root.deinit();
+    const tagged = findFunctionConstantNamed(&tagged_root, env.rt, "numericStringDiscard") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), tagged.cpoolSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged.byteCode(), op.drop));
+
+    var discarded_root = try parseStatementWithTopLevelChildren(
+        &env,
+        "function stringDiscard(value){ 0; \"hello\"; \"\"; return value; }",
+    );
+    defer discarded_root.deinit(env.rt);
+    const discarded = findFunctionConstantNamed(&discarded_root, env.rt, "stringDiscard") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(discarded.byteCode(), op.drop));
+
+    var boundary_root = try compileForTest(
+        env.rt,
+        \\function stringTemplate(value){ 0; `${value}`; return value; }
+        \\function stringConcat(value){ 0; "a" + "b"; return value; }
+        \\function stringSymbol(makeSymbol, value){ makeSymbol("hello"); return value; }
+        \\function stringEval(){ return eval("\"hello\""); }
+    ,
+        .{ .mode = .script, .filename = "string-boundaries.js" },
+    );
+    defer boundary_root.deinit();
+
+    const template = findFunctionConstantNamed(&boundary_root, env.rt, "stringTemplate") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(template.byteCode(), op.drop));
+
+    const concat = findFunctionConstantNamed(&boundary_root, env.rt, "stringConcat") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(concat.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.add));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(concat.byteCode(), op.drop));
+
+    const symbol = findFunctionConstantNamed(&boundary_root, env.rt, "stringSymbol") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.call1));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(symbol.byteCode(), op.drop));
+
+    const eval_fn = findFunctionConstantNamed(&boundary_root, env.rt, "stringEval") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(eval_fn.byteCode(), op.eval));
+
+    var completion = try compileForTest(env.rt, "\"hello\"", .{
+        .mode = .script,
+        .filename = "<repl>",
+        .return_completion = true,
+    });
+    defer completion.deinit();
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(completion.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(completion.byteCode(), op.drop));
+    try std.testing.expectEqual(op.@"return", completion.byteCode()[completion.byteCode().len - 1]);
+
+    var module = try compileForTest(env.rt, "0; \"hello\"; \"\";", .{
+        .mode = .module,
+        .filename = "string-discard.mjs",
+    });
+    defer module.deinit();
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_atom_value));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module.byteCode(), op.drop));
+    try std.testing.expectEqual(op.return_undef, module.byteCode()[module.byteCode().len - 1]);
 }
 
 test "F5: labelled break crossing switch drops discriminant" {
@@ -3794,6 +4758,43 @@ test "F9: yield expression" {
     try expectOpcode(child.byteCode(), op.return_async);
 }
 
+test "W5: generator parameter boundary emits initial_yield in scripts and modules" {
+    var env = try ParserTestEnv.init();
+    defer env.deinit();
+
+    var script = try parseStatementWithTopLevelChildren(
+        &env,
+        "function f(x = function* () { yield 1; }) { return x; }",
+    );
+    defer script.deinit(env.rt);
+
+    const outer = try expectFunctionConstant(&script, 0);
+    const nested_generator = try expectFunctionConstant(outer, 0);
+    const nested_code = nested_generator.byteCode();
+    try std.testing.expect(nested_code.len >= 3);
+    try std.testing.expectEqualSlices(u8, &.{
+        op.initial_yield,
+        op.push_1,
+        op.yield,
+    }, nested_code[0..3]);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(nested_code, op.initial_yield));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(nested_code, op.push_false));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(nested_code, op.push_true));
+
+    var module = try parseModuleStatement(&env, "export function* g(x = 1) { yield x; }");
+    defer module.deinit(env.rt);
+
+    const module_generator = try expectFunctionConstant(&module, 0);
+    const module_code = module_generator.byteCode();
+    const initial_yield_offset = firstOpcodeOffset(module_code, op.initial_yield).?;
+    const body_yield_offset = firstOpcodeOffset(module_code, op.yield).?;
+    try std.testing.expect(initial_yield_offset > 0);
+    try std.testing.expect(initial_yield_offset < body_yield_offset);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(module_code, op.initial_yield));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module_code, op.push_false));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(module_code, op.push_true));
+}
+
 test "F9: yield* expression" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -4701,6 +5702,18 @@ fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    return function;
+}
+
+fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("runtime-expression");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+    defer state.deinit(env.rt);
+    try parser_core.parseExpr(&state);
     return function;
 }
 
@@ -6105,6 +7118,85 @@ test "QuickJS global declaration carriers precede child finalization" {
     try std.testing.expectEqual(@as(usize, 0), countOpcode(read.byteCode(), op.get_var_ref));
 }
 
+test "dynamic global writes keep put_var distinct from plain var-ref stores" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\var initializedCell = 0;
+        \\globalThis.dynamicCell = 0;
+        \\function writeInitialized(value) { initializedCell = value; }
+        \\function writeDynamic(value) { dynamicCell = value; }
+        \\function makeLocalWriter() {
+        \\  let localCell = 0;
+        \\  return function writeLocal(value) { localCell = value; };
+        \\}
+    ,
+        .{ .mode = .script, .filename = "dynamic-global-put-consumers.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    var initialized_parent_idx: ?u16 = null;
+    var dynamic_parent_idx: ?u16 = null;
+    for (parsed.closureVars(), 0..) |cv, idx| {
+        const name = rt.atoms.name(cv.var_name) orelse "";
+        if (std.mem.eql(u8, name, "initializedCell")) {
+            try std.testing.expectEqual(function_def.ClosureType.global_decl, cv.closureType());
+            initialized_parent_idx = @intCast(idx);
+        } else if (std.mem.eql(u8, name, "dynamicCell")) {
+            try std.testing.expectEqual(function_def.ClosureType.global, cv.closureType());
+            dynamic_parent_idx = @intCast(idx);
+        }
+    }
+
+    const global_cases = [_]struct {
+        function_name: []const u8,
+        binding_name: []const u8,
+        parent_idx: u16,
+    }{
+        .{
+            .function_name = "writeInitialized",
+            .binding_name = "initializedCell",
+            .parent_idx = initialized_parent_idx orelse return error.TestExpectedEqual,
+        },
+        .{
+            .function_name = "writeDynamic",
+            .binding_name = "dynamicCell",
+            .parent_idx = dynamic_parent_idx orelse return error.TestExpectedEqual,
+        },
+    };
+    for (global_cases) |case| {
+        const writer = findFunctionConstantNamed(&parsed, rt, case.function_name) orelse
+            return error.TestExpectedEqual;
+        try expectOpcodeSequence(writer.byteCode(), &.{
+            op.get_arg0,
+            op.dup,
+            op.put_var,
+            op.return_undef,
+        });
+        try std.testing.expectEqual(@as(usize, 1), writer.closureVar().len);
+        const capture = writer.closureVar()[0];
+        try std.testing.expectEqual(function_def.ClosureType.global_ref, capture.closureType());
+        try std.testing.expectEqual(case.parent_idx, capture.var_idx);
+        try std.testing.expectEqualStrings(case.binding_name, rt.atoms.name(capture.var_name) orelse "");
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, writer.byteCode()[3..5], .little));
+    }
+
+    const make_local = findFunctionConstantNamed(&parsed, rt, "makeLocalWriter") orelse
+        return error.TestExpectedEqual;
+    const local_writer = findFunctionConstantNamed(make_local, rt, "writeLocal") orelse
+        return error.TestExpectedEqual;
+    try expectOpcodeSequence(local_writer.byteCode(), &.{
+        op.get_arg0,
+        op.dup,
+        op.put_var_ref_check,
+        op.return_undef,
+    });
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(local_writer.byteCode(), op.put_var));
+}
+
 test "QuickJS open binding indices follow child capture demand order" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6152,6 +7244,47 @@ test "QuickJS open binding indices follow child capture demand order" {
         found_local_first = true;
     }
     try std.testing.expect(found_local_first);
+}
+
+test "dead scope refs do not capture across a live merge" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\function outer() {
+        \\  let x;
+        \\  function inner(flag) {
+        \\    if (flag) {
+        \\      return;
+        \\      x;
+        \\    }
+        \\    return;
+        \\  }
+        \\  return inner;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "dead-scope-capture.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const outer = findFunctionConstantNamed(&parsed, rt, "outer") orelse
+        return error.TestExpectedEqual;
+    const inner = findFunctionConstantNamed(outer, rt, "inner") orelse
+        return error.TestExpectedEqual;
+
+    try std.testing.expectEqual(@as(usize, 0), inner.closureVar().len);
+    try std.testing.expectEqual(@as(u16, 0), outer.openVarRefCount());
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(inner.byteCode(), op.get_var_ref));
+
+    var found_x = false;
+    for (outer.varDefs()) |vd| {
+        if (!std.mem.eql(u8, rt.atoms.name(vd.var_name) orelse "", "x")) continue;
+        try std.testing.expect(!vd.isCaptured());
+        found_x = true;
+    }
+    try std.testing.expect(found_x);
 }
 
 test "QuickJS postorder capture topology records exact forwarding rows" {
@@ -7277,6 +8410,37 @@ test "try catch fixed topology removes calls to its empty finalizer" {
     const function = findFunctionConstantNamed(&parsed, rt, "noFinally") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.ret));
+}
+
+test "empty finally producer reaches the phase2 and phase3 cascade" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        "function emptyFinally(value) { try { if (value) return 1; } finally {} }",
+        .{ .mode = .script, .filename = "empty-syntactic-finalizer.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+
+    const function = findFunctionConstantNamed(&parsed, rt, "emptyFinally") orelse
+        return error.TestExpectedEqual;
+    try expectOpcodeSequence(function.byteCode(), &.{
+        qop.@"catch",
+        qop.get_arg0,
+        qop.if_false8,
+        qop.push_1,
+        qop.nip_catch,
+        qop.@"return",
+        qop.drop,
+        qop.return_undef,
+        qop.throw,
+    });
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.undefined));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.gosub));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(function.byteCode(), qop.ret));
 }
 
 fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {
@@ -7568,7 +8732,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
     try std.testing.expect(!parsed.isStrict());
     try expectOpcode(parsed.byteCode(), qop.add);
-    try expectOpcode(parsed.byteCode(), qop.drop);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.byteCode(), qop.drop));
     try std.testing.expect(countOpcode(parsed.byteCode(), qop.return_undef) + countOpcode(parsed.byteCode(), qop.return_async) > 0);
     try std.testing.expectEqual(@as(usize, 0), parsed.constants().len);
 }
@@ -8217,19 +9381,7 @@ test "named function self-binding writes do not reach var-ref stores" {
     defer sloppy.deinit();
     try std.testing.expect(sloppy.syntax_error == null);
 
-    const var_ref_writes = countOpcodeRecursive(&sloppy, qop.put_var_ref) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref0) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref1) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref2) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref3) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref_check) +
-        countOpcodeRecursive(&sloppy, qop.put_var_ref_check_init) +
-        countOpcodeRecursive(&sloppy, qop.set_var_ref) +
-        countOpcodeRecursive(&sloppy, qop.set_var_ref0) +
-        countOpcodeRecursive(&sloppy, qop.set_var_ref1) +
-        countOpcodeRecursive(&sloppy, qop.set_var_ref2) +
-        countOpcodeRecursive(&sloppy, qop.set_var_ref3);
-    try std.testing.expectEqual(@as(usize, 0), var_ref_writes);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&sloppy));
 
     var dynamic = try compileForTest(
         rt,
@@ -8244,6 +9396,7 @@ test "named function self-binding writes do not reach var-ref stores" {
     // self-binding must use that transport rather than re-resolving a store.
     try std.testing.expect(countOpcodeRecursive(&dynamic, qop.with_make_ref) >= 2);
     try std.testing.expect(countOpcodeRecursive(&dynamic, qop.put_ref_value) >= 2);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&dynamic));
 
     var strict = try compileForTest(
         rt,
@@ -8253,6 +9406,7 @@ test "named function self-binding writes do not reach var-ref stores" {
     defer strict.deinit();
     try std.testing.expect(strict.syntax_error == null);
     try std.testing.expect(countOpcodeRecursive(&strict, qop.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&strict));
 
     var parameter_default = try compileForTest(
         rt,
@@ -8270,6 +9424,234 @@ test "named function self-binding writes do not reach var-ref stores" {
         countOpcodeRecursive(&parameter_default, qop.get_loc2) +
         countOpcodeRecursive(&parameter_default, qop.get_loc3);
     try std.testing.expect(local_reads >= 1);
+}
+
+test "final bytecode authorizes plain var-ref stores before execution" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        label: []const u8,
+        source: []const u8,
+        target_name: []const u8,
+        outer_name: ?[]const u8 = null,
+        expected_arg_min: usize = 0,
+        expected_local_min: usize = 0,
+        expected_plain_ref: usize = 0,
+        expected_set_ref: usize = 0,
+        expected_global: usize = 0,
+        expect_throw: bool = false,
+    }{
+        .{
+            .label = "owned-local-arg.js",
+            .source = "function writer(arg) { var local = 0; arg = 1; local = 2; return arg + local; }",
+            .target_name = "writer",
+            .expected_arg_min = 1,
+            .expected_local_min = 1,
+        },
+        .{
+            .label = "sloppy-mutable-ref.js",
+            .source = "function outer() { var cell = 0; return function writer() { cell = 1; }; }",
+            .outer_name = "outer",
+            .target_name = "writer",
+            .expected_plain_ref = 1,
+        },
+        .{
+            .label = "strict-mutable-ref.js",
+            .source = "function outer(arg) { return function writer() { 'use strict'; arg = 1; }; }",
+            .outer_name = "outer",
+            .target_name = "writer",
+            .expected_plain_ref = 1,
+        },
+        .{
+            .label = "value-producing-ref.js",
+            .source = "function outer() { var cell = 0; return function writer() { return cell = 1; }; }",
+            .outer_name = "outer",
+            .target_name = "writer",
+            .expected_set_ref = 1,
+        },
+        .{
+            .label = "sloppy-readonly-ref.js",
+            .source = "function outer() { const cell = 0; return function writer() { cell = 1; }; }",
+            .outer_name = "outer",
+            .target_name = "writer",
+            .expect_throw = true,
+        },
+        .{
+            .label = "strict-readonly-ref.js",
+            .source = "function outer() { const cell = 0; return function writer() { 'use strict'; cell = 1; }; }",
+            .outer_name = "outer",
+            .target_name = "writer",
+            .expect_throw = true,
+        },
+        .{
+            .label = "global-write.js",
+            .source = "var globalCell = 0; function writer() { globalCell = 1; }",
+            .target_name = "writer",
+            .expected_global = 1,
+        },
+    };
+
+    // The table is the compiler/executor seam: only already-authorized
+    // mutable refs reach plain put/set, while owning slots, globals, and
+    // rejected read-only refs stay in their distinct final opcode families.
+    for (cases) |case| {
+        var parsed = try compileForTest(
+            rt,
+            case.source,
+            .{ .mode = .script, .filename = case.label },
+        );
+        defer parsed.deinit();
+        errdefer std.debug.print("store authorization case failed: {s}\n", .{case.label});
+        try std.testing.expect(parsed.syntax_error == null);
+
+        const target = if (case.outer_name) |outer_name| target: {
+            const outer = findFunctionConstantNamed(&parsed, rt, outer_name) orelse
+                return error.TestExpectedEqual;
+            break :target findFunctionConstantNamed(outer, rt, case.target_name) orelse
+                return error.TestExpectedEqual;
+        } else findFunctionConstantNamed(&parsed, rt, case.target_name) orelse
+            return error.TestExpectedEqual;
+        const code = target.byteCode();
+
+        const arg_writes =
+            countOpcode(code, op.put_arg) +
+            countOpcode(code, op.put_arg0) +
+            countOpcode(code, op.put_arg1) +
+            countOpcode(code, op.put_arg2) +
+            countOpcode(code, op.put_arg3);
+        const local_writes =
+            countOpcode(code, op.put_loc) +
+            countOpcode(code, op.put_loc8) +
+            countOpcode(code, op.put_loc0) +
+            countOpcode(code, op.put_loc1) +
+            countOpcode(code, op.put_loc2) +
+            countOpcode(code, op.put_loc3);
+        if (case.expected_arg_min == 0) {
+            try std.testing.expectEqual(@as(usize, 0), arg_writes);
+        } else {
+            try std.testing.expect(arg_writes >= case.expected_arg_min);
+        }
+        if (case.expected_local_min == 0) {
+            try std.testing.expectEqual(@as(usize, 0), local_writes);
+        } else {
+            try std.testing.expect(local_writes >= case.expected_local_min);
+        }
+        try std.testing.expectEqual(case.expected_plain_ref, countPutVarRefStores(code));
+        try std.testing.expectEqual(@as(usize, 0), countCheckedPutVarRefStores(code));
+        try std.testing.expectEqual(case.expected_set_ref, countSetVarRefStores(code));
+        try std.testing.expectEqual(
+            case.expected_plain_ref + case.expected_set_ref,
+            countVarRefStoresRecursive(target),
+        );
+        try std.testing.expectEqual(case.expected_global, countOpcode(code, op.put_var));
+        if (case.expect_throw) {
+            try std.testing.expect(countOpcode(code, op.throw_error) >= 1);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), countOpcode(code, op.throw_error));
+        }
+    }
+
+    // A top-level mutable module cell is initialized with plain put, then
+    // protected by the checked form on a subsequent lexical write. Four
+    // preceding imports force the plain initializer through generic index 4.
+    var module_mutable = try compileForTest(
+        rt,
+        "import { a, b, c, d } from 'dep'; export let moduleCell = 0; moduleCell = 1;",
+        .{ .mode = .module, .filename = "module-mutable-write-authorization.mjs" },
+    );
+    defer module_mutable.deinit();
+    try std.testing.expect(module_mutable.syntax_error == null);
+    try std.testing.expect(module_mutable.closureVars().len >= 5);
+    try std.testing.expectEqualStrings(
+        "moduleCell",
+        rt.atoms.name(module_mutable.closureVars()[4].var_name) orelse "",
+    );
+    try std.testing.expect(module_mutable.closureVars()[4].isLexical());
+    try std.testing.expect(!module_mutable.closureVars()[4].isConst());
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(module_mutable.byteCode(), op.put_var_ref));
+    try std.testing.expectEqual(@as(usize, 1), countCheckedPutVarRefStores(module_mutable.byteCode()));
+    try std.testing.expectEqual(@as(usize, 0), countSetVarRefStores(module_mutable.byteCode()));
+    try std.testing.expectEqual(@as(usize, 2), countVarRefStoresRecursive(&module_mutable));
+
+    var found_generic_init = false;
+    var found_subsequent_check = false;
+    var pc: usize = 0;
+    while (pc < module_mutable.byteCode().len) {
+        const opcode_id = module_mutable.byteCode()[pc];
+        const size = engine.bytecode.opcode.sizeOf(opcode_id);
+        try std.testing.expect(size != 0 and pc + size <= module_mutable.byteCode().len);
+        if (opcode_id == op.put_var_ref) {
+            try std.testing.expectEqual(@as(u16, 4), readU16AtOpcode(module_mutable.byteCode(), pc));
+            found_generic_init = true;
+        } else if (opcode_id == op.put_var_ref_check) {
+            try std.testing.expectEqual(@as(u16, 4), readU16AtOpcode(module_mutable.byteCode(), pc));
+            found_subsequent_check = true;
+        }
+        pc += size;
+    }
+    try std.testing.expect(found_generic_init);
+    try std.testing.expect(found_subsequent_check);
+
+    // Module imports are read-only and cannot produce either put or set.
+    var imported = try compileForTest(
+        rt,
+        "import { importedName } from 'dep'; importedName = 1;",
+        .{ .mode = .module, .filename = "import-write-authorization.mjs" },
+    );
+    defer imported.deinit();
+    try std.testing.expect(imported.syntax_error == null);
+    try std.testing.expect(countOpcode(imported.byteCode(), op.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&imported));
+
+    // Direct eval receives the same final authorization from its seeded
+    // closure table: mutable ref -> value-preserving store, const ref ->
+    // throw_error.
+    const mutable_atom = try rt.internAtom("mutableEval");
+    defer rt.atoms.free(mutable_atom);
+    const mutable_seed = [_]parser.EvalClosureSeed{.{
+        .var_name = mutable_atom,
+        .closure_type = .ref,
+        .var_idx = 0,
+        .is_lexical = false,
+        .is_const = false,
+        .var_kind = .normal,
+    }};
+    var mutable_eval = try compileForTest(rt, "mutableEval = 1; 0;", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &mutable_seed,
+    });
+    defer mutable_eval.deinit();
+    try std.testing.expect(mutable_eval.syntax_error == null);
+    // Direct eval preserves statement completion, so this assignment uses the
+    // value-preserving set family. It is authorized, but deliberately remains
+    // outside this plain-put execution candidate.
+    try std.testing.expectEqual(@as(usize, 0), countPutVarRefStores(mutable_eval.byteCode()));
+    try std.testing.expectEqual(@as(usize, 0), countCheckedPutVarRefStores(mutable_eval.byteCode()));
+    try std.testing.expectEqual(@as(usize, 1), countSetVarRefStores(mutable_eval.byteCode()));
+    try std.testing.expectEqual(@as(usize, 1), countVarRefStoresRecursive(&mutable_eval));
+
+    const fixed_atom = try rt.internAtom("fixedEval");
+    defer rt.atoms.free(fixed_atom);
+    const fixed_seed = [_]parser.EvalClosureSeed{.{
+        .var_name = fixed_atom,
+        .closure_type = .ref,
+        .var_idx = 1,
+        .is_lexical = true,
+        .is_const = true,
+        .var_kind = .normal,
+    }};
+    var fixed_eval = try compileForTest(rt, "fixedEval = 1;", .{
+        .mode = .eval_direct,
+        .filename = "<eval>",
+        .eval_closure_seed = &fixed_seed,
+    });
+    defer fixed_eval.deinit();
+    try std.testing.expect(fixed_eval.syntax_error == null);
+    try std.testing.expect(countOpcode(fixed_eval.byteCode(), op.throw_error) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countSetVarRefStores(fixed_eval.byteCode()));
+    try std.testing.expectEqual(@as(usize, 0), countVarRefStoresRecursive(&fixed_eval));
 }
 
 test "assignment target scan ignores atom operand bytes" {
@@ -8365,6 +9747,135 @@ test "quick parser emits compound assignment and update statements" {
     try std.testing.expect(add_count >= 1);
     try std.testing.expectEqual(@as(usize, 1), globalDeclarationClosureCount(&parsed));
     try std.testing.expect(globalDeclarationClosureNamed(&parsed, rt, "x").?.isLexical());
+}
+
+test "add_loc finalization accepts only QuickJS RHS producers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt,
+        \\function emptyRhs() {
+        \\  var value = "seed";
+        \\  side();
+        \\  value += "";
+        \\  side();
+        \\  return value;
+        \\}
+        \\function atomRhs() {
+        \\  var value = "";
+        \\  side();
+        \\  value += "x";
+        \\  side();
+        \\  return value;
+        \\}
+        \\function intRhs() {
+        \\  var value = 0;
+        \\  side();
+        \\  value += 1;
+        \\  side();
+        \\  return value;
+        \\}
+        \\function cpoolRhs() {
+        \\  var value = 0;
+        \\  side();
+        \\  value += 1.5;
+        \\  side();
+        \\  return value;
+        \\}
+        \\function taggedRhs() {
+        \\  var value = "";
+        \\  side();
+        \\  value += "123";
+        \\  side();
+        \\  return value;
+        \\}
+    , .{ .mode = .script, .filename = "add-loc-rhs.js" });
+    defer parsed.deinit();
+
+    const empty_rhs = findFunctionConstantNamed(&parsed, rt, "emptyRhs") orelse return error.TestExpectedEqual;
+    try expectOpcodeSequence(empty_rhs.byteCode(), &.{
+        op.push_atom_value,
+        op.put_loc0,
+        op.get_var,
+        op.call0,
+        op.drop,
+        op.push_empty_string,
+        op.add_loc,
+        op.get_var,
+        op.call0,
+        op.drop,
+        op.get_loc0,
+        op.@"return",
+    });
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_empty_string));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(empty_rhs.byteCode(), op.push_atom_value));
+    var empty_rhs_atom_count: usize = 0;
+    var empty_rhs_atom_it = empty_rhs.atomOperandIterator();
+    while (empty_rhs_atom_it.next()) |atom_id| {
+        try std.testing.expect(atom_id != core.atom.ids.empty_string);
+        empty_rhs_atom_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), empty_rhs_atom_count);
+
+    const atom_rhs = findFunctionConstantNamed(&parsed, rt, "atomRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(atom_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(atom_rhs.byteCode(), op.add));
+
+    const int_rhs = findFunctionConstantNamed(&parsed, rt, "intRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(int_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(int_rhs.byteCode(), op.add));
+
+    const cpool_rhs = findFunctionConstantNamed(&parsed, rt, "cpoolRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(cpool_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.add));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cpool_rhs.byteCode(), op.push_const8));
+
+    const tagged_rhs = findFunctionConstantNamed(&parsed, rt, "taggedRhs") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(tagged_rhs.byteCode(), op.add_loc));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.add));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(tagged_rhs.byteCode(), op.push_const8));
+    try std.testing.expectEqual(@as(usize, 1), tagged_rhs.cpoolSlice().len);
+    const tagged_string = tagged_rhs.cpoolSlice()[0].asStringBodyRaw() orelse return error.TestExpectedEqual;
+    try std.testing.expect(tagged_string.eqlBytes("123"));
+}
+
+test "add_loc finalization attributes a multiline local RHS to the operator" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try compileForTest(rt,
+        \\function addLocal() {
+        \\  var value = 0;
+        \\  side();
+        \\  value +=
+        \\    1;
+        \\  side();
+        \\  return value;
+        \\}
+    , .{ .mode = .script, .filename = "add-loc-source.js" });
+    defer parsed.deinit();
+
+    const child = findFunctionConstantNamed(&parsed, rt, "addLocal") orelse return error.TestExpectedEqual;
+    const code = child.byteCode();
+    var rhs_pc: ?usize = null;
+    var pc: usize = 0;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size = engine.bytecode.opcode.sizeOf(op_id);
+        if (size == 0 or pc + size > code.len) return error.TestExpectedEqual;
+        if (op_id == op.push_1 and pc + size < code.len and code[pc + size] == op.add_loc) {
+            rhs_pc = pc;
+            break;
+        }
+        pc += size;
+    }
+
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
+        child.pc2lineBuf(),
+        @intCast(rhs_pc orelse return error.TestExpectedEqual),
+    );
+    try std.testing.expectEqual(@as(i32, 4), source_loc.line_num);
+    try std.testing.expectEqual(@as(i32, 9), source_loc.col_num);
 }
 
 test "quick parser emits arithmetic compound assignment operators" {

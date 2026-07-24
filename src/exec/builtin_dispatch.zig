@@ -229,6 +229,54 @@ pub const NativeBacktraceScope = struct {
     }
 };
 
+/// QuickJS preflights every observable C_FUNCTION call against the caller's
+/// native stack before linking the native frame or switching to the function's
+/// realm. C_FUNCTION_DATA and synthetic record reuse deliberately keep their
+/// caller-semantics path and do not pass through this guard.
+pub inline fn preflightCFunctionCall(
+    caller_ctx: *core.JSContext,
+    caller_global: ?*core.Object,
+    func_obj: ?*core.Object,
+    formal_length: usize,
+) HostError!void {
+    const object = func_obj orelse return;
+    if (object.class_id != core.class.ids.c_function) return;
+    const planned_stack_bytes = std.math.mul(
+        usize,
+        formal_length,
+        @sizeOf(core.JSValue),
+    ) catch return throwCFunctionStackOverflow(caller_ctx, caller_global);
+    if (!caller_ctx.runtime.checkNativeStackOverflow(planned_stack_bytes)) return;
+    return throwCFunctionStackOverflow(caller_ctx, caller_global);
+}
+
+/// Preflight an installed record when an outer dispatcher must establish a
+/// native frame before the record terminal (for example, constructor argument
+/// coercion). A missing record remains the terminal's ordinary dispatch miss.
+pub inline fn preflightInternalRecordCFunction(
+    caller_ctx: *core.JSContext,
+    caller_global: ?*core.Object,
+    func_obj: ?*core.Object,
+    native_ref: core.function.NativeBuiltinRef,
+) HostError!void {
+    const record = caller_ctx.runtime.internalBuiltinRecord(
+        @intCast(@intFromEnum(native_ref.domain)),
+        native_ref.id,
+    ) orelse return;
+    return preflightCFunctionCall(caller_ctx, caller_global, func_obj, record.length);
+}
+
+noinline fn throwCFunctionStackOverflow(
+    caller_ctx: *core.JSContext,
+    caller_global: ?*core.Object,
+) HostError!void {
+    const global = caller_global orelse caller_ctx.global orelse return error.InvalidBuiltinRegistry;
+    _ = exception_ops.throwInternalErrorMessage(caller_ctx, global, "stack overflow") catch |err| {
+        return @as(HostError, @errorCast(err));
+    };
+    return error.StackOverflow;
+}
+
 /// Turn a raw engine sentinel into its JS Error while the caller's native frame
 /// is still active. Message-carrying throw helpers already leave a matching
 /// pending exception and therefore take the allocation-free first return.
@@ -280,6 +328,7 @@ pub inline fn callInternalRecordDirect(
     caller_function: ?*const Bytecode,
     caller_frame: ?*Frame,
 ) HostError!core.JSValue {
+    try preflightCFunctionCall(ctx, global, func_obj, record.length);
     const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     return callInternalRecordDirectWithEnvironment(view, output, func_obj, this_value, record, args, caller_function, caller_frame);
 }
@@ -522,6 +571,9 @@ fn callConstructRecordImpl(
     // wrapper-primitive call entry) would otherwise run its call body, so
     // report a miss and let the caller fall through to its construct cascade.
     if (!record.isConstructor()) return null;
+    if (push_native_frame) {
+        try preflightCFunctionCall(ctx, global, func_obj, record.length);
+    }
     const view = try finalCallEnvironment(ctx, global, globals, func_obj);
     var native_scope = NativeBacktraceScope.init(view.ctx, func_obj);
     if (push_native_frame) native_scope.push();

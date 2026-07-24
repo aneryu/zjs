@@ -2256,6 +2256,9 @@ pub fn createGeneratorObject(
     output: ?*std.Io.Writer,
     global: *core.Object,
     is_async: bool,
+    call_depth_precharged: bool,
+    call_entry_ctx: *core.JSContext,
+    call_entry_global: *core.Object,
 ) !core.JSValue {
     var rooted_func = func;
     var rooted_current = current_function_value;
@@ -2354,10 +2357,25 @@ pub fn createGeneratorObject(
         break :blk rooted_this;
     } else rooted_this;
     object.setGeneratorThis(ctx.runtime, effective_this.dup());
-    // Every generator gets one resident frame at creation, including internal
-    // hand-built bytecode with no body marker (which parks at pc 0). qjs's
-    // async_func_init likewise has no separate deferred args/captures owner.
-    const init_result = try runGeneratorParameterInit(ctx, fb, nested, prepared_frame_ptr, object, rooted_current, effective_this, input_args, input_var_refs, output, global);
+    // Every generator gets one resident frame at creation. Canonical bytecode
+    // parks at OP_initial_yield; markerless internal fixtures park at pc 0.
+    // qjs's async_func_init likewise has no separate deferred args/captures
+    // owner.
+    const init_result = try runGeneratorParameterInit(
+        ctx,
+        fb,
+        nested,
+        prepared_frame_ptr,
+        object,
+        rooted_current,
+        effective_this,
+        input_args,
+        input_var_refs,
+        output,
+        call_depth_precharged,
+        call_entry_ctx,
+        call_entry_global,
+    );
     init_result.free(ctx.runtime);
 
     var resolved_prototype = generatorObjectPrototype(ctx.runtime, global, rooted_current, is_async) catch OwnedPrototype.fromObject(null);
@@ -3940,17 +3958,40 @@ pub fn setSuperPropertyValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    const throw_on_set_failure = setFailureShouldThrow(caller_function);
     if (try findPropertyDescriptor(ctx.runtime, prototype, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .accessor => {
-                if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (desc.setter.isUndefined()) {
+                    if (throw_on_set_failure) {
+                        const exception = try throwSetFailureTypeError(
+                            ctx,
+                            global,
+                            atom_id,
+                            error.AccessorWithoutSetter,
+                        );
+                        exception.free(ctx.runtime);
+                    }
+                    return;
+                }
                 const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 result.free(ctx.runtime);
                 return;
             },
             .data => {
-                if (desc.writable == false) return error.TypeError;
+                if (desc.writable == false) {
+                    if (throw_on_set_failure) {
+                        const exception = try throwSetFailureTypeError(
+                            ctx,
+                            global,
+                            atom_id,
+                            error.ReadOnly,
+                        );
+                        exception.free(ctx.runtime);
+                    }
+                    return;
+                }
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
                 const result = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
                 result.free(ctx.runtime);

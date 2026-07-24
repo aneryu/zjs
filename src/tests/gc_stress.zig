@@ -96,22 +96,14 @@ test "gc stress weak map preserved key keeps value alive" {
 
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        // Shapes are GC objects now: weakmap + preserved key + value share
-        // one live empty root shape.
-        try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
-    } else {
-        // TODO(S3): weak-collection liveness under forced GC.
-    }
+    // Shapes are GC objects now: weakmap + preserved key + value share
+    // one live empty root shape.
+    try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());
 
     weakmap.value().free(rt);
     keys[preserved_index].value().free(rt);
     _ = try rt.tryRunObjectCycleRemoval();
-    if (!core.memory.force_gc_on_allocation_enabled) {
-        try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    } else {
-        // TODO(S3): weak-collection liveness under forced GC.
-    }
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
 test "gc stress weak map dead cyclic keys clear values" {

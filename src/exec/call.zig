@@ -330,12 +330,22 @@ fn callHostFunction(
     record: HostFunctionRecord,
     flags: HostCallFlags,
 ) !core.JSValue {
+    std.debug.assert(record.length >= 0);
+    try builtin_dispatch.preflightCFunctionCall(
+        ctx,
+        global,
+        func_obj,
+        @intCast(record.length),
+    );
     // `global` and `globals` belong to the caller-side transport. Once this
     // final host-function arm is selected, the function class is the only
     // realm authority.
-    _ = global;
     _ = globals;
     const realm = try builtin_dispatch.finalCallableRealmView(ctx, func_obj);
+    var native_scope = builtin_dispatch.NativeBacktraceScope.init(realm.realm, func_obj);
+    native_scope.push();
+    defer native_scope.deinit();
+
     return record.call(.{
         .realm = realm,
         .output = output,
@@ -343,7 +353,10 @@ fn callHostFunction(
         .this_value = this_value,
         .args = args,
         .flags = flags,
-    });
+    }) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(realm.realm, realm.global, err);
+        return err;
+    };
 }
 
 fn hostCallExternalHostFunction(call: HostCall) HostError!core.JSValue {

@@ -215,7 +215,18 @@ pub const Entry = struct {
         /// instead of reading the record, and the established leaf arms keep
         /// their exact single-bit tests.
         forwarded_leaf: bool = false,
-        _padding: u3 = 0,
+        /// This frame carries the logical depth and planned bytecode-stack
+        /// cost of tail-call callers whose physical Entry storage was reused.
+        /// QuickJS keeps those callers blocked in nested JS_CallInternal
+        /// invocations until the final callee completes; `popFrameMode`
+        /// releases both accumulated budgets together. The record overlays
+        /// storage that is dead for every tail-replacement frame.
+        tail_chain: bool = false,
+        /// This frame entered through a JS_Call/COPY_ARGV-shaped forwarding
+        /// boundary. Persist the pricing mode so teardown releases the exact
+        /// bytes charged even after the transient InlineTarget is gone.
+        copy_argv: bool = false,
+        _padding: u1 = 0,
     };
 
     /// The Entry's sole persistent FunctionBytecode source is `frame.function`;
@@ -310,6 +321,37 @@ pub const Entry = struct {
     pub inline fn emptyLeafResumeSp(self: *Entry) [*]core.JSValue {
         std.debug.assert(self.isEmptyLeaf() or self.isExactArgsLeaf());
         return @ptrFromInt(self.emptyLeafResumeWords()[1]);
+    }
+
+    const TailChainBudget = extern struct {
+        extra_depth: usize,
+        planned_stack_bytes: usize,
+    };
+
+    /// Budgets retained by callers retired through tail-frame reuse. Tail
+    /// replacements are generic, non-leaf frames and never own the synthetic
+    /// native Function.call record. The default 16-byte JSValue representation
+    /// uses that dead slot; NaN boxing uses the 16-byte stride padding that is
+    /// otherwise occupied only by leaf resume words. Entry's measured layout
+    /// is unchanged in both representations.
+    inline fn tailChainBudgetSlot(self: *Entry) *TailChainBudget {
+        std.debug.assert(!self.teardown.has_native_caller);
+        std.debug.assert(!self.teardown.empty_leaf);
+        std.debug.assert(!self.teardown.exact_args_leaf);
+        std.debug.assert(!self.teardown.forwarded_leaf);
+        if (comptime core.value.nan_boxing) {
+            comptime std.debug.assert(@sizeOf(@TypeOf(self._stride_padding)) >= @sizeOf(TailChainBudget));
+            // An array-of-u8's type alignment remains one even when its field
+            // declaration carries stronger alignment. Prove the actual field
+            // address instead of rejecting that deliberately aligned storage.
+            comptime std.debug.assert(@alignOf(Entry) >= @alignOf(TailChainBudget));
+            comptime std.debug.assert(@offsetOf(Entry, "_stride_padding") % @alignOf(TailChainBudget) == 0);
+            return @ptrCast(@alignCast(&self._stride_padding));
+        } else {
+            comptime std.debug.assert(@sizeOf(core.JSValue) >= @sizeOf(TailChainBudget));
+            comptime std.debug.assert(@alignOf(core.JSValue) >= @alignOf(TailChainBudget));
+            return @ptrCast(@alignCast(&self.native_caller));
+        }
     }
 
     /// Move post-call work from a retired frame into its tail-call replacement.
@@ -486,6 +528,16 @@ pub const Entry = struct {
 
     /// Straight-line qjs `done:` epilogue for the common arena-backed frame.
     inline fn deinitSimple(self: *Entry, ctx: *core.JSContext) void {
+        self.deinitSimpleResources(ctx);
+        ctx.runtime.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    /// Release every resource in a simple frame except the VM-stack watermark
+    /// and profiling restore record. Tail replacement retains the caller's
+    /// alloca-shaped arena window until the final callee completes, exactly as
+    /// QuickJS's nested JS_CallInternal frames remain live.
+    inline fn deinitSimpleResources(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         const frame = &self.frame;
         std.debug.assert(self.canUseSimpleTeardown());
@@ -499,24 +551,41 @@ pub const Entry = struct {
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
         for (frame.args) |v| v.free(rt);
-        rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
     /// the common arena-backed shape.
     fn deinitGeneral(self: *Entry, ctx: *core.JSContext) void {
+        self.deinitGeneralResources(ctx);
+        ctx.runtime.vm_stack.restore(self.arena_mark);
+        self.profile_guard.deinit();
+    }
+
+    fn deinitGeneralResources(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
         self.stack.deinit(rt);
         self.frame.deinitInlineCall(&rt.memory, rt);
-        rt.vm_stack.restore(self.arena_mark);
-        self.profile_guard.deinit();
+    }
+
+    /// Successful tail replacement has already built and linked the target
+    /// frame above this caller. Release the caller's values and heap-owned
+    /// storage without rewinding the shared arena or restoring its profiling
+    /// activation: both records are transferred to the replacement Entry.
+    inline fn deinitForTailReplacement(self: *Entry, ctx: *core.JSContext) void {
+        if (self.teardown.empty_leaf or self.teardown.exact_args_leaf or
+            self.teardown.forwarded_leaf)
+            self.deinitGeneralResources(ctx)
+        else if (self.canUseSimpleTeardown())
+            self.deinitSimpleResources(ctx)
+        else
+            self.deinitGeneralResources(ctx);
     }
 };
 
 comptime {
-    const expected_size: usize = if (core.value.nan_boxing) 248 else 256;
+    const base_size: usize = if (core.value.nan_boxing) 248 else 256;
+    const expected_size = base_size + @sizeOf(vm_call.CallProfileGuard);
     if (@sizeOf(Entry) != expected_size) @compileError(std.fmt.comptimePrint(
         "inline Entry layout drifted: expected {d} bytes, found {d}",
         .{ expected_size, @sizeOf(Entry) },
@@ -771,12 +840,33 @@ pub const Machine = struct {
     /// callee frame address is the `alloca` result already in a register
     /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
     /// would redo the chunk multiply for nothing.
-    fn pushFrame(self: *Machine, comptime setup_path: FrameSetupPath, global: *core.Object, target: *const InlineTarget, source: ArgsSource) align(64) HostError!*Entry {
-        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
-            cleanupStackSource(self.ctx.runtime, source);
-            return err;
-        };
-        errdefer self.ctx.runtime.call_depth -= 1;
+    fn pushFrame(
+        self: *Machine,
+        comptime setup_path: FrameSetupPath,
+        comptime stack_preflighted: bool,
+        comptime copy_argv: bool,
+        global: *core.Object,
+        target: *const InlineTarget,
+        source: ArgsSource,
+    ) align(64) HostError!*Entry {
+        // Keep the release token independent of target/source ownership:
+        // setup failure may destroy the callable (and its FunctionBytecode)
+        // before this function's accounting errdefer runs.
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            target.fb,
+            source.argCount(),
+            copy_argv,
+        );
+        if (stack_preflighted) {
+            std.debug.assert(!copy_argv);
+            vm_call.commitInlineCallDepthMode(self.ctx, target.fb, source.argCount(), copy_argv);
+        } else {
+            vm_call.enterInlineCallDepthMode(self.ctx, global, target.fb, source.argCount(), copy_argv) catch |err| {
+                cleanupStackSource(self.ctx.runtime, source);
+                return err;
+            };
+        }
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
             cleanupStackSource(self.ctx.runtime, source);
             return err;
@@ -812,6 +902,7 @@ pub const Machine = struct {
         } else {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         }
+        entry.teardown.copy_argv = copy_argv;
         // Link the new frame into the chain — qjs `sf->prev_frame =
         // rt->current_stack_frame; rt->current_stack_frame = sf;`
         // (quickjs.c:17869-17870).
@@ -1211,11 +1302,16 @@ pub const Machine = struct {
         } else {
             std.debug.assert(isSimpleInlineFrame(target, source));
         }
-        vm_call.enterInlineCallDepth(self.ctx, global) catch |err| {
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            target.fb,
+            source.argCount(),
+            false,
+        );
+        vm_call.enterInlineCallDepth(self.ctx, global, target.fb, source.argCount()) catch |err| {
             cleanupStackSource(self.ctx.runtime, source);
             return err;
         };
-        errdefer self.ctx.runtime.call_depth -= 1;
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
         const entry = self.acquireSlot(global) catch |err| {
             cleanupStackSource(self.ctx.runtime, source);
             return err;
@@ -1274,8 +1370,9 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.runtime.call_depth -= 1;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        try vm_call.enterInlineCallDepth(ctx, global, function, 0);
+        errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1335,8 +1432,9 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.runtime.call_depth -= 1;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
+        try vm_call.enterInlineCallDepth(ctx, global, function, argc);
+        errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1391,8 +1489,9 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.runtime.call_depth -= 1;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, 0, false);
+        try vm_call.enterInlineCallDepth(ctx, global, function, 0);
+        errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1454,8 +1553,9 @@ pub const Machine = struct {
             freeSourceSlot(rt, &region_start[@intFromBool(method_receiver)]);
             if (method_receiver) freeSourceSlot(rt, &region_start[0]);
         }
-        try vm_call.enterInlineCallDepth(ctx, global);
-        errdefer ctx.runtime.call_depth -= 1;
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
+        try vm_call.enterInlineCallDepth(ctx, global, function, argc);
+        errdefer vm_call.leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
         const entry = try self.acquireSlot(global);
         entry.return_action = .next;
         entry.continuation_payload = 0;
@@ -1846,7 +1946,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
-        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1857,7 +1957,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.runtime.call_depth += 1;
+        vm_call.commitInlineCallDepth(ctx, function, 0);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1890,7 +1990,7 @@ pub const Machine = struct {
         assertExactArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
         const ctx = self.ctx;
-        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+        if (!vm_call.canEnterInlineCallDepth(ctx, function, argc)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1901,7 +2001,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.runtime.call_depth += 1;
+        vm_call.commitInlineCallDepth(ctx, function, argc);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1934,7 +2034,7 @@ pub const Machine = struct {
         assertCaptureLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(captures.len != 0);
         const ctx = self.ctx;
-        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1945,7 +2045,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.runtime.call_depth += 1;
+        vm_call.commitInlineCallDepth(ctx, function, 0);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -1986,7 +2086,7 @@ pub const Machine = struct {
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
         const ctx = self.ctx;
-        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+        if (!vm_call.canEnterInlineCallDepth(ctx, function, argc)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -1997,7 +2097,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.runtime.call_depth += 1;
+        vm_call.commitInlineCallDepth(ctx, function, argc);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2363,7 +2463,7 @@ pub const Machine = struct {
         if (isStrictSimpleInlineFrame(false, target, source)) {
             return self.pushExactSimpleFrame(true, false, false, global, target, source);
         }
-        return self.pushFrame(.generic_after_exact_plain, global, target, source);
+        return self.pushFrame(.generic_after_exact_plain, false, false, global, target, source);
     }
 
     /// Enter an argc=0 leaf after resolveInlineFunction published its
@@ -2491,7 +2591,7 @@ pub const Machine = struct {
                 return self.pushExactSimpleFrame(false, true, true, global, target, source);
             }
         }
-        return self.pushFrame(.generic, global, target, source);
+        return self.pushFrame(.generic, false, false, global, target, source);
     }
 
     /// Dynamic adapter used by the driver-side fallback. Hot threaded handlers
@@ -2526,9 +2626,9 @@ pub const Machine = struct {
     ) HostError!*Entry {
         const source = ArgsSource.initMoved(moved_values, layout == .method);
         const entry = if (layout == .method)
-            try self.pushFrame(.moved_method, global, target, source)
+            try self.pushFrame(.moved_method, false, true, global, target, source)
         else
-            try self.pushFrame(.generic, global, target, source);
+            try self.pushFrame(.generic, false, true, global, target, source);
         entry.return_action = return_action;
         entry.continuation_payload = switch (return_action) {
             .next => 0,
@@ -2552,7 +2652,7 @@ pub const Machine = struct {
         if (!isBorrowedIteratorSimpleInlineFrame(target, iterator_record)) return null;
         // The borrowed setup path ignores ArgsSource; pass the caller record as
         // a diagnostic witness without changing or taking either slot.
-        const entry = try self.pushFrame(.borrowed_iterator, global, target, ArgsSource.initMoved(iterator_record, true));
+        const entry = try self.pushFrame(.borrowed_iterator, false, false, global, target, ArgsSource.initMoved(iterator_record, true));
         entry.return_action = .for_of_next;
         entry.continuation_payload = depth;
         return entry;
@@ -2601,6 +2701,7 @@ pub const Machine = struct {
             .simple = true,
             .has_native_caller = true,
             .forwarded_leaf = true,
+            .copy_argv = true,
         };
         entry.prev = self.top;
         self.top = entry;
@@ -2630,7 +2731,7 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function, call_facts);
         const ctx = self.ctx;
-        if (ctx.runtime.call_depth >= ctx.stackLimit()) return null;
+        if (!vm_call.canEnterInlineCallDepth(ctx, function, 0)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2641,7 +2742,7 @@ pub const Machine = struct {
         const stack_count = @as(usize, function.stack_size) + 1;
         const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
 
-        ctx.runtime.call_depth += 1;
+        vm_call.commitInlineCallDepth(ctx, function, 0);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2664,22 +2765,27 @@ pub const Machine = struct {
         native_caller: core.JSValue,
     ) HostError!*Entry {
         caller_stack.setLen(region_base);
-        const entry = try self.pushFrame(.generic, global, target, ArgsSource.initStack(caller_stack.topPtr(), argc, layout == .method));
+        const entry = try self.pushFrame(.generic, false, true, global, target, ArgsSource.initStack(caller_stack.topPtr(), argc, layout == .method));
         entry.native_caller = native_caller;
         entry.teardown.has_native_caller = true;
         return entry;
     }
 
-    /// Proper tail call: replace the top inline frame with a fresh frame
-    /// for `target`, keeping the logical call depth constant. The operand
+    /// Tail-call execution: transactionally replace the top inline frame with
+    /// a fresh frame for `target` while retaining the retired caller's logical
+    /// stack unit. QuickJS performs a nested JS_CallInternal for OP_tail_call
+    /// and only releases the caller after the callee returns. Build the target
+    /// in the next reusable Entry while the caller remains current, then move
+    /// the fully-prepared target into the caller's slot with no fallible work
+    /// left. Thus every target setup error is caught at the original call site
+    /// while successful chains still occupy one physical live Entry.
+    /// The operand
     /// region starting at `region_base` lives on the dying frame's own
     /// operand stack, so it is moved into a scratch buffer before the frame
     /// (and the arena window backing its stack) is torn down. The region is
     /// `[callable, args...]`, or `[receiver, callable, args...]` when
     /// `has_receiver` (a tail-positioned method call, where the receiver
-    /// becomes the reused frame's `this`). On error the dying frame is
-    /// already gone; the error propagates as if thrown by the callee before
-    /// executing any code.
+    /// becomes the reused frame's `this`).
     pub fn tailCallReuse(
         self: *Machine,
         global: *core.Object,
@@ -2690,6 +2796,11 @@ pub const Machine = struct {
         layout: RegionLayout,
     ) HostError!*Entry {
         std.debug.assert(self.depth > 0);
+        // Check before moving operands or retiring the caller so overflow is
+        // delivered at the intact tail-call site, like QuickJS's callee-entry
+        // stack guard.
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(target.fb, argc, false);
+        try vm_call.checkTailCallChainStackBudget(self.ctx, global, planned_stack_bytes);
         const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
 
@@ -2706,11 +2817,54 @@ pub const Machine = struct {
         // args not yet transferred into the new frame).
         defer for (moved) |value| value.free(rt);
 
-        var continuation = self.popFrame();
-        defer continuation.deinit(rt);
-        const entry = try self.pushFrame(.generic, global, target, ArgsSource.initMoved(moved, has_receiver));
+        // Keep inherited logical units occupied while replacing the physical
+        // Entry. The prepared target temporarily occupies the next slot, but
+        // pushFrame does not link it until every fallible setup step succeeds.
+        const dying = self.topEntry();
+        const dying_prev = dying.prev;
+        const dying_arena_mark = dying.arena_mark;
+        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        );
+        const inherited_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
+            dying.tailChainBudgetSlot().*
+        else
+            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
+
+        const entry = try self.pushFrame(
+            .generic,
+            true,
+            false,
+            global,
+            target,
+            ArgsSource.initMoved(moved, has_receiver),
+        );
+        // From here through publication there are no fallible operations.
+        // Fold the caller's continuation, logical budget, arena watermark and
+        // profiling restore level into the target before retiring its values.
+        var continuation = dying.takeContinuation();
         entry.adoptContinuation(&continuation);
-        return entry;
+        // Generic setup leaves the dead native-caller slot unspecified. The
+        // default representation overwrites it with TailChainBudget below;
+        // NaN boxing stores that budget in stride padding, so initialize the
+        // remaining field before moving the whole Entry into the reused slot.
+        entry.native_caller = core.JSValue.undefinedValue();
+        entry.teardown.tail_chain = true;
+        entry.tailChainBudgetSlot().* = .{
+            .extra_depth = inherited_budget.extra_depth + 1,
+            .planned_stack_bytes = inherited_budget.planned_stack_bytes + dying_stack_bytes,
+        };
+        entry.arena_mark = dying_arena_mark;
+        entry.profile_guard.adoptRetiredCaller(dying.profile_guard);
+
+        dying.deinitForTailReplacement(self.ctx);
+        entry.prev = dying_prev;
+        dying.* = entry.*;
+        self.top = dying;
+        self.depth -= 1;
+        return dying;
     }
 
     /// Retire the top inline frame through the single qjs-style `done:`
@@ -2718,12 +2872,27 @@ pub const Machine = struct {
     /// transferred to a tail-call replacement, or explicitly deinitialized.
     inline fn popFrameMode(self: *Machine, comptime returned: bool) ReturnContinuation {
         const dying = self.topEntry();
+        // Read the overlay before teardown. The final replacement releases
+        // its own unit and every retired tail caller it represents.
+        const chain_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
+            dying.tailChainBudgetSlot().*
+        else
+            .{ .extra_depth = 0, .planned_stack_bytes = 0 };
+        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        );
         const continuation = dying.takeContinuation();
         if (returned)
             dying.deinitReturned(self.ctx)
         else
             dying.deinit(self.ctx);
-        self.ctx.runtime.call_depth -= 1;
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
+        std.debug.assert(self.ctx.runtime.call_depth >= chain_budget.extra_depth);
+        std.debug.assert(self.ctx.runtime.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
+        self.ctx.runtime.call_depth -= chain_budget.extra_depth;
+        self.ctx.runtime.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue (quickjs.c:20709).
@@ -2749,14 +2918,20 @@ pub const Machine = struct {
     pub inline fn popReturnedEmptyLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isEmptyLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
+        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        );
         // Inline epilogue: the hot leg is an rc decrement plus the arena
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
         // outline behind the rc==0 branch).
         dying.deinitEmptyLeafInline(self.ctx);
-        self.ctx.runtime.call_depth -= 1;
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -2767,10 +2942,16 @@ pub const Machine = struct {
     pub inline fn popReturnedExactArgsLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isExactArgsLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
+        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        );
         dying.deinitExactArgsLeafInline(self.ctx);
-        self.ctx.runtime.call_depth -= 1;
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -2783,10 +2964,16 @@ pub const Machine = struct {
     pub inline fn popReturnedForwardedLeaf(self: *Machine) void {
         const dying = self.topEntry();
         std.debug.assert(dying.isForwardedLeaf());
+        std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
         std.debug.assert(dying.continuation_payload == 0);
+        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            dying.frame.function,
+            dying.frame.actual_arg_count,
+            dying.teardown.copy_argv,
+        );
         dying.deinitForwardedLeafInline(self.ctx);
-        self.ctx.runtime.call_depth -= 1;
+        vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
     }

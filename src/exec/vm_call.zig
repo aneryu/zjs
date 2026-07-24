@@ -50,10 +50,14 @@ pub const TailCallResult = union(enum) {
 
 pub const CallDepthGuard = struct {
     ctx: *core.JSContext,
+    planned_stack_bytes: usize,
 
     pub fn deinit(self: CallDepthGuard) void {
-        self.ctx.runtime.call_depth -= 1;
-        self.ctx.runtime.native_call_depth -= 1;
+        const rt = self.ctx.runtime;
+        std.debug.assert(rt.active_bytecode_stack_bytes >= self.planned_stack_bytes);
+        rt.active_bytecode_stack_bytes -= self.planned_stack_bytes;
+        rt.call_depth -= 1;
+        rt.native_call_depth -= 1;
     }
 };
 
@@ -66,28 +70,173 @@ pub const CallProfileGuard = if (build_options.zjs_enable_opcode_profile) struct
             _ = core.profile.activate(self.previous);
         }
     }
+
+    /// A proper-tail-call replacement enters the callee while the caller is
+    /// still current so every fallible setup edge remains catchable by that
+    /// caller. Once setup succeeds, only the callee guard survives; make its
+    /// eventual restore skip the retired caller's activation level.
+    pub fn adoptRetiredCaller(self: *@This(), retired: @This()) void {
+        std.debug.assert(self.rt == retired.rt);
+        self.previous = retired.previous;
+    }
 } else struct {
     pub fn deinit(_: @This()) void {}
+
+    pub fn adoptRetiredCaller(_: *@This(), _: @This()) void {}
 };
 
-pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
-    if (ctx.runtime.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.runtime.call_depth >= maxLogicalJsCallDepth(ctx)) {
+pub fn enterCallDepth(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    planned_stack_bytes: usize,
+) !CallDepthGuard {
+    const rt = ctx.runtime;
+    if (rt.native_call_depth >= maxNativeJsCallDepth(ctx) or
+        rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
+    {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
         // InternalError "stack overflow" (quickjs.c:17837, 7789-7791).
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
-    ctx.runtime.call_depth += 1;
-    ctx.runtime.native_call_depth += 1;
-    return .{ .ctx = ctx };
+    rt.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.call_depth += 1;
+    rt.native_call_depth += 1;
+    return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
-/// Depth accounting for inline (same interpreter loop) call frames.
-pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
-    if (ctx.runtime.call_depth >= maxLogicalJsCallDepth(ctx)) {
+/// Accounting for inline (same interpreter loop) bytecode call frames.
+pub fn enterInlineCallDepth(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+) !void {
+    return enterInlineCallDepthMode(ctx, global, function, argc, false);
+}
+
+pub fn enterInlineCallDepthMode(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+    copy_argv: bool,
+) !void {
+    if (!canEnterInlineCallDepthMode(ctx, function, argc, copy_argv)) {
         return inlineCallDepthOverflow(ctx, global);
     }
-    ctx.runtime.call_depth += 1;
+    commitInlineCallDepthMode(ctx, function, argc, copy_argv);
+}
+
+/// QuickJS JS_CallInternal's planned `alloca_size` for a normal bytecode
+/// target called without COPY_ARGV (quickjs.c:17828-17836). Tail opcodes use
+/// flags=0, so only missing arguments allocate the padded argv prefix.
+pub fn qjsBytecodeFrameAllocaSize(
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+    copy_argv: bool,
+) usize {
+    const allocated_arg_count: usize = if (copy_argv or argc < @as(usize, function.arg_count))
+        function.arg_count
+    else
+        0;
+    const value_slots = allocated_arg_count +
+        @as(usize, function.var_count) +
+        @as(usize, function.stack_size);
+    return value_slots * @sizeOf(core.JSValue) +
+        @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
+}
+
+inline fn bytecodeStackBudgetWouldOverflow(
+    rt: *const core.JSRuntime,
+    planned_stack_bytes: usize,
+) bool {
+    const accumulated = std.math.add(
+        usize,
+        rt.active_bytecode_stack_bytes,
+        planned_stack_bytes,
+    ) catch return true;
+    return rt.checkNativeStackOverflow(accumulated);
+}
+
+pub inline fn canEnterInlineCallDepth(
+    ctx: *const core.JSContext,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+) bool {
+    return canEnterInlineCallDepthMode(ctx, function, argc, false);
+}
+
+pub inline fn canEnterInlineCallDepthMode(
+    ctx: *const core.JSContext,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+    copy_argv: bool,
+) bool {
+    const rt = ctx.runtime;
+    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
+    return rt.call_depth < maxLogicalJsCallDepth(ctx) and
+        !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
+}
+
+pub inline fn commitInlineCallDepth(
+    ctx: *core.JSContext,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+) void {
+    commitInlineCallDepthMode(ctx, function, argc, false);
+}
+
+pub inline fn commitInlineCallDepthMode(
+    ctx: *core.JSContext,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+    copy_argv: bool,
+) void {
+    const rt = ctx.runtime;
+    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
+    std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.call_depth += 1;
+}
+
+pub inline fn leaveInlineCallDepthBytes(
+    ctx: *core.JSContext,
+    planned_stack_bytes: usize,
+) void {
+    const rt = ctx.runtime;
+    std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.active_bytecode_stack_bytes -= planned_stack_bytes;
+    rt.call_depth -= 1;
+}
+
+pub inline fn leaveInlineCallDepth(
+    ctx: *core.JSContext,
+    function: *const bytecode.FunctionBytecode,
+    argc: usize,
+) void {
+    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, false);
+    leaveInlineCallDepthBytes(ctx, planned_stack_bytes);
+}
+
+/// Preflight for a tail-call frame replacement. QuickJS's OP_tail_call enters
+/// a nested JS_CallInternal, checks native SP minus the callee's planned
+/// alloca, and leaves every caller blocked until the final callee returns.
+/// zjs reuses physical Entry storage, so it carries those planned bytes in a
+/// separate Runtime budget while also preserving logical call-depth balance.
+/// Neither budget aliases the per-Realm interrupt counter.
+pub fn checkTailCallChainStackBudget(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    planned_stack_bytes: usize,
+) !void {
+    const rt = ctx.runtime;
+    if (rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
+    {
+        return inlineCallDepthOverflow(ctx, global);
+    }
 }
 
 /// Stack exhaustion is exceptional and constructs a JS error.  Keep it out of
@@ -666,7 +815,7 @@ pub noinline fn constructor(
         top;
     defer if (has_explicit_new_target) new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
-    const result = call_runtime.constructValueOrBytecodeWithNewTarget(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
+    const result = call_runtime.constructValueOrBytecodeWithNewTargetInternal(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

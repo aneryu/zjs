@@ -694,12 +694,9 @@ pub const opcode = struct {
     /// in phase 1 (`get_length`, `if_false8`, `is_undefined`, ...), so
     /// ids outside the overlap fall through to the final view (the two
     /// views agree everywhere but the overlap).
-    ///
-    /// Caveat: id 192 is genuinely ambiguous in phase-1 streams — the
-    /// parser emits both `push_empty_string` (short form, 1 byte) and
-    /// `scope_in_private_field` (temp, 7 bytes). This view reports the
-    /// temp entry; scanners that may encounter both must disambiguate
-    /// from context or bail out.
+    /// The parser keeps empty strings in the wide `push_atom_value` form;
+    /// `resolve_labels` alone introduces `push_empty_string`. Consequently,
+    /// overlap id 192 is only the temp `scope_in_private_field` in phase 1.
     fn phase1Info(op_id: u8) ?*const Info {
         if (op_id >= op.op_temp_start and op_id < op.op_temp_end)
             return &opcode_info[op_id];
@@ -1496,10 +1493,6 @@ pub const function_bytecode = struct {
         scope_level: i32,
         var_name: atom.Atom,
         eval_target: EvalBindingTarget = .unresolved,
-        /// Compile-only Annex B.3.4 plan: a same-name simple catch binding is
-        /// still the initializer target, while the caller's variable object
-        /// must acquire the `var` binding if it does not already own one.
-        eval_var_object_fallback: ?u16 = null,
     };
 
     /// Exact optional QuickJS debug tail (`JSFunctionBytecode.debug`). It is
@@ -1931,28 +1924,6 @@ pub const function_bytecode = struct {
                 return &.{};
             }
             unreachable;
-        }
-        /// PC of the generator body marker, or 0 if none. Mirrors qjs, which
-        /// locates the body marker by scanning the bytecode rather than caching
-        /// a field (the former `generator_body_pc: usize`). The marker is the
-        /// `push_false; drop; push_true; drop` sequence emitted at the boundary
-        /// between the parameter-init prologue and the generator body; the pc
-        /// returned points just past it. Only generator/async-generator FBs
-        /// contain the marker, so this returns 0 for ordinary functions.
-        pub fn generatorBodyPc(self: *const FunctionBytecodeImpl) usize {
-            const code = self.byteCode();
-            const op = opcode.op;
-            var i: usize = 0;
-            while (i + 4 <= code.len) : (i += 1) {
-                if (code[i] == op.push_false and
-                    code[i + 1] == op.drop and
-                    code[i + 2] == op.push_true and
-                    code[i + 3] == op.drop)
-                {
-                    return i + 4;
-                }
-            }
-            return 0;
         }
         pub inline fn allVarDefs(self: *const FunctionBytecodeImpl) []BytecodeVarDef {
             if (self.legacyBytecodeAdapter()) |legacy| {
@@ -6075,43 +6046,23 @@ pub const pipeline_resolve_variables = struct {
     /// walk: the first applicable entry is the declaration environment.
     fn resolveEvalGlobalVarTargets(fd: *function_def_mod.FunctionDef) Error!void {
         for (fd.global_vars) |*gv| {
-            gv.eval_var_object_fallback = null;
             if (!fd.is_eval) {
                 gv.eval_target = .global;
                 continue;
             }
 
             gv.eval_target = .global;
-            var matched_catch_var = false;
             for (fd.closure_var, 0..) |cv, idx| {
                 if (cv.var_name == gv.var_name) {
-                    if (matched_catch_var) {
-                        // An outer same-name binding means the declaration
-                        // environment already owns the binding. The nearer
-                        // catch remains the initializer reference target.
-                        break;
-                    }
+                    // instantiate_hoisted_definitions stops at the first
+                    // same-name closure, including a simple catch binding.
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
                     gv.eval_target = .{ .closure = @intCast(idx) };
-                    // Pinned QuickJS stops here. Annex B.3.4 instead ignores a
-                    // simple catch environment while deciding whether a
-                    // direct-eval `var` must be created in the caller's
-                    // VariableDeclarationEnvironment. Keep function
-                    // declarations on the pinned-QJS path until their distinct
-                    // initialization semantics have equally strong coverage.
-                    if (gv.cpool_idx < 0 and cv.varKind() == .catch_) {
-                        matched_catch_var = true;
-                        continue;
-                    }
                     break;
                 }
                 if (isEvalVarObjectAtom(cv.var_name) and closureVarIsRuntimeVarRef(cv)) {
                     if (idx > std.math.maxInt(u16)) return error.InvalidBytecode;
-                    if (matched_catch_var) {
-                        gv.eval_var_object_fallback = @intCast(idx);
-                    } else {
-                        gv.eval_target = .{ .var_object = @intCast(idx) };
-                    }
+                    gv.eval_target = .{ .var_object = @intCast(idx) };
                     break;
                 }
             }
@@ -6139,18 +6090,6 @@ pub const pipeline_resolve_variables = struct {
         return false;
     }
 
-    fn evalVarObjectEnsureSize(ctx: *const JSContext, ref_idx: u16) usize {
-        return selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx).size +
-            opcode.sizeOf(opcode.op.dup) +
-            opcode.sizeOf(opcode.op.push_atom_value) +
-            opcode.sizeOf(opcode.op.swap) +
-            opcode.sizeOf(opcode.op.in) +
-            opcode.sizeOf(opcode.op.if_true) +
-            opcode.sizeOf(opcode.op.undefined) +
-            opcode.sizeOf(opcode.op.define_field) +
-            opcode.sizeOf(opcode.op.drop);
-    }
-
     fn globalHoistSize(
         ctx: *const JSContext,
         gv: function_def_mod.GlobalVar,
@@ -6165,18 +6104,14 @@ pub const pipeline_resolve_variables = struct {
                 opcode.sizeOf(opcode.op.define_field) + 1,
             .global, .unresolved => 0,
         };
-        return target_size + if (gv.eval_var_object_fallback) |idx|
-            evalVarObjectEnsureSize(ctx, idx)
-        else
-            0;
+        return target_size;
     }
 
     fn globalHoistAtomCount(gv: function_def_mod.GlobalVar) usize {
-        const target_count: usize = switch (gv.eval_target) {
+        return switch (gv.eval_target) {
             .var_object => 1,
             .closure, .global, .unresolved => 0,
         };
-        return target_count + @as(usize, if (gv.eval_var_object_fallback != null) 2 else 0);
     }
 
     const BodyHoistMetrics = struct {
@@ -6258,18 +6193,6 @@ pub const pipeline_resolve_variables = struct {
         }
 
         for (fd.global_vars) |gv| {
-            if (gv.eval_var_object_fallback) |ref_idx| {
-                try writeEvalVarObjectEnsure(
-                    ctx,
-                    func,
-                    output,
-                    out_idx,
-                    output_atoms,
-                    out_atom_idx,
-                    ref_idx,
-                    gv.var_name,
-                );
-            }
             switch (gv.eval_target) {
                 .closure => |ref_idx| {
                     if (gv.cpool_idx < 0) continue;
@@ -6300,55 +6223,6 @@ pub const pipeline_resolve_variables = struct {
             out_idx.* += opcode.sizeOf(opcode.op.return_undef);
             std.mem.writeInt(u32, output[jump_pc + 1 ..][0..4], @intCast(out_idx.*), .little);
         }
-    }
-
-    fn writeEvalVarObjectEnsure(
-        ctx: *const JSContext,
-        func: *bytecode_function.Bytecode,
-        output: []u8,
-        out_idx: *usize,
-        output_atoms: []atom.Atom,
-        out_atom_idx: *usize,
-        ref_idx: u16,
-        atom_id: atom.Atom,
-    ) Error!void {
-        const start_pc = out_idx.*;
-        const encoded_size = evalVarObjectEnsureSize(ctx, ref_idx);
-        if (start_pc + encoded_size > output.len or out_atom_idx.* + 2 > output_atoms.len) {
-            return error.InvalidBytecode;
-        }
-        const drop_pc = start_pc + encoded_size - opcode.sizeOf(opcode.op.drop);
-        if (drop_pc > std.math.maxInt(u32)) return error.InvalidBytecode;
-
-        writeVarRefForm(output, out_idx, selectVarRefForm(ctx, opcode.op.get_var_ref, ref_idx), ref_idx);
-        output[out_idx.*] = opcode.op.dup;
-        out_idx.* += opcode.sizeOf(opcode.op.dup);
-
-        output[out_idx.*] = opcode.op.push_atom_value;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
-        out_atom_idx.* += 1;
-        out_idx.* += opcode.sizeOf(opcode.op.push_atom_value);
-
-        output[out_idx.*] = opcode.op.swap;
-        out_idx.* += opcode.sizeOf(opcode.op.swap);
-        output[out_idx.*] = opcode.op.in;
-        out_idx.* += opcode.sizeOf(opcode.op.in);
-        output[out_idx.*] = opcode.op.if_true;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], @intCast(drop_pc), .little);
-        out_idx.* += opcode.sizeOf(opcode.op.if_true);
-
-        output[out_idx.*] = opcode.op.undefined;
-        out_idx.* += opcode.sizeOf(opcode.op.undefined);
-        output[out_idx.*] = opcode.op.define_field;
-        std.mem.writeInt(u32, output[out_idx.* + 1 ..][0..4], atom_id, .little);
-        output_atoms[out_atom_idx.*] = func.atoms.dup(atom_id);
-        out_atom_idx.* += 1;
-        out_idx.* += opcode.sizeOf(opcode.op.define_field);
-
-        output[out_idx.*] = opcode.op.drop;
-        out_idx.* += opcode.sizeOf(opcode.op.drop);
-        if (out_idx.* != start_pc + encoded_size) return error.InvalidBytecode;
     }
 
     fn findClosureName(fd: *const function_def_mod.FunctionDef, atom_id: atom.Atom) ?u16 {
@@ -6762,6 +6636,134 @@ pub const pipeline_resolve_variables = struct {
         if (atom_index != func.atom_operands.len) return error.InvalidBytecode;
     }
 
+    const Phase1CfgNode = struct {
+        size: u8 = 0,
+        is_temp: bool = false,
+        is_live: bool = false,
+    };
+
+    /// QuickJS `resolve_variables` phase-2 dead-code boundary
+    /// (`quickjs.c:34360-34381`). `return_async` deliberately remains a
+    /// fallthrough instruction here; QuickJS only treats it as terminal in
+    /// `resolve_labels`.
+    fn isPhase2TerminalOp(op_id: u8) bool {
+        return switch (op_id) {
+            opcode.op.goto,
+            opcode.op.tail_call,
+            opcode.op.tail_call_method,
+            opcode.op.@"return",
+            opcode.op.return_undef,
+            opcode.op.throw,
+            opcode.op.throw_error,
+            opcode.op.ret,
+            => true,
+            else => false,
+        };
+    }
+
+    fn enqueuePhase1Reachable(
+        nodes: []Phase1CfgNode,
+        worklist: []usize,
+        worklist_len: *usize,
+        target: usize,
+    ) Error!void {
+        if (target >= nodes.len or (target + 1 != nodes.len and nodes[target].size == 0)) {
+            return error.InvalidBytecode;
+        }
+        if (nodes[target].is_live) return;
+        if (worklist_len.* >= worklist.len) return error.InvalidBytecode;
+        nodes[target].is_live = true;
+        worklist[worklist_len.*] = target;
+        worklist_len.* += 1;
+    }
+
+    /// QuickJS removes an empty-finalizer call in `resolve_variables`
+    /// (`quickjs.c:34304-34320`) when the called label contains only `ret`.
+    /// Its label table points just past OP_label; zjs absolute targets point
+    /// at the phase-1 label itself, so skip that one representation-only
+    /// boundary before applying `code_match`'s line-marker tolerance.
+    fn isPhase2EmptyGosub(
+        code: []const u8,
+        nodes: []const Phase1CfgNode,
+        pc: usize,
+    ) bool {
+        if (pc >= code.len or code[pc] != opcode.op.gosub or pc + 5 > code.len) return false;
+        var target: usize = @intCast(std.mem.readInt(u32, code[pc + 1 ..][0..4], .little));
+        if (target >= code.len or target >= nodes.len or nodes[target].size == 0) return false;
+
+        if (code[target] == opcode.op.label) {
+            target += nodes[target].size;
+        }
+        while (target < code.len and code[target] == opcode.op.line_num) {
+            if (target >= nodes.len or nodes[target].size == 0) return false;
+            target += nodes[target].size;
+        }
+        return target < code.len and
+            target < nodes.len and
+            nodes[target].size != 0 and
+            code[target] == opcode.op.ret;
+    }
+
+    /// Build phase-1 instruction boundaries and solve reachability from entry.
+    /// This is intentionally an explicit CFG rather than a "referenced label"
+    /// scan: references originating in unreachable code must not keep a dead
+    /// jump cycle, binding event, or atom owner alive.
+    fn computePhase1Reachability(ctx: *const JSContext) Error![]Phase1CfgNode {
+        const func = ctx.function;
+        const nodes = try ctx.memory.alloc(Phase1CfgNode, func.code.len + 1);
+        errdefer ctx.memory.free(Phase1CfgNode, nodes);
+        @memset(nodes, .{});
+
+        var pc: usize = 0;
+        var atom_index: usize = 0;
+        while (pc < func.code.len) {
+            const op_id = func.code[pc];
+            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
+            const size: usize = instr.size;
+            if (size == 0 or pc + size > func.code.len) return error.InvalidBytecode;
+            if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
+                if (offset + 4 > size) return error.InvalidBytecode;
+            }
+            nodes[pc] = .{ .size = instr.size, .is_temp = instr.is_temp };
+            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+            pc += size;
+        }
+        if (pc != func.code.len or atom_index != func.atom_operands.len) {
+            return error.InvalidBytecode;
+        }
+
+        const worklist = try ctx.memory.alloc(usize, func.code.len + 1);
+        defer ctx.memory.free(usize, worklist);
+        var worklist_len: usize = 0;
+        try enqueuePhase1Reachable(nodes, worklist, &worklist_len, 0);
+
+        var worklist_index: usize = 0;
+        while (worklist_index < worklist_len) : (worklist_index += 1) {
+            const current = worklist[worklist_index];
+            if (current == func.code.len) continue;
+
+            const node = nodes[current];
+            const op_id = func.code[current];
+            const next = current + node.size;
+            if (topologyLabelOperandOffset(op_id, node.is_temp)) |offset| {
+                const target = std.mem.readInt(u32, func.code[current + offset ..][0..4], .little);
+                if (!isPhase2EmptyGosub(func.code, nodes, current)) {
+                    try enqueuePhase1Reachable(nodes, worklist, &worklist_len, target);
+                }
+                if (op_id != opcode.op.goto) {
+                    try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
+                }
+            } else if (!isPhase2TerminalOp(op_id)) {
+                try enqueuePhase1Reachable(nodes, worklist, &worklist_len, next);
+            }
+        }
+        return nodes;
+    }
+
+    fn isPhase1Reachable(nodes: []const Phase1CfgNode, pc: usize) bool {
+        return pc < nodes.len and nodes[pc].is_live;
+    }
+
     /// QuickJS `resolve_variables` discard fold (quickjs.c:34343): once the
     /// assignment value is unused, the stack permutation itself can disappear.
     fn discardedIndexedStoreOp(code: []const u8, jump_targets: []const bool, pc: usize) ?u8 {
@@ -6771,6 +6773,118 @@ pub const pipeline_resolve_variables = struct {
         if (put_op != opcode.op.put_array_el and put_op != opcode.op.put_ref_value) return null;
         if (jump_targets[pc + 1] or jump_targets[pc + 2]) return null;
         return put_op;
+    }
+
+    const Phase1LogicalPrefix = struct {
+        branch_op: u8,
+        target: usize,
+        end_pc: usize,
+    };
+
+    const Phase1LogicalChain = struct {
+        branch_op: u8,
+        target: usize,
+        end_pc: usize,
+    };
+
+    fn skipPhase1LineMarkers(code: []const u8, start_pc: usize) ?usize {
+        var pc = start_pc;
+        while (pc < code.len and code[pc] == opcode.op.line_num) {
+            if (pc + opcode.sizeOfPhase1(opcode.op.line_num) > code.len) return null;
+            pc += opcode.sizeOfPhase1(opcode.op.line_num);
+        }
+        return pc;
+    }
+
+    fn phase1LogicalPrefix(
+        code: []const u8,
+        jump_targets: []const bool,
+        pc: usize,
+        guard_consumed_suffix: bool,
+    ) ?Phase1LogicalPrefix {
+        if (pc >= code.len or code[pc] != opcode.op.dup or jump_targets.len != code.len + 1) return null;
+
+        const branch_pc = skipPhase1LineMarkers(code, pc + 1) orelse return null;
+        if (branch_pc + 5 > code.len) return null;
+        const branch_op = code[branch_pc];
+        if (branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) return null;
+
+        const drop_pc = skipPhase1LineMarkers(code, branch_pc + 5) orelse return null;
+        if (drop_pc >= code.len or code[drop_pc] != opcode.op.drop) return null;
+        const end_pc = drop_pc + 1;
+        if (guard_consumed_suffix) {
+            for (jump_targets[pc + 1 .. end_pc]) |is_target| {
+                if (is_target) return null;
+            }
+        }
+
+        const target = std.mem.readInt(u32, code[branch_pc + 1 ..][0..4], .little);
+        if (target > code.len) return null;
+        return .{
+            .branch_op = branch_op,
+            .target = target,
+            .end_pc = end_pc,
+        };
+    }
+
+    /// QuickJS `get_label_pos`: labels and line markers do not interrupt a
+    /// logical-chain target, and a bounded chain of gotos is followed before
+    /// inspecting the target opcode.
+    fn phase1LogicalTargetPc(code: []const u8, initial_target: usize) ?usize {
+        var target = initial_target;
+        var goto_hops: usize = 0;
+        while (goto_hops < 20) : (goto_hops += 1) {
+            var pc = target;
+            while (pc < code.len) {
+                switch (code[pc]) {
+                    opcode.op.line_num, opcode.op.label => {
+                        if (pc + 5 > code.len) return null;
+                        pc += 5;
+                    },
+                    opcode.op.goto => {
+                        if (pc + 5 > code.len) return null;
+                        target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+                        if (target > code.len) return null;
+                        break;
+                    },
+                    else => return pc,
+                }
+            } else return pc;
+        }
+        return null;
+    }
+
+    /// QuickJS performs this fold in `resolve_variables`, while labels are
+    /// still wide and OP_line_num markers still delimit source provenance:
+    ///
+    ///   dup if_false(l1) drop ... l1: if_false(l2) -> if_false(l2)
+    ///
+    /// The consumed branch/drop suffix must not be an independent entry point.
+    fn matchPhase1LogicalChain(
+        code: []const u8,
+        jump_targets: []const bool,
+        pc: usize,
+    ) ?Phase1LogicalChain {
+        const first = phase1LogicalPrefix(code, jump_targets, pc, true) orelse return null;
+        var target = first.target;
+        var hops: usize = 0;
+        while (hops < code.len) : (hops += 1) {
+            const target_pc = phase1LogicalTargetPc(code, target) orelse return null;
+            if (target_pc + 5 <= code.len and code[target_pc] == first.branch_op) {
+                const final_target = std.mem.readInt(u32, code[target_pc + 1 ..][0..4], .little);
+                if (final_target > code.len) return null;
+                return .{
+                    .branch_op = first.branch_op,
+                    .target = final_target,
+                    .end_pc = first.end_pc,
+                };
+            }
+
+            const next = phase1LogicalPrefix(code, jump_targets, target_pc, false) orelse return null;
+            if (next.branch_op != first.branch_op) return null;
+            target = next.target;
+        }
+        return null;
     }
 
     /// Bind the parser's tagged label identities to absolute phase-1 PCs.
@@ -6930,6 +7044,7 @@ pub const pipeline_resolve_variables = struct {
     /// make-ref tail plan is cached here so both later passes are read-only.
     fn analyzeResolutionEvents(
         ctx: *JSContext,
+        reachability: []const Phase1CfgNode,
         tail_atoms: []atom.Atom,
         tail_kinds: []u8,
         tail_local_indices: []u16,
@@ -6946,6 +7061,11 @@ pub const pipeline_resolve_variables = struct {
             const instr = topologyInstruction(code, atoms, pc, atom_index);
             const size: usize = instr.size;
             if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(reachability, pc)) {
+                if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
+                pc += size;
+                continue;
+            }
             if (instr.is_temp and (isScopeVarOp(op_id) or isScopeRefOp(op_id))) {
                 const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
                 const scope = decodeScopeOperand(code[pc + 5 ..][0..2]).level;
@@ -7011,6 +7131,8 @@ pub const pipeline_resolve_variables = struct {
     pub fn run(ctx: *JSContext) !void {
         const func = ctx.function;
         try bindParserLabels(ctx);
+        const phase1_reachability = try computePhase1Reachability(ctx);
+        defer ctx.memory.free(Phase1CfgNode, phase1_reachability);
         const phase1_jump_targets = try ctx.memory.alloc(bool, func.code.len + 1);
         defer ctx.memory.free(bool, phase1_jump_targets);
         try collectPhase1JumpTargets(func, phase1_jump_targets);
@@ -7033,6 +7155,7 @@ pub const pipeline_resolve_variables = struct {
 
         try analyzeResolutionEvents(
             ctx,
+            phase1_reachability,
             global_ref_tail_atoms,
             global_ref_tail_kinds,
             local_ref_tail_indices,
@@ -7064,6 +7187,18 @@ pub const pipeline_resolve_variables = struct {
         var scan_atom_idx: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
+            const instr = topologyInstruction(func.code, func.atom_operands, i, scan_atom_idx);
+            const input_size: usize = instr.size;
+            if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(phase1_reachability, i)) {
+                if (topologyInstructionHasAtom(op, instr.is_temp)) scan_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
+            if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
+                i += input_size;
+                continue;
+            }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
                 if (kind == LOCAL_REF_TAIL_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
@@ -7079,6 +7214,12 @@ pub const pipeline_resolve_variables = struct {
             if (discardedIndexedStoreOp(func.code, phase1_jump_targets, i) != null) {
                 output_size += 1;
                 i += 3;
+                continue;
+            }
+            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+                output_size += 5;
+                jump_count += 1;
+                i = logical.end_pc;
                 continue;
             }
             // Validate the parser-time OP_eval / OP_apply_eval scope index. The
@@ -7302,6 +7443,7 @@ pub const pipeline_resolve_variables = struct {
                 i += size;
             }
         }
+        if (scan_atom_idx != func.atom_operands.len) return error.InvalidBytecode;
 
         // Keep empty outputs as inert slices so later bytecode ownership has a
         // stable representation without touching allocator accounting.
@@ -7364,6 +7506,20 @@ pub const pipeline_resolve_variables = struct {
             // the lowered body resolve correctly.
             pc_map[i] = out_idx;
             const op = func.code[i];
+            const instr = topologyInstruction(func.code, func.atom_operands, i, in_atom_idx);
+            const input_size: usize = instr.size;
+            if (input_size == 0 or i + input_size > func.code.len) return error.InvalidBytecode;
+            if (!isPhase1Reachable(phase1_reachability, i)) {
+                for (i + 1..i + input_size) |dead_pc| pc_map[dead_pc] = out_idx;
+                if (topologyInstructionHasAtom(op, instr.is_temp)) in_atom_idx += 1;
+                i += input_size;
+                continue;
+            }
+            if (isPhase2EmptyGosub(func.code, phase1_reachability, i)) {
+                for (i + 1..i + input_size) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                i += input_size;
+                continue;
+            }
             if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
                 const kind = global_ref_tail_kinds[i];
                 if (kind == GLOBAL_REF_TAIL_DUP_PUT or kind == LOCAL_REF_TAIL_DUP_PUT) {
@@ -7386,6 +7542,16 @@ pub const pipeline_resolve_variables = struct {
                 out_idx += 1;
                 pc_map[i + 2] = out_idx;
                 i += 3;
+                continue;
+            }
+            if (matchPhase1LogicalChain(func.code, phase1_jump_targets, i)) |logical| {
+                output[out_idx] = logical.branch_op;
+                std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], @intCast(logical.target), .little);
+                jump_sites[out_jump_idx] = .{ .operand_pos = out_idx + 1 };
+                out_jump_idx += 1;
+                out_idx += 5;
+                for (i + 1..logical.end_pc) |consumed_pc| pc_map[consumed_pc] = out_idx;
+                i = logical.end_pc;
                 continue;
             }
             // Convert OP_eval / OP_apply_eval's parser scope index to QuickJS's
@@ -7696,6 +7862,13 @@ pub const pipeline_resolve_variables = struct {
                 i += size;
             }
         }
+        if (in_atom_idx != func.atom_operands.len or
+            out_idx > output.len or
+            out_atom_idx > output_atoms.len or
+            out_jump_idx > jump_sites.len)
+        {
+            return error.InvalidBytecode;
+        }
         // Terminal entry: pc_map[old_len] == out_idx handles jumps that
         // target exactly one-past-the-end (e.g. loop exit to the next
         // instruction after the final byte).
@@ -7917,8 +8090,7 @@ pub const pipeline_resolve_labels = struct {
         return cursor;
     }
 
-    fn threadedJumpTarget(code: []const u8, pc: usize) !usize {
-        const original = try jumpTarget(code, pc);
+    fn threadedTarget(code: []const u8, original: usize) !usize {
         var target = original;
         var depth: usize = 0;
         while (depth < 10) : (depth += 1) {
@@ -7931,11 +8103,127 @@ pub const pipeline_resolve_labels = struct {
         return original;
     }
 
+    fn threadedJumpTarget(code: []const u8, pc: usize) !usize {
+        return threadedTarget(code, try jumpTarget(code, pc));
+    }
+
+    /// QuickJS applies the same bounded `find_jump_target` walk to all five
+    /// `atom_label_u8` dynamic-environment probes. Unlike an ordinary goto,
+    /// the probe itself is never removed or replaced by a terminal opcode:
+    /// only its taken edge is retargeted past an intervening goto chain.
+    fn threadedAtomLabelTarget(code: []const u8, pc: usize) !usize {
+        return threadedTarget(code, try atomLabelTarget(code, pc));
+    }
+
     fn resolvedJumpTarget(code: []const u8, pc: usize) !usize {
         return switch (code[pc]) {
             opcode.op.goto, opcode.op.if_false, opcode.op.if_true => threadedJumpTarget(code, pc),
             else => jumpTarget(code, pc),
         };
+    }
+
+    /// QuickJS `code_has_label` recognises a jump whose resolved label is at
+    /// the following bytecode boundary. Consecutive labels and an immediately
+    /// following goto to the same resolved label all denote that boundary.
+    fn targetAppearsAtFollowingBoundary(code: []const u8, boundary_pc: usize, target: usize) !bool {
+        var cursor = boundary_pc;
+        while (cursor < code.len and code[cursor] == opcode.op.label) {
+            if (cursor == target) return true;
+            if (cursor + 5 > code.len) return error.InvalidBytecode;
+            cursor += 5;
+        }
+        if (cursor == target) return true;
+        if (cursor < code.len and code[cursor] == opcode.op.goto) {
+            return try jumpTarget(code, cursor) == target;
+        }
+        return false;
+    }
+
+    fn jumpTargetsNextInstruction(code: []const u8, pc: usize) !bool {
+        if (pc >= code.len) return error.InvalidBytecode;
+        const op_id = code[pc];
+        if (op_id != opcode.op.goto and op_id != opcode.op.if_false and op_id != opcode.op.if_true) {
+            return false;
+        }
+        if (pc + 5 > code.len) return error.InvalidBytecode;
+        const target = try resolvedJumpTarget(code, pc);
+        return targetAppearsAtFollowingBoundary(code, pc + 5, target);
+    }
+
+    const ConditionalGotoPeephole = struct {
+        branch_op: u8,
+        target: usize,
+        total_size: usize,
+    };
+
+    /// `if_* L1; goto L2; L1:` becomes the inverted conditional branch to L2.
+    /// The goto must be adjacent: QuickJS skips source markers here, which are
+    /// already represented out-of-band by this phase, but it does not cross a
+    /// real label or instruction between the conditional and goto.
+    fn matchConditionalGotoPeephole(code: []const u8, pc: usize) !?ConditionalGotoPeephole {
+        if (pc + 10 > code.len) return null;
+        const branch_op = code[pc];
+        if ((branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) or
+            code[pc + 5] != opcode.op.goto)
+        {
+            return null;
+        }
+        if (hasJumpTargetTo(code, pc + 5)) return null;
+        const branch_target = try resolvedJumpTarget(code, pc);
+        if (!try targetAppearsAtFollowingBoundary(code, pc + 10, branch_target)) return null;
+        return .{
+            .branch_op = if (branch_op == opcode.op.if_false) opcode.op.if_true else opcode.op.if_false,
+            .target = try jumpTarget(code, pc + 5),
+            .total_size = 10,
+        };
+    }
+
+    fn hasSourceMarkerAt(source_locs: []const pipeline_pc2line.SourceLocSlot, pc: usize) bool {
+        for (source_locs) |slot| {
+            if (slot.pc == pc) return true;
+        }
+        return false;
+    }
+
+    fn terminalOpAtTarget(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        raw_target: usize,
+    ) ?u8 {
+        var target = skipLabels(code, raw_target) catch return null;
+        if (target >= code.len) return null;
+        switch (code[target]) {
+            opcode.op.@"return", opcode.op.return_undef, opcode.op.throw => return code[target],
+            else => {},
+        }
+        while (target < code.len and code[target] == opcode.op.drop) {
+            target += 1;
+            // QuickJS examines the raw phase-2 stream here. A source marker
+            // after the first drop interrupts its bytewise drop* scan even
+            // though resolve_labels later moves that marker to pc2line data.
+            if (hasSourceMarkerAt(source_locs, target)) return null;
+        }
+        if (target < code.len and code[target] == opcode.op.return_undef) {
+            return opcode.op.return_undef;
+        }
+        return null;
+    }
+
+    /// QuickJS `find_jump_target` folds a goto whose threaded destination is
+    /// return/return_undef/throw. It also treats one or more drops immediately
+    /// before return_undef as the same terminal target because the whole frame
+    /// is discarded on return.
+    fn gotoTerminalOp(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        pc: usize,
+    ) ?u8 {
+        if (pc >= code.len or code[pc] != opcode.op.goto) return null;
+        return terminalOpAtTarget(
+            code,
+            source_locs,
+            resolvedJumpTarget(code, pc) catch return null,
+        );
     }
 
     fn relOffset(from_pc: usize, target_pc: usize) i64 {
@@ -8071,67 +8359,168 @@ pub const pipeline_resolve_labels = struct {
     };
 
     fn matchConstantTestPeephole(code: []const u8, pc: usize) ?ConstantTestPeephole {
-        if (pc + 10 > code.len or code[pc] != opcode.op.push_i32) return null;
-        const jump_pc = pc + 5;
+        if (pc >= code.len) return null;
+        const Producer = struct {
+            size: usize,
+            truthy: bool,
+        };
+        const producer: Producer = switch (code[pc]) {
+            opcode.op.push_false, opcode.op.null, opcode.op.undefined => .{ .size = @as(usize, 1), .truthy = false },
+            opcode.op.push_true => .{ .size = @as(usize, 1), .truthy = true },
+            opcode.op.push_i32 => blk: {
+                if (pc + 5 > code.len) return null;
+                break :blk .{
+                    .size = @as(usize, 5),
+                    .truthy = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little) != 0,
+                };
+            },
+            else => return null,
+        };
+        const jump_pc = pc + producer.size;
+        if (jump_pc + 5 > code.len) return null;
         const jump_op = code[jump_pc];
         if (jump_op != opcode.op.if_false and jump_op != opcode.op.if_true) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 10)) return null;
-        const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
-        const truthy = value != 0;
+        const total_size = producer.size + 5;
+        if (hasJumpTargetInRange(code, pc + 1, pc + total_size)) return null;
         return .{
-            .taken = if (jump_op == opcode.op.if_true) truthy else !truthy,
+            .taken = if (jump_op == opcode.op.if_true) producer.truthy else !producer.truthy,
             .jump_pc = jump_pc,
-            .total_size = 10,
+            .total_size = total_size,
         };
+    }
+
+    const ConstantTestAction = union(enum) {
+        fallthrough,
+        terminal: u8,
+        jump: usize,
+    };
+
+    fn constantTestAction(
+        code: []const u8,
+        source_locs: []const pipeline_pc2line.SourceLocSlot,
+        peephole: ConstantTestPeephole,
+    ) !ConstantTestAction {
+        if (!peephole.taken) return .fallthrough;
+        const target = try resolvedJumpTarget(code, peephole.jump_pc);
+        // QuickJS tests raw adjacency before terminal folding. Preserve that
+        // ordering because the target instruction, rather than a synthetic
+        // terminal, owns source locations in the adjacent case.
+        if (try targetAppearsAtFollowingBoundary(code, peephole.jump_pc + 5, target)) {
+            return .fallthrough;
+        }
+        if (terminalOpAtTarget(code, source_locs, target)) |terminal_op| {
+            return .{ .terminal = terminal_op };
+        }
+        return .{ .jump = target };
     }
 
     const PushI32NegPeephole = struct {
         value: i32,
+        discarded: bool,
         total_size: usize,
     };
 
     fn matchPushI32NegPeephole(code: []const u8, pc: usize) ?PushI32NegPeephole {
         if (pc + 6 > code.len or code[pc] != opcode.op.push_i32 or code[pc + 5] != opcode.op.neg) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
         if (value == std.math.minInt(i32) or value == 0) return null;
-        return .{ .value = -value, .total_size = 6 };
-    }
-
-    fn canSkipDeadCodeAfter(op_id: u8) bool {
-        return switch (op_id) {
-            opcode.op.goto,
-            opcode.op.tail_call,
-            opcode.op.tail_call_method,
-            opcode.op.@"return",
-            opcode.op.return_undef,
-            opcode.op.throw,
-            opcode.op.throw_error,
-            opcode.op.ret,
-            => true,
-            else => false,
-        };
-    }
-
-    fn deadCodePastTerminalSize(code: []const u8, pc: usize) ?usize {
-        if (pc >= code.len or !canSkipDeadCodeAfter(code[pc])) return null;
-        const terminal_size = instrSize(code[pc]);
-        var scan_pc = pc + terminal_size;
-        var skipped: usize = 0;
-        while (scan_pc < code.len) {
-            if (hasJumpTargetTo(code, scan_pc)) break;
-            const op_id = code[scan_pc];
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or scan_pc + size > code.len) return null;
-            scan_pc += size;
-            skipped += size;
+        if (pc + 7 <= code.len and
+            code[pc + 6] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+        {
+            return .{ .value = -value, .discarded = true, .total_size = 7 };
         }
-        return if (skipped == 0) null else skipped;
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        return .{ .value = -value, .discarded = false, .total_size = 6 };
+    }
+
+    const PushBigIntI32NegPeephole = struct {
+        value: i32,
+        discarded: bool,
+        total_size: usize,
+    };
+
+    fn matchPushBigIntI32NegPeephole(code: []const u8, pc: usize) ?PushBigIntI32NegPeephole {
+        if (pc + 6 > code.len or
+            code[pc] != opcode.op.push_bigint_i32 or
+            code[pc + 5] != opcode.op.neg)
+        {
+            return null;
+        }
+        const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+        if (pc + 7 <= code.len and
+            code[pc + 6] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+        {
+            return .{ .value = value, .discarded = true, .total_size = 7 };
+        }
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        if (value == std.math.minInt(i32)) return null;
+        return .{ .value = -value, .discarded = false, .total_size = 6 };
+    }
+
+    const PushAtomValuePeephole = struct {
+        kind: enum {
+            discarded,
+            empty_string,
+        },
+        total_size: usize,
+    };
+
+    fn matchPushAtomValuePeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?PushAtomValuePeephole {
+        if (pc + 5 > code.len or code[pc] != opcode.op.push_atom_value) return null;
+        const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+
+        // QuickJS never emits tagged integer atoms for string literals: they
+        // fall back to push_const. Keep that producer boundary explicit until
+        // zjs's cpool allocation order can be aligned independently.
+        if (!atom.isTaggedInt(atom_id) and
+            pc + 6 <= code.len and
+            code[pc + 5] == opcode.op.drop and
+            !hasJumpTargetInRange(code, pc + 1, pc + 6))
+        {
+            return .{ .kind = .discarded, .total_size = 6 };
+        }
+
+        if (use_short_opcodes and
+            atom_id == atom.ids.empty_string and
+            !hasJumpTargetInRange(code, pc + 1, pc + 5))
+        {
+            return .{ .kind = .empty_string, .total_size = 5 };
+        }
+        return null;
+    }
+
+    fn discardedPushI32DropPairSize(code: []const u8, pc: usize) ?usize {
+        if (pc + 6 > code.len or
+            code[pc] != opcode.op.push_i32 or
+            code[pc + 5] != opcode.op.drop)
+        {
+            return null;
+        }
+        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        return 6;
+    }
+
+    fn dropReturnUndefPairSize(code: []const u8, pc: usize) ?usize {
+        if (pc + 2 > code.len or
+            code[pc] != opcode.op.drop or
+            code[pc + 1] != opcode.op.return_undef or
+            hasJumpTargetTo(code, pc + 1))
+        {
+            return null;
+        }
+        return 2;
     }
 
     fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
         if (pc + 2 > code.len) return null;
-        if (code[pc] == opcode.op.undefined and code[pc + 1] == opcode.op.drop) return 2;
+        if (code[pc] == opcode.op.undefined and
+            code[pc + 1] == opcode.op.drop and
+            !hasJumpTargetTo(code, pc + 1))
+        {
+            return 2;
+        }
         return null;
     }
 
@@ -8173,12 +8562,6 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    const LogicalChainPeephole = struct {
-        branch_op: u8,
-        target: usize,
-        total_size: usize,
-    };
-
     const NullishTestPeephole = struct {
         test_op: u8,
         branch_op: ?u8,
@@ -8201,7 +8584,7 @@ pub const pipeline_resolve_labels = struct {
         {
             return null;
         }
-        return 2 + (deadCodePastTerminalSize(code, pc + 1) orelse 0);
+        return 2;
     }
 
     /// QuickJS short-opcode folds for `value === null/undefined` and for the
@@ -8274,48 +8657,6 @@ pub const pipeline_resolve_labels = struct {
             .target = target,
             .total_size = 12,
         };
-    }
-
-    /// Collapse the prefix of a chained logical expression:
-    ///
-    ///   dup if_false(l1) drop ... l1: if_false(l2)
-    ///     -> if_false(l2) ... l1: if_false(l2)
-    ///
-    /// and likewise for `if_true`.  This mirrors QuickJS's resolve-labels
-    /// peephole.  The branch and drop must not be independent control-flow
-    /// entry points because both are removed from this occurrence.
-    fn matchLogicalChainPeephole(code: []const u8, pc: usize) ?LogicalChainPeephole {
-        if (pc + 7 > code.len or code[pc] != opcode.op.dup) return null;
-        const branch_op = code[pc + 1];
-        if (branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) return null;
-        if (code[pc + 6] != opcode.op.drop) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
-
-        var target = jumpTarget(code, pc + 1) catch return null;
-        var depth: usize = 0;
-        while (depth < 32) : (depth += 1) {
-            const target_pc = skipLabels(code, target) catch return null;
-            if (target_pc >= code.len) return null;
-
-            if (code[target_pc] == branch_op) {
-                const final_target = resolvedJumpTarget(code, target_pc) catch return null;
-                return .{
-                    .branch_op = branch_op,
-                    .target = final_target,
-                    .total_size = 7,
-                };
-            }
-
-            if (target_pc + 7 > code.len or
-                code[target_pc] != opcode.op.dup or
-                code[target_pc + 1] != branch_op or
-                code[target_pc + 6] != opcode.op.drop)
-            {
-                return null;
-            }
-            target = jumpTarget(code, target_pc + 1) catch return null;
-        }
-        return null;
     }
 
     /// QuickJS `resolve_labels` begins this family at quickjs.c:35264. Atom
@@ -8406,10 +8747,34 @@ pub const pipeline_resolve_labels = struct {
 
     const AddLocPeephole = struct {
         idx: u16,
-        rhs_op: u8,
+        rhs_is_empty_string: bool,
         rhs_size: usize,
         total_size: usize,
     };
+
+    /// Exact wide RHS producer family accepted by QuickJS's add_loc fold
+    /// (quickjs.c:35417-35458). Constant-pool values and tagged integer atoms
+    /// are deliberately excluded: QuickJS emits neither through the matched
+    /// push_atom_value/push_i32 producer paths.
+    fn qjsAddLocRhsSize(code: []const u8, pc: usize) ?usize {
+        if (pc >= code.len) return null;
+        const op_id = code[pc];
+
+        if (op_id == opcode.op.push_atom_value) {
+            if (pc + 5 > code.len) return null;
+            const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (atom.isTaggedInt(atom_id)) return null;
+            return 5;
+        }
+
+        const size: usize = switch (op_id) {
+            opcode.op.push_i32 => 5,
+            opcode.op.get_loc, opcode.op.get_arg, opcode.op.get_var_ref => 3,
+            else => return null,
+        };
+        if (pc + size > code.len) return null;
+        return size;
+    }
 
     fn matchAddLocPeephole(code: []const u8, pc: usize) ?AddLocPeephole {
         if (pc + 3 > code.len) return null;
@@ -8421,12 +8786,7 @@ pub const pipeline_resolve_labels = struct {
         const rhs_pc = pc + 3;
         if (rhs_pc >= code.len) return null;
         const rhs_op = code[rhs_pc];
-
-        const rhs_size = switch (rhs_op) {
-            opcode.op.push_i32, opcode.op.push_const, opcode.op.push_atom_value => @as(usize, 5),
-            opcode.op.get_loc, opcode.op.get_arg, opcode.op.get_var_ref => @as(usize, 3),
-            else => return null,
-        };
+        const rhs_size = qjsAddLocRhsSize(code, rhs_pc) orelse return null;
 
         const suffix_pc = rhs_pc + rhs_size;
         if (suffix_pc + 6 > code.len) return null;
@@ -8448,7 +8808,8 @@ pub const pipeline_resolve_labels = struct {
 
         return .{
             .idx = idx,
-            .rhs_op = rhs_op,
+            .rhs_is_empty_string = rhs_op == opcode.op.push_atom_value and
+                std.mem.readInt(u32, code[rhs_pc + 1 ..][0..4], .little) == atom.ids.empty_string,
             .rhs_size = rhs_size,
             .total_size = total_len,
         };
@@ -8603,6 +8964,112 @@ pub const pipeline_resolve_labels = struct {
         return false;
     }
 
+    const reachability_boundary: u8 = 1 << 0;
+    const reachability_live: u8 = 1 << 1;
+
+    fn enqueueReachable(
+        states: []u8,
+        worklist: []usize,
+        worklist_len: *usize,
+        target: usize,
+    ) !void {
+        if (target >= states.len or states[target] & reachability_boundary == 0) {
+            return error.InvalidBytecode;
+        }
+        if (states[target] & reachability_live != 0) return;
+        if (worklist_len.* >= worklist.len) return error.InvalidBytecode;
+        states[target] |= reachability_live;
+        worklist[worklist_len.*] = target;
+        worklist_len.* += 1;
+    }
+
+    /// Compute instruction-boundary CFG reachability before layout. QuickJS
+    /// removes a dead jump's label reference while skipping unreachable code;
+    /// using the original jump set as a liveness oracle therefore preserves
+    /// targets referenced only by dead code and cannot eliminate dead cycles.
+    /// An explicit graph gives the same fixed point without mutating the input
+    /// or coupling reachability to the iterative short-jump layout.
+    fn computeReachability(ctx: *const JSContext) ![]u8 {
+        const code = ctx.function.code;
+        const states = try ctx.memory.alloc(u8, code.len + 1);
+        errdefer ctx.memory.free(u8, states);
+        @memset(states, 0);
+
+        var pc: usize = 0;
+        while (pc < code.len) {
+            states[pc] |= reachability_boundary;
+            const size = if (code[pc] == opcode.op.label) 5 else instrSize(code[pc]);
+            if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            pc += size;
+        }
+        if (pc != code.len) return error.InvalidBytecode;
+        states[code.len] |= reachability_boundary;
+
+        const worklist = try ctx.memory.alloc(usize, code.len + 1);
+        defer ctx.memory.free(usize, worklist);
+        var worklist_len: usize = 0;
+        try enqueueReachable(states, worklist, &worklist_len, 0);
+
+        var worklist_index: usize = 0;
+        while (worklist_index < worklist_len) : (worklist_index += 1) {
+            const current = worklist[worklist_index];
+            if (current == code.len) continue;
+
+            const op_id = code[current];
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+            if (size == 0 or current + size > code.len) return error.InvalidBytecode;
+            const next = current + size;
+
+            if (matchConstantTestPeephole(code, current)) |peephole| {
+                switch (try constantTestAction(code, ctx.function.source_loc_slots, peephole)) {
+                    .fallthrough => try enqueueReachable(
+                        states,
+                        worklist,
+                        &worklist_len,
+                        current + peephole.total_size,
+                    ),
+                    .terminal => {},
+                    .jump => |target| try enqueueReachable(states, worklist, &worklist_len, target),
+                }
+            } else if (try matchConditionalGotoPeephole(code, current)) |peephole| {
+                // Layout replaces `if_* L1; goto L2; L1:` with an inverted
+                // branch to L2 and falls through at the boundary after the
+                // consumed goto. Model those output successors directly:
+                // threaded input targets can otherwise bypass the fallthrough
+                // trampoline, while terminal folding can hide L2.
+                try enqueueReachable(states, worklist, &worklist_len, peephole.target);
+                try enqueueReachable(
+                    states,
+                    worklist,
+                    &worklist_len,
+                    current + peephole.total_size,
+                );
+            } else if (op_id == opcode.op.goto) {
+                if (try jumpTargetsNextInstruction(code, current)) {
+                    try enqueueReachable(states, worklist, &worklist_len, next);
+                } else if (gotoTerminalOp(code, ctx.function.source_loc_slots, current) == null) {
+                    try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                }
+            } else if (op_id == opcode.op.if_false or op_id == opcode.op.if_true) {
+                try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            } else if (isJumpOp(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            } else if (isAtomLabelU8Op(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, try threadedAtomLabelTarget(code, current));
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            } else if (!isTerminalOp(op_id)) {
+                try enqueueReachable(states, worklist, &worklist_len, next);
+            }
+        }
+        return states;
+    }
+
+    fn isReachable(states: []const u8, pc: usize) bool {
+        return pc < states.len and states[pc] & reachability_live != 0;
+    }
+
     fn redundantReturnUndefSize(code: []const u8, pc: usize) ?usize {
         if (pc >= code.len or code[pc] != opcode.op.return_undef) return null;
         if (hasJumpTargetTo(code, pc)) return null;
@@ -8739,8 +9206,10 @@ pub const pipeline_resolve_labels = struct {
         out_idx.* += size;
     }
 
-    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) usize {
+    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) !usize {
         if (code[pc] == opcode.op.label) return in_size;
+        if (try jumpTargetsNextInstruction(code, pc)) return in_size;
+        if (try matchConditionalGotoPeephole(code, pc)) |p| return p.total_size;
         if (matchGetLengthPeephole(code, pc, use_short_opcodes)) |size| return size;
         if (matchDiscardedFieldStorePeephole(code, pc)) |p| return p.total_size;
         if (undefinedDropPairSize(code, pc)) |size| return size;
@@ -8748,7 +9217,6 @@ pub const pipeline_resolve_labels = struct {
         if (redundantReturnUndefSize(code, pc)) |size| return size;
         if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
         if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
-        if (matchLogicalChainPeephole(code, pc)) |p| return p.total_size;
         if (matchDupPutPeephole(code, pc)) |p| return p.total_size;
         if (matchPutGetPeephole(code, pc)) |p| return p.total_size;
         if (matchIncLocPeephole(code, pc)) |p| return p.total_size;
@@ -8756,20 +9224,21 @@ pub const pipeline_resolve_labels = struct {
         if (matchPostUpdatePeephole(code, pc)) |p| return p.total_size;
         if (matchConstantTestPeephole(code, pc)) |p| return p.total_size;
         if (matchPushI32NegPeephole(code, pc)) |p| return p.total_size;
-        return in_size + (deadCodePastTerminalSize(code, pc) orelse 0);
+        if (matchPushBigIntI32NegPeephole(code, pc)) |p| return p.total_size;
+        if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
+        if (discardedPushI32DropPairSize(code, pc)) |size| return size;
+        if (dropReturnUndefPairSize(code, pc)) |size| return size;
+        return in_size;
     }
 
-    /// QuickJS removes a call whose finalizer contains only `ret`.  The parser
-    /// still emits the uniform try/catch topology for a syntactic try/catch;
-    /// removing the empty `gosub` here keeps that topology free of runtime cost.
-    fn isEmptyGosub(code: []const u8, pc: usize) bool {
-        if (pc >= code.len or code[pc] != opcode.op.gosub) return false;
-        const target = jumpTarget(code, pc) catch return false;
-        const target_pc = skipLabels(code, target) catch return false;
-        return target_pc < code.len and code[target_pc] == opcode.op.ret;
-    }
-
-    fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
+    fn computeLayout(
+        ctx: *const JSContext,
+        positions: []usize,
+        sizes: []usize,
+        reachability: []const u8,
+        use_short_opcodes: bool,
+        initial_pc: usize,
+    ) !usize {
         const code = ctx.function.code;
         @memset(positions, 0);
         @memset(sizes, 0);
@@ -8792,11 +9261,27 @@ pub const pipeline_resolve_labels = struct {
                 const in_size = if (op == opcode.op.label) 5 else instrSize(op);
                 if (pc + in_size > code.len) return error.InvalidBytecode;
 
+                if (!isReachable(reachability, pc)) {
+                    sizes[pc] = 0;
+                    if (old_size != 0) changed = true;
+                    const next_pc = pc + in_size;
+                    var boundary_pc = pc + 1;
+                    while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
+                        positions[boundary_pc] = out_pc;
+                    }
+                    pc = next_pc;
+                    continue;
+                }
+
                 const new_size: usize = if (op == opcode.op.label)
                     0
-                else if (isEmptyGosub(code, pc))
-                    0
-                else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
+                else if (try jumpTargetsNextInstruction(code, pc))
+                    if (op == opcode.op.goto) 0 else instrSize(opcode.op.drop)
+                else if (try matchConditionalGotoPeephole(code, pc)) |p| blk: {
+                    const target_pc = positions[p.target];
+                    const diff = relOffset(out_pc, target_pc);
+                    break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
+                } else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
                     1
                 else if (matchDiscardedFieldStorePeephole(code, pc) != null)
                     instrSize(opcode.op.put_field)
@@ -8816,28 +9301,44 @@ pub const pipeline_resolve_labels = struct {
                     const target_pc = positions[p.target];
                     const diff = relOffset(out_pc + 1, target_pc);
                     break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
-                } else if (matchLogicalChainPeephole(code, pc)) |p| blk: {
-                    const target_pc = positions[p.target];
-                    const diff = relOffset(out_pc, target_pc);
-                    break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
                 } else if (matchDupPutPeephole(code, pc)) |p|
                     loweredSlotInstructionSize(p.result_op, p.idx, use_short_opcodes)
                 else if (matchPutGetPeephole(code, pc)) |p|
                     loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
                 else if (matchIncLocPeephole(code, pc) != null)
                     2
-                else if (matchAddLocPeephole(code, pc)) |_|
-                    loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
+                else if (matchAddLocPeephole(code, pc)) |p|
+                    (if (use_short_opcodes and p.rhs_is_empty_string)
+                        instrSize(opcode.op.push_empty_string)
+                    else
+                        loweredInstrSize(code, pc + 3, use_short_opcodes)) + 2
                 else if (matchPostUpdatePeephole(code, pc)) |p|
                     postUpdateOutputSize(p, use_short_opcodes)
                 else if (matchConstantTestPeephole(code, pc)) |p| blk: {
-                    if (!p.taken) break :blk 0;
-                    const target = try resolvedJumpTarget(code, p.jump_pc);
-                    const target_pc = positions[target];
-                    const diff = relOffset(out_pc, target_pc);
-                    break :blk jumpSizeForOffset(opcode.op.goto, diff, use_short_opcodes);
+                    break :blk switch (try constantTestAction(code, ctx.function.source_loc_slots, p)) {
+                        .fallthrough => 0,
+                        .terminal => 1,
+                        .jump => |target| jumpSizeForOffset(
+                            opcode.op.goto,
+                            relOffset(out_pc, positions[target]),
+                            use_short_opcodes,
+                        ),
+                    };
                 } else if (matchPushI32NegPeephole(code, pc)) |p|
-                    loweredPushI32Size(p.value, use_short_opcodes)
+                    if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
+                else if (matchPushBigIntI32NegPeephole(code, pc)) |p|
+                    if (p.discarded) 0 else instrSize(opcode.op.push_bigint_i32)
+                else if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p|
+                    switch (p.kind) {
+                        .discarded => 0,
+                        .empty_string => instrSize(opcode.op.push_empty_string),
+                    }
+                else if (discardedPushI32DropPairSize(code, pc) != null)
+                    0
+                else if (dropReturnUndefPairSize(code, pc) != null)
+                    instrSize(opcode.op.return_undef)
+                else if (gotoTerminalOp(code, ctx.function.source_loc_slots, pc) != null)
+                    1
                 else if (isAtomLabelU8Op(op))
                     instrSize(op)
                 else if (isJumpOp(op)) blk: {
@@ -8849,10 +9350,110 @@ pub const pipeline_resolve_labels = struct {
 
                 sizes[pc] = new_size;
                 if (old_size != new_size) changed = true;
-                const next_pc = pc + optimizedInputSize(code, pc, use_short_opcodes, in_size);
+                const next_pc = pc + try optimizedInputSize(code, pc, use_short_opcodes, in_size);
                 var boundary_pc = pc + 1;
                 while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
+                }
+                if (matchUndefinedReturnPeephole(code, pc) != null) {
+                    // QJS attributes the consumed return's source marker to
+                    // return_undef. The matcher already rejects an external
+                    // jump target at this boundary.
+                    positions[pc + 1] = out_pc;
+                }
+                if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| {
+                    // QJS attributes source markers on the consumed compare
+                    // and branch to the replacement nullish test. The matcher
+                    // rejects control-flow entry into those boundaries, so
+                    // mapping them back is source-only.
+                    positions[pc + 1] = out_pc;
+                    if (p.branch_op != null) positions[pc + 2] = out_pc;
+                }
+                if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| {
+                    // QJS attributes an equality fold to the consumed compare.
+                    // For an inequality branch fold it first observes that
+                    // compare source, then lets the consumed if_false source
+                    // supersede it at the same replacement pc. Mapping both
+                    // boundaries preserves that order. The matcher rejects
+                    // control-flow entry into the consumed range.
+                    positions[pc + 6] = out_pc;
+                    if (p.branch_op != null) positions[pc + 7] = out_pc;
+                }
+                if (matchConstantTestPeephole(code, pc)) |p| {
+                    // QJS applies a source marker before the consumed branch
+                    // to the replacement goto. The interior-target guard
+                    // makes this boundary remap source-only.
+                    positions[p.jump_pc] = out_pc;
+                }
+                if (try matchConditionalGotoPeephole(code, pc) != null) {
+                    // QJS carries a source marker before the consumed goto to
+                    // the replacement inverted branch.
+                    positions[pc + 5] = out_pc;
+                }
+                if (matchPutGetPeephole(code, pc) != null) {
+                    // QJS applies the source marker before the consumed get to
+                    // the replacement set. The matcher rejects control-flow
+                    // entry into the get, so remapping that opcode boundary
+                    // back to the replacement start is source-only.
+                    positions[pc + 3] = out_pc;
+                }
+                if (matchIncLocPeephole(code, pc)) |p| {
+                    // QJS attributes every consumed update/store/drop marker
+                    // to the replacement inc_loc/dec_loc. The matcher rejects
+                    // control-flow entry into the consumed suffix.
+                    positions[pc + 3] = out_pc;
+                    positions[pc + 4] = out_pc;
+                    if (p.total_size == 8) {
+                        positions[pc + 7] = out_pc;
+                    } else {
+                        positions[pc + 5] = out_pc;
+                        positions[pc + 8] = out_pc;
+                    }
+                }
+                if (matchAddLocPeephole(code, pc)) |p| {
+                    // code_match retains the last source marker visited before
+                    // any consumed RHS/add/dup/put/drop opcode, then QJS emits
+                    // that marker once at the replacement RHS start. There is
+                    // no separate source update at add_loc; the input end keeps
+                    // the default mapping to the output end.
+                    const rhs_pc = pc + 3;
+                    const add_pc = rhs_pc + p.rhs_size;
+                    const dup_pc = add_pc + 1;
+                    const put_pc = dup_pc + 1;
+                    const drop_pc = put_pc + 3;
+                    positions[pc] = out_pc;
+                    positions[rhs_pc] = out_pc;
+                    positions[add_pc] = out_pc;
+                    positions[dup_pc] = out_pc;
+                    positions[put_pc] = out_pc;
+                    positions[drop_pc] = out_pc;
+                }
+                if (matchDupPutPeephole(code, pc)) |p| {
+                    // QJS attributes the replacement to the consumed put, or
+                    // to the following drop when that later source marker is
+                    // present. A trailing get's marker is deliberately delayed
+                    // until after the replacement (`line2` in QuickJS).
+                    positions[pc + 1] = out_pc;
+                    if (p.total_size >= 5) positions[pc + 4] = out_pc;
+                }
+                if (matchPushI32NegPeephole(code, pc) != null) {
+                    // QuickJS attributes the folded push to the unary minus.
+                    // A discarded push/neg/drop has size zero, so the same
+                    // mapping points all consumed source positions at the
+                    // surviving next instruction.
+                    positions[pc + 5] = out_pc;
+                }
+                if (matchPushBigIntI32NegPeephole(code, pc)) |p| {
+                    // QuickJS attributes the folded push to the unary minus.
+                    // A discarded push/neg/drop has size zero, so the default
+                    // boundary mapping also points the drop at the surviving
+                    // next instruction. The matcher rejects control-flow entry
+                    // into the entire consumed range.
+                    positions[pc + 5] = out_pc;
+                    if (p.discarded) positions[pc + 6] = out_pc;
+                }
+                if (dropReturnUndefPairSize(code, pc) != null) {
+                    positions[pc + 1] = out_pc;
                 }
                 out_pc += new_size;
                 pc = next_pc;
@@ -8892,7 +9493,7 @@ pub const pipeline_resolve_labels = struct {
 
     fn emitAtomLabelU8(code: []const u8, pc: usize, output: []u8, out_idx: *usize, positions: []const usize) !void {
         if (pc + 10 > code.len) return error.InvalidBytecode;
-        const target = try atomLabelTarget(code, pc);
+        const target = try threadedAtomLabelTarget(code, pc);
         const target_pc = positions[target];
         const current_pc = out_idx.*;
         const diff = @as(i64, @intCast(target_pc)) - @as(i64, @intCast(current_pc + 5));
@@ -9018,11 +9619,20 @@ pub const pipeline_resolve_labels = struct {
         defer ctx.memory.free(usize, positions);
         const sizes = try ctx.memory.alloc(usize, func.code.len + 1);
         defer ctx.memory.free(usize, sizes);
+        const reachability = try computeReachability(ctx);
+        defer ctx.memory.free(u8, reachability);
 
         // First pass: compute the old-pc -> new-pc layout. OP_label is
         // dropped; jumps are rewritten from parser absolute targets to the
         // pc-relative form expected after resolve_labels.
-        const output_size = try computeLayout(ctx, positions, sizes, use_short_opcodes, prologue_size);
+        const output_size = try computeLayout(
+            ctx,
+            positions,
+            sizes,
+            reachability,
+            use_short_opcodes,
+            prologue_size,
+        );
 
         // Keep empty output as an inert slice so bytecode ownership stays explicit
         // without touching allocator accounting.
@@ -9039,10 +9649,21 @@ pub const pipeline_resolve_labels = struct {
         var i: usize = 0;
         while (i < func.code.len) {
             const op = func.code[i];
-            if (op == opcode.op.label) {
+            const raw_size = if (op == opcode.op.label) 5 else instrSize(op);
+            if (i + raw_size > func.code.len) return error.InvalidBytecode;
+            if (!isReachable(reachability, i)) {
+                i += raw_size;
+            } else if (op == opcode.op.label) {
                 i += 5;
-            } else if (isEmptyGosub(func.code, i)) {
+            } else if (try jumpTargetsNextInstruction(func.code, i)) {
+                if (op != opcode.op.goto) {
+                    output[out_idx] = opcode.op.drop;
+                    out_idx += instrSize(opcode.op.drop);
+                }
                 i += instrSize(op);
+            } else if (try matchConditionalGotoPeephole(func.code, i)) |p| {
+                try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, sizes[i]);
+                i += p.total_size;
             } else if (matchGetLengthPeephole(func.code, i, use_short_opcodes)) |input_size| {
                 output[out_idx] = opcode.op.get_length;
                 out_idx += 1;
@@ -9076,10 +9697,6 @@ pub const pipeline_resolve_labels = struct {
                     try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
                 }
                 i += p.total_size;
-            } else if (matchLogicalChainPeephole(func.code, i)) |p| {
-                const size = sizes[i];
-                try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, size);
-                i += p.total_size;
             } else if (matchDupPutPeephole(func.code, i)) |p| {
                 try emitSlotInstruction(p.result_op, p.idx, output, &out_idx, use_short_opcodes);
                 i += p.total_size;
@@ -9092,7 +9709,15 @@ pub const pipeline_resolve_labels = struct {
                 out_idx += 2;
                 i += p.total_size;
             } else if (matchAddLocPeephole(func.code, i)) |p| {
-                try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
+                // This combined matcher precedes the standalone
+                // push_atom_value shortener, so mirror QuickJS's get_loc case
+                // and shorten an empty RHS before emitting add_loc.
+                if (use_short_opcodes and p.rhs_is_empty_string) {
+                    output[out_idx] = opcode.op.push_empty_string;
+                    out_idx += instrSize(opcode.op.push_empty_string);
+                } else {
+                    try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
+                }
                 output[out_idx] = opcode.op.add_loc;
                 output[out_idx + 1] = @intCast(p.idx);
                 out_idx += 2;
@@ -9114,19 +9739,48 @@ pub const pipeline_resolve_labels = struct {
                 }
                 i += p.total_size;
             } else if (matchConstantTestPeephole(func.code, i)) |p| {
-                if (p.taken) {
-                    const size = sizes[i];
-                    const target = try resolvedJumpTarget(func.code, p.jump_pc);
-                    try emitJumpToTarget(opcode.op.goto, target, output, &out_idx, positions, size);
+                switch (try constantTestAction(func.code, func.source_loc_slots, p)) {
+                    .fallthrough => {},
+                    .terminal => |terminal_op| {
+                        output[out_idx] = terminal_op;
+                        out_idx += 1;
+                    },
+                    .jump => |target| {
+                        const size = sizes[i];
+                        try emitJumpToTarget(opcode.op.goto, target, output, &out_idx, positions, size);
+                    },
                 }
                 i += p.total_size;
             } else if (matchPushI32NegPeephole(func.code, i)) |p| {
-                emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
+                if (!p.discarded) emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
                 i += p.total_size;
+            } else if (matchPushBigIntI32NegPeephole(func.code, i)) |p| {
+                if (!p.discarded) {
+                    output[out_idx] = opcode.op.push_bigint_i32;
+                    std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
+                    out_idx += instrSize(opcode.op.push_bigint_i32);
+                }
+                i += p.total_size;
+            } else if (matchPushAtomValuePeephole(func.code, i, use_short_opcodes)) |p| {
+                if (p.kind == .empty_string) {
+                    output[out_idx] = opcode.op.push_empty_string;
+                    out_idx += instrSize(opcode.op.push_empty_string);
+                }
+                i += p.total_size;
+            } else if (discardedPushI32DropPairSize(func.code, i)) |pair_size| {
+                i += pair_size;
+            } else if (dropReturnUndefPairSize(func.code, i)) |return_size| {
+                output[out_idx] = opcode.op.return_undef;
+                out_idx += instrSize(opcode.op.return_undef);
+                i += return_size;
+            } else if (gotoTerminalOp(func.code, func.source_loc_slots, i)) |terminal_op| {
+                output[out_idx] = terminal_op;
+                out_idx += 1;
+                i += instrSize(op);
             } else if (isJumpOp(op)) {
                 const size = sizes[i];
                 try emitJump(func.code, i, output, &out_idx, positions, size);
-                i += instrSize(op) + (deadCodePastTerminalSize(func.code, i) orelse 0);
+                i += instrSize(op);
             } else if (isAtomLabelU8Op(op)) {
                 try emitAtomLabelU8(func.code, i, output, &out_idx, positions);
                 i += instrSize(op);
@@ -9134,7 +9788,7 @@ pub const pipeline_resolve_labels = struct {
                 const size = instrSize(op);
                 if (i + size > func.code.len) return error.InvalidBytecode;
                 try emitLoweredInstruction(func.code, i, output, &out_idx, use_short_opcodes);
-                i += size + (deadCodePastTerminalSize(func.code, i) orelse 0);
+                i += size;
             }
         }
 
@@ -9165,7 +9819,7 @@ pub const pipeline_resolve_labels = struct {
             if (owned.len != 0) ctx.memory.free(atom.Atom, owned);
         };
 
-        func.remapSourceLocs(positions);
+        func.remapSourceLocsBeforeEnd(positions, code_to_install.len);
         if (code_was_trimmed and output.len != 0) ctx.memory.free(u8, output);
         func.installCode(code_to_install);
         trimmed_code_owned = false;
@@ -9747,7 +10401,6 @@ pub const pipeline_finalize = struct {
 
     const std = @import("std");
     const atom = @import("core/atom.zig");
-    const memory_mod = @import("core/memory.zig");
     const runtime_mod = @import("core/runtime.zig");
     const fb_mod = function_bytecode;
     const bytecode_function = function_mod;
@@ -9832,9 +10485,31 @@ pub const pipeline_finalize = struct {
         target: *function_def_mod.FunctionDef,
         owner: *function_def_mod.FunctionDef,
         local_idx: usize,
+        normalize_unscoped: bool,
     ) FinalizeError!void {
         if (local_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        resolve_variables.threadParentLocalSource(target, owner, @intCast(local_idx)) catch |err| return switch (err) {
+        const source_idx: u16 = @intCast(local_idx);
+        if (source_idx >= owner.vars.len) return error.InvalidBytecode;
+        owner.captureLocal(source_idx) catch return error.InvalidBytecode;
+        const vd = owner.vars[source_idx];
+        // QuickJS add_eval_variables preserves scoped binding attributes, but
+        // deliberately forwards ancestor unscoped locals as non-const NORMAL
+        // rows. In particular, a named-function self binding loses its
+        // FUNCTION_NAME write protection only along this descendant-eval path.
+        _ = resolve_variables.threadClosureSource(
+            target,
+            owner,
+            source_idx,
+            function_def_mod.ClosureVar.init(.{
+                .closure_type = .local,
+                .is_lexical = vd.is_lexical,
+                .is_const = if (normalize_unscoped) false else vd.is_const,
+                .var_kind = if (normalize_unscoped) .normal else vd.var_kind,
+                .var_idx = source_idx,
+                .var_name = vd.var_name,
+            }),
+            .local,
+        ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.BytecodeOverflow => error.BytecodeOverflow,
             else => error.InvalidBytecode,
@@ -9847,7 +10522,26 @@ pub const pipeline_finalize = struct {
         arg_idx: usize,
     ) FinalizeError!void {
         if (arg_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        resolve_variables.threadParentArgSource(target, owner, @intCast(arg_idx)) catch |err| return switch (err) {
+        const source_idx: u16 = @intCast(arg_idx);
+        if (source_idx >= owner.args.len) return error.InvalidBytecode;
+        owner.captureArg(source_idx) catch return error.InvalidBytecode;
+        const arg = owner.args[source_idx];
+        // Ancestor arguments use the same add_eval_variables normalization:
+        // lexical provenance is retained, while const/kind are ordinary.
+        _ = resolve_variables.threadClosureSource(
+            target,
+            owner,
+            source_idx,
+            function_def_mod.ClosureVar.init(.{
+                .closure_type = .arg,
+                .is_lexical = arg.is_lexical,
+                .is_const = false,
+                .var_kind = .normal,
+                .var_idx = source_idx,
+                .var_name = arg.var_name,
+            }),
+            .arg,
+        ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.BytecodeOverflow => error.BytecodeOverflow,
             else => error.InvalidBytecode,
@@ -9932,7 +10626,7 @@ pub const pipeline_finalize = struct {
                     return error.InvalidBytecode;
                 }
                 visited += 1;
-                try captureEvalParentLocal(fd, parent, @intCast(scope_idx));
+                try captureEvalParentLocal(fd, parent, @intCast(scope_idx), false);
                 scope_idx = parent.vars[@intCast(scope_idx)].scope_next;
             }
 
@@ -9944,12 +10638,12 @@ pub const pipeline_finalize = struct {
                 }
                 for (parent.vars, 0..) |vd, local_idx| {
                     if (vd.scope_level != 0 or vd.var_name == atom.ids.ret or vd.var_name == atom.null_atom) continue;
-                    try captureEvalParentLocal(fd, parent, local_idx);
+                    try captureEvalParentLocal(fd, parent, local_idx, true);
                 }
             } else {
                 for (parent.vars, 0..) |vd, local_idx| {
                     if (vd.scope_level == 0 and isVarInArgumentScope(vd)) {
-                        try captureEvalParentLocal(fd, parent, local_idx);
+                        try captureEvalParentLocal(fd, parent, local_idx, true);
                     }
                 }
             }
@@ -10460,13 +11154,6 @@ pub const pipeline_finalize = struct {
             def.finalization_state = .resolved;
         }
 
-        // Peephole: fuse `get_locN; inc/dec; put_locN` triples into a single
-        // `inc_loc`/`dec_loc` (mirrors QuickJS OP_inc_loc). Runs after
-        // resolve_variables (locals are now in SHORT form) and before
-        // resolve_labels (jump operands are still absolute u32; OP_label
-        // markers are still present to keep jump targets off the triple).
-        try fuseIncLoc(function, function.memory);
-
         // After resolve_variables, enable short opcodes for resolve_labels
         // (mirrors quickjs.c:35101 where use_short_opcodes is set after
         // the resolve_variables pass completes).
@@ -10548,271 +11235,6 @@ pub const pipeline_finalize = struct {
             error.ReachableFalloff => error.InvalidBytecode,
             else => |other| other,
         };
-    }
-
-    /// Byte length of an opcode in the post-resolve_variables stream. At this
-    /// pipeline stage `OP_label` (size 5) markers are still present and must be
-    /// stepped over explicitly, exactly as resolve_variables / resolve_labels do.
-    fn fuseInstrSize(op_id: u8) usize {
-        if (op_id == opcode.op.label) return 5;
-        const total = opcode.sizeOf(op_id);
-        return if (total == 0) 1 else total;
-    }
-
-    /// Byte offset within `op_id` of an absolute u32 jump target, or null when
-    /// the opcode carries no label operand. Mirrors resolve_variables'
-    /// `labelOperandOffset`: at this stage targets are still absolute u32.
-    fn fuseLabelOperandOffset(op_id: u8) ?usize {
-        return switch (opcode.formatOf(op_id)) {
-            .label => 1, // u32 target at bytes[1..5]
-            .atom_label_u8, .atom_label_u16 => 5, // atom at bytes[1..5], target at bytes[5..9]
-            else => null,
-        };
-    }
-
-    /// Decode a `get_loc` form at `pc`: the short forms get_loc0..get_loc3 /
-    /// get_loc8, or the wide u16 `get_loc` (id 87). Returns the local index and
-    /// byte size, or null for any other opcode.
-    ///
-    /// NOTE: this pass runs between resolve_variables and resolve_labels.
-    /// resolve_variables emits the WIDE `get_loc`/`put_loc` form here (it only
-    /// enables short-opcode selection AFTER it returns; resolve_labels is what
-    /// shortens loc forms). We therefore decode both forms and fuse whenever the
-    /// index fits the 2-byte `inc_loc`/`dec_loc` loc8 encoding (idx < 256). The
-    /// short forms are decoded too so the pass stays correct if it is ever moved
-    /// after short-form selection.
-    const LocOp = struct { idx: usize, size: usize };
-
-    fn decodeGetLoc(code: []const u8, pc: usize) ?LocOp {
-        const op = opcode.op;
-        return switch (code[pc]) {
-            op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3 => .{
-                .idx = code[pc] - op.get_loc0,
-                .size = 1,
-            },
-            op.get_loc8 => blk: {
-                if (pc + 2 > code.len) break :blk null;
-                break :blk .{ .idx = code[pc + 1], .size = 2 };
-            },
-            op.get_loc => blk: {
-                if (pc + 3 > code.len) break :blk null;
-                break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .size = 3 };
-            },
-            else => null,
-        };
-    }
-
-    fn decodePutLoc(code: []const u8, pc: usize) ?LocOp {
-        const op = opcode.op;
-        return switch (code[pc]) {
-            op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3 => .{
-                .idx = code[pc] - op.put_loc0,
-                .size = 1,
-            },
-            op.put_loc8 => blk: {
-                if (pc + 2 > code.len) break :blk null;
-                break :blk .{ .idx = code[pc + 1], .size = 2 };
-            },
-            op.put_loc => blk: {
-                if (pc + 3 > code.len) break :blk null;
-                break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .size = 3 };
-            },
-            else => null,
-        };
-    }
-
-    /// A single-value, side-effect-free, no-pop operand op that may legally sit
-    /// between `get_loc(n)` and `add` in the add_loc fuse pattern. Mirrors the
-    /// operand set in QuickJS's add_loc peephole (quickjs.c:35417-35458:
-    /// push_atom_value / push_i32 / get_loc / get_arg / get_var_ref), extended with
-    /// zjs's compact push encodings. All are nPop=0/nPush=1 with no control flow,
-    /// so replacing `get_loc(n) W add put_loc(n)` with `W add_loc(n)` is value- and
-    /// stack-neutral. (scope ops sharing push_minus1..push_7 ids are already gone:
-    /// resolve_variables runs before this pass.)
-    fn isFusableAddLocOperand(op_id: u8) bool {
-        const op = opcode.op;
-        return switch (op_id) {
-            op.push_i32,
-            op.push_const,
-            op.push_const8,
-            op.push_atom_value,
-            op.push_minus1,
-            op.push_0,
-            op.push_1,
-            op.push_2,
-            op.push_3,
-            op.push_4,
-            op.push_5,
-            op.push_6,
-            op.push_7,
-            op.get_loc,
-            op.get_loc8,
-            op.get_loc0,
-            op.get_loc1,
-            op.get_loc2,
-            op.get_loc3,
-            op.get_arg,
-            op.get_arg0,
-            op.get_arg1,
-            op.get_arg2,
-            op.get_arg3,
-            op.get_var_ref,
-            op.get_var_ref0,
-            op.get_var_ref1,
-            op.get_var_ref2,
-            op.get_var_ref3,
-            => true,
-            else => false,
-        };
-    }
-
-    /// Peephole pass: fuse a contiguous `get_locN; inc/dec; put_locN` triple
-    /// (same local index, idx < 256) into a single 2-byte `inc_loc`/`dec_loc`
-    /// (`loc8` format), matching QuickJS's `OP_inc_loc` / `OP_dec_loc`.
-    /// Also fuses `get_locN; W; add; put_locN` (W a single-value operand op) into
-    /// `W; add_loc(n)`, QuickJS's add_loc peephole (quickjs.c:35417-35458).
-    ///
-    /// Modeled on the tail of `resolve_variables.run`: at this pipeline stage
-    /// jump operands are ABSOLUTE u32 targets and `OP_label` markers (size 5)
-    /// are still in the stream. Because the match must be CONTIGUOUS in the byte
-    /// stream, no `OP_label` can sit inside a fused triple, so no jump target can
-    /// land mid-triple. We build a pc_map over every old pc, remap all absolute
-    /// u32 jump targets through it, and remap source-locs / direct-call-sites,
-    /// then install the compacted code via `installCode`. There are no atom
-    /// operands in any fused op, so `atom_operands` is left untouched.
-    pub fn fuseIncLoc(function: *bytecode_function.Bytecode, mem: *memory_mod.MemoryAccount) !void {
-        const op = opcode.op;
-        const code = function.code;
-        if (code.len == 0) return;
-
-        // Output is always <= input (each fused triple shrinks 2->.. -> 2 bytes,
-        // i.e. it never grows). Allocate worst-case (== input length).
-        const output = try mem.alloc(u8, code.len);
-        var output_owned = true;
-        errdefer if (output_owned) mem.free(u8, output);
-
-        const pc_map = try mem.alloc(usize, code.len + 1);
-        defer mem.free(usize, pc_map);
-        @memset(pc_map, 0);
-
-        var i: usize = 0;
-        var out_idx: usize = 0;
-        while (i < code.len) {
-            const op_id = code[i];
-            pc_map[i] = out_idx;
-
-            // Try to match a contiguous get_loc; inc/dec; put_loc triple.
-            if (decodeGetLoc(code, i)) |get| {
-                const mid_pc = i + get.size;
-                if (mid_pc < code.len and
-                    (code[mid_pc] == op.inc or code[mid_pc] == op.dec))
-                {
-                    const put_pc = mid_pc + 1; // inc/dec is size 1
-                    if (put_pc < code.len) {
-                        if (decodePutLoc(code, put_pc)) |put| {
-                            if (put.idx == get.idx and get.idx < 256) {
-                                // Emit the fused 2-byte loc8 op.
-                                output[out_idx] = if (code[mid_pc] == op.inc)
-                                    op.inc_loc
-                                else
-                                    op.dec_loc;
-                                output[out_idx + 1] = @intCast(get.idx);
-                                // Map the two removed positions (inc/dec, put_loc)
-                                // to the new pc of the emitted op. They are never
-                                // jump targets, but map them safely.
-                                pc_map[mid_pc] = out_idx;
-                                pc_map[put_pc] = out_idx;
-                                out_idx += 2;
-                                i = put_pc + put.size;
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // get_loc(n); W; add; put_loc(n)  ->  W; add_loc(n)
-                // (QuickJS add_loc peephole, quickjs.c:35417-35458). W is a single
-                // side-effect-free value op. Contiguity guarantees no OP_label (and
-                // thus no jump target) lands inside the match, so it is jump-safe by
-                // the same argument as the inc/dec fuse above.
-                if (get.idx < 256) {
-                    const w_pc = i + get.size;
-                    if (w_pc < code.len and isFusableAddLocOperand(code[w_pc])) {
-                        const w_size = fuseInstrSize(code[w_pc]);
-                        const add_pc = w_pc + w_size;
-                        if (add_pc < code.len and code[add_pc] == op.add) {
-                            const put2_pc = add_pc + 1; // add is size 1
-                            if (put2_pc < code.len) {
-                                if (decodePutLoc(code, put2_pc)) |put| {
-                                    if (put.idx == get.idx) {
-                                        // Copy W verbatim, then emit add_loc(n).
-                                        if (i + get.size + w_size > code.len) return error.InvalidBytecode;
-                                        @memcpy(output[out_idx .. out_idx + w_size], code[w_pc .. w_pc + w_size]);
-                                        pc_map[w_pc] = out_idx;
-                                        out_idx += w_size;
-                                        output[out_idx] = op.add_loc;
-                                        output[out_idx + 1] = @intCast(get.idx);
-                                        pc_map[add_pc] = out_idx;
-                                        pc_map[put2_pc] = out_idx;
-                                        out_idx += 2;
-                                        i = put2_pc + put.size;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // No fuse: copy the op verbatim.
-            const size = fuseInstrSize(op_id);
-            if (i + size > code.len) return error.InvalidBytecode;
-            @memcpy(output[out_idx .. out_idx + size], code[i .. i + size]);
-            out_idx += size;
-            i += size;
-        }
-        // Terminal entry: a jump that targets exactly one-past-the-end resolves
-        // to the new end of the stream.
-        pc_map[code.len] = out_idx;
-
-        // Patch absolute u32 jump targets in the OUTPUT through pc_map.
-        var scan: usize = 0;
-        while (scan < out_idx) {
-            const out_op = output[scan];
-            const out_size = fuseInstrSize(out_op);
-            if (scan + out_size > out_idx) break;
-            if (fuseLabelOperandOffset(out_op)) |offset| {
-                const operand_pos = scan + offset;
-                const old_target = std.mem.readInt(u32, output[operand_pos..][0..4], .little);
-                const new_target: u32 = if (old_target <= code.len)
-                    @intCast(pc_map[old_target])
-                else
-                    old_target;
-                std.mem.writeInt(u32, output[operand_pos..][0..4], new_target, .little);
-            }
-            scan += out_size;
-        }
-
-        // Build an exact-fit buffer (output is <= input). Keep the temporary
-        // buffer owned via errdefer until every fallible step succeeds.
-        const code_to_install: []u8 = if (out_idx < output.len) blk: {
-            if (out_idx == 0) break :blk &.{};
-            const trimmed = try mem.alloc(u8, out_idx);
-            @memcpy(trimmed, output[0..out_idx]);
-            break :blk trimmed;
-        } else output;
-        var code_to_install_owned = code_to_install.len != 0 and code_to_install.ptr != output.ptr;
-        errdefer if (code_to_install_owned) mem.free(u8, code_to_install);
-
-        function.remapSourceLocs(pc_map);
-        if (code_to_install.ptr != output.ptr) {
-            mem.free(u8, output);
-            output_owned = false;
-        }
-        function.installCode(code_to_install);
-        if (code_to_install_owned) code_to_install_owned = false;
-        if (code_to_install.ptr == output.ptr) output_owned = false;
     }
 
     fn encodePc2Line(function: *bytecode_function.Bytecode) !void {
@@ -11466,6 +11888,31 @@ const function_mod = struct {
                 if (slot.pc >= old_to_new_pc.len) continue;
                 slot.pc = @intCast(old_to_new_pc[slot.pc]);
             }
+        }
+
+        /// Remap source slots after final layout and discard entries that no
+        /// longer precede an emitted opcode. QuickJS only calls
+        /// `add_pc2line_info` before live output instructions; line markers in
+        /// an unreachable suffix update its scanner state but do not create a
+        /// pc2line record at bytecode end. Compact in place so this remains
+        /// allocation-free at the resolve_labels commit boundary.
+        pub fn remapSourceLocsBeforeEnd(
+            self: *BytecodeImpl,
+            old_to_new_pc: []const usize,
+            new_code_len: usize,
+        ) void {
+            if (self.source_loc_slots.len == 0) return;
+            var write_index: usize = 0;
+            for (self.source_loc_slots) |slot| {
+                var remapped = slot;
+                if (slot.pc < old_to_new_pc.len) {
+                    remapped.pc = @intCast(old_to_new_pc[slot.pc]);
+                }
+                if (@as(usize, remapped.pc) >= new_code_len) continue;
+                self.source_loc_slots[write_index] = remapped;
+                write_index += 1;
+            }
+            self.source_loc_slots = self.source_loc_slots.ptr[0..write_index];
         }
 
         /// Root-bytecode counterpart of FunctionDef.truncateSourceLocs.
