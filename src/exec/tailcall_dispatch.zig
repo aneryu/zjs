@@ -739,7 +739,14 @@ inline fn pushBorrowedIteratorAndEnter(
     iterator_record: []JSValue,
     depth: u8,
 ) Outcome {
-    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+    // K7 scalarization (see pollCallEntryCold): tick-only warm poll; borrowed
+    // bindings stay rooted on the suspended caller stack, so a poll throw
+    // needs no ownership restore. The borrowed-miss fallback below still
+    // enters pushMovedAndEnter with interrupt_polled=true — this entry poll
+    // remains the single semantic call poll on both legs.
+    if (vm.ctx.pollInterruptTick()) {
+        if (pollCallEntryCold(vm)) return .threw;
+    }
     const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, target, iterator_record, depth) catch |err| {
         if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
         return coldNext(vb, vm);
@@ -1597,7 +1604,15 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                         execution.strict_simple_inline_eligible or
                         execution.strict_simple_snapshot_inline_eligible;
                     if (borrowed_simple and resolved.fb.openVarRefCount() == 0) {
-                        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+                        // K7 scalarization (see pollCallEntryCold): the warm
+                        // arm keeps only the cadence tick; the publishing
+                        // re-poll and its vm.global load live in the cold
+                        // half. "Poll already paid" for the warm-miss bl
+                        // below is unchanged — a cadence hit resolves fully
+                        // (handler run or .threw) before the carve attempt.
+                        if (vm.ctx.pollInterruptTick()) {
+                            if (pollCallEntryCold(vm)) return .threw;
+                        }
                         const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
                         if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
                             return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr);
