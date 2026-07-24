@@ -44,7 +44,10 @@
 > `c44288432db4cacb5a87e101ffe8db901009bf1c`；ReleaseFast zjs完整SHA-256
 > `6e145e51456a8021466946a0dce57b31bb4135d4565e2e9938f40a0b382e4fcd`，`.text`
 > `3ee63dbb786011571de080ad40b76eeb96b1889738cac04368e6ea18c7d64524`。
-> 其后的路线图证据提交不改变production `.text`；最终总门禁仍以最后一个文档提交后的HEAD执行。
+> **该`.text`只描述`c4428843`时点的P1c性能基线**：其后另有四个correctness修复
+> （`9ced17b3`、`c0caecbc`、`5f621c03`、`4ea0e859`）改变production `.text`，
+> 纯文档证据提交（`2bf622d9`/`5e07d230`/`82ce5765`）不改变；最终总门禁以最后一个
+> 文档提交后的HEAD执行，P1c的PMU结论不跨这四个修复重新申报。
 >
 > **W1–W6 原阶段收口与终态复核（2026-07-24）**：原阶段门禁没有通过改测试或放宽
 > exclude/known-error 制造绿色，而是形成四个独立、可审计的小提交：
@@ -67,6 +70,14 @@
 > **【FINAL-CORRECTION-COMPLETE(eval-simple-catch)】** `4ea0e859`删除
 > `eval_var_object_fallback`第二target，pinned QJS与新`zjs-dev`均输出`g 42g`，
 > bytecode targeted 1/1，精确test262为known 1且路径已加入`test262_errors.txt`。
+> **Annex B.3.4耦合回滚集（qjs基线升级时须原子处理）**：该修复为对齐pinned QJS
+> 物理删除了Annex B.3.4 var-object fallback机制（无flag门）。若将来pinned QuickJS
+> 升级后恢复该规范行为，必须一次性回滚：①`src/bytecode.zig`的机制删除（从
+> `4ea0e859`反演）；②三个测试文件的期望翻转（`src/tests/builtins.zig`两条
+> nested-eval/catch-var用例、`src/tests/bytecode.zig`的catch-var first-match用例、
+> `src/tests/exec.zig`的top-level lexical cells用例）；③`test262_errors.txt`中
+> `test262/test/staging/sm/lexical-environment/var-in-catch-body-annex-b-eval.js`
+> 一行及`reports/test262-latest`对应计数。
 > **【FINAL-EVIDENCE-COMPLETE(post-eval-fixes-checkpoint)】** 修复后的`checkpoint-check`
 > 26/26 steps，统一Debug 1969/1969、Debug CLI smoke 3/3、test262-smoke 12/12，
 > architecture与public API门禁全绿；`engine-production-gate`亦为26/26 steps，
@@ -79,6 +90,24 @@
 > 唯一一次运行`zig build test -Doptimize=ReleaseSafe --seed 0 --summary all`：
 > 9/9 steps，统一套件1969 passed、0 skipped、0 failed。门禁后只把本段占位改为实际证据，
 > 未改变任何构建输入；承载证据的是包含本完成标记的收口提交。
+>
+> **【POST-CLOSE-REVIEW-CORRECTIONS(2026-07-24)】** 收口后独立review确认全部最终门禁
+> 可在HEAD复现，另发现并修复三项窄residual（均correctness/cleanup，收益记零）：
+> ①`Object.replaceAutoInitPropertyWithRealmAndNative`（当前仅测试可达的pub API）把
+> descriptor flags先于fallible slot构造发布，违反`5f621c03`确立的prepare-before-
+> publication协议且绕过`setEntryKindAndSlot` chokepoint；已改为全部fallible步骤先行、
+> 锁步发布，并补flags/realm-rc/allocated-bytes逐项回滚+同runtime retry的OOM红灯回归
+> （旧序下按预期失败于descriptor bits断言）。②`setSuperPropertyValue`两处对永抛
+> helper结果的不可达`exception.free`死代码清理，行为中性。③`push_bigint_i32 neg drop`
+> 弃置的`INT32_MIN`守卫嵌套对齐qjs（qjs把discard整个嵌在`val != INT32_MIN`内；
+> parser不可达形态，仅合成fixture golden翻转，并镜像useless-drop-before-return残余）。
+> 修正后同树证据：`git diff --check`通过；core 291/291、bytecode 187/187；
+> `checkpoint-check` 26/26 steps（统一Debug 1970/1970）；`test262-gate` 0/49775
+> unexpected、passed 44541、known 25（与收口结果逐字不变）；
+> `zig build test -Doptimize=ReleaseSafe --seed 0` 9/9 steps、统一1970/1970。
+> 同时删除了仓库根误重定向产生的未跟踪`-`汇编草稿。resolve_labels的
+> walker/layout/advance/emit四链手工同步脆性（`124f475e`已实证可穿透门禁）与
+> `hasJumpTargetTo`族O(64·n²)扫描按§8留作显式重开条件，不在本次修正内。
 >
 > 本文取代 2026-07-18 版本；基于 2026-07-19 对当前代码、QuickJS 源码、历史战报和 PMU 的重新审计。
 >
@@ -3205,8 +3234,8 @@ known-error、benchmark iteration 和 stdout oracle 均不得为候选让路。
 | W2 | **已完成并冻结** | W2-0、W2-tail、W2-cont |
 | W3 | **已完成**；correctness保留，两个性能候选均按§8回退 | W3-property、W3-native |
 | W4 | **已完成**；correctness关闭，性能收益记零 | W4、W4-shape-before-object；`025d4f08`、`eeff93ac`、`5f621c03` |
-| W5 | **已完成**；correctness/final-bytecode关闭，性能收益记零 | W5及全部细分完成行；最终consumer修复`9ced17b3` |
-| W6 | **已关闭，重开条件未满足** | W6；`a11f99d3`、`a2499f4c` |
+| W5 | **已完成**；correctness/final-bytecode关闭，性能收益记零。**已知结构债（重开须按§8）**：resolve_labels的walker/layout/advance/emit四链手工同步无强制一致性基建（`124f475e`→`9ced17b3`已实证缺口可穿透全绿门禁存活8个提交），收敛为单一分派表是独立候选；`hasJumpTargetTo`族裸扫描最坏O(64·n²)，大型生成代码上是编译期热点候选 | W5及全部细分完成行；最终consumer修复`9ced17b3`；结构债细节见顶部POST-CLOSE-REVIEW-CORRECTIONS |
+| W6 | **已关闭，重开条件未满足** | W6；`a11f99d3`、`a2499f4c`（两提交标题按机制标注W2 tail/continuation，此处作为W6不重开依据引用） |
 
 最终修复树上的checkpoint与full test262已由顶部
 `FINAL-EVIDENCE-COMPLETE(...)`回填；ReleaseSafe仍由顶部唯一占位回填。
