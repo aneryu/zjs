@@ -38,16 +38,20 @@ pub const InitialProperty = struct {
     flags: u6,
 };
 
-/// Byte size of a shape's inline FAM region (hash table + prop array) for a
-/// given allocated prop capacity and bucket count. Mirrors qjs get_shape_size
-/// minus `sizeof(JSShape)` (quickjs.c:5121): `hash_size*4 + prop_size*8`, with
-/// the prop array aligned to 8 after the (4-byte) hash buckets. `prop_size` is
-/// u32 and bucket_count derives from a u32 mask, so on 64-bit the products and
-/// sum cannot overflow usize.
+/// Byte size of a shape's inline FAM region (prop array + hash table) for a
+/// given allocated prop capacity and bucket count. Byte-total identical to qjs
+/// get_shape_size minus `sizeof(JSShape)` (quickjs.c:5121): `prop_size*8 +
+/// hash_size*4` (bucket counts are powers of two >= 4, so the old
+/// buckets-first layout had no alignment slack either). Props come FIRST so
+/// `props()` is a constant offset from the shape — the property-array analogue
+/// of qjs `get_shape_prop(sh) == (JSShapeProperty *)(sh + 1)`, whose own
+/// constant offset comes from hosting the hash part at negative offsets. The
+/// buckets sit after the full prop CAPACITY, so in-place prop_count growth
+/// never moves them; only capacity relocation (which rebuilds both regions)
+/// does. `prop_size` is u32 and bucket_count derives from a u32 mask, so on
+/// 64-bit the products and sum cannot overflow usize.
 fn famRegionBytes(prop_capacity: usize, bucket_count: usize) usize {
-    const bucket_bytes = @sizeOf(u32) * bucket_count;
-    const props_offset = std.mem.alignForward(usize, bucket_bytes, @alignOf(Property));
-    return props_offset + @sizeOf(Property) * prop_capacity;
+    return @sizeOf(Property) * prop_capacity + @sizeOf(u32) * bucket_count;
 }
 
 pub const Shape = extern struct {
@@ -76,10 +80,12 @@ pub const Shape = extern struct {
     registry_hash_next: ?*Shape = null,
     proto: ?*Object = null,
     // Inline flexible array member follows at `@sizeOf(Shape)`:
-    //   [hash buckets: u32 × bucketCount()] [props: Property × prop_size]
-    // Every live shape has a power-of-two bucket count >= 4, so the bucket
-    // region is already aligned for the 8-byte Property records.
-    // addressed through famBase()/hashBuckets()/props().
+    //   [props: Property × prop_size] [hash buckets: u32 × bucketCount()]
+    // Props first: every hot property access (lookup walks, transition
+    // verification, define) reaches the array at a CONSTANT offset from the
+    // shape pointer — the analogue of qjs get_shape_prop's `(sh + 1)`. The
+    // bucket base needs one prop_size shift-add, paid once per hash lookup.
+    // Addressed through famBase()/hashBuckets()/props().
 
     /// Base of the inline FAM region (just past the struct fields). Mirrors qjs
     /// `(uint32_t *)(sh + 1)` (get_shape_prop, quickjs.c:5128).
@@ -95,20 +101,18 @@ pub const Shape = extern struct {
     pub inline fn hashBuckets(self: *const Shape) []u32 {
         const n = self.bucketCount();
         if (n == 0) return &.{};
-        const ptr: [*]u32 = @ptrCast(@alignCast(self.famBase()));
+        const ptr: [*]u32 = @ptrCast(@alignCast(self.famBase() + @sizeOf(Property) * @as(usize, self.prop_size)));
         return ptr[0..n];
     }
 
     pub inline fn props(self: *const Shape) []Property {
-        // qjs `get_shape_prop` is just `(sh + 1) + hash_size`: its hash table
-        // is always large enough to leave the following 8-byte property array
-        // aligned. zjs maintains the same invariant in every shape constructor
-        // and relocation (bucket_count is a power of two and at least 4).
-        // Avoid recomputing a dynamic alignForward on every property lookup.
+        // Constant offset — the property-array analogue of qjs
+        // `get_shape_prop(sh) == (JSShapeProperty *)(sh + 1)`. The old
+        // buckets-first layout re-derived this base from the bucket count on
+        // every property access (a load + csel + shift-add chain that showed
+        // up as the top stall of the shape-transition probe).
         std.debug.assert(self.prop_size != 0);
-        const bucket_bytes = @sizeOf(u32) * self.bucketCount();
-        std.debug.assert(bucket_bytes == std.mem.alignForward(usize, bucket_bytes, @alignOf(Property)));
-        const ptr: [*]Property = @ptrCast(@alignCast(self.famBase() + bucket_bytes));
+        const ptr: [*]Property = @ptrCast(@alignCast(self.famBase()));
         return ptr[0..self.prop_size];
     }
 
