@@ -2894,10 +2894,14 @@ inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     // qjs CASE(OP_goto) polls interrupts on every unconditional jump — the
-    // loop back edge (quickjs.c:18822-18826). Without this, a pure loop never
-    // reaches a poll point and an installed interrupt handler can't abort it.
-    vm.publish(pc, sp);
-    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+    // loop back edge (quickjs.c:18822-18826). js_poll_interrupts' inline leg
+    // is a bare cadence decrement; only a cadence hit publishes and runs the
+    // Runtime handler. That cold leg re-executes this op via cold_table — the
+    // indirect route LLVM cannot fold back (see op_if_false8's cold-routing
+    // note), keeping this hot body prologue-free. The cold poll's second
+    // decrement lands at ≤0 and still triggers the reset+handler run.
+    if (vm.ctx.pollInterruptTick())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
 // The boolean fast path (a comparison result — the hot loop condition) inlines; a
@@ -2914,8 +2918,11 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        // Cadence tick only (qjs js_poll_interrupts inline leg); a hit routes
+        // to the cold branch8, which re-executes the untouched operand with
+        // the publishing poll (see op_goto8).
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2924,8 +2931,8 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // from the original pc/sp; branch8 consumes its operand, so shrink the GC
         // root window before the inline free just as stack.pop() does there.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
@@ -2936,8 +2943,8 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2945,8 +2952,8 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         // See op_if_false8: non-HTMLDDA objects are truthy, and the consumed
         // operand's root must be removed before its inline rc==1 destruction.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
