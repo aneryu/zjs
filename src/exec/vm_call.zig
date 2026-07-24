@@ -231,6 +231,38 @@ pub inline fn commitInlineCallDepthBytes(
     rt.hot.call_depth += 1;
 }
 
+/// K2 fused admission+commit for the warm leaf constructors: the check and
+/// the commit RMW run back-to-back on one caller-supplied `rt` (no chunk or
+/// carve stores in between), so the whole budget transaction is a single
+/// hot-line load cluster instead of the admission/commit split that reloaded
+/// ctx→runtime after the arena carve's aliasing store (M1 dossier K2: rt
+/// reloads #3/#4). Mirrors qjs check-then-alloca where the check IS the
+/// commitment (quickjs.c:17837/17845); a later chunk/carve miss must retreat
+/// the charge via `retreatInlineCallDepthBytesMiss` before the pure-miss
+/// null return. `bytecodeStackBudgetWouldOverflow` already rejects a wrapping
+/// add, so the commit needs no second overflow assert.
+pub inline fn tryCommitInlineCallDepthBytesRt(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) bool {
+    if (rt.hot.call_depth >= maxLogicalJsCallDepthRt(rt) or
+        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes)) return false;
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
+    return true;
+}
+
+/// K2 cold unwind: commit-before-carve means a warm constructor's rare
+/// chunk/carve miss holds an already-committed budget charge; retreat it so
+/// the authoritative slow constructor re-enters from balanced accounting.
+/// noinline keeps the unwind bl-only on the warm body's miss exits.
+pub noinline fn retreatInlineCallDepthBytesMiss(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) void {
+    leaveInlineCallDepthBytesRt(rt, planned_stack_bytes);
+}
+
 /// Bytes-priced sibling of `enterInlineCallDepthMode` for callers that keep
 /// the planned figure alive across the push (Entry persistence + errdefer).
 pub inline fn enterInlineCallDepthBytes(
@@ -999,6 +1031,14 @@ pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
 
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
     return ctx.stackLimit();
+}
+
+/// rt-threaded twin of `maxLogicalJsCallDepth` (`ctx.stackLimit()` is exactly
+/// `ctx.runtime.stackSize()` == `rt.hot.stack_size`); the fused K2 admission
+/// already holds `rt`, and the direct field read avoids the by-value
+/// `stackSize(self: JSRuntime)` receiver copy in unoptimized builds.
+inline fn maxLogicalJsCallDepthRt(rt: *const core.JSRuntime) usize {
+    return rt.hot.stack_size;
 }
 
 fn maxJsCallDepth(ctx: *const core.JSContext) usize {

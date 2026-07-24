@@ -17400,3 +17400,64 @@ test "named function expression self-binding materializes lazily with pinned Qui
     // 22 probes, all green.
     try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());
 }
+
+test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and carve misses" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // The budget check compares native SP minus the accumulated bytecode
+    // budget against the native limit; this test intentionally accumulates
+    // ~0.8MB of planned frame bytes to cross the 32K-slot arena chunk, so
+    // widen the native window (the miss-retreat mechanism under test never
+    // depends on it — an admission failure commits nothing).
+    js.runtime.setNativeStackSize(8 * 1024 * 1024);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    // A right-nested addition gives the leaf bodies a ~97-slot operand stack
+    // window, an order of magnitude above the driver's ~20 slots/frame, so
+    // the level at which arena chunk 0 first lacks leaf capacity is reached
+    // while the driver itself still fits: the warm leaf constructors take the
+    // carve-miss retreat there (and the entries-chunk 16-boundary miss ~150
+    // times on the way down). bigleaf covers the empty-leaf family, bigleaf1
+    // the exact-args family, cap the capture family.
+    const deep_expr = ("1+(" ** 96) ++ "1" ++ (")" ** 96);
+    const source =
+        "function bigleaf(){ return " ++ deep_expr ++ "; }\n" ++
+        "function bigleaf1(x){ return " ++ deep_expr ++ "; }\n" ++
+        "function mkcap(){ var q = 3; return function(){ return q + q; }; }\n" ++
+        "var cap = mkcap();\n" ++
+        "function f(n){\n" ++
+        "  bigleaf(); bigleaf1(n); cap();\n" ++
+        "  var a=n+1, b=a+1, c=b+1, d=c+1, e=d+1, g=e+1, h=g+1, k=h+1, m=k+1, p=m+1, r=p+1, s=r+1;\n" ++
+        "  if (n === 0) return a+b+c+d+e+g+h+k+m+p+r+s;\n" ++
+        "  return f(n-1) + 1;\n" ++
+        "}\n" ++
+        "var __k2_deep = f(2400);\n";
+
+    const result = try js.eval(source);
+    result.free(js.runtime);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__k2_deep");
+    defer js.runtime.atoms.free(key);
+    const deep_value = try global.getProperty(key);
+    defer deep_value.free(js.runtime);
+    // n=0 level: locals sum 1+2+...+12 = 78, plus one per recursion level.
+    try std.testing.expectEqual(@as(?i32, 78 + 2400), deep_value.asInt32());
+
+    // The arena must actually have crossed into a second chunk — otherwise
+    // this test lost its carve-miss coverage (e.g. geometry drift).
+    try std.testing.expect(js.runtime.vm_stack.chunk_count >= 2);
+
+    // Every warm miss committed and then retreated its budget charge; any
+    // imbalance (missing or doubled retreat) leaves a residue here.
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}

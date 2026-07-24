@@ -1965,18 +1965,28 @@ pub const Machine = struct {
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
-        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+        // K2 admission-commit fusion: one rt load carries the budget check,
+        // the commit RMW, the carve, and the profile guard (qjs
+        // check-then-alloca: the check is the commitment, quickjs.c:17837/
+        // 17845). The rare chunk/carve misses below retreat the committed
+        // charge on their cold exits before honoring the pure-miss contract.
+        const rt = ctx.runtime;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) return null;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
         const entry = self.entryAt(index);
 
-        const rt = ctx.runtime;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
 
-        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2011,18 +2021,25 @@ pub const Machine = struct {
         const ctx = self.ctx;
         // K1 single pricing (argc == arg_count: padded-argv prefix empty).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
-        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
+        // rare chunk/carve misses retreat the committed charge cold.
+        const rt = ctx.runtime;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) return null;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
         const entry = self.entryAt(index);
 
-        const rt = ctx.runtime;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
 
-        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2059,18 +2076,25 @@ pub const Machine = struct {
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
-        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
+        // rare chunk/carve misses retreat the committed charge cold.
+        const rt = ctx.runtime;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) return null;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
         const entry = self.entryAt(index);
 
-        const rt = ctx.runtime;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
 
-        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2113,18 +2137,25 @@ pub const Machine = struct {
         const ctx = self.ctx;
         // K1 single pricing (argc < arg_count allocates the qjs argv prefix).
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
-        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
+        // rare chunk/carve misses retreat the committed charge cold.
+        const rt = ctx.runtime;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) return null;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
         const entry = self.entryAt(index);
 
-        const rt = ctx.runtime;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
 
-        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
@@ -2929,18 +2960,25 @@ pub const Machine = struct {
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
-        if (!vm_call.canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) return null;
+        // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
+        // rare chunk/carve misses retreat the committed charge cold.
+        const rt = ctx.runtime;
+        if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
-        if (chunk_index >= self.chunk_count) return null;
+        if (chunk_index >= self.chunk_count) {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        }
         const entry = self.entryAt(index);
 
-        const rt = ctx.runtime;
         const stack_count = @as(usize, function.stack_size) + 1;
-        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse return null;
+        const carve = rt.vm_stack.carveActiveMarked(stack_count) orelse {
+            vm_call.retreatInlineCallDepthBytesMiss(rt, planned_stack_bytes);
+            return null;
+        };
 
-        vm_call.commitInlineCallDepthBytes(ctx, planned_stack_bytes);
         entry.return_action = .next;
         entry.continuation_payload = 0;
         entry.catch_target = null;
