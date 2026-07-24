@@ -7747,7 +7747,6 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
     rt.setGCThreshold(0);
     try std.testing.expectEqual(@as(usize, 0), rt.gcThreshold());
 
-    const before_object_allocation = rt.memory.allocated_bytes;
     const survivor = try core.Object.create(rt, core.class.ids.object, null);
     defer survivor.value().free(rt);
 
@@ -7756,8 +7755,10 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         try std.testing.expectEqual(@as(usize, 0), rt.gcThreshold());
     } else {
         // QJS resets malloc_gc_threshold immediately after its pre-object GC,
-        // before the triggering JSObject allocation is charged.
-        const expected = before_object_allocation + (before_object_allocation >> 1);
+        // after its Shape is owned but before the triggering JSObject body is
+        // charged.
+        const boundary_bytes = rt.memory.allocated_bytes - survivor.allocationSize(rt);
+        const expected = boundary_bytes + (boundary_bytes >> 1);
         try std.testing.expectEqual(expected, rt.gcThreshold());
     }
 }
