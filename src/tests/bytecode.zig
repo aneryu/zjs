@@ -3529,7 +3529,7 @@ test "resolve_labels: discards signed push_bigint_i32 expressions without crossi
     defer rt.atoms.free(name);
     const op = bytecode.opcode.op;
 
-    for ([_]i32{ 0, 1, std.math.maxInt(i32), std.math.minInt(i32) }) |value| {
+    for ([_]i32{ 0, 1, std.math.maxInt(i32) }) |value| {
         var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
         defer bc.deinit(rt);
 
@@ -3550,6 +3550,31 @@ test "resolve_labels: discards signed push_bigint_i32 expressions without crossi
 
         try std.testing.expectEqualSlices(u8, &.{op.return_undef}, bc.code);
         for (bc.source_loc_slots) |slot| try std.testing.expectEqual(@as(u32, 0), slot.pc);
+    }
+
+    // qjs guards the whole neg fold — including the drop discard — behind
+    // `val != INT32_MIN`, so the INT32_MIN push/neg pair survives; only the
+    // separate useless-drop-before-return rule still removes the drop.
+    {
+        var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        var input = [_]u8{0} ** 8;
+        input[0] = op.push_bigint_i32;
+        std.mem.writeInt(i32, input[1..5], std.math.minInt(i32), .little);
+        input[5] = op.neg;
+        input[6] = op.drop;
+        input[7] = op.return_undef;
+        try bc.setCode(&input);
+
+        var ctx = pipeline.resolve_labels.JSContext.init(&bc);
+        try pipeline.resolve_labels.run(&ctx);
+
+        try std.testing.expectEqual(@as(usize, 7), bc.code.len);
+        try std.testing.expectEqual(op.push_bigint_i32, bc.code[0]);
+        try std.testing.expectEqual(std.math.minInt(i32), std.mem.readInt(i32, bc.code[1..5], .little));
+        try std.testing.expectEqual(op.neg, bc.code[5]);
+        try std.testing.expectEqual(op.return_undef, bc.code[6]);
     }
 
     var targeted = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);

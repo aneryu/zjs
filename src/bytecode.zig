@@ -8448,6 +8448,10 @@ pub const pipeline_resolve_labels = struct {
             return null;
         }
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+        // qjs (resolve_labels OP_push_bigint_i32) guards the whole neg fold —
+        // including the drop discard — behind `val != INT32_MIN`, so the
+        // INT32_MIN sequence is preserved verbatim.
+        if (value == std.math.minInt(i32)) return null;
         if (pc + 7 <= code.len and
             code[pc + 6] == opcode.op.drop and
             !hasJumpTargetInRange(code, pc + 1, pc + 7))
@@ -8455,7 +8459,6 @@ pub const pipeline_resolve_labels = struct {
             return .{ .value = value, .discarded = true, .total_size = 7 };
         }
         if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
-        if (value == std.math.minInt(i32)) return null;
         return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
