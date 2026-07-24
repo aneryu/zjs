@@ -903,6 +903,7 @@ pub const Machine = struct {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         }
         entry.teardown.copy_argv = copy_argv;
+        entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         // Link the new frame into the chain — qjs `sf->prev_frame =
         // rt->current_stack_frame; rt->current_stack_frame = sf;`
         // (quickjs.c:17869-17870).
@@ -1230,7 +1231,7 @@ pub const Machine = struct {
             else
                 global.value(),
             .current_function = takeSourceSlot(callable_slot),
-            .actual_arg_count = actual_arg_count,
+            .actual_arg_count = @intCast(actual_arg_count),
             .locals = locals,
             .args = frame_args,
             .var_refs = captures,
@@ -1307,7 +1308,7 @@ pub const Machine = struct {
             source.argCount(),
             false,
         );
-        vm_call.enterInlineCallDepth(self.ctx, global, target.fb, source.argCount()) catch |err| {
+        vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
             cleanupStackSource(self.ctx.runtime, source);
             return err;
         };
@@ -1327,6 +1328,7 @@ pub const Machine = struct {
         } else {
             try setupSimpleInlineEntryImpl(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
         }
+        entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
@@ -1683,6 +1685,7 @@ pub const Machine = struct {
                 .sloppy_global => global.value(),
             },
             .current_function = takeSourceSlot(callable_slot),
+            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
                 .this_value = if (method_receiver) .owned else .borrowed,
@@ -1749,6 +1752,9 @@ pub const Machine = struct {
             },
             .current_function = takeSourceSlot(callable_slot),
             .actual_arg_count = argc,
+            // Exact-args pricing: argc == arg_count, so the padded-argv
+            // prefix is empty and the leaf figure is the committed charge.
+            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
             .args = args_window,
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
@@ -1811,6 +1817,7 @@ pub const Machine = struct {
                 .sloppy_global => global.value(),
             },
             .current_function = takeSourceSlot(callable_slot),
+            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
@@ -1892,6 +1899,8 @@ pub const Machine = struct {
             },
             .current_function = takeSourceSlot(callable_slot),
             .actual_arg_count = argc,
+            // Padded pricing: argc < arg_count allocates the qjs argv prefix.
+            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeFrameAllocaSize(function, argc, false)),
             .args = args_window,
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
@@ -2689,6 +2698,9 @@ pub const Machine = struct {
             .function = function,
             .this_value = global.value(),
             .current_function = takeSourceSlot(&region_start[0]),
+            // Forwarded leaves commit with copy_argv pricing, but the body is
+            // zero-arg, so the figure equals the leaf form either way.
+            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
             .storage_values = &.{},
             .ownership = .{
                 .this_value = .borrowed,
@@ -2823,11 +2835,14 @@ pub const Machine = struct {
         const dying = self.topEntry();
         const dying_prev = dying.prev;
         const dying_arena_mark = dying.arena_mark;
-        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
-        );
+        ));
         const inherited_budget: Entry.TailChainBudget = if (dying.teardown.tail_chain)
             dying.tailChainBudgetSlot().*
         else
@@ -2878,11 +2893,14 @@ pub const Machine = struct {
             dying.tailChainBudgetSlot().*
         else
             .{ .extra_depth = 0, .planned_stack_bytes = 0 };
-        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        // Committed charge persisted at construction; the recompute is the
+        // Debug lockstep guard against any constructor missing the store.
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             dying.teardown.copy_argv,
-        );
+        ));
         const continuation = dying.takeContinuation();
         if (returned)
             dying.deinitReturned(self.ctx)
@@ -2926,7 +2944,8 @@ pub const Machine = struct {
         // prefix is statically empty.
         std.debug.assert(!dying.teardown.copy_argv);
         std.debug.assert(dying.frame.function.arg_count == 0);
-        const dying_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function);
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
         // Inline epilogue: the hot leg is an rc decrement plus the arena
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
@@ -2951,11 +2970,12 @@ pub const Machine = struct {
         // copy_argv pricing select is statically false here (none of the
         // exact/capture/padded finishers sets it).
         std.debug.assert(!dying.teardown.copy_argv);
-        const dying_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(
             dying.frame.function,
             dying.frame.actual_arg_count,
             false,
-        );
+        ));
         dying.deinitExactArgsLeafInline(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
@@ -2977,7 +2997,8 @@ pub const Machine = struct {
         // body is zero-arg, so the padded-argv prefix is empty either way and
         // the leaf figure releases the exact bytes charged.
         std.debug.assert(dying.frame.function.arg_count == 0);
-        const dying_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function);
+        const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
+        std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
         dying.deinitForwardedLeafInline(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;

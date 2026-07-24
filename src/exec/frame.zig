@@ -257,7 +257,14 @@ pub const Frame = struct {
     pc: usize = 0,
     this_value: JSValue = JSValue.undefinedValue(),
     current_function: JSValue = JSValue.undefinedValue(),
-    actual_arg_count: usize = 0,
+    /// u32 halves sharing the old `usize` slot: argc is u16-bounded everywhere
+    /// upstream, and the freed half persists this frame's committed
+    /// bytecode-stack charge (`qjsBytecodeFrameAllocaSize` at construction) so
+    /// the pop paths release the budget with one load instead of re-deriving
+    /// it from the function header on every return. Every pop asserts the
+    /// stored figure against the recompute in Debug (lockstep guard).
+    actual_arg_count: u32 = 0,
+    planned_stack_bytes: u32 = 0,
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
     /// Slot-typed var-ref array — qjs `JSVarRef **var_refs` (JS_CallInternal
@@ -347,7 +354,7 @@ pub const Frame = struct {
             .function = function,
             .this_value = this_value,
             .current_function = current_function,
-            .actual_arg_count = actual_arg_count,
+            .actual_arg_count = @intCast(actual_arg_count),
             .ownership = .{
                 .this_value = .borrowed,
                 .current_function = .borrowed,
@@ -399,7 +406,7 @@ pub const Frame = struct {
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
-        self.actual_arg_count = args.len;
+        self.actual_arg_count = @intCast(args.len);
 
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
@@ -424,7 +431,7 @@ pub const Frame = struct {
         use_inline_storage: bool,
         need_original_snapshot: bool,
     ) !void {
-        self.actual_arg_count = argc;
+        self.actual_arg_count = @intCast(argc);
         const frame_arg_count = @max(argc, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
             if (stack.len() < argc) return error.StackUnderflow;
@@ -456,7 +463,7 @@ pub const Frame = struct {
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
-        self.actual_arg_count = args.len;
+        self.actual_arg_count = @intCast(args.len);
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
             const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage, windows.args);
@@ -483,7 +490,7 @@ pub const Frame = struct {
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
-        self.actual_arg_count = args.len;
+        self.actual_arg_count = @intCast(args.len);
         std.debug.assert(args.len >= @as(usize, @intCast(self.function.arg_count)));
         if (args.len > 0 and need_original_snapshot) {
             try self.initOriginalArgsSnapshot(account, args, use_inline_storage, true, windows.original_args);
