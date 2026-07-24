@@ -202,10 +202,9 @@ pub const Registry = struct {
     // shape lives on the GC object list, never a separate registry array.
     shape_hash_count: usize = 0,
     shape_hash_buckets: []?*Shape = &.{},
-    // Total live shapes (hashed + unhashed). qjs has no such counter — it walks
-    // gc_obj_list when it needs one — but `memoryUsage()` introspection wants an
-    // O(1) read, so we maintain it in `link`/`unlink`.
-    live_shape_count: usize = 0,
+    // No total-live-shape counter: qjs has none — it walks gc_obj_list when it
+    // needs one. Diagnostics use `gc.liveCountKind(.shape)` (derived by walking),
+    // keeping the shape link/unlink hot paths free of count maintenance.
 
     pub fn init(runtime: *JSRuntime, account: *memory.MemoryAccount, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
         return .{ .runtime = runtime, .memory = account, .atoms = atoms, .gc_registry = gc_registry };
@@ -220,7 +219,6 @@ pub const Registry = struct {
         self.shape_hash_buckets = &.{};
         self.shape_hash_bits = initial_shape_hash_bits;
         self.shape_hash_count = 0;
-        self.live_shape_count = 0;
         if (buckets.len != 0) self.memory.free(?*Shape, buckets);
     }
 
@@ -293,7 +291,10 @@ pub const Registry = struct {
         @memset(shape.props(), .{});
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
+        // `fam_bytes` was sized from the same capacity fields just stored, so
+        // `@sizeOf(Shape) + fam_bytes == allocationSize()` bit-for-bit; skip
+        // the recompute (registerObjectWithBytes precedent, runtime.zig).
+        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -321,7 +322,9 @@ pub const Registry = struct {
         }
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
+        // Same-value passthrough: fam_bytes derives from the capacity fields
+        // stored above, so this equals allocationSize() bit-for-bit.
+        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -452,11 +455,12 @@ pub const Registry = struct {
         const old_prop_count = old.prop_count;
         const old_bucket_count = old.bucketCount();
         const old_fam_bytes = old.famByteSize();
-        const old_allocation_size = old.allocationSize();
+        const old_allocation_size = @sizeOf(Shape) + old_fam_bytes;
+        const new_fam_bytes = famRegionBytes(new_prop_size, new_bucket_count);
 
         // The ONLY fallible / GC-triggering step. On failure `shape_ptr.*` (old)
         // is untouched — correct rollback with nothing to undo.
-        const new_shape = try self.memory.createWithFam(Shape, famRegionBytes(new_prop_size, new_bucket_count));
+        const new_shape = try self.memory.createWithFam(Shape, new_fam_bytes);
         // No further allocation below: the transient two-copy window is GC-safe.
 
         new_shape.* = .{
@@ -496,7 +500,8 @@ pub const Registry = struct {
         if (old.is_hashed) self.removeShapeHash(old);
         self.gc_registry.unlinkObjectWithBytes(&old.header, old_allocation_size);
         // Registration only links/accountes the already initialized header.
-        self.gc_registry.addInitializedWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
+        // Same-value passthrough: new_fam_bytes sized the block above.
+        self.gc_registry.addInitializedWithSize(&new_shape.header, @sizeOf(Shape) + new_fam_bytes) catch unreachable;
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Free the OLD block's raw memory only — proto + atoms have moved.
@@ -615,13 +620,15 @@ pub const Registry = struct {
         }
 
         // Swap registries old->new (no more fallible / GC-triggering ops below).
+        // Same-value passthroughs: old_fam_bytes reads the untouched old
+        // capacity fields; fam_bytes sized the new block above.
+        const old_fam_bytes = old.famByteSize();
         if (old.is_hashed) self.removeShapeHash(old);
-        self.gc_registry.unlinkObjectWithBytes(&old.header, old.allocationSize());
-        self.gc_registry.addInitializedWithSize(&new_shape.header, new_shape.allocationSize()) catch unreachable;
+        self.gc_registry.unlinkObjectWithBytes(&old.header, @sizeOf(Shape) + old_fam_bytes);
+        self.gc_registry.addInitializedWithSize(&new_shape.header, @sizeOf(Shape) + fam_bytes) catch unreachable;
         if (new_shape.is_hashed) self.insertShapeHash(new_shape);
 
         // Discard the OLD layout: free its prop atoms (NOT carried over) + block.
-        const old_fam_bytes = old.famByteSize();
         const old_prop_count = old.prop_count;
         for (old.props()[0..old_prop_count]) |prop| {
             if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
@@ -697,12 +704,18 @@ pub const Registry = struct {
     }
 
     fn destroyShape(self: *Registry, shape: *Shape) void {
-        self.gc_registry.unlinkObjectWithBytes(&shape.header, shape.allocationSize());
-        self.unlink(shape);
-        // Capture the FAM size + prop atoms while the capacity fields are intact;
-        // the inline storage lives in the single block freed below (qjs
-        // js_free_shape0 releases atoms + proto, then the one allocation).
+        // Capture the FAM size while the capacity fields are intact; it also
+        // feeds the GC free-accounting (`allocationSize` is bit-for-bit
+        // `@sizeOf(Shape) + famByteSize()` and nothing mutates the capacity
+        // fields in between), so the size is derived exactly once per destroy —
+        // qjs js_free_shape0 never re-derives the block size at all (the malloc
+        // block header carries it, quickjs.c:5199-5215).
         const fam_bytes = shape.famByteSize();
+        self.gc_registry.unlinkObjectWithBytes(&shape.header, @sizeOf(Shape) + fam_bytes);
+        self.unlink(shape);
+        // Prop atoms stay valid until freed below; the inline storage lives in
+        // the single block freed last (qjs js_free_shape0 releases atoms +
+        // proto, then the one allocation).
         const old_proto = shape.proto;
         const prop_count = shape.prop_count;
         for (shape.props()[0..prop_count]) |prop| {
@@ -765,7 +778,9 @@ pub const Registry = struct {
         }
         try self.link(shape, hashed);
         errdefer self.unlink(shape);
-        try self.gc_registry.addInitializedWithSize(&shape.header, shape.allocationSize());
+        // Same-value passthrough: fam_bytes derives from the capacity fields
+        // stored above, so this equals allocationSize() bit-for-bit.
+        try self.gc_registry.addInitializedWithSize(&shape.header, @sizeOf(Shape) + fam_bytes);
         if (proto) |object| gc.retain(&object.header);
         return shape;
     }
@@ -840,7 +855,6 @@ pub const Registry = struct {
         } else {
             shape.is_hashed = false;
         }
-        self.live_shape_count += 1;
     }
 
     fn unlink(self: *Registry, shape: *Shape) void {
@@ -850,8 +864,6 @@ pub const Registry = struct {
             std.debug.assert(self.shape_hash_count != 0);
             self.shape_hash_count -= 1;
         }
-        std.debug.assert(self.live_shape_count != 0);
-        self.live_shape_count -= 1;
     }
 
     fn ensureShapeHashCapacity(self: *Registry, additional: usize) !void {

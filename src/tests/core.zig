@@ -1926,7 +1926,7 @@ const ObjectConstructionOrderProbe = struct {
         if (size != @sizeOf(core.Object)) return;
         self.object_boundary_calls += 1;
         self.shape_owned_at_object_boundary =
-            self.rt.shapes.live_shape_count == self.live_shape_count_before + 1 and
+            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
             self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
             self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes() and
             self.prototype.header.meta().rc == self.prototype_refs_before + 1;
@@ -4084,7 +4084,7 @@ test "shape registry release maintains hashed and live counts" {
     defer rt.destroy();
 
     const hashed_baseline = rt.shapes.shape_hash_count;
-    const live_baseline = rt.shapes.live_shape_count;
+    const live_baseline = rt.gc.liveCountKind(.shape);
 
     const first = try rt.shapes.create(null);
     const second = try rt.shapes.create(null);
@@ -4093,16 +4093,16 @@ test "shape registry release maintains hashed and live counts" {
     // Every created shape is both hashed and live (qjs counts hashed shapes only,
     // and zjs has no separate registry array — both are intrusive GC-list shapes).
     try std.testing.expectEqual(hashed_baseline + 3, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline + 3, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline + 3, rt.gc.liveCountKind(.shape));
 
     rt.shapes.release(second);
     try std.testing.expectEqual(hashed_baseline + 2, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline + 2, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline + 2, rt.gc.liveCountKind(.shape));
 
     rt.shapes.release(first);
     rt.shapes.release(third);
     try std.testing.expectEqual(hashed_baseline, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline, rt.gc.liveCountKind(.shape));
 }
 
 test "shape registry hash grows and reuses object root shapes" {
@@ -5440,7 +5440,7 @@ const closed_property_cycle_reclaimed_count: usize = 4;
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 0), rt.shapes.live_shape_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.shape));
 }
 
 fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
@@ -7863,7 +7863,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     const root_shape_bytes = emptyRootShapeAllocationBytes();
     try std.testing.expect(root_shape_bytes > @sizeOf(core.Object));
-    const live_shape_count_before = rt.shapes.live_shape_count;
+    const live_shape_count_before = rt.gc.liveCountKind(.shape);
     const shape_hash_count_before = rt.shapes.shape_hash_count;
     const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
     const allocated_bytes_before = rt.memory.allocated_bytes;
@@ -7894,7 +7894,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     try std.testing.expectEqual(@as(usize, 1), probe.object_boundary_calls);
     try std.testing.expect(probe.shape_owned_at_object_boundary);
-    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
@@ -7914,7 +7914,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expect(probe.shape_owned_at_object_boundary);
     try std.testing.expectEqual(prototype, retry.getPrototype());
     retry.value().free(rt);
-    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);

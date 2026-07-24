@@ -1337,24 +1337,30 @@ pub const JSRuntime = struct {
         try self.gc.addInitializedWithSize(&object.header, bytes);
     }
 
-    pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
-        self.assertOwnerThread();
-        self.unregisterObjectWithBytes(object, object.allocationSize(self));
-    }
-
-    /// Same as `unregisterObject` but with the object's allocation size supplied
-    /// by the caller. `destroyFromHeader` already computes the inline-class-payload
-    /// layout (for the tail `freeObjectAllocation`); its `object_size` is bit-for-bit
-    /// the value `allocationSize` would recompute here (both go through
+    /// GC-list unlink + free-byte accounting boundary of an object teardown,
+    /// with the allocation size supplied by the caller. `destroyFromHeader`
+    /// (the sole caller) already computes the inline-class-payload layout (for
+    /// the tail `freeObjectAllocation`); its `object_size` is bit-for-bit the
+    /// value `allocationSize` would recompute here (both go through
     /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
     /// between the two calls). Reusing it drops a redundant record-table lookup +
     /// 88-byte-stride multiply + inline-layout recompute off the hot free path —
     /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
     /// teardown either (the slab block carries it).
+    ///
+    /// The weak/borrowed side-table links were already detached at the TOP of
+    /// `destroyFromHeader` (before class-payload teardown, because those links
+    /// borrow payload-owned storage), and nothing during payload teardown can
+    /// re-register a finalizing object — so this boundary no longer repeats the
+    /// two unregister scans. qjs `free_object` keeps no such side tables at all;
+    /// `remove_gc_object` (quickjs.c:6548) is a bare `list_del`.
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
         self.assertOwnerThread();
-        self.unregisterWeakReferenceHolder(object);
-        self.unregisterBorrowedReferenceHolder(object);
+        if (builtin.mode == .Debug) {
+            // Catch any future payload finalizer that re-registers mid-teardown.
+            if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
+            std.debug.assert(!object.flags.is_borrowed_reference_holder);
+        }
         self.gc.unlinkObjectWithBytes(&object.header, bytes);
     }
 
@@ -2412,7 +2418,7 @@ pub const JSRuntime = struct {
         }
 
         const object_count = self.gc.liveCountKind(.object);
-        const shape_count = self.shapes.live_shape_count;
+        const shape_count = self.gc.liveCountKind(.shape);
         // Count heap nodes, not Realm registry membership: an externally
         // retained record remains live and reportable after its Realm unlinks.
         const module_count = self.gc.liveCountKind(.module);

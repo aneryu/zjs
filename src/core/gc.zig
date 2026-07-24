@@ -694,7 +694,10 @@ pub const Registry = struct {
     // O(1) pointer splices.
     gc_object_head: ?*GCObjectHeader = null,
     gc_object_tail: ?*GCObjectHeader = null,
-    gc_object_count: usize = 0,
+    // No live-object counter: qjs add_gc_object/remove_gc_object
+    // (quickjs.c:6540/6548) are pure list splices with no count scalar.
+    // Diagnostics (`liveCount`) derive the count by walking, like
+    // `liveCountKind` always has.
     // QuickJS-style zero-ref queue. Once a value-bearing GC node reaches zero,
     // its intrusive link is moved out of gc_object_* and into this queue. The
     // outermost release drains it iteratively, so child releases performed by a
@@ -849,7 +852,6 @@ pub const Registry = struct {
 
         self.gc_object_head = null;
         self.gc_object_tail = null;
-        self.gc_object_count = 0;
         self.zero_ref_head = null;
         self.zero_ref_tail = null;
 
@@ -1494,7 +1496,6 @@ pub const Registry = struct {
         }
         self.gc_object_tail = header;
         header.meta().flags.in_cycle_list = true;
-        self.gc_object_count += 1;
     }
 
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
@@ -1515,8 +1516,6 @@ pub const Registry = struct {
         header.prev = null;
         header.next = null;
         header.meta().flags.in_cycle_list = false;
-        std.debug.assert(self.gc_object_count != 0);
-        self.gc_object_count -= 1;
     }
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
@@ -1624,11 +1623,11 @@ pub const Registry = struct {
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
-        if (self.gc_object_count == 0) {
-            if (self.gc_object_head != null or self.gc_object_tail != null) return error.CorruptGcList;
+        if (self.gc_object_head == null) {
+            if (self.gc_object_tail != null) return error.CorruptGcList;
             return;
         }
-        if (self.gc_object_head == null or self.gc_object_tail == null) return error.CorruptGcList;
+        if (self.gc_object_tail == null) return error.CorruptGcList;
 
         var tortoise = self.gc_object_head;
         var hare = self.gc_object_head;
@@ -1641,7 +1640,6 @@ pub const Registry = struct {
 
         var previous: ?*GCObjectHeader = null;
         var current = self.gc_object_head;
-        var count: usize = 0;
         while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (!h.meta().flags.in_cycle_list) return error.CorruptGcList;
@@ -1656,10 +1654,8 @@ pub const Registry = struct {
 
             previous = h;
             current = h.next;
-            count += 1;
         }
         if (previous != self.gc_object_tail) return error.CorruptGcList;
-        if (count != self.gc_object_count) return error.CorruptGcList;
     }
 
     pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
@@ -1738,8 +1734,14 @@ pub const Registry = struct {
             expected.evacuation_candidate_page_count == current.evacuation_candidate_page_count;
     }
 
+    /// Diagnostic/test-only: derived by walking, exactly like `liveCountKind`.
+    /// The hot alloc/free paths keep no live-object counter (qjs
+    /// add_gc_object/remove_gc_object are pure list splices).
     pub fn liveCount(self: Registry) usize {
-        return self.gc_object_count;
+        var count: usize = 0;
+        var iterator = self.objectIterator();
+        while (iterator.next()) |_| count += 1;
+        return count;
     }
 
     pub fn liveCountKind(self: Registry, kind: GcKind) usize {
