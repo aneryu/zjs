@@ -3958,17 +3958,40 @@ pub fn setSuperPropertyValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    const throw_on_set_failure = setFailureShouldThrow(caller_function);
     if (try findPropertyDescriptor(ctx.runtime, prototype, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         switch (desc.kind) {
             .accessor => {
-                if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (desc.setter.isUndefined()) {
+                    if (throw_on_set_failure) {
+                        const exception = try throwSetFailureTypeError(
+                            ctx,
+                            global,
+                            atom_id,
+                            error.AccessorWithoutSetter,
+                        );
+                        exception.free(ctx.runtime);
+                    }
+                    return;
+                }
                 const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
                 result.free(ctx.runtime);
                 return;
             },
             .data => {
-                if (desc.writable == false) return error.TypeError;
+                if (desc.writable == false) {
+                    if (throw_on_set_failure) {
+                        const exception = try throwSetFailureTypeError(
+                            ctx,
+                            global,
+                            atom_id,
+                            error.ReadOnly,
+                        );
+                        exception.free(ctx.runtime);
+                    }
+                    return;
+                }
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;
                 const result = try setValueProperty(ctx, output, global, receiver, atom_id, value, caller_function, caller_frame);
                 result.free(ctx.runtime);

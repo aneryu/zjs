@@ -13361,6 +13361,51 @@ test "arrow super property call keeps the enclosing method receiver" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "super property assignment respects strictness when inherited descriptors reject writes" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const superSetBase = {};
+        \\Object.defineProperty(superSetBase, "lockedData", {
+        \\    value: 1,
+        \\    writable: false,
+        \\    configurable: true,
+        \\});
+        \\Object.defineProperty(superSetBase, "getterOnly", {
+        \\    get() { return 2; },
+        \\    configurable: true,
+        \\});
+        \\class StrictSuperSet {
+        \\    setData() { super.lockedData = 10; }
+        \\    setAccessor() { super.getterOnly = 20; }
+        \\}
+        \\Object.setPrototypeOf(StrictSuperSet.prototype, superSetBase);
+        \\const strictReceiver = new StrictSuperSet();
+        \\assert.throws(TypeError, () => strictReceiver.setData());
+        \\assert.throws(TypeError, () => strictReceiver.setAccessor());
+        \\const sloppyReceiver = {
+        \\    __proto__: superSetBase,
+        \\    setData() { super.lockedData = 10; },
+        \\    setAccessor() { super.getterOnly = 20; },
+        \\};
+        \\sloppyReceiver.setData();
+        \\sloppyReceiver.setAccessor();
+        \\assert.sameValue(superSetBase.lockedData, 1);
+        \\assert.sameValue(superSetBase.getterOnly, 2);
+        \\assert.sameValue(
+        \\    Object.prototype.hasOwnProperty.call(sloppyReceiver, "lockedData"),
+        \\    false
+        \\);
+        \\assert.sameValue(
+        \\    Object.prototype.hasOwnProperty.call(sloppyReceiver, "getterOnly"),
+        \\    false
+        \\);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "bytecode constructability follows canonical function shape" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
