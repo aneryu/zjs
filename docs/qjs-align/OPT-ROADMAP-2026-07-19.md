@@ -23,6 +23,13 @@
 > `5e331bf92e236c8e2c3bd88032b3c1ec2c2e9e0cfe2e1bd40b4ce2bbeaacd365`，与性能 qjs 的
 > `.text` 逐字节相同。完整 hash 差异来自非 `.text` 构建产物，性能仍固定使用前一个二进制。
 >
+> 2026-07-24 post-W1、pre-P1c-set recon 冻结在代码点
+> `91ad97dc9248d7f0ab8fdb8604f2b0e5201ec7a5`：ReleaseFast zjs 完整 SHA-256
+> `6386f600d28771641db1140a1f8cad73431b529229da62bab5ea1d2e30f60e9d`，`.text`
+> `b9f23389912267fb04a69b832e46a8f60503be6c6ae1b6cc3b24211f29c1406d`。
+> 该冻结件用于确认RegExp Zoo仍领先及resident-set值得开独立候选；若set候选改变共享dispatcher
+> 并获保留，最终P1c/RegExp仍须在新`.text`上再冻结，不能把这里的数字跨baseline拼接。
+>
 > 本文取代 2026-07-18 版本；基于 2026-07-19 对当前代码、QuickJS 源码、历史战报和 PMU 的重新审计。
 >
 > **第七次 QuickJS 反向复核与 CORE 收口（2026-07-20，当前状态）**：第六次复核列出的
@@ -438,6 +445,22 @@ median。下表来自历史冻结件
 | short plain put | 1.787x | 1.661x | 旧 baseline 的最大 direct 写差距；P1a/P1b 构造对齐后重测，才裁决 P1c |
 | short set | 1.349x | 1.293x | 与 put 分开，作为第二候选 |
 | short post-inc | 2.276x | 1.953x | 混入 read/number/update/lowering，只作后续 consumer |
+
+2026-07-24在W1全部construction机制收口后，又以CPU19、ReleaseFast、ASLR-off和15轮交错
+paired重新冻结`91ad97dc`：
+
+- JavaScript Zoo `regexp.js`的adaptive score zjs/qjs paired median为`1.12546584x`
+  （zjs `+12.5466%`），MAD `0.01095469x`、范围`1.10539–1.19603x`，15/15轮zjs胜；
+  因两侧都按一秒自适应循环，PMU只保留为envelope，不作fixed-work归因；
+- fixed-work `cell-set-short-20m.js`的zjs/qjs cycles为`2.27380809x`、instructions为
+  `2.02820703x`，cycles MAD `0.00374563x`，30/30 stdout完全相同。该结果只批准独立
+  resident-set单刀，不把2.27x整体预先归因给residency；
+- qjs仍为上方固定二进制；Zoo源码为`javascript-zoo@a17d4e0`。combined raw分别在
+  `/tmp/zjs-post-w1-refreeze-91ad97dc/{zoo,cell-set}-paired-raw.csv`，SHA-256为
+  `ebf6e1877fe34248f90e3c8b7e3badc169b481ec5e49c0e9aae32958b7804e77`和
+  `b17756d111fbfcebd237bbd2b467ee503e69d491a0b14b903c5a5f0425693ab0`；
+  完整summary SHA-256为
+  `1e9edc03fc8fb5e395f90b1ffce94675cc74b270562a267b4ff3397b53662995`。
 
 已做过一次“plain read 与 checked read 分 handler”的干净候选，并在独立重建后跑 15 轮 paired
 复核。它删除了 plain read 的 TDZ compare，instructions 如预期下降约 1.26%，但没有 cycles 收益，
