@@ -3284,9 +3284,14 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    // Keep Zig's boundary check for synthetic/legacy bytecode; normal parser
-    // output has construction-fixed length (qjs reads unchecked, 18461).
-    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): get_var /
+    // get_var_undef are .var_ref-format ops, so finalize validates their
+    // operands against closure_var_count (validateVarRefOperandBounds) and
+    // frame construction sizes var_refs to exactly that count
+    // (captureSlice/initFrameVarRefs). The resident read is unchecked like
+    // qjs OP_get_var (quickjs.c:18461); the assert covers the test-only
+    // legacy adapter bridge, which bypasses finalize.
+    std.debug.assert(idx < vm.frame.var_refs.len);
     // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
     // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
     // (18461-18488).
@@ -3311,38 +3316,41 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
         // exact cold waterfall (vm_property_globals.getVar), which starts
         // with this same own-data probe.
         const function = vm.function;
-        if (idx < function.closureVar().len) {
-            const cv = function.closureVar()[idx];
-            if (!cv.isLexical() and !function.runtimeStrictMode()) {
-                const global = vm.global;
-                if (!global.hasExoticMethods()) {
-                    // Private frameless twin of Object.findProperty + the
-                    // asDataAt data test (traversal identical, hot-arm
-                    // non-sharing discipline): the shared helpers'
-                    // Flags.fromBits packed-struct bitcast materializes
-                    // through a stack slot when inlined here, which grew a
-                    // scratch frame on the WHOLE handler and taxed the
-                    // initialized hit leg (+2 sp insns per read). Raw-bits
-                    // probe: atom match + !deleted (bit 5) + kind == .data
-                    // (bits 3-4) — register tests only. Mirrors qjs
-                    // find_own_property + the JS_PROP_NORMAL value read.
-                    const shape_ref = global.shape_ref;
-                    const props = global.shapeProps();
-                    var shape_index: u32 = @call(.always_inline, core.Shape.firstPropertyIndex, .{ shape_ref, cv.var_name });
-                    var steps: usize = 0;
-                    while (shape_index != core.shape.no_property_index and steps < shape_ref.prop_count) : (steps += 1) {
-                        const prop_index: usize = @intCast(shape_index);
-                        if (prop_index >= shape_ref.prop_count) break;
-                        const prop = shape_ref.props()[prop_index];
-                        shape_index = prop.hash_next;
-                        if (prop_index >= props.len) continue;
-                        if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
-                            if ((prop.flags & 0b011000) == 0) {
-                                sp[0] = global.prop_values[prop_index].slot.data.dup();
-                                return cont(pc + 3, sp + 1, var_buf, vm);
-                            }
-                            break; // found, but not a plain data slot → cold waterfall
+        // Same finalize-validated operand contract as the initialized leg
+        // above: idx < closureVarCount is construction-fixed, so the arm
+        // reads the closure-var record unchecked (assert covers the
+        // test-only legacy adapter bridge).
+        std.debug.assert(idx < function.closureVar().len);
+        const cv = function.closureVar()[idx];
+        if (!cv.isLexical() and !function.runtimeStrictMode()) {
+            const global = vm.global;
+            if (!global.hasExoticMethods()) {
+                // Private frameless twin of Object.findProperty + the
+                // asDataAt data test (traversal identical, hot-arm
+                // non-sharing discipline): the shared helpers'
+                // Flags.fromBits packed-struct bitcast materializes
+                // through a stack slot when inlined here, which grew a
+                // scratch frame on the WHOLE handler and taxed the
+                // initialized hit leg (+2 sp insns per read). Raw-bits
+                // probe: atom match + !deleted (bit 5) + kind == .data
+                // (bits 3-4) — register tests only. Mirrors qjs
+                // find_own_property + the JS_PROP_NORMAL value read.
+                const shape_ref = global.shape_ref;
+                const props = global.shapeProps();
+                var shape_index: u32 = @call(.always_inline, core.Shape.firstPropertyIndex, .{ shape_ref, cv.var_name });
+                var steps: usize = 0;
+                while (shape_index != core.shape.no_property_index and steps < shape_ref.prop_count) : (steps += 1) {
+                    const prop_index: usize = @intCast(shape_index);
+                    if (prop_index >= shape_ref.prop_count) break;
+                    const prop = shape_ref.props()[prop_index];
+                    shape_index = prop.hash_next;
+                    if (prop_index >= props.len) continue;
+                    if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
+                        if ((prop.flags & 0b011000) == 0) {
+                            sp[0] = global.prop_values[prop_index].slot.data.dup();
+                            return cont(pc + 3, sp + 1, var_buf, vm);
                         }
+                        break; // found, but not a plain data slot → cold waterfall
                     }
                 }
             }
