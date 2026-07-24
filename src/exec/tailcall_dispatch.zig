@@ -827,10 +827,29 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
 /// Cold post-return dispatcher. Keeping both continuation bodies out of
 /// `popAndResume` preserves the ordinary return's original one-compare shape;
 /// only calls that actually carry post-call work publish these fields.
+///
+/// The `.for_of_next` arm carries the same-chain fast leg for the dominant
+/// iterator-result shape — qjs's straight-line C after JS_Call returns:
+/// JS_IteratorNext's done tail (JS_GetProperty(obj, JS_ATOM_done) →
+/// JS_ToBoolFree, quickjs.c:16607-16617) and js_for_of_next's result layout
+/// (`sp[0] = value; sp[1] = JS_NewBool(done)`, quickjs.c:16700-16712) — with
+/// no driver hop and no re-validation. The `pc`/`sp` arguments ARE the
+/// caller's resume state: popAndResume republished the caller through
+/// reloadAfterPop before tail-calling here, so a plain own-data `{value,
+/// done:false}` step finishes with two probe loads, two stores and a
+/// tail-jump. Eligibility mirrors `iteratorResultProperty`'s fast leg
+/// (ordinary receiver, own data slots); `done` must be a plain bool (qjs
+/// JS_ToBoolFree's bool leg). Everything else — accessors/Proxy/exotic
+/// receivers, prototype-walk misses, non-bool `done`, the done==true loop
+/// exit (which clears the iterator slot), capacity shortfalls, and the
+/// L0 stop-fixture seam — bails to the authoritative completion below.
+/// The borrowed-entry invariant ("the caller stack was deliberately left
+/// untouched while the method frame ran", finishForOfNextResult) is what
+/// makes the operand-layout re-validation unnecessary on the fast leg, the
+/// same trust qjs's js_for_of_next places in its sp-relative slots
+/// (quickjs.c:16686-16699).
 fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    _ = pc;
-    _ = sp;
-    const result = vm.return_value;
+    const result = loadValueAsIntPair(&vm.return_value);
     const action = vm.return_action;
     const payload = vm.return_payload;
     vm.return_value = JSValue.undefinedValue();
@@ -838,7 +857,38 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     vm.return_payload = 0;
     switch (action) {
         .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
-        .for_of_next => completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .for_of_next => {
+            fast: {
+                // Legacy stop-boundary fixtures suspend through coldNext's
+                // maybeStop; keep them on the publishing path (op_drop_fast
+                // precedent).
+                if (vm.local_fast_blocked) break :fast;
+                const next_object = class_vm.objectFromValue(result) orelse break :fast;
+                if (next_object.proxyTarget() != null or next_object.hasExoticMethods()) break :fast;
+                const stack = vm.stack;
+                std.debug.assert(sp == stack.topPtr());
+                // Same capacity contract as finishForOfNextResult: normal
+                // frames reserve stack_size + 1, synthetic/heap-backed frames
+                // keep the checked growth path.
+                if (stack.len() > stack.capacity or stack.capacity - stack.len() < 2) break :fast;
+                var slow_property = false;
+                const done_value = next_object.findOwnDataValueFast(core.atom.ids.done, &slow_property) orelse break :fast;
+                const done = done_value.asBool() orelse break :fast;
+                if (done) break :fast;
+                const value_borrowed = next_object.findOwnDataValueFast(core.atom.ids.value, &slow_property) orelse break :fast;
+                const value = value_borrowed.dup();
+                // Deliver `[value, done]` and publish the new operand top
+                // BEFORE releasing the result object — mirror of
+                // finishForOfNextResult's push-then-deferred-free order, so a
+                // destroy-triggered GC scans a consistent caller window.
+                sp[0] = value;
+                sp[1] = JSValue.boolean(false);
+                stack.setTopPtr(sp + 2);
+                result.free(vm.ctx.runtime);
+                return @call(.always_tail, next, .{ pc, sp + 2, var_buf, vm });
+            }
+            completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
+        },
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
