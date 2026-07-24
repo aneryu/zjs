@@ -875,6 +875,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // no runtime predicate select on the int fast path).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
+    // qjs OP_post_inc/OP_post_dec int fast leg (quickjs.c:20009-20045). Every
+    // `let` loop update emits post_inc+put_loc_check+drop (checked lvalues are
+    // outside the resolve_labels plain-loc fusions, matching qjs), so this is
+    // the per-iteration update op of every lexical counter loop.
+    inline for ([_]u8{ op.post_inc, op.post_dec }) |o| t[o] = td.op_post_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;
     // Trailing expression-statement drop (the per-iter `dup; put_loc_check; DROP`

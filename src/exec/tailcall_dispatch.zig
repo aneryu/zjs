@@ -2849,6 +2849,23 @@ pub fn op_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// qjs CASE(OP_post_inc)/CASE(OP_post_dec) int fast leg (quickjs.c:20009-20045):
+// the old int stays at sp[-1], the stepped int lands at sp[0], and sp grows by
+// one — the emitter's n_push=2 stack account covers the slot (same unchecked
+// push contract as op_dup). INT32_MAX/INT32_MIN steps and non-int operands
+// fall to the cold shell (js_post_inc_slow mirror) with the stack untouched.
+pub fn op_post_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const opc = pc[0];
+    if ((sp - 1)[0].asInt32()) |iv| {
+        const res = if (opc == op.post_inc) @addWithOverflow(iv, 1) else @subWithOverflow(iv, 1);
+        if (res[1] == 0) {
+            sp[0] = JSValue.int32(res[0]);
+            return cont(pc + 1, sp + 1, var_buf, vm);
+        }
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = (sp - 1)[0];
     sp[0] = if (v.requiresRefCount()) v.dup() else v;
