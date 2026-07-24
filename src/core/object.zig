@@ -1768,7 +1768,15 @@ pub const Object = extern struct {
         std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
         std.debug.assert(definition.payload_kind == .generator);
 
-        const self = try rt.createRuntime(Object);
+        // qjs creates the public generator object through js_create_from_ctor →
+        // JS_NewObjectFromShape, whose js_trigger_gc(sizeof(JSObject))
+        // (quickjs.c:5619) runs BEFORE the JSObject allocation. With
+        // registration no longer polling (add_gc_object never re-checks the
+        // threshold, quickjs.c:6540), this pre-allocation boundary is the
+        // generator path's faithful GC service point. The shell is not yet
+        // reachable, so a collection here sees only rooted/refcounted state.
+        rt.collectBeforeObjectAllocation(@sizeOf(Object));
+        const self = try rt.memory.createNoTrigger(Object);
         errdefer rt.memory.destroy(Object, self);
         // The detached path knows the finalized operand-stack size and installs
         // a variable-sized execution record immediately afterwards. Allocate

@@ -1281,13 +1281,12 @@ pub const JSRuntime = struct {
         // gc_obj_list; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
         // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
-        // by createInternal's collectBeforeObjectAllocation immediately before
-        // the object body allocation. Property arrays and separate payloads
-        // retain their existing allocRuntime* requests. By the time we link,
-        // those sub-allocations have observed the final allocated_bytes and set
-        // major_request.pending iff over threshold, so re-loading allocated_bytes
-        // here is pure redundant work. Keep addWithSize (the faithful
-        // add_gc_object) and only service an already-pending request.
+        // by collectBeforeObjectAllocation immediately before the object body
+        // allocation. Property arrays and separate payloads retain their
+        // existing allocRuntime* requests; a crossing they produce stays
+        // pending until the next pre-allocation boundary or scheduler poll,
+        // exactly like a prop-array js_malloc crossing in qjs
+        // (quickjs.c:5636) waits for the next js_trigger_gc.
         try self.registerObjectWithBytes(object, object.allocationSize(self));
     }
 
@@ -1300,9 +1299,6 @@ pub const JSRuntime = struct {
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
         self.assertOwnerThread();
         try self.gc.addInitializedWithSize(&object.header, bytes);
-        if (self.gc.hasPendingMajorRequest()) {
-            _ = self.pollGC(null, .normal) catch {};
-        }
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
