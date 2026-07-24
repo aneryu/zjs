@@ -3235,6 +3235,54 @@ test "resolve_labels normalizes branches at the following instruction boundary" 
     }
 }
 
+test "resolve_labels reachability follows normalized conditional goto successors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("conditional-goto-cfg");
+    defer rt.atoms.free(name);
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    // get_arg 0
+    // if_false Lcontinue
+    // goto Lexit
+    // Lcontinue: goto 0
+    // Lexit: return_undef
+    //
+    // Branch normalization emits `if_true Lexit; goto 0`. Reachability must
+    // therefore retain both the normalized branch target and its fallthrough
+    // trampoline, even though jump threading bypasses that trampoline in the
+    // original graph and the original goto can fold directly to return_undef.
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 29;
+    input[0] = op.get_arg;
+    std.mem.writeInt(u16, input[1..3], 0, .little);
+    input[3] = op.if_false;
+    std.mem.writeInt(u32, input[4..8], 13, .little);
+    input[8] = op.goto;
+    std.mem.writeInt(u32, input[9..13], 23, .little);
+    input[13] = op.label;
+    input[18] = op.goto;
+    std.mem.writeInt(u32, input[19..23], 0, .little);
+    input[23] = op.label;
+    input[28] = op.return_undef;
+
+    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ op.get_arg0, op.if_true8, 3, op.goto8, @bitCast(@as(i8, -4)), op.return_undef },
+        bc.code,
+    );
+}
+
 test "resolve_labels constant tests fold every QuickJS producer and preserve source mapping" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

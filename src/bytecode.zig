@@ -9132,6 +9132,19 @@ pub const pipeline_resolve_labels = struct {
                     .terminal => {},
                     .jump => |target| try enqueueReachable(states, worklist, &worklist_len, target),
                 }
+            } else if (try matchConditionalGotoPeephole(code, current)) |peephole| {
+                // Layout replaces `if_* L1; goto L2; L1:` with an inverted
+                // branch to L2 and falls through at the boundary after the
+                // consumed goto. Model those output successors directly:
+                // threaded input targets can otherwise bypass the fallthrough
+                // trampoline, while terminal folding can hide L2.
+                try enqueueReachable(states, worklist, &worklist_len, peephole.target);
+                try enqueueReachable(
+                    states,
+                    worklist,
+                    &worklist_len,
+                    current + peephole.total_size,
+                );
             } else if (op_id == opcode.op.goto) {
                 if (try jumpTargetsNextInstruction(code, current)) {
                     try enqueueReachable(states, worklist, &worklist_len, next);
