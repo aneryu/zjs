@@ -4433,6 +4433,15 @@ pub const Object = extern struct {
         return null;
     }
 
+    /// Single-lookup view of the typed-array payload for the hot element
+    /// read/write legs — qjs reads its cached `u.array` state once per access;
+    /// this returns the payload pointer so the interpreter fast legs read
+    /// kind/element_size/byte_offset/fixed_length/buffer without re-resolving
+    /// the payload through five separate accessors.
+    pub fn typedArrayPayloadFast(self: *const Object) ?*const TypedArrayPayload {
+        return self.typedArrayPayloadConst();
+    }
+
     pub fn typedArrayKindSlot(self: *Object) *u8 {
         if (self.typedArrayPayload()) |payload| return &payload.kind;
         std.debug.assert(!class.isBytecodeFunctionClass(self.class_id));

@@ -1125,16 +1125,48 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // string / boolean / null / undefined have non-throwing conversions, so the
     // validity-check-first order is observably identical for them — they stay fast.)
     if (value.isBigInt() or value.isSymbol()) return .not_typed_array;
-    if (!core.object.isTypedArrayObject(object)) return .not_typed_array;
-    const kind = object.typedArrayKind();
-    // BigInt64/BigUint64 punt to the slow path (it converts via JS_ToBigInt64).
-    if (kind == 11 or kind == 12) return .not_typed_array;
+    // Resolve the payload ONCE (was re-resolved ~5x across isTypedArrayObject +
+    // typedArrayKind + typedArraySetElement's immutable/element_size/kind/
+    // index-valid/buffer/byte_offset accessor calls — the write-side twin of the
+    // read collapse). Same operation SEQUENCE as typedArraySetElement, which is
+    // qjs-exact: immutable reject (silent no-op) -> convert into scratch FIRST
+    // (number/string/bool/null/undefined values never run user code, so no
+    // mid-write detach; object/BigInt/Symbol already punted above) -> re-check
+    // live in-bounds/attached -> store, OOB/detached a silent no-op
+    // (qjs `ta_out_of_bound: return TRUE`).
+    const payload = object.typedArrayPayloadFast() orelse return .not_typed_array;
+    const kind = payload.kind;
+    if (kind == 11 or kind == 12) return .not_typed_array; // BigInt -> slow (JS_ToBigInt64)
+    const buffer_obj = objectFromValue(payload.buffer orelse return .not_typed_array) orelse return .not_typed_array;
+    if (buffer_obj.class_id != core.class.ids.array_buffer and buffer_obj.class_id != core.class.ids.shared_array_buffer) return .not_typed_array;
+    if (core.object.arrayBufferIsImmutable(rt, buffer_obj)) return .handled; // silent no-op
+    const width = payload.element_size;
+    var scratch: [8]u8 = undefined;
+    try core.typed_array.writeElement(rt, kind, scratch[0..width], value); // coerce FIRST
     const index: u32 = @intCast(key_int);
-    // typedArraySetElement mirrors qjs exactly: immutable reject (silent no-op),
-    // convert into a scratch buffer FIRST (user code may detach/resize), then
-    // re-check the in-bounds/attached state and store. OOB after conversion is a
-    // silent no-op (qjs `ta_out_of_bound: return TRUE`), not a throw.
-    _ = try core.typed_array.typedArraySetElement(rt, object, index, value);
+    const fixed_len = payload.fixed_length orelse {
+        // Length-tracking (resizable): recompute the live length via the
+        // canonical validity check, then store the already-coerced bytes.
+        if (!(try core.object.typedArrayIndexValid(rt, object, index))) return .handled;
+        const off = payload.byte_offset + @as(usize, index) * @as(usize, width);
+        @memcpy(buffer_obj.byteStorage()[off..][0..width], scratch[0..width]);
+        return .handled;
+    };
+    // Live validity, identical to the read leg's proven-correct check: a
+    // detached buffer, or a fixed-length TA whose backing (resizable) buffer
+    // shrank so the WHOLE TA no longer fits, makes every index out-of-bounds
+    // (IsTypedArrayOutOfBounds) -> silent no-op, not just indices past the new
+    // buffer end. `byte_len > bytes.len - byte_offset` is the whole-TA check the
+    // per-element bound would have missed (test262 out-of-bounds-get-and-set).
+    if (buffer_obj.arrayBufferDetached()) return .handled;
+    const bytes = buffer_obj.byteStorage();
+    const byte_offset = payload.byte_offset;
+    if (byte_offset > bytes.len) return .handled;
+    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, width)) catch return .handled;
+    if (byte_len > bytes.len - byte_offset) return .handled;
+    if (index >= fixed_len) return .handled;
+    const off = byte_offset + @as(usize, index) * @as(usize, width);
+    @memcpy(bytes[off..][0..width], scratch[0..width]);
     return .handled;
 }
 

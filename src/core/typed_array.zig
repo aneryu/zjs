@@ -853,7 +853,7 @@ pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
     };
 }
 
-fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+pub fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
     switch (kind) {
         1, 2 => {
             if (value.isBigInt()) return error.TypeError;
