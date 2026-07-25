@@ -8376,7 +8376,60 @@ pub const pipeline_resolve_labels = struct {
         return owned;
     }
 
+    // Pass-scoped jump-target bitset (bit p set iff some jump op targets pc p).
+    // `computeLayout`'s up-to-64-pass fixpoint reads a stable `code`, so the
+    // target set is constant; building it once turns every peephole
+    // `hasJumpTargetInRange` query from an O(code) rescan into an O(window)
+    // bit check (windows are <= 12 bytes). Threadlocal so concurrent parses on
+    // different threads don't collide; guarded on code slice identity and
+    // save/restored across re-entrancy so a query only trusts a bitset built
+    // for that exact buffer, else it falls back to the exact scan below.
+    threadlocal var pass_jump_target_bits: []const u8 = &.{};
+    threadlocal var pass_jump_target_code_ptr: usize = 0;
+    threadlocal var pass_jump_target_code_len: usize = 0;
+
+    /// Build the jump-target bitset for `code`. Stops at the first malformed op
+    /// exactly like the scan (so the bitset covers the same targets the scan
+    /// could reach). Sized for bits [0, code.len] since a jump target may equal
+    /// code.len (jump-to-end).
+    fn buildJumpTargetBits(mem: *memory.MemoryAccount, code: []const u8) ![]u8 {
+        const nbytes = (code.len + 1 + 7) / 8;
+        const bits = try mem.alloc(u8, nbytes);
+        @memset(bits, 0);
+        var scan_pc: usize = 0;
+        while (scan_pc < code.len) {
+            const op_id = code[scan_pc];
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+            if (size == 0 or scan_pc + size > code.len) break;
+            const target: ?usize = if (isJumpOp(op_id))
+                (jumpTarget(code, scan_pc) catch break)
+            else if (isAtomLabelU8Op(op_id))
+                (atomLabelTarget(code, scan_pc) catch break)
+            else
+                null;
+            if (target) |t| {
+                if (t <= code.len) bits[t >> 3] |= (@as(u8, 1) << @as(u3, @intCast(t & 7)));
+            }
+            scan_pc += size;
+        }
+        return bits;
+    }
+
     fn hasJumpTargetInRange(code: []const u8, start_pc: usize, end_pc: usize) bool {
+        if (pass_jump_target_bits.len != 0 and
+            pass_jump_target_code_ptr == @intFromPtr(code.ptr) and
+            pass_jump_target_code_len == code.len)
+        {
+            const bit_capacity = pass_jump_target_bits.len * 8;
+            const limit = @min(end_pc, code.len + 1);
+            var pc = start_pc;
+            while (pc < limit) : (pc += 1) {
+                if (pc < bit_capacity and
+                    (pass_jump_target_bits[pc >> 3] & (@as(u8, 1) << @as(u3, @intCast(pc & 7)))) != 0)
+                    return true;
+            }
+            return false;
+        }
         var scan_pc: usize = 0;
         while (scan_pc < code.len) {
             const op_id = code[scan_pc];
@@ -9289,6 +9342,36 @@ pub const pipeline_resolve_labels = struct {
         const code = ctx.function.code;
         @memset(positions, 0);
         @memset(sizes, 0);
+
+        // Precompute the jump-target set once for the whole layout fixpoint:
+        // `code` is read-only here, so the peephole matchers' repeated
+        // `hasJumpTargetInRange` queries become O(window) instead of O(code)
+        // rescans (the O(64*n^2) that timed out on large generated functions).
+        // Save/restore the threadlocal across any re-entrant computeLayout;
+        // fall back to the per-call scan on OOM. Only built for large functions:
+        // below the threshold the per-call scan's O(n^2) is sub-millisecond, so
+        // small functions keep the exact allocation-free scan path (this also
+        // keeps the resolve_labels OOM-injection unit tests, which use tiny
+        // synthetic functions, on their original allocation sequence).
+        const jump_target_bitset_threshold = 4096;
+        const jt_bits: ?[]u8 = if (code.len >= jump_target_bitset_threshold)
+            (buildJumpTargetBits(ctx.memory, code) catch null)
+        else
+            null;
+        const jt_saved_bits = pass_jump_target_bits;
+        const jt_saved_ptr = pass_jump_target_code_ptr;
+        const jt_saved_len = pass_jump_target_code_len;
+        if (jt_bits) |b| {
+            pass_jump_target_bits = b;
+            pass_jump_target_code_ptr = @intFromPtr(code.ptr);
+            pass_jump_target_code_len = code.len;
+        }
+        defer {
+            pass_jump_target_bits = jt_saved_bits;
+            pass_jump_target_code_ptr = jt_saved_ptr;
+            pass_jump_target_code_len = jt_saved_len;
+            if (jt_bits) |b| ctx.memory.free(u8, b);
+        }
 
         var changed = true;
         var final_size: usize = 0;
