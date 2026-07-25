@@ -17461,3 +17461,84 @@ test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and 
     try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
+
+test "latin1 high bytes survive raw-string byte bridges (qjs JS_ToCStringLen2 mirror)" {
+    // Regression: value_ops.appendRawString used to append latin1 payload
+    // bytes raw into UTF-8 byte buffers; any 0x80-0xFF code point then broke
+    // the createStringValue re-decode ("URIError: expecting hex digit").
+    // Each leg below reproduced against qjs before the width-aware fix.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    var out = [];
+        \\    var f = function () {};
+        \\    Object.defineProperty(f, "name", { value: "é" });
+        \\    out.push(f.bind(null).name === "bound é");
+        \\    var tagged = {};
+        \\    tagged[Symbol.toStringTag] = "étag";
+        \\    out.push(Object.prototype.toString.call(tagged) === "[object étag]");
+        \\    out.push(Symbol("é").toString() === "Symbol(é)");
+        \\    out.push(Symbol("é").description === "é");
+        \\    out.push(new Error("mé").toString() === "Error: mé");
+        \\    out.push(["a", "b"].join("é") === "aéb");
+        \\    out.push(new Int8Array([1, 2]).join("é") === "1é2");
+        \\    out.push(new RegExp("éx").toString() === "/éx/");
+        \\    out.push(["é"].toLocaleString() === "é");
+        \\    try {
+        \\        var C = class éc {};
+        \\        C();
+        \\        out.push("no-throw");
+        \\    } catch (e) {
+        \\        out.push(e instanceof TypeError);
+        \\    }
+        \\    var stack_ok = false;
+        \\    try {
+        \\        (function éfn() { throw new Error("boom"); })();
+        \\    } catch (e) {
+        \\        stack_ok = typeof e.stack === "string" && e.stack.indexOf("éfn") >= 0;
+        \\    }
+        \\    out.push(stack_ok);
+        \\    return out.join(",");
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(
+        result,
+        "true,true,true,true,true,true,true,true,true,true,true",
+    );
+}
+
+test "JSON.rawJSON latin1 payload survives the simple stringify byte buffer" {
+    // Regression: json_ops' local appendRawString clone appended raw latin1
+    // bytes into the stringify buffer, breaking the final UTF-8 re-decode.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\[
+        \\    JSON.stringify(JSON.rawJSON('"é"')) === '"é"',
+        \\    JSON.stringify({ x: JSON.rawJSON('"é"') }, null, 1) === '{\n "x": "é"\n}',
+        \\].join(",")
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(result, "true,true");
+}
+
+test "native function toString keeps non-ASCII identifier names (qjs js_function_toString)" {
+    // Regression: the native-source name filter only accepted ASCII
+    // identifiers, silently dropping latin1/unicode identifier names that
+    // qjs js_function_toString (quickjs.c:41335) emits verbatim.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    Object.defineProperty(Math.max, "name", { value: "ém", configurable: true });
+        \\    return Math.max.toString() === "function ém() {\n    [native code]\n}";
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(true, result.asBool().?);
+}
