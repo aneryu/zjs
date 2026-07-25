@@ -835,7 +835,7 @@ fn f64ToFloat16(value: f64) u16 {
     return @bitCast(@as(f16, @floatCast(value)));
 }
 
-fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
+pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
     return switch (kind) {
         1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
         2 => JSValue.int32(bytes[0]),

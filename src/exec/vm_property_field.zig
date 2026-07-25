@@ -1078,10 +1078,15 @@ pub fn fastTypedArrayElementValue(rt: *core.JSRuntime, obj: core.JSValue, key: c
     if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
     const index: u32 = @intCast(key_int);
     if (index >= fixed_len) return core.JSValue.undefinedValue();
-    // All bounds/detach/length conditions above match typedArrayGetIndex's own
-    // gating, so for kinds 1..10 it cannot error here (no allocation) — but route
-    // any unexpected error to the slow path rather than swallowing it.
-    return core.typed_array.typedArrayGetIndex(rt, object, index) catch null;
+    // Inline the typed load using the buffer/offset/kind already resolved above,
+    // mirroring qjs JS_GetPropertyValue's per-class typed arm (quickjs.c:9048-
+    // 9083) which is a single bounds check + typed load off cached state. The
+    // former `typedArrayGetIndex` call RE-resolved the payload, buffer, and
+    // length a second time (the 2.78x-vs-qjs helper-chain redundancy). Bounds
+    // are already guaranteed by the byte_len/index checks above, so for
+    // kinds 1..10 (non-BigInt) readElement cannot error.
+    const element_offset = byte_offset + @as(usize, index) * @as(usize, element_size);
+    return core.typed_array.readElement(rt, kind, bytes[element_offset..][0..element_size]) catch null;
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };

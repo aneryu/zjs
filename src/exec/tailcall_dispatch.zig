@@ -2649,6 +2649,25 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         obj.free(rt);
         return cont(pc + 1, sp - 3, var_buf, vm);
     }
+    // Typed-array integer write: qjs JS_SetPropertyValue's typed arm
+    // (quickjs.c:9947) converts the numeric value, bounds-rechecks, and stores.
+    // Reach it from the hot handler instead of the cold_table -> write helper
+    // chain. Object/BigInt/Symbol values (user-code or throwing conversions)
+    // return .not_typed_array and fall through; a numeric/string/bool/null/
+    // undefined value writes (or is a silent OOB/detached no-op) here. The store
+    // copies the coerced bytes and does not consume the operand, so the value/
+    // key/obj refs are released exactly as the dense leg does.
+    if (key.isInt() and obj.isObject()) {
+        switch (vm_property_field.putTypedArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
+            .handled => {
+                value.free(rt);
+                key.free(rt);
+                obj.free(rt);
+                return cont(pc + 1, sp - 3, var_buf, vm);
+            },
+            .not_typed_array => {},
+        }
+    }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -2913,11 +2932,26 @@ fn op_get_array_el_cached_proxy(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSV
 pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const key = (sp - 1)[0];
     const obj = (sp - 2)[0];
+    const rt = vm.ctx.runtime;
     if (vm_property_field.fastDenseArrayElementValue(obj, key)) |value| {
-        obj.free(vm.ctx.runtime);
-        key.free(vm.ctx.runtime);
+        obj.free(rt);
+        key.free(rt);
         (sp - 2)[0] = value; // owned (fastArrayElementDup dups)
         return cont(pc + 1, sp - 1, var_buf, vm);
+    }
+    // Typed-array integer read: qjs JS_GetPropertyValue's per-class typed arm
+    // (quickjs.c:9048-9083) is the slow path for OP_get_array_el but is itself a
+    // compact bounds-check + typed load. Reach it directly from the hot handler
+    // (int key returns an owned/undefined JSValue) instead of the
+    // cold_table -> arrayElement -> fastTypedArrayElementValue detour. Non-typed
+    // /BigInt/negative/length-tracking cases return null and fall through.
+    if (key.isInt() and obj.isObject()) {
+        if (vm_property_field.fastTypedArrayElementValue(rt, obj, key)) |value| {
+            obj.free(rt);
+            // key is an int (no refcount); nothing to free.
+            (sp - 2)[0] = value;
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
     }
     if (key.isString()) return @call(.always_tail, propertyTailHandler(vm, .get_array_el_cached_string), .{ pc, sp, var_buf, vm });
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
