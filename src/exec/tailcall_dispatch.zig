@@ -445,7 +445,18 @@ noinline fn iteratorNextCallSetupRecover(vm: *Vm, depth: u8, err: HostError) boo
 /// (empty_leaf_geometry requires closureVarCount == 0): a captureless callee
 /// contains no var-ref ops at all (validateVarRefOperandBounds), so no
 /// mirrored op can observe the skipped publication.
-const MirrorPublish = enum { none, captures };
+///
+/// `.entry_frame` re-derives the base from the just-constructed
+/// `entry.frame.var_refs.ptr` (store-forwarded ldr off the entry register)
+/// instead of extending the resolver's captures value across the warm
+/// constructor: measured on the call matrix, the register-passed base was
+/// free on the exact-args instances (the str pairs with the adjacent
+/// `code_base` store into one stp) but its longer live range displaced the
+/// call_facts halfword out of a callee-saved register in the zero-arg
+/// instance, costing the EMPTY arm one mov per call. The O2 capture arms
+/// therefore pay the local ldr+str themselves and keep the empty arm's
+/// baseline register allocation.
+const MirrorPublish = enum { none, captures, entry_frame };
 
 inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8, comptime publish_mirror: MirrorPublish, captures_base: [*]*core.VarRef) Outcome {
     // Enter the entry pushCall handed back instead of reloading
@@ -474,6 +485,12 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8,
             std.debug.assert(entry.frame.function.closureVarCount() == 0 or
                 captures_base == entry.frame.var_refs.ptr);
             vm.var_refs_ptr = captures_base;
+        },
+        .entry_frame => {
+            // Store-forwarded reload off the entry register (see the enum
+            // doc): frees the resolver's captures value right at the warm
+            // constructor like the pre-mirror baseline.
+            vm.var_refs_ptr = entry.frame.var_refs.ptr;
         },
         .none => {
             // Empty-leaf families: callee proven captureless at publication
@@ -700,7 +717,7 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// zero-arg captured callees on OP_call0. Same warm/miss split as the
 /// established zero-arg adapter; the warm constructor adds only the borrowed
 /// capture binding (two frame stores off the already-resolved closure record).
-inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, comptime publish: MirrorPublish, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
@@ -708,12 +725,12 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
+    return enterEntry(vm, entry, code_ptr, publish, if (publish == .captures) captures.ptr else undefined);
 }
 
 /// Handler-side adapter for the outline warm capture-leaf constructor (the
 /// non-pivot sloppy plain twin; see `warmCaptureLeafOutline`).
-inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
+inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, comptime publish: MirrorPublish, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, resume_pc)) {
@@ -721,7 +738,7 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
+    return enterEntry(vm, entry, code_ptr, publish, if (publish == .captures) captures.ptr else undefined);
 }
 
 /// Out-of-line capture-leaf entry (dynamic-argc plain calls and the method
@@ -729,14 +746,14 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
 /// zero-arg raw method arm's rationale: a warm inline body here would be
 /// instruction-near-identical to the pivot one and could tail-merge back
 /// into a shared discrimination head on the established arms.
-inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
+inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, comptime publish: MirrorPublish, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
+    return enterEntry(vm, entry, code_ptr, publish, if (publish == .captures) captures.ptr else undefined);
 }
 
 /// Cold half of the moved/borrowed-region entry polls — the K7 sibling of
@@ -1403,16 +1420,16 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                             const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
                             if (comptime argc_source == .zero) {
                                 if (capture_kind == .raw_this) {
-                                    return pushWarmCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
+                                    return pushWarmCaptureLeafAndEnter(.raw_undefined, .entry_frame, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
                                 }
-                                return pushWarmOutlineCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
+                                return pushWarmOutlineCaptureLeafAndEnter(.sloppy_global, .entry_frame, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, pc + 1, resolved.fb.byteCode().ptr);
                             }
                             // Dynamic-argc plain calls: authoritative outline,
                             // mirroring the established zero-arg arm above.
                             if (capture_kind == .raw_this) {
-                                return pushCaptureLeafAndEnter(.raw_undefined, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
+                                return pushCaptureLeafAndEnter(.raw_undefined, .entry_frame, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
                             }
-                            return pushCaptureLeafAndEnter(.sloppy_global, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
+                            return pushCaptureLeafAndEnter(.sloppy_global, .entry_frame, vb, vm, resolved.fb, resolved.call_facts, captures, region_start, resolved.fb.byteCode().ptr);
                         }
                     }
                     // O1 exact-args leaf arms — fixed nonzero arity only (the
@@ -1558,7 +1575,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             // above; the kind byte is tested only after both established
             // zero-arg bits missed.
             if (argc == 0 and execution.capture_leaf_kind != .none) {
-                return pushCaptureLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, resolved.fb.byteCode().ptr);
+                return pushCaptureLeafAndEnter(.receiver, .captures, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, resolved.fb.byteCode().ptr);
             }
             // O1 exact-args method arms: `recv.m(x)` on a published exact-args
             // leaf. The receiver arm is policy-independent (raw receiver
@@ -1711,6 +1728,13 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                         }
                         const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
                         if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
+                            // Captureless next() has no var-ref ops at all
+                            // (operand-bounds validator), so the mirror store
+                            // is skipped exactly like the empty-leaf arms; the
+                            // len is already in a register for the carve.
+                            if (captures.len == 0) {
+                                return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .none, undefined);
+                            }
                             return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .captures, captures.ptr);
                         }
                         // Cold warm-miss arm: re-read the borrowed record
@@ -1718,7 +1742,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                         // callee region) so `receiver`/`method` are not kept
                         // live across the carve/miss `bl`s in the hot arm.
                         switch (pushBorrowedIteratorMiss(vm, &resolved, iterator_record[0], iterator_record[1], iterator_record, depth)) {
-                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .captures, captures.ptr),
+                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .entry_frame, undefined),
                             .threw => return .threw,
                             .recovered => return coldNext(vb, vm),
                         }
