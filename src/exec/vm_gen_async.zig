@@ -99,7 +99,7 @@ fn parkGeneratorExecutionState(
     // QuickJS's attached JSVarRef -> JSAsyncFunctionState edge. Initial
     // parameter setup uses a detached shell; finishGeneratorShell installs
     // these edges immediately after publishing its fresh rc==1 header.
-    if (generator.header.metaConst().flags.heap_accounted) {
+    if (generator.header.metaConst().alloc_info.heap_accounted) {
         const generator_value = generator.value();
         for (frame.open_var_refs) |maybe_cell| {
             const cell = maybe_cell orelse continue;

@@ -253,7 +253,7 @@ test "heap BigInt value uses reserved QuickJS tag" {
     defer value.free(rt);
 
     try std.testing.expect(value.isBigInt());
-    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().kind);
+    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().flags.kind);
 }
 
 test "heap BigInt limbs participate in runtime memory limit and accounting" {
@@ -304,7 +304,7 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     const first = try core.RealmContext.create(rt);
     const second = try core.RealmContext.create(rt);
 
-    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().kind);
+    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().flags.kind);
     try std.testing.expectEqual(first, rt.firstContext().?);
 
     var owner = core.RealmRef.retain(first);
@@ -380,7 +380,7 @@ test "RealmContext owns the five QuickJS initial layouts as Shapes" {
         ctx.regexp_result_shape.?,
     };
     for (initial_shapes) |initial_shape| {
-        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().kind);
+        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().flags.kind);
     }
     try std.testing.expectEqual(array_prototype, ctx.array_shape.?.proto.?);
     try std.testing.expectEqual(object_prototype, ctx.arguments_shape.?.proto.?);
@@ -4891,7 +4891,7 @@ test "function bytecode registration is old-space accounted" {
 
     try std.testing.expectEqual(fixture_layout.total_size, fb.layout().total_size);
     try std.testing.expectEqual(fixture_layout.total_size, fb.heapByteSize());
-    try std.testing.expect(!fb.header.meta().flags.metadata_in_slab);
+    try std.testing.expect(fb.header.meta().alloc_info.standalone);
     try std.testing.expectEqual(
         baseline_bytes + fixture_layout.total_size + core.gc.metadata_prefix_size,
         rt.memory.allocated_bytes,
@@ -5282,9 +5282,9 @@ test "gc heap accounting verifier catches missing allocation entries" {
     defer obj.value().free(rt);
     try rt.gc.verifyHeapAccounting(rt);
 
-    obj.header.meta().flags.heap_accounted = false;
+    obj.header.meta().alloc_info.heap_accounted = false;
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
-    obj.header.meta().flags.heap_accounted = true;
+    obj.header.meta().alloc_info.heap_accounted = true;
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -8231,7 +8231,7 @@ test "realm module registry keeps published record addresses stable" {
     defer rt.atoms.free(first_name);
     const first = try publishEmptyModule(rt, &ctx.modules, first_name);
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.ModuleRecord, "header"));
-    try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().kind);
+    try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().flags.kind);
 
     var buffer: [48]u8 = undefined;
     for (0..48) |index| {

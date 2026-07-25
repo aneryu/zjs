@@ -971,7 +971,7 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
 
     try std.testing.expectEqual(layout.total_size, recovered.layout().total_size);
     try std.testing.expectEqual(layout.total_size, recovered.heapByteSize());
-    try std.testing.expect(!recovered.header.meta().flags.metadata_in_slab);
+    try std.testing.expect(recovered.header.meta().alloc_info.standalone);
     try std.testing.expectEqual(baseline_bytes + accounted_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(baseline_allocations + 1, rt.memory.allocation_count);
     try std.testing.expectEqual(baseline_live, rt.gc.liveCount());

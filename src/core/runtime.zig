@@ -1562,7 +1562,7 @@ pub const JSRuntime = struct {
     fn releaseNativeFunctionRealmsForContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
         var iter = self.gc.objectIterator();
         while (iter.next()) |header| {
-            if (header.metaConst().kind != .object) continue;
+            if (header.metaConst().flags.kind != .object) continue;
             const candidate: *Object = @alignCast(@fieldParentPtr("header", header));
             candidate.releaseNativeFunctionRealmForRuntimeTeardown(ctx);
         }
@@ -2035,7 +2035,7 @@ pub const JSRuntime = struct {
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.header.meta().flags.has_weak_id) {
+        if (object.flags.has_weak_id) {
             const weak_id = self.weak_object_ids.get(address) orelse unreachable;
             return weak_id << 1;
         }
@@ -2046,13 +2046,13 @@ pub const JSRuntime = struct {
             return err;
         };
         self.next_weak_id += 1;
-        object.header.meta().flags.has_weak_id = true;
+        object.flags.has_weak_id = true;
         return weak_id << 1;
     }
 
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        if (!object.header.metaConst().flags.has_weak_id) return null;
+        if (!object.flags.has_weak_id) return null;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         return weak_id << 1;
@@ -2061,8 +2061,8 @@ pub const JSRuntime = struct {
     /// Removes `object` from the weak identity registry, returning its encoded
     /// weak identity (if any) so destruction can propagate it to weak slots.
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        if (!object.header.meta().flags.has_weak_id) return null;
-        object.header.meta().flags.has_weak_id = false;
+        if (!object.flags.has_weak_id) return null;
+        object.flags.has_weak_id = false;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         _ = self.weak_object_ids.remove(address);
@@ -2511,7 +2511,7 @@ pub const JSRuntime = struct {
         }
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
-            if (header.meta().kind == .object) {
+            if (header.meta().flags.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
@@ -3104,7 +3104,7 @@ pub const JSRuntime = struct {
             if (item.value.refCountHeader()) |header| {
                 if (header.meta().rc == 0) {
                     const already_consumed_prepared_object =
-                        header.meta().kind == .object and
+                        header.meta().flags.kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
                     std.debug.assert(already_consumed_prepared_object);
@@ -3336,7 +3336,7 @@ pub const JSRuntime = struct {
 
 fn objectFromLastRefValue(value: JSValue) ?*Object {
     const header = value.refHeader() orelse return null;
-    if (header.meta().kind != .object) return null;
+    if (header.meta().flags.kind != .object) return null;
     if (header.meta().rc != 1) return null;
     return @alignCast(@fieldParentPtr("header", header));
 }

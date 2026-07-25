@@ -729,7 +729,7 @@ pub const JSContext = struct {
         const value = self.class_prototypes[index];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 
@@ -747,7 +747,7 @@ pub const JSContext = struct {
         const value = self.native_error_prototypes[@intFromEnum(kind)];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 

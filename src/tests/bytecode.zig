@@ -318,9 +318,9 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expect(fb.legacyBytecodeAdapter() == null);
         try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
         try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
-        try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().kind);
+        try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().flags.kind);
         try std.testing.expectEqual(@as(i32, 1), fb.header.meta().rc);
-        try std.testing.expect(fb.header.meta().flags.metadata_in_slab);
+        try std.testing.expect(!fb.header.meta().alloc_info.standalone);
 
         try std.testing.expect(fb.byte_code == null);
         try std.testing.expect(fb.vardefs == null);
@@ -812,7 +812,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     try std.testing.expectEqual(std.mem.zeroes(bytecode.CallFacts), second.hotExtension().?.call_facts);
     try std.testing.expectEqual(@as(u16, 0), second.hotExtension().?._call_facts_padding);
     try std.testing.expectEqual(atom_module.null_atom, second.hotExtension().?.script_or_module);
-    try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().kind);
+    try std.testing.expectEqual(core.gc.GcKind.function_bytecode, second.header.meta().flags.kind);
     try std.testing.expectEqual(@as(i32, 1), second.header.meta().rc);
 }
 
@@ -9207,7 +9207,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     // This function's base+debug+tables+exact-code+extension FAM is slab-backed;
     // its metadata size_class is the allocator's slab index, while GC heap
     // accounting asks the live FB for the main payload plus independent source.
-    try std.testing.expect(fb.header.meta().flags.metadata_in_slab);
+    try std.testing.expect(!fb.header.meta().alloc_info.standalone);
 
     const stats = rt.gcStats();
     try std.testing.expectEqual(before_fb.large_alloc_count + 1, stats.large_alloc_count);

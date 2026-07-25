@@ -42,8 +42,8 @@ const OwnKeysError = std.mem.Allocator.Error;
 /// object mutation from a class finalizer remains outside the callback contract.
 const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
-        .kind = .shape,
-        .flags = .{ .is_pinned = true },
+        .alloc_info = .{ .standalone = true },
+        .flags = .{ .kind = .shape, .is_pinned = true },
         .rc = std.math.maxInt(i32) / 2,
     },
     value: shape.Shape = .{
@@ -1604,9 +1604,11 @@ pub const ObjectFlags = packed struct(u16) {
     /// intrinsic %Array.prototype% and cleared permanently by mutations that
     /// can make dense Array extension observe the prototype chain.
     is_std_array_prototype: bool = false,
-    // Reserved to keep the packed ObjectFlags ABI at 16 bits after class
-    // payload finalization moved onto the infallible zero-ref drain.
-    _reserved_lifecycle_bit: bool = false,
+    /// Weak-identity table membership. Moved here from the GC metadata prefix
+    /// when the prefix kind/flags byte collapsed to the qjs single-byte
+    /// `gc_obj_type:7|mark:1` shape (quickjs.c:276); this bit is object-only,
+    /// and it reuses the reserved lifecycle bit so the packed ABI stays 16 bits.
+    has_weak_id: bool = false,
     has_exotic_methods: bool = false,
     is_borrowed_reference_holder: bool = false,
     /// Actual active payload state. This is distinct from the class's declared
@@ -1809,7 +1811,7 @@ pub const Object = extern struct {
     pub fn finishGeneratorShell(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(self.flags.class_payload_kind == .generator);
-        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        std.debug.assert(!self.header.meta().alloc_info.heap_accounted);
         const final_shape = try rt.shapes.createObjectRoot(prototype);
         self.shape_ref = final_shape;
         rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
@@ -1827,7 +1829,7 @@ pub const Object = extern struct {
     /// Error-path counterpart for a shell that has not been registered yet.
     pub fn destroyGeneratorShell(self: *Object, rt: *JSRuntime) void {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
-        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        std.debug.assert(!self.header.meta().alloc_info.heap_accounted);
         if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
         freeClassPayloadAllocation(rt, self.u.payload, self.flags.class_payload_kind);
         self.u.payload = null;
@@ -2430,10 +2432,12 @@ pub const Object = extern struct {
     }
 
     fn initInlineClassPayloadGcPrefix(self: *Object) void {
-        const meta: [*]u8 = @ptrFromInt(@intFromPtr(self) - 8);
-        @memset(meta[0..8], 0);
-        meta[2] = Object.gc_kind_tag;
-        meta[4] = 1;
+        // Inline-payload objects live inside a raw aligned allocation (freed
+        // via freeObjectAllocation with the full layout), so their prefix is a
+        // standalone one: no slab class to stamp, size_class carries encoded
+        // heap bytes once registered.
+        const meta: *gc.Metadata = @ptrFromInt(@intFromPtr(self) - 8);
+        meta.* = .{ .alloc_info = .{ .standalone = true }, .flags = .{ .kind = .object }, .rc = 1 };
     }
 
     fn inlineClassPayloadPtr(self: *Object, layout: InlineClassPayloadLayout) *anyopaque {
@@ -2889,7 +2893,7 @@ pub const Object = extern struct {
         // object; only objects handed a weak id (has_weak_id) have an entry, so
         // gate the call — a plain object never enters takeWeakObjectIdentity just
         // to load the flag and return.
-        if (self.header.meta().flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
+        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
         freeObjectAllocation(rt, self, inline_layout);
         rt.classes.releaseObjectDefinition(destroying_class_id, definition.generation);
     }
@@ -5584,7 +5588,7 @@ pub const Object = extern struct {
         if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
-        std.debug.assert(header.meta().kind == .function_bytecode);
+        std.debug.assert(header.meta().flags.kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
         const old_fb = self.u.bytecode_function.function_bytecode;
         self.u.bytecode_function.function_bytecode = fb;
@@ -6776,7 +6780,7 @@ pub const Object = extern struct {
     }
 
     fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
-        switch (header.meta().kind) {
+        switch (header.meta().flags.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 obj.traceChildEdgesNoFail(rt, visitor);
@@ -6812,7 +6816,7 @@ pub const Object = extern struct {
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape or header.metaConst().kind == .realm_context or header.metaConst().kind == .module;
+        return header.metaConst().flags.kind == .object or header.metaConst().flags.kind == .function_bytecode or header.metaConst().flags.kind == .var_ref or header.metaConst().flags.kind == .shape or header.metaConst().flags.kind == .realm_context or header.metaConst().flags.kind == .module;
     }
 
     const DecrefVisitor = struct {
@@ -7181,7 +7185,7 @@ pub const Object = extern struct {
         {
             var cursor = garbage.head;
             while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape or h.meta().kind == .realm_context or h.meta().kind == .module) garbage_count += 1;
+                if (h.meta().flags.kind == .object or h.meta().flags.kind == .var_ref or h.meta().flags.kind == .shape or h.meta().flags.kind == .realm_context or h.meta().flags.kind == .module) garbage_count += 1;
             }
         }
 
@@ -7196,7 +7200,7 @@ pub const Object = extern struct {
         var garbage_modules: gc.HeaderList = .{};
         garbage_committed = true;
         while (garbage.popFront()) |h| {
-            switch (h.meta().kind) {
+            switch (h.meta().flags.kind) {
                 .object => garbage_objects.append(h),
                 .function_bytecode => garbage_bytecodes.append(h),
                 .var_ref => garbage_var_refs.append(h),
@@ -7271,7 +7275,7 @@ pub const Object = extern struct {
     /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         while (rt.gc.popCycleDeferredFree()) |h| {
-            switch (h.meta().kind) {
+            switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
@@ -7375,7 +7379,7 @@ pub const Object = extern struct {
 
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
-        if (stored_header.meta().kind != .object) return null;
+        if (stored_header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", stored_header);
     }
 
@@ -7896,7 +7900,7 @@ pub const Object = extern struct {
 
     fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -8041,7 +8045,7 @@ pub const Object = extern struct {
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
-        if (header.meta().kind != .function_bytecode) return null;
+        if (header.meta().flags.kind != .function_bytecode) return null;
         return @fieldParentPtr("header", header);
     }
 
@@ -8111,7 +8115,7 @@ pub const Object = extern struct {
     }
 
     fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
-        if (header.meta().kind != .function_bytecode) return null;
+        if (header.meta().flags.kind != .function_bytecode) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
