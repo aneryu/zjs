@@ -1332,8 +1332,14 @@ pub const JSRuntime = struct {
     /// second record-table lookup + inline-layout recompute on the object-creation
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
+    ///
+    /// Thread ownership is a safe-build assertion only: qjs `add_gc_object`
+    /// (quickjs.c:6540) has no per-registration thread check, and the release
+    /// check was the single largest cost of this boundary (~18 insns: a cached
+    /// TLS `getCurrentId` read pair + compare, plus the panic arm's `bl`
+    /// forcing a callee-saved frame on an otherwise leaf function).
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
-        self.assertOwnerThread();
+        std.debug.assert(self.isOwnerThread());
         try self.gc.addInitializedWithSize(&object.header, bytes);
     }
 
@@ -1354,8 +1360,11 @@ pub const JSRuntime = struct {
     /// re-register a finalizing object — so this boundary no longer repeats the
     /// two unregister scans. qjs `free_object` keeps no such side tables at all;
     /// `remove_gc_object` (quickjs.c:6548) is a bare `list_del`.
+    ///
+    /// Thread ownership is a safe-build assertion only, mirroring the register
+    /// side (qjs `remove_gc_object` has no thread check either).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
-        self.assertOwnerThread();
+        std.debug.assert(self.isOwnerThread());
         if (builtin.mode == .Debug) {
             // Catch any future payload finalizer that re-registers mid-teardown.
             if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
