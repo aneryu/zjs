@@ -1288,6 +1288,12 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
             // handler (qjs CASE(OP_call)). A miss (host fn / ctor / cross-realm /
             // underflow) falls to execCall with allow_inline=false.
             const total = @as(usize, argc) + 1;
+            // Underflow-gate elision was measured and REJECTED (2026-07-25):
+            // qjs OP_call has no gate (call_argv = sp - argc, quickjs.c:18189)
+            // and dropping it saved a flat 4 insn/call across the five call
+            // shapes, but call-const cycles regressed +0.93% repeatably
+            // (6/6 interleaved rounds) — the branch's geometry is doing work
+            // the retired-count does not show. Keep the checked gate.
             const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack.values);
             if (live_bytes >= total * @sizeOf(JSValue)) {
                 const region_start = sp - total;
