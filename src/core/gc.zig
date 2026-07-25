@@ -232,8 +232,14 @@ pub const SpaceAccount = struct {
     // only). SmallObjectSlab returns an arena as soon as its last block is freed,
     // so there is no retained-empty-page hysteresis to carry on the hot path.
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
-        if (bytes == 0) return;
-        self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
+        // Plain unsigned add, exactly qjs `s->malloc_size += ...`
+        // (quickjs.c:2166). The former checked-add-with-saturation compiled to
+        // adds+cset+tst+csinv on the per-object hot path for an overflow that
+        // cannot occur (live bytes are bounded by the address space); wrapping
+        // `+%=` keeps the codegen a bare ldr/add/str in every build mode. The
+        // zero-bytes early-out is dropped for the same reason: adding 0 is a
+        // no-op, and qjs has no such guard.
+        self.live_bytes +%= bytes;
     }
 
     fn recordFree(self: *SpaceAccount, bytes: usize) void {
@@ -1285,12 +1291,21 @@ pub const Registry = struct {
         const tracked = isCycleCandidate(h);
         if (h.meta().alloc_info.standalone) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().alloc_info.heap_accounted = true;
+        // Fold the cycle-list flag into registration instead of a second RMW
+        // inside appendGcObject — qjs add_gc_object writes its header
+        // bookkeeping once and then just list_add_tail's (quickjs.c:6540-6546).
+        // The earlier in_cycle_list publication is unobservable: only
+        // straight-line owner-thread scalar code separates it from the splice.
+        // (heap_accounted now lives in the byte-2 AllocInfo, so the two bits
+        // are two single-byte RMWs rather than one; the appendGcObject-side
+        // store is still gone.)
+        if (tracked) h.meta().flags.in_cycle_list = true;
         // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
         // keeps the selected space's live-byte scalar; all other allocation
         // diagnostics are derived by statsSnapshot.
         self.recordSpaceAlloc(is_large, bytes);
 
-        if (tracked) self.appendGcObject(h);
+        if (tracked) self.linkGcObjectTail(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
@@ -1528,15 +1543,27 @@ pub const Registry = struct {
         std.debug.assert(header.prev == null);
         std.debug.assert(header.next == null);
 
-        header.prev = self.gc_object_tail;
+        header.meta().flags.in_cycle_list = true;
+        self.linkGcObjectTail(header);
+    }
+
+    /// Tail-link an already-flagged header (qjs list_add_tail, quickjs.c:6545).
+    /// `in_cycle_list` must already be set by the caller so the link is a pure
+    /// pointer splice. The tail pointer is cached in a local because LLVM
+    /// cannot prove the `header.prev` store does not alias
+    /// `self.gc_object_tail` and would otherwise reload it (this was the
+    /// hottest single load of the registration path).
+    inline fn linkGcObjectTail(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.meta().flags.in_cycle_list);
+        const tail = self.gc_object_tail;
+        header.prev = tail;
         header.next = null;
-        if (self.gc_object_tail) |tail| {
-            tail.next = header;
+        if (tail) |prior| {
+            prior.next = header;
         } else {
             self.gc_object_head = header;
         }
         self.gc_object_tail = header;
-        header.meta().flags.in_cycle_list = true;
     }
 
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
