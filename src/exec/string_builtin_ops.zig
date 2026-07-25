@@ -2109,9 +2109,11 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         .latin1 => |bytes| {
             for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
         },
-        .utf16 => |units| {
-            for (units) |unit| try appendUtf8CodePoint(rt, buffer, unit);
-        },
+        // Combine surrogate pairs (canonical appendUtf16UnitsAsUtf8) instead
+        // of encoding each unit separately: the per-unit CESU-8 form could
+        // never byte-match astral needles that appendValueString encodes as
+        // 4-byte UTF-8 in the byte-search fallbacks.
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }
 
