@@ -408,7 +408,14 @@ pub noinline fn copyDataProperties(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    if (rooted_source_value.isNull() or rooted_source_value.isUndefined()) return .done;
+    // qjs JS_CopyDataProperties (quickjs.c:16912-16913) skips EVERY non-object
+    // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
+    // properties, not just null/undefined. (Object-rest destructuring still
+    // copies from a wrapped string because its source is objectified upstream
+    // before OP_copy_data_properties, both engines.) The former
+    // null/undefined-only skip let a primitive source fall into expectObject's
+    // TypeError — a divergence from qjs, not a spec-ordering guard.
+    if (!rooted_source_value.isObject()) return .done;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
