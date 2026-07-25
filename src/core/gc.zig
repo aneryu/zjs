@@ -112,15 +112,23 @@ pub const ExternalMemoryToken = struct {
 /// 3-bit tag packed into the shared kind/flags byte of `Metadata` (qjs
 /// `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276, also shares its byte
 /// with the mark bit).
+///
+/// Value order is load-bearing for codegen, mirroring qjs's
+/// `JS_GC_OBJ_TYPE_JS_OBJECT == 0` (quickjs.c:423): the hot `kind == .object`
+/// guards compile to a single `tst` of the masked byte, and the recurring
+/// zero-ref kind sets become contiguous ranges — {object..module} is the
+/// enqueue/finalize/remove_cycles set and {object..shape} is the
+/// cycle-candidate/deinit set, each a single unsigned compare. string/big_int
+/// (plain refcounted payloads, never cycle-tracked) sit at the top.
 pub const RefKind = enum(u3) {
-    string = 0,
-    object = 1,
-    big_int = 2,
-    function_bytecode = 3,
-    var_ref = 4,
+    object = 0,
+    function_bytecode = 1,
+    var_ref = 2,
+    realm_context = 3,
+    module = 4,
     shape = 5,
-    realm_context = 6,
-    module = 7,
+    string = 6,
+    big_int = 7,
 };
 
 pub const GcKind = RefKind;
@@ -382,8 +390,12 @@ comptime {
     // Kind occupies the low 3 bits of the shared kind/flags byte; a bare tag
     // byte (all flags clear) equals the enum value, which is what the raw
     // prefix writers in memory.zig and object.zig store.
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .module })) == @intFromEnum(GcKind.module));
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .string, .mark = true })) == 1 << 3);
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .mark = true })) == 1 << 3);
+    // The contiguous kind ranges documented on RefKind.
+    std.debug.assert(@intFromEnum(GcKind.object) == 0);
+    std.debug.assert(@intFromEnum(GcKind.module) == 4 and @intFromEnum(GcKind.shape) == 5);
+    std.debug.assert(@intFromEnum(GcKind.string) == 6 and @intFromEnum(GcKind.big_int) == 7);
 }
 
 /// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
