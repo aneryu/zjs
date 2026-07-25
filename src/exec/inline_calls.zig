@@ -13,6 +13,7 @@
 //! fully supported; the two paths share all frame setup primitives.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const op = bytecode.opcode.op;
@@ -108,19 +109,39 @@ pub const ResolvedInlineFunction = struct {
 /// this prefix separate lets OP_call0 enter a published empty leaf without
 /// first constructing fields that its dedicated frame constructor cannot use.
 pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?ResolvedInlineFunction {
-    const function_object = object_ops.functionObjectFromValue(func) orelse return null;
+    // qjs single-compare admission (JS_CallInternal, quickjs.c:17816):
+    // generator/async function classes fall to the slow path here instead of
+    // passing the four-class set test only to be rejected by the kind check.
+    const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
     const function_data = function_object.bytecodeFunctionStoragePtr();
     const fb = function_data.function_bytecode orelse return null;
-    const captures = function_data.captureSlice();
-    std.debug.assert(captures.len == fb.closureVarCount());
+    // Raw one-word capture-array load, deferring the empty-sentinel/len
+    // normalization captureSlice performs: every consumer slices
+    // `var_refs[0..fb.closureVarCount()]`, and a fully-published callable with
+    // a non-zero count has already installed its allocated array, while a
+    // zero-count callable keeps the aligned dangling sentinel that a
+    // zero-length slice never dereferences (BytecodeFunctionStorage.var_refs
+    // contract). The empty-leaf arms never touch captures, so the hot plain
+    // call keeps one load where the checked slice cost a csel chain.
+    const captures_raw: [*]*core.VarRef = @ptrCast(function_data.var_refs);
+    if (comptime builtin.mode == .Debug) {
+        const checked = function_data.captureSlice();
+        std.debug.assert(checked.len == fb.closureVarCount());
+        std.debug.assert(checked.len == 0 or checked.ptr == captures_raw);
+    }
     if (fb.functionKind() != .normal) return null;
     // Production callable publication proves the exact non-empty FAM layout;
     // take the three-load code+len hot-tail path instead of rechecking the
     // optional fixture/legacy shapes on every call.
     const call_facts = fb.canonicalCallFacts();
     if (fb.isDerivedClassConstructor()) return null;
-    const code = fb.byteCode();
-    if (code.len == 0 or code[0] == op.check_ctor) return null;
+    // Base-class-constructor rejection: the entry-opcode probe
+    // (`code[0] == op.check_ctor`) moved to publication time
+    // (publishExecutionFlags) as a CallFacts bit, so plain-call resolution
+    // reads it from the snapshot it already loads instead of touching the
+    // bytecode array's first byte on every call. Canonical published code is
+    // immutable, so the hoisted predicate is exact.
+    if (call_facts.execution.entry_rejects_plain_call) return null;
     // Realm gate: qjs reads `ctx = b->realm` from the shared FB. With FB now
     // resident directly in Object.u.func this is one dependent load, without a
     // per-closure realm cache or borrowed-holder registration.
@@ -128,7 +149,7 @@ pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?R
     const function_global = function_realm.global orelse return null;
     if (function_global != global) return null;
     return .{
-        .var_refs = captures.ptr,
+        .var_refs = captures_raw,
         .fb = fb,
         .call_facts = call_facts,
     };

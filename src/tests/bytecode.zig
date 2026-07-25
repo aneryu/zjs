@@ -329,7 +329,9 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(@as(i32, 0), fb.byte_code_len);
         try std.testing.expectEqual(@as(i32, 0), fb.cpool_count);
         try std.testing.expectEqual(@as(i32, 0), fb.closure_var_count);
-        try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &fb._flag_padding);
+        try std.testing.expectEqual(@as(u8, 0), fb._flag_padding0);
+        try std.testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(fb.call_facts_mirror)));
+        try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, &fb._flag_padding);
         try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &fb._realm_padding);
         try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & bytecode.FunctionBytecode.byte18_rom_mask);
         try std.testing.expectEqual(@as(u8, 0), fb.flag_byte18 & 0x80);
@@ -771,6 +773,8 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
         .has_extension = true,
     });
     const first_address = @intFromPtr(first);
+    first._flag_padding0 = 0xaa;
+    first.call_facts_mirror = @bitCast(@as(u16, 0xaaaa));
     @memset(&first._flag_padding, 0xaa);
     @memset(&first._realm_padding, 0xbb);
     first.debugInfoMut().?._padding = 0xcccccccc;
@@ -796,7 +800,9 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
     });
     defer second.destroyUnpublishedFixture(rt);
     try std.testing.expectEqual(first_address, @intFromPtr(second));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, &second._flag_padding);
+    try std.testing.expectEqual(@as(u8, 0), second._flag_padding0);
+    try std.testing.expectEqual(@as(u16, 0), @as(u16, @bitCast(second.call_facts_mirror)));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, &second._flag_padding);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &second._realm_padding);
     try std.testing.expectEqual(@as(u32, 0), second.debugInfo().?._padding);
     try std.testing.expect(second.cpoolSlice()[0].isUndefined());

@@ -2631,6 +2631,21 @@ pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
+/// Inline-call resolution twin of `functionObjectFromValue` with qjs's exact
+/// discrimination: JS_CallInternal admits only `p->class_id ==
+/// JS_CLASS_BYTECODE_FUNCTION` with a single compare (quickjs.c:17816) —
+/// generator/async classes take the class_array call slow path there. zjs's
+/// four-class set test (`isBytecodeFunctionClass`) compiles to a 1<<id
+/// shift+mask chain (8 insn); on the inline-call path the three non-normal
+/// classes are ALWAYS rejected two loads later by `functionKind() != .normal`,
+/// so the exact compare is a strict refinement: same accept set, and the
+/// generator/async miss reaches the authoritative slow path earlier.
+pub inline fn plainBytecodeFunctionObjectFromValue(value: core.JSValue) ?*core.Object {
+    const object = objectFromValue(value) orelse return null;
+    if (object.class_id != core.class.ids.bytecode_function) return null;
+    return object;
+}
+
 pub fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;

@@ -1250,6 +1250,7 @@ pub const CompileContext = struct {
 
 pub const function_bytecode = struct {
     const std = @import("std");
+    const builtin = @import("builtin");
 
     const atom = @import("core/atom.zig");
     const context = @import("core/context.zig");
@@ -1543,7 +1544,17 @@ pub const function_bytecode = struct {
         capture_leaf_kind: ExactArgsLeafKind = .none,
         /// The finalized root is an ECMAScript module body.
         is_module: bool = false,
-        _reserved: u3 = 0,
+        /// Publication-time image of the entry-opcode probe
+        /// `byte_code[0] == OP_check_ctor` (base-class constructors): plain
+        /// [[Call]] must take the authoritative slow path so rejection runs
+        /// with full construct-context semantics. Published code is immutable,
+        /// so hoisting the probe out of per-call resolution is exact. qjs
+        /// needs no such bit — its OP_check_ctor throws inside the callee
+        /// (quickjs.c:18253) — but zjs's inline frame constructors must reject
+        /// before entering. Derived constructors keep the canonical qjs
+        /// header bit; this covers only the base-class entry probe.
+        entry_rejects_plain_call: bool = false,
+        _reserved: u2 = 0,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -1638,7 +1649,17 @@ pub const function_bytecode = struct {
         js_mode: u8, // 0x10
         flag_byte17: u8, // 0x11
         flag_byte18: u8, // 0x12
-        _flag_padding: [5]u8, // 0x13..0x17, js_mallocz zero holes
+        _flag_padding0: u8, // 0x13, js_mallocz zero hole
+        /// Header-resident image of the hot-extension CallFacts word, living
+        /// in QuickJS's 0x13..0x17 flag-padding hole so no core offset moves.
+        /// The FAM tail behind the code bytes stays authoritative (it is what
+        /// layout/serialization own); both copies are written together by the
+        /// only two publication funnels (publishExecutionFlags /
+        /// setExecutionFlags), so per-call resolution reads one fixed-offset
+        /// halfword instead of a code-ptr + code-len dependent tail load that
+        /// touches the far end of the bytecode array every call.
+        call_facts_mirror: function_bytecode.CallFacts, // 0x14
+        _flag_padding: [2]u8, // 0x16..0x17, js_mallocz zero holes
         byte_code: ?[*]u8, // 0x18
         byte_code_len: i32, // 0x20
         func_name: atom.Atom,
@@ -1662,7 +1683,9 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "js_mode") == 0x10);
             std.debug.assert(@offsetOf(@This(), "flag_byte17") == 0x11);
             std.debug.assert(@offsetOf(@This(), "flag_byte18") == 0x12);
-            std.debug.assert(@offsetOf(@This(), "_flag_padding") == 0x13);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding0") == 0x13);
+            std.debug.assert(@offsetOf(@This(), "call_facts_mirror") == 0x14);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding") == 0x16);
             std.debug.assert(@offsetOf(@This(), "byte_code") == 0x18);
             std.debug.assert(@offsetOf(@This(), "byte_code_len") == 0x20);
             std.debug.assert(@offsetOf(@This(), "func_name") == 0x24);
@@ -1783,18 +1806,25 @@ pub const function_bytecode = struct {
         /// `callFacts()` below.
         pub inline fn canonicalCallFacts(self: *const FunctionBytecodeImpl) function_bytecode.CallFacts {
             // Production publication rejects empty code and always installs
-            // the zjs tail. Keep the unsafe hot load self-checking in Debug so
-            // fixture/embedding misuse fails at the contract boundary instead
-            // of silently reading beyond a non-canonical record.
+            // the zjs tail, and every publication funnel writes the header
+            // mirror together with the authoritative FAM word — so the hot
+            // read is one fixed-offset halfword instead of a code-ptr +
+            // code-len dependent load that touches the far end of the
+            // bytecode array. Keep the mirror self-checking in Debug so
+            // fixture/embedding misuse fails at the contract boundary.
             std.debug.assert(self.hasExtension());
             std.debug.assert(self.byte_code != null);
             std.debug.assert(self.byte_code_len > 0);
-            @setRuntimeSafety(false);
-            const code_ptr = self.byte_code orelse unreachable;
-            const code_len: usize = @intCast(self.byte_code_len);
-            const hot: *align(1) const FunctionBytecodeHotExtension =
-                @ptrFromInt(@intFromPtr(code_ptr) +% code_len);
-            return hot.call_facts;
+            if (comptime builtin.mode == .Debug) {
+                @setRuntimeSafety(false);
+                const code_ptr = self.byte_code orelse unreachable;
+                const code_len: usize = @intCast(self.byte_code_len);
+                const hot: *align(1) const FunctionBytecodeHotExtension =
+                    @ptrFromInt(@intFromPtr(code_ptr) +% code_len);
+                std.debug.assert(@as(u16, @bitCast(hot.call_facts)) ==
+                    @as(u16, @bitCast(self.call_facts_mirror)));
+            }
+            return self.call_facts_mirror;
         }
 
         pub fn applyFlags(self: *FunctionBytecodeImpl, flags: Flags) void {
@@ -2064,6 +2094,9 @@ pub const function_bytecode = struct {
             var facts = hot.call_facts;
             facts.execution = value;
             hot.call_facts = facts;
+            // Keep the header-resident hot mirror coherent with the
+            // authoritative FAM word (canonicalCallFacts reads the mirror).
+            self.call_facts_mirror = facts;
         }
         pub inline fn hasMappedArguments(self: *const FunctionBytecodeImpl) bool {
             return self.executionFlags().has_mapped_arguments;
@@ -12225,6 +12258,13 @@ const function_mod = struct {
             fb.closureVarCount() > 0 and leaf_body_geometry;
         const raw_capture = simple_inline_base and strict_mode and
             fb.arg_count == 0 and fb.closureVarCount() > 0 and leaf_body_geometry;
+        // Publication-time image of the per-call entry probe the inline call
+        // resolver used to run (`code[0] == OP_check_ctor`). The code bytes
+        // are final here (copied and authoritative above), so this is the
+        // same predicate evaluated once.
+        const entry_code = fb.byteCode();
+        const entry_rejects_plain_call = entry_code.len == 0 or
+            entry_code[0] == opcode.op.check_ctor;
 
         call_facts.execution = .{
             .has_mapped_arguments = has_mapped_arguments,
@@ -12238,8 +12278,12 @@ const function_mod = struct {
             .exact_args_leaf_kind = if (sloppy_exact) .sloppy else if (raw_exact) .raw_this else .none,
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
             .is_module = is_module,
+            .entry_rejects_plain_call = entry_rejects_plain_call,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
+        // Keep the header-resident hot mirror coherent with the authoritative
+        // FAM word (canonicalCallFacts reads the mirror).
+        fb.call_facts_mirror = call_facts;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;
