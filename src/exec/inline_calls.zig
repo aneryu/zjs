@@ -2088,6 +2088,7 @@ pub const Machine = struct {
         captures: []*core.VarRef,
         region_start: [*]core.JSValue,
         resume_pc: [*]const u8,
+        mirror_out: ?*[*]*core.VarRef,
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertCaptureLeafEligible(leaf_this, function, call_facts);
@@ -2121,6 +2122,12 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
+        // VARREF-V3 in-tail mirror publication: the store happens HERE, at the
+        // point where `captures` is consumed by the frame binding anyway, so
+        // the caller's captures value keeps its baseline live range (the
+        // post-constructor publication measurably displaced sibling-arm
+        // register allocation in the zero-arg call handler).
+        if (mirror_out) |m| m.* = captures.ptr;
         return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, resume_pc);
     }
 
