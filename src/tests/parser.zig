@@ -1001,16 +1001,21 @@ fn varDefNamed(
 }
 
 fn countPutVarRefStores(code: []const u8) usize {
+    // VARREF-V3: `*_mirror` twins are the finalize-gated encoding of the SAME
+    // store (id-only swap in call-free functions); count them with their base.
     return countOpcode(code, op.put_var_ref) +
         countOpcode(code, op.put_var_ref0) +
         countOpcode(code, op.put_var_ref1) +
         countOpcode(code, op.put_var_ref2) +
-        countOpcode(code, op.put_var_ref3);
+        countOpcode(code, op.put_var_ref3) +
+        countOpcode(code, op.put_var_ref0_mirror) +
+        countOpcode(code, op.put_var_ref1_mirror);
 }
 
 fn countCheckedPutVarRefStores(code: []const u8) usize {
     return countOpcode(code, op.put_var_ref_check) +
-        countOpcode(code, op.put_var_ref_check_init);
+        countOpcode(code, op.put_var_ref_check_init) +
+        countOpcode(code, op.put_var_ref_check_mirror);
 }
 
 fn countSetVarRefStores(code: []const u8) usize {
@@ -1056,6 +1061,10 @@ fn countVarRefStoresRecursive(function: anytype) usize {
         op.set_var_ref1,
         op.set_var_ref2,
         op.set_var_ref3,
+        // VARREF-V3 mirror twins (finalize-gated id swaps of the same stores).
+        op.put_var_ref0_mirror,
+        op.put_var_ref1_mirror,
+        op.put_var_ref_check_mirror,
     }) |opcode_id| {
         count += countOpcodeRecursive(function, opcode_id);
     }
@@ -7188,10 +7197,12 @@ test "dynamic global writes keep put_var distinct from plain var-ref stores" {
         return error.TestExpectedEqual;
     const local_writer = findFunctionConstantNamed(make_local, rt, "writeLocal") orelse
         return error.TestExpectedEqual;
+    // VARREF-V3: writeLocal is call-free, so the finalize gate swaps the
+    // checked store for its mirror twin (same size/semantics, id only).
     try expectOpcodeSequence(local_writer.byteCode(), &.{
         op.get_arg0,
         op.dup,
-        op.put_var_ref_check,
+        op.put_var_ref_check_mirror,
         op.return_undef,
     });
     try std.testing.expectEqual(@as(usize, 0), countOpcode(local_writer.byteCode(), op.put_var));
@@ -7978,7 +7989,12 @@ test "QuickJS script global functions publish from bytecode through the first de
         pc += engine.bytecode.opcode.sizeOf(parsed.byteCode()[pc]);
         const put_opcode = parsed.byteCode()[pc];
         const expected_ref = first_f_ref orelse return error.TestExpectedEqual;
-        if (expected_ref < 4) {
+        if (expected_ref < 2) {
+            // VARREF-V3: the call-free top-level body is mirror-gated, so the
+            // short publication store finalizes to its twin id (put_var_ref2/3
+            // and the u16 form have no twin and would stay base).
+            try std.testing.expectEqual(op.put_var_ref0_mirror + @as(u8, @intCast(expected_ref)), put_opcode);
+        } else if (expected_ref < 4) {
             try std.testing.expectEqual(op.put_var_ref0 + @as(u8, @intCast(expected_ref)), put_opcode);
         } else {
             try std.testing.expectEqual(op.put_var_ref, put_opcode);
@@ -9355,7 +9371,12 @@ test "captured reads encode lexical TDZ in the final var-ref opcode" {
         countOpcodeRecursive(&plain, qop.get_var_ref0) +
         countOpcodeRecursive(&plain, qop.get_var_ref1) +
         countOpcodeRecursive(&plain, qop.get_var_ref2) +
-        countOpcodeRecursive(&plain, qop.get_var_ref3);
+        countOpcodeRecursive(&plain, qop.get_var_ref3) +
+        // VARREF-V3 mirror twins of the same plain reads (call-free bodies).
+        countOpcodeRecursive(&plain, qop.get_var_ref0_mirror) +
+        countOpcodeRecursive(&plain, qop.get_var_ref1_mirror) +
+        countOpcodeRecursive(&plain, qop.get_var_ref2_mirror) +
+        countOpcodeRecursive(&plain, qop.get_var_ref3_mirror);
     try std.testing.expect(plain_reads >= 1);
     try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&plain, qop.get_var_ref_check));
 
@@ -9366,7 +9387,10 @@ test "captured reads encode lexical TDZ in the final var-ref opcode" {
     );
     defer checked.deinit();
     try std.testing.expect(checked.syntax_error == null);
-    try std.testing.expect(countOpcodeRecursive(&checked, qop.get_var_ref_check) >= 1);
+    // VARREF-V3: the call-free inner body finalizes the checked read to its
+    // mirror twin; either encoding carries the TDZ-checked semantics.
+    try std.testing.expect(countOpcodeRecursive(&checked, qop.get_var_ref_check) +
+        countOpcodeRecursive(&checked, qop.get_var_ref_check_mirror) >= 1);
 }
 
 test "named function self-binding writes do not reach var-ref stores" {

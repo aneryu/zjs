@@ -282,11 +282,11 @@ fn decodeTypedArrayLengthPrintStore(code: []const u8, pc: usize) ?TypedArrayLeng
             if (pc + 2 > code.len) return null;
             break :blk .{ .local_index = code[pc + 1], .next_pc = pc + 2 };
         },
-        op.put_var_ref0 => .{ .local_index = 0, .next_pc = pc + 1 },
-        op.put_var_ref1 => .{ .local_index = 1, .next_pc = pc + 1 },
+        op.put_var_ref0, op.put_var_ref0_mirror => .{ .local_index = 0, .next_pc = pc + 1 },
+        op.put_var_ref1, op.put_var_ref1_mirror => .{ .local_index = 1, .next_pc = pc + 1 },
         op.put_var_ref2 => .{ .local_index = 2, .next_pc = pc + 1 },
         op.put_var_ref3 => .{ .local_index = 3, .next_pc = pc + 1 },
-        op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => blk: {
+        op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.put_var_ref_check_mirror => blk: {
             if (pc + 3 > code.len) return null;
             break :blk .{ .local_index = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
         },
@@ -473,8 +473,10 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.FunctionBytecode, fram
     const code = function.byteCode();
     return switch (code[frame.pc]) {
         op.push_atom_value => frame.pc + 6 <= code.len and code[frame.pc + 5] == op.call1,
-        op.get_var_ref, op.get_var_ref_check => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
-        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => frame.pc + 1 <= code.len and code[frame.pc + 1] == op.call1,
+        // Mirror twins cannot appear here (their gate excludes call ops), but
+        // keep the decode total for defense in depth.
+        op.get_var_ref, op.get_var_ref_check, op.get_var_ref_check_mirror => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
+        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.get_var_ref0_mirror, op.get_var_ref1_mirror, op.get_var_ref2_mirror, op.get_var_ref3_mirror => frame.pc + 1 <= code.len and code[frame.pc + 1] == op.call1,
         op.get_var, op.get_var_undef => frame.pc + 4 <= code.len and code[frame.pc + 3] == op.call1,
         else => false,
     };

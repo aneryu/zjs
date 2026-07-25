@@ -244,6 +244,9 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = h_get_arg_short;
     inline for ([_]u8{ op.get_arg, op.put_arg, op.set_arg, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 }) |o| t[o] = h_arg;
     inline for ([_]u8{ op.get_var_ref, op.get_var_ref_check, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref, op.put_var_ref_check, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.put_var_ref_check_init, op.set_var_ref, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 }) |o| t[o] = h_varref;
+    // VARREF-V3 mirror twins: same cold shell (varRefVm maps each twin id to
+    // its base semantics — TDZ resolution, generator stop seams, legacy).
+    inline for ([_]u8{ op.get_var_ref0_mirror, op.get_var_ref1_mirror, op.get_var_ref2_mirror, op.get_var_ref3_mirror, op.put_var_ref0_mirror, op.put_var_ref1_mirror, op.get_var_ref_check_mirror, op.put_var_ref_check_mirror }) |o| t[o] = h_varref;
     inline for ([_]u8{ op.get_loc_check, op.get_loc_checkthis, op.put_loc_check, op.set_loc_check, op.put_loc_check_init, op.set_loc_uninitialized }) |o| t[o] = h_checkedloc;
 
     // --- names ---
@@ -912,26 +915,38 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     t[op.get_var] = td.op_get_var;
     t[op.get_var_undef] = td.op_get_var;
     inline for ([_]struct { o: u8, h: Handler }{
-        .{ .o = op.get_var_ref0, .h = td.opGetVarRef(.c0) },
-        .{ .o = op.get_var_ref1, .h = td.opGetVarRef(.c1) },
-        .{ .o = op.get_var_ref2, .h = td.opGetVarRef(.c2) },
-        .{ .o = op.get_var_ref3, .h = td.opGetVarRef(.c3) },
-        .{ .o = op.get_var_ref, .h = td.opGetVarRef(.half) },
-        .{ .o = op.get_var_ref_check, .h = td.opGetVarRef(.half) },
-        .{ .o = op.put_var_ref0, .h = td.opPutVarRef(.c0) },
-        .{ .o = op.put_var_ref1, .h = td.opPutVarRef(.c1) },
-        .{ .o = op.put_var_ref2, .h = td.opPutVarRef(.c2) },
-        .{ .o = op.put_var_ref3, .h = td.opPutVarRef(.c3) },
-        .{ .o = op.put_var_ref, .h = td.opPutVarRef(.half) },
+        .{ .o = op.get_var_ref0, .h = td.opGetVarRef(.c0, .frame) },
+        .{ .o = op.get_var_ref1, .h = td.opGetVarRef(.c1, .frame) },
+        .{ .o = op.get_var_ref2, .h = td.opGetVarRef(.c2, .frame) },
+        .{ .o = op.get_var_ref3, .h = td.opGetVarRef(.c3, .frame) },
+        .{ .o = op.get_var_ref, .h = td.opGetVarRef(.half, .frame) },
+        .{ .o = op.get_var_ref_check, .h = td.opGetVarRef(.half, .frame) },
+        .{ .o = op.put_var_ref0, .h = td.opPutVarRef(.c0, .frame) },
+        .{ .o = op.put_var_ref1, .h = td.opPutVarRef(.c1, .frame) },
+        .{ .o = op.put_var_ref2, .h = td.opPutVarRef(.c2, .frame) },
+        .{ .o = op.put_var_ref3, .h = td.opPutVarRef(.c3, .frame) },
+        .{ .o = op.put_var_ref, .h = td.opPutVarRef(.half, .frame) },
         // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
         // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
         // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
-        .{ .o = op.put_var_ref_check, .h = td.op_put_var_ref_check },
+        .{ .o = op.put_var_ref_check, .h = td.opPutVarRefCheck(.frame) },
         .{ .o = op.set_var_ref0, .h = td.opSetVarRef(.c0) },
         .{ .o = op.set_var_ref1, .h = td.opSetVarRef(.c1) },
         .{ .o = op.set_var_ref2, .h = td.opSetVarRef(.c2) },
         .{ .o = op.set_var_ref3, .h = td.opSetVarRef(.c3) },
         .{ .o = op.set_var_ref, .h = td.opSetVarRef(.half) },
+        // VARREF-V3 mirror twins (finalize-gated ids): the SAME per-op bodies
+        // instantiated on the Vm mirror base — separate handler instances
+        // (hot arms are never shared), reading the register-resident
+        // `vm.var_refs_ptr` instead of the frame chain.
+        .{ .o = op.get_var_ref0_mirror, .h = td.opGetVarRef(.c0, .mirror) },
+        .{ .o = op.get_var_ref1_mirror, .h = td.opGetVarRef(.c1, .mirror) },
+        .{ .o = op.get_var_ref2_mirror, .h = td.opGetVarRef(.c2, .mirror) },
+        .{ .o = op.get_var_ref3_mirror, .h = td.opGetVarRef(.c3, .mirror) },
+        .{ .o = op.put_var_ref0_mirror, .h = td.opPutVarRef(.c0, .mirror) },
+        .{ .o = op.put_var_ref1_mirror, .h = td.opPutVarRef(.c1, .mirror) },
+        .{ .o = op.get_var_ref_check_mirror, .h = td.opGetVarRef(.half, .mirror) },
+        .{ .o = op.put_var_ref_check_mirror, .h = td.opPutVarRefCheck(.mirror) },
     }) |e| t[e.o] = e.h;
     return t;
 }

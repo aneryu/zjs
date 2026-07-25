@@ -98,28 +98,36 @@ pub const Vm = struct {
     /// through `function`. Still hot: every cold op's publish and every jump
     /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
-    /// Mirror of `frame.var_refs.ptr` — the qjs `var_refs` interpreter-local
-    /// register (JS_CallInternal loads `var_refs = p->u.func.var_refs` once per
-    /// frame, quickjs.c:17817, then every OP_get_var_ref is a bare
-    /// `var_refs[idx]->pvalue`, 18627). Without it every hot var-ref op paid a
-    /// 5-deep dependent load chain (vm->frame->var_refs.ptr->cell->pvalue->tag)
-    /// vs qjs's 3 — the dominant backend-stall source on the closure-read
-    /// benchmarks. Refreshed wherever `vm.frame` is (re)published (enterEntry,
-    /// the flat leaf-return arms, reloadTop/reloadAfterPop, run init) and in
+    /// VARREF-V3 mirror of `frame.var_refs.ptr` — the qjs `var_refs`
+    /// interpreter-local register (JS_CallInternal loads
+    /// `var_refs = p->u.func.var_refs` once per frame, quickjs.c:17817, then
+    /// every OP_get_var_ref is a bare `var_refs[idx]->pvalue`, 18627).
+    /// Without it every hot var-ref op paid a 5-deep dependent load chain
+    /// (vm->frame->var_refs.ptr->cell->pvalue->tag) vs qjs's 3 — the dominant
+    /// backend-stall source on the closure-read benchmarks.
+    ///
+    /// READ ONLY by the `*_mirror` twin opcodes the finalize gate emits
+    /// (applyVarRefMirrorTwinRewrite): functions containing no same-Machine
+    /// frame-pushing ops. Refresh set: enterEntry publication (str-only, the
+    /// captures base the resolving handler already holds in a register — the
+    /// v2 whole-VM mirror's per-return restores and their measured call-family
+    /// tax are gone with the gate), reloadTop/reloadAfterPop, run init, and
     /// coldNext, which by construction covers every mid-frame
-    /// `frame.var_refs` reallocation (ensureVarRefsCapacity is only reachable
-    /// from cold helpers; finalized bytecode never grows — M2-刀4 bounds
-    /// contract). Every hot reader Debug-asserts freshness against the
+    /// `frame.var_refs` replacement (ensureVarRefsCapacity and global-decl/
+    /// module cell surgery run only under cold ops; finalized bytecode never
+    /// grows — M2-刀4 bounds contract). The flat leaf-return arms deliberately
+    /// do NOT restore: leaf entries are pushed only by call-family handlers,
+    /// so a flat-arm resume lands in a call-containing (never mirror-gated)
+    /// function. Every twin reader Debug-asserts freshness against the
     /// authoritative `frame.var_refs.ptr`.
     ///
     /// Deliberately placed in the retired `code_end` slot (F3), directly after
-    /// `code_base`, so the boundary republication stores are stp-fusable in
-    /// principle (measured codegen still interleaves the feeding loads, so the
-    /// maintenance is ldr+str per frame switch — +4 insn per call round trip,
-    /// the quantified cost on capture-free call probes). The retired-slot
-    /// reuse keeps the dispatch tables and outcome payloads at their measured
-    /// offsets (the compact-layout experiment was instruction-neutral but less
-    /// cycle-stable on the call/closure probes).
+    /// `code_base`, so the enterEntry publication pairs with the adjacent
+    /// `code_base` store (stp-fusable: the feeding value is register-resident,
+    /// unlike the v2 form whose frame-field reload broke the pairing). The
+    /// retired-slot reuse keeps the dispatch tables and outcome payloads at
+    /// their measured offsets (the compact-layout experiment was
+    /// instruction-neutral but less cycle-stable on the call/closure probes).
     var_refs_ptr: [*]*core.VarRef = undefined,
     /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
     /// base from the authoritative `stack.values` (one dependent load off the
@@ -427,7 +435,19 @@ noinline fn iteratorNextCallSetupRecover(vm: *Vm, depth: u8, err: HostError) boo
 /// into the callee's first opcode. No driver round-trip: no Outcome encode,
 /// no tail_request staging, no driver-side spill/reload detour. Expanded
 /// inline into the (Handler-signature) caller so the tail calls are legal.
-inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8) Outcome {
+/// VARREF-V3 publication policy for enterEntry: `.captures` publishes the
+/// callee's capture-array base (the register-resident `captures_base` the
+/// resolving handler already holds — resolveInlineFunction's one-word
+/// `captures_raw` load / InlineTarget.var_refs) into the Vm mirror with one
+/// str, placed adjacent to the `code_base` store so the pair can fuse to one
+/// stp (zero net insn on the call path). `.none` is for the empty-leaf entry
+/// families whose callees are captureless BY CONSTRUCTION
+/// (empty_leaf_geometry requires closureVarCount == 0): a captureless callee
+/// contains no var-ref ops at all (validateVarRefOperandBounds), so no
+/// mirrored op can observe the skipped publication.
+const MirrorPublish = enum { none, captures };
+
+inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8, comptime publish_mirror: MirrorPublish, captures_base: [*]*core.VarRef) Outcome {
     // Enter the entry pushCall handed back instead of reloading
     // `machine.top` — qjs enters the callee via the alloca result pointer
     // already in a register (quickjs.c:17846); this is the equivalent
@@ -444,9 +464,23 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
-    // qjs per-call `var_refs = p->u.func.var_refs` (quickjs.c:17817). The
-    // frame field was just stored by pushCall, so this load store-forwards.
-    vm.var_refs_ptr = entry.frame.var_refs.ptr;
+    switch (publish_mirror) {
+        .captures => {
+            // qjs per-call `var_refs = p->u.func.var_refs` (quickjs.c:17817),
+            // str-only: the base is the same value every frame constructor
+            // stored into `frame.var_refs` (asserted for capture-carrying
+            // callees; captureless callees have no var-ref ops, so their
+            // mirror value is never read before the next publication).
+            std.debug.assert(entry.frame.function.closureVarCount() == 0 or
+                captures_base == entry.frame.var_refs.ptr);
+            vm.var_refs_ptr = captures_base;
+        },
+        .none => {
+            // Empty-leaf families: callee proven captureless at publication
+            // time, no var-ref op can run before the next refresh point.
+            std.debug.assert(entry.frame.function.closureVarCount() == 0);
+        },
+    }
     // Just pushed, so depth > 0; the generator stop-boundary cache is L0-only
     // and must read false for the callee. Do NOT publish false unconditionally:
     // the every-call `strb wzr` re-dirtied the Vm byte that the guarded
@@ -532,7 +566,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr, .captures, target.var_refs);
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -553,7 +587,7 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .none, undefined);
 }
 
 /// Exact-args twin of the warm empty-leaf adapter (O1): fixed-arity call
@@ -570,7 +604,7 @@ inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThi
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// First-use/chunk-switch/heap/OOM arm for the warm call0 adapter. Keeping the
@@ -601,7 +635,7 @@ inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Capacity gate for the padded-args leaf family (Q3): the pad fill writes
@@ -628,7 +662,7 @@ inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Out-of-line empty-leaf entry (dynamic-argc plain calls and the strict
@@ -643,7 +677,7 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .none, undefined);
 }
 
 /// Out-of-line exact-args leaf entry — the raw-`this` method twin. Like the
@@ -659,7 +693,7 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Warm capture-leaf entry (O2) — the pivot arm for `() => this.x` style
@@ -674,7 +708,7 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Handler-side adapter for the outline warm capture-leaf constructor (the
@@ -687,7 +721,7 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Out-of-line capture-leaf entry (dynamic-argc plain calls and the method
@@ -702,7 +736,7 @@ inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb:
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, code_ptr);
+    return enterEntry(vm, entry, code_ptr, .captures, captures.ptr);
 }
 
 /// Cold half of the moved/borrowed-region entry polls — the K7 sibling of
@@ -750,7 +784,7 @@ inline fn pushMovedAndEnter(
         if (!recovered) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr, .captures, target.var_refs);
 }
 
 /// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
@@ -781,7 +815,7 @@ inline fn pushBorrowedIteratorAndEnter(
         defer for (moved) |value| value.free(vm.ctx.runtime);
         return pushMovedAndEnter(vb, vm, target, &moved, .for_of_next, depth, true);
     };
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr, .captures, target.var_refs);
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
@@ -848,7 +882,7 @@ inline fn pushForwardedAndEnter(
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr, .captures, target.var_refs);
 }
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
@@ -1084,7 +1118,11 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
-            vm.var_refs_ptr = caller.frame.var_refs.ptr;
+            // NO var_refs_ptr restore (VARREF-V3): leaf entries are pushed
+            // only by call-family handlers, so this caller CONTAINS a
+            // call-family op and the finalize gate proved it carries no
+            // mirror-twin var-ref ops; the next twin op runs only after
+            // another enterEntry publication or a driver/cold refresh.
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -1141,7 +1179,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
-            vm.var_refs_ptr = caller.frame.var_refs.ptr;
+            // NO var_refs_ptr restore (VARREF-V3, see the empty-leaf arm).
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = value;
             caller.stack.setTopPtr(resume_sp + 1);
@@ -1175,7 +1213,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
-            vm.var_refs_ptr = caller.frame.var_refs.ptr;
+            // NO var_refs_ptr restore (VARREF-V3, see the empty-leaf arm).
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: the retired target slot
             // at the caller's operand top is dead (its value transferred into
@@ -1583,7 +1621,9 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.stack.setTopPtr(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
-                        return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+                        // Forwarded EMPTY leaf: captureless by publication
+                        // (simple_inline_empty_leaf ⇒ closureVarCount == 0).
+                        return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr, .none, undefined);
                     }
                     vm.stack.setTopPtr(sp);
                 }
@@ -1671,14 +1711,14 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                         }
                         const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
                         if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
-                            return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr);
+                            return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .captures, captures.ptr);
                         }
                         // Cold warm-miss arm: re-read the borrowed record
                         // slots (identity — the record is untouched below the
                         // callee region) so `receiver`/`method` are not kept
                         // live across the carve/miss `bl`s in the hot arm.
                         switch (pushBorrowedIteratorMiss(vm, &resolved, iterator_record[0], iterator_record[1], iterator_record, depth)) {
-                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
+                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr, .captures, captures.ptr),
                             .threw => return .threw,
                             .recovered => return coldNext(vb, vm),
                         }
@@ -2199,13 +2239,35 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 /// Uninitialized (TDZ or deleted binding parked at UNINITIALIZED, qjs
 /// remove_global_object_property) routes to the cold resolver.
 const VarRefIdx = enum { c0, c1, c2, c3, half };
-pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
+/// VARREF-V3 base selector: `.frame` is the authoritative
+/// `frame.var_refs.ptr` chain (every plain var-ref op — always correct,
+/// zero mirror coupling). `.mirror` is the Vm-resident `var_refs_ptr`
+/// register (qjs's interpreter-local `var_refs`, quickjs.c:17817), legal
+/// ONLY for the `*_mirror` twin ids the finalize gate emits into functions
+/// with no frame-pushing ops (see applyVarRefMirrorTwinRewrite): there the
+/// mirror is provably fresh at every twin, certified by the Debug assert.
+const VarRefBase = enum { frame, mirror };
+
+inline fn varRefCellFromBase(comptime base: VarRefBase, vm: *const Vm, idx: usize) *core.VarRef {
+    switch (base) {
+        .frame => return slot_ops.varRefSlotCellUnchecked(vm.frame, idx),
+        .mirror => {
+            // The finalize gate + the refresh set (enterEntry publication,
+            // run init, reloadTop, reloadAfterPop, coldNext) make the mirror
+            // fresh at every twin op; the assert traps any coverage gap.
+            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
+            return vm.var_refs_ptr[idx];
+        },
+    }
+}
+
+pub fn opGetVarRef(comptime idx_src: VarRefIdx, comptime base: VarRefBase) Handler {
     return struct {
         // I-cache pin (see op_return): this handler is a dependent load chain
-        // (var_refs_ptr->cell->pvalue->tag, the qjs OP_get_var_ref shape now
-        // that the base rides the Vm mirror) whose cycle cost is exquisitely
-        // entry-alignment sensitive; keep it invariant under unrelated
-        // text-size changes in the dispatch unit.
+        // (frame->ptr->cell->pvalue->tag, or var_refs_ptr->cell->pvalue->tag
+        // for the mirror twins — the qjs OP_get_var_ref shape) whose cycle
+        // cost is exquisitely entry-alignment sensitive; keep it invariant
+        // under unrelated text-size changes in the dispatch unit.
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
@@ -2229,11 +2291,7 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
             // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
-            // The base comes from the per-frame `vm.var_refs_ptr` mirror (qjs's
-            // register-resident `var_refs`), cutting the vm->frame->ptr front
-            // of the dependent load chain; the assert traps any refresh gap.
-            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_ptr[idx];
+            const cell = varRefCellFromBase(base, vm, idx);
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             // Guard #7 (nested-cell check) retired: a cell's VALUE is never
@@ -2253,7 +2311,7 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
 /// writes become drop during resolve_variables. The resident success path is
 /// therefore qjs set_value exactly: publish the owned TOS value, release the old
 /// cell value, consume TOS, and continue. TDZ/init forms remain cold and separate.
-pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
+pub fn opPutVarRef(comptime idx_src: VarRefIdx, comptime base: VarRefBase) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
             if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2272,8 +2330,7 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
             std.debug.assert(idx < vm.frame.var_refs.len);
-            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_ptr[idx];
+            const cell = varRefCellFromBase(base, vm, idx);
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp - 1, var_buf, vm);
         }
@@ -2294,23 +2351,26 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
 /// (scope_put_var_init lowering), so folding the TDZ probe into the shared
 /// handler would send every closure `let` initialization to the cold shell.
 /// No short forms exist for the check variant (qjs has none either).
-pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    const idx = readInt(u16, pc + 1);
-    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands are
-    // finalize-validated, frames carry exactly closure_var_count cells —
-    // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
-    std.debug.assert(idx < vm.frame.var_refs.len);
-    std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
-    const cell = vm.var_refs_ptr[idx];
-    // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
-    if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // qjs set_value: publish the owned TOS value, release the displaced cell
-    // value. The freed value is the OLD cell value — never the (stale-window)
-    // operand slot — so no stack shrink is required before free (same GC-window
-    // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
-    value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
-    return cont(pc + 3, sp - 1, var_buf, vm);
+pub fn opPutVarRefCheck(comptime base: VarRefBase) Handler {
+    return struct {
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+            if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            const idx = readInt(u16, pc + 1);
+            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands are
+            // finalize-validated, frames carry exactly closure_var_count cells —
+            // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
+            std.debug.assert(idx < vm.frame.var_refs.len);
+            const cell = varRefCellFromBase(base, vm, idx);
+            // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
+            if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // qjs set_value: publish the owned TOS value, release the displaced cell
+            // value. The freed value is the OLD cell value — never the (stale-window)
+            // operand slot — so no stack shrink is required before free (same GC-window
+            // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
+            value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+            return cont(pc + 3, sp - 1, var_buf, vm);
+        }
+    }.h;
 }
 
 /// Assignment-expression closure/global var-ref write (qjs OP_set_var_ref0..3 /
@@ -2337,9 +2397,10 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
             // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
+            // No mirror twin exists for the set family (the 8 free ids went
+            // to the measured-hot get/put forms); always the frame path.
             std.debug.assert(idx < vm.frame.var_refs.len);
-            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
-            const cell = vm.var_refs_ptr[idx];
+            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp, var_buf, vm);
         }

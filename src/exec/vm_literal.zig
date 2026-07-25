@@ -150,11 +150,11 @@ fn decodeLocalGet(code: []const u8, pc: usize) ?DecodedGet {
 fn decodeVarRefGet(code: []const u8, pc: usize) ?DecodedGet {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.get_var_ref0 => .{ .idx = 0, .next_pc = pc + 1 },
-        op.get_var_ref1 => .{ .idx = 1, .next_pc = pc + 1 },
-        op.get_var_ref2 => .{ .idx = 2, .next_pc = pc + 1 },
-        op.get_var_ref3 => .{ .idx = 3, .next_pc = pc + 1 },
-        op.get_var_ref, op.get_var_ref_check => blk: {
+        op.get_var_ref0, op.get_var_ref0_mirror => .{ .idx = 0, .next_pc = pc + 1 },
+        op.get_var_ref1, op.get_var_ref1_mirror => .{ .idx = 1, .next_pc = pc + 1 },
+        op.get_var_ref2, op.get_var_ref2_mirror => .{ .idx = 2, .next_pc = pc + 1 },
+        op.get_var_ref3, op.get_var_ref3_mirror => .{ .idx = 3, .next_pc = pc + 1 },
+        op.get_var_ref, op.get_var_ref_check, op.get_var_ref_check_mirror => blk: {
             if (pc + 3 > code.len) return null;
             break :blk .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 };
         },

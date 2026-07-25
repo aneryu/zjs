@@ -308,6 +308,41 @@ pub fn varRef(
         op.set_var_ref1 => try slot_ops.execSetVarRef(ctx, frame, stack, 1, 0, opc),
         op.set_var_ref2 => try slot_ops.execSetVarRef(ctx, frame, stack, 2, 0, opc),
         op.set_var_ref3 => try slot_ops.execSetVarRef(ctx, frame, stack, 3, 0, opc),
+
+        // VARREF-V3 mirror twins: identical cold semantics to their base op —
+        // the mirror is a HOT-handler dispatch device only; every cold
+        // resolution (TDZ, deleted-binding, stop seams) reads the
+        // authoritative frame. The base opc is passed through so the
+        // downstream const/init/check discrimination stays unchanged.
+        op.get_var_ref0_mirror => {
+            if (try tryFastDirectVarRefGet(function, frame, stack, 0, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+        },
+        op.get_var_ref1_mirror => {
+            if (try tryFastDirectVarRefGet(function, frame, stack, 1, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+        },
+        op.get_var_ref2_mirror => {
+            if (try tryFastDirectVarRefGet(function, frame, stack, 2, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+        },
+        op.get_var_ref3_mirror => {
+            if (try tryFastDirectVarRefGet(function, frame, stack, 3, 0)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+        },
+        op.put_var_ref0_mirror => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, op.put_var_ref0),
+        op.put_var_ref1_mirror => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, op.put_var_ref1),
+        op.get_var_ref_check_mirror => {
+            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
+            if (try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return .done;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+        },
+        op.put_var_ref_check_mirror => {
+            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
+            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, op.put_var_ref_check);
+        },
         else => unreachable,
     }
     return .done;

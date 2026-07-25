@@ -323,6 +323,30 @@ pub const opcode = struct {
         pub const using_dispose_stack: u8 = 246;
         pub const using_dispose_stack_for_throw: u8 = 247;
 
+        // VARREF-V3 mirror twins (zjs-only, no qjs id counterpart — the qjs
+        // MECHANISM is the interpreter-local `var_refs` register every
+        // JS_CallInternal activation gets for free, quickjs.c:17817/17844;
+        // these twins are its translation into the flat tail-call dispatcher).
+        // Emitted ONLY by the finalize-time id-swap rewrite
+        // (`applyVarRefMirrorTwinRewrite`): a per-function gate proves the Vm
+        // `var_refs_ptr` mirror stays fresh across the whole body (no
+        // same-Machine frame-pushing ops), then swaps the base id for the
+        // twin. Twins are byte-for-byte the same size/format/stack-effect as
+        // their base op, so the rewrite has zero label/offset interaction.
+        // The parser NEVER emits these ids; phase-1 streams cannot contain
+        // them.
+        pub const get_var_ref0_mirror: u8 = 248;
+        pub const get_var_ref1_mirror: u8 = 249;
+        pub const get_var_ref2_mirror: u8 = 250;
+        pub const get_var_ref3_mirror: u8 = 251;
+        pub const put_var_ref0_mirror: u8 = 252;
+        pub const put_var_ref1_mirror: u8 = 253;
+        /// Twin of the u16 CHECKED read — the encoding of every lexical
+        /// (let/const) capture read (no short forms exist, same as qjs):
+        /// the for-of `next()` body's per-iteration reads.
+        pub const get_var_ref_check_mirror: u8 = 254;
+        pub const put_var_ref_check_mirror: u8 = 255;
+
         // Temporary opcodes (phase-1 emit, erased before resolve_labels).
         // Ids overlap the short opcodes above; phase-1 streams and final
         // streams must use the matching opcode.zig view to size them.
@@ -352,7 +376,8 @@ pub const opcode = struct {
         pub const parser_label_tag: u32 = 0x8000_0000;
 
         /// Number of real (DEF) opcodes; ids 0..op_count-1 are claimed.
-        pub const op_count: u16 = 248;
+        /// 248..255 are the VARREF-V3 mirror twins (finalize-only ids).
+        pub const op_count: u16 = 256;
         /// First id of the temp/short overlap range (OP_nop + 1).
         pub const op_temp_start: u8 = 178;
         /// One past the last temp id (exclusive).
@@ -361,7 +386,7 @@ pub const opcode = struct {
         pub const op_temp_count: u8 = 19;
     };
 
-    pub const op_info_len: usize = 267;
+    pub const op_info_len: usize = 275;
 
     /// Merged metadata table in quickjs-opcode.h file order (see header
     /// comment for the index layout).
@@ -633,6 +658,17 @@ pub const opcode = struct {
         .{ .name = "using_add_resource", .size = 2, .n_pop = 2, .n_push = 0, .fmt = .u8 }, // [264] id 245
         .{ .name = "using_dispose_stack", .size = 1, .n_pop = 1, .n_push = 1, .fmt = .none }, // [265] id 246
         .{ .name = "using_dispose_stack_for_throw", .size = 1, .n_pop = 2, .n_push = 1, .fmt = .none }, // [266] id 247
+        // VARREF-V3 mirror twins: byte-for-byte the metadata of their base op
+        // (size/n_pop/n_push/fmt MUST stay lockstep — the finalize rewrite is
+        // an id-only swap and every walker derives geometry from this table).
+        .{ .name = "get_var_ref0_mirror", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [267] id 248
+        .{ .name = "get_var_ref1_mirror", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [268] id 249
+        .{ .name = "get_var_ref2_mirror", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [269] id 250
+        .{ .name = "get_var_ref3_mirror", .size = 1, .n_pop = 0, .n_push = 1, .fmt = .none_var_ref }, // [270] id 251
+        .{ .name = "put_var_ref0_mirror", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [271] id 252
+        .{ .name = "put_var_ref1_mirror", .size = 1, .n_pop = 1, .n_push = 0, .fmt = .none_var_ref }, // [272] id 253
+        .{ .name = "get_var_ref_check_mirror", .size = 3, .n_pop = 0, .n_push = 1, .fmt = .var_ref }, // [273] id 254
+        .{ .name = "put_var_ref_check_mirror", .size = 3, .n_pop = 1, .n_push = 0, .fmt = .var_ref }, // [274] id 255
     };
 
     pub const Kind = enum {
@@ -10942,12 +10978,121 @@ pub const pipeline_finalize = struct {
                         opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
                         opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
                         opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
+                        // VARREF-V3 twins carry the identical implied index
+                        // (id-swap rewrite; same bounds contract). The u16
+                        // twins (get/put_var_ref_check_mirror) ride the
+                        // generic .var_ref arm above.
+                        opcode.op.get_var_ref0_mirror...opcode.op.get_var_ref3_mirror => op_id - opcode.op.get_var_ref0_mirror,
+                        opcode.op.put_var_ref0_mirror...opcode.op.put_var_ref1_mirror => op_id - opcode.op.put_var_ref0_mirror,
                         else => return error.InvalidBytecode,
                     };
                     if (idx >= closure_var_count) return error.InvalidBytecode;
                 },
                 else => {},
             }
+            pc += size;
+        }
+    }
+
+    /// VARREF-V3 emission gate (the tax-free follow-up to the rejected
+    /// whole-VM mirror experiment): swap hot var-ref op ids for their
+    /// `*_mirror` twins in functions where the Vm `var_refs_ptr` mirror is
+    /// PROVABLY fresh across the whole body, so only those functions read the
+    /// mirror and every other function (in particular every call-containing
+    /// caller) keeps the zero-maintenance authoritative `frame.var_refs` path.
+    ///
+    /// qjs correspondence: qjs's `var_refs` is an interpreter-local C register
+    /// of every JS_CallInternal activation (`var_refs = p->u.func.var_refs`,
+    /// quickjs.c:17817/17844) — per-frame, maintenance-free, restored for free
+    /// by C-stack frame discipline on return. zjs's flat tail-call dispatcher
+    /// has one activation for the whole inline chain, so a global mirror pays
+    /// a per-call publication/restore tax with no qjs counterpart (measured
+    /// +0.46..0.92% on the call family — rejected twice). The gate below is
+    /// the structural validity domain where the register model costs nothing:
+    ///
+    ///   The mirror is republished at every driver-loop frame switch
+    ///   (run init / reloadTop / reloadAfterPop), at every cold-op
+    ///   continuation (coldNext), and at every same-Machine call entry
+    ///   (enterEntry). The ONLY resume path that skips republication is the
+    ///   flat leaf-return arm family in popAndResume — and leaf entries are
+    ///   constructed exclusively by the call/call_method handler bodies
+    ///   (finish*LeafFrame tails, all reached from opCall/op_call_method), so
+    ///   a flat-arm resume always lands in a function that CONTAINS a
+    ///   call-family op. Excluding those ops from mirrored functions makes
+    ///   the stale window unreachable: within a gated function, execution
+    ///   between two mirrored ops can only cross refresh points. Every
+    ///   mirrored handler Debug-asserts freshness against the authoritative
+    ///   `frame.var_refs.ptr`, so any gap in this reasoning traps across the
+    ///   exec/core suites and test262.
+    ///
+    /// The criterion is a general mechanism property (absence of same-Machine
+    /// frame-pushing/suspending ops = the mirror's validity domain), not a
+    /// probe-shaped heuristic: every closure-reading leaf function in any
+    /// program qualifies. Conservative extras (yield/await family, eval,
+    /// apply, for-of/for-await next) keep suspension and scope-surgery seams
+    /// on the authoritative path.
+    const varref_mirror_excluded_ops = [_]u8{
+        opcode.op.call_constructor,
+        opcode.op.call,
+        opcode.op.tail_call,
+        opcode.op.call_method,
+        opcode.op.tail_call_method,
+        opcode.op.apply,
+        opcode.op.eval,
+        opcode.op.apply_eval,
+        opcode.op.call0,
+        opcode.op.call1,
+        opcode.op.call2,
+        opcode.op.call3,
+        opcode.op.for_of_next,
+        opcode.op.for_await_of_next,
+        opcode.op.initial_yield,
+        opcode.op.yield,
+        opcode.op.yield_star,
+        opcode.op.async_yield_star,
+        opcode.op.await,
+    };
+
+    /// Id-only swap of the hot var-ref ops to their mirror twins. Twins are
+    /// registered in `opcode_info` with byte-identical size/format/stack
+    /// metadata, and this runs strictly AFTER resolve_labels on the finalized
+    /// stream, so no label, offset, atom-owner or stack-model interaction is
+    /// possible. Caller has already gated on function kind (normal, non-eval,
+    /// non-module) and the operand-bounds validator has accepted `code`.
+    fn applyVarRefMirrorTwinRewrite(code: []u8) void {
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            // validateVarRefOperandBounds already proved sizes/coverage.
+            std.debug.assert(size != 0 and size <= code.len - pc);
+            for (varref_mirror_excluded_ops) |excluded| {
+                if (op_id == excluded) return;
+            }
+            pc += size;
+        }
+        pc = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            code[pc] = switch (op_id) {
+                opcode.op.get_var_ref0 => opcode.op.get_var_ref0_mirror,
+                opcode.op.get_var_ref1 => opcode.op.get_var_ref1_mirror,
+                opcode.op.get_var_ref2 => opcode.op.get_var_ref2_mirror,
+                opcode.op.get_var_ref3 => opcode.op.get_var_ref3_mirror,
+                opcode.op.put_var_ref0 => opcode.op.put_var_ref0_mirror,
+                opcode.op.put_var_ref1 => opcode.op.put_var_ref1_mirror,
+                opcode.op.get_var_ref_check => opcode.op.get_var_ref_check_mirror,
+                opcode.op.put_var_ref_check => opcode.op.put_var_ref_check_mirror,
+                // put_var_ref2/3 / set_var_ref* / the unchecked u16 forms
+                // keep the authoritative frame path: the 8 free opcode ids
+                // (248..255) are spent on the measured-hot forms — the short
+                // var-capture reads/writes plus BOTH u16 checked forms (every
+                // lexical capture read and the per-iteration for-of index
+                // write-back). Unmirrored ops in a gated function stay fully
+                // correct — they just read through `frame.var_refs`.
+                else => op_id,
+            };
             pc += size;
         }
     }
@@ -11020,6 +11165,14 @@ pub const pipeline_finalize = struct {
         _ = try validateFinalArtifactShape(fd, &lowered);
         try validateFinalAtomOwners(lowered.code, lowered.atom_operands);
         try validateVarRefOperandBounds(lowered.code, fd.closure_var.len);
+        // VARREF-V3 emission gate: only plain functions (no generator/async
+        // suspension seams, no eval/module scope surgery) whose bodies pass
+        // the frame-pushing-op scan get mirror-twin var-ref ids. Runs after
+        // every lowering/validation pass on the final stream (id-only swap,
+        // zero label interaction); the FB copy below carries the result.
+        if (fd.func_kind == .normal and !fd.is_direct_eval and !fd.is_indirect_eval and !fd.is_module) {
+            applyVarRefMirrorTwinRewrite(lowered.code);
+        }
 
         // Preflight the exact packed FunctionBytecode layout before the first
         // artifact allocation. Source and pc2line remain independent moved
