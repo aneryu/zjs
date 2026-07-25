@@ -3176,6 +3176,29 @@ pub fn op_mod_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     return coldNext(var_buf, vm);
 }
 
+/// Dedicated cold-table handler for OP_div after its both-int32 CASE misses.
+/// QJS OP_div routes every non-(both-int) case to js_binary_arith_slow, which
+/// handles both-float and mixed int/float operands through `handle_float64`:
+/// `dr = d1 / d2; sp[-2] = __JS_NewFloat64(ctx, dr)` — a BARE float64 with no
+/// int canonicalization (the canonicalizing JS_NewFloat64 only runs on the
+/// both-int leg, which opBinary already caught before reaching here, so the
+/// cold path always has ≥1 float operand). Mirror that so a plain float divide
+/// stays register-resident instead of falling all the way to binaryVm.
+/// numberValue rejects BigInt/string/object, so those retain the generic path.
+pub fn op_div_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (!vm.local_fast_blocked) {
+        if (value_ops.numberValue((sp - 2)[0])) |lhs| {
+            if (value_ops.numberValue((sp - 1)[0])) |rhs| {
+                (sp - 2)[0] = JSValue.float64(lhs / rhs);
+                return cont(pc + 1, sp - 1, var_buf, vm);
+            }
+        }
+    }
+    vm.publish(pc, sp);
+    _ = arith_vm.binaryVm(vm.ctx, vm.stack, vm.frame, vm.catch_target, pc[0], vm.output, vm.global) catch |err| return vm.fail(err);
+    return coldNext(var_buf, vm);
+}
+
 /// Dedicated cold handler for OP_lt/OP_le/…/OP_eq's non-(both-int32) operands — the
 /// float-vs-int / float / object / loose-eq cases (qjs js_relational_slow /
 /// js_eq_slow). Installed as the cold_table entry for the compare ops, so the

@@ -269,6 +269,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
 
     // --- arith / compare / unary ---
     inline for ([_]u8{ op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor }) |o| t[o] = h_binary;
+    t[op.div] = td.op_div_cold;
     t[op.mod] = td.op_mod_cold;
     // Register-resident cold compare (no publish round-trip) — falls back to the
     // publishing h_compare path internally at the generator parameter/body stop. Reached via
