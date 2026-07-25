@@ -384,7 +384,10 @@ inline fn qjsGetFieldFastSlotWithExoticOrder(
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
     // without paying the private-atom probe. Two pure guards reordered.
-    var object = objectFromValue(receiver) orelse return null;
+    // Trusted-expression classification: the receiver came off the operand
+    // stack as an expression value, so the header-kind re-load in the generic
+    // objectFromValue is dead here (see objectFromValueTrustedExpression).
+    var object = object_ops.objectFromValueTrustedExpression(receiver) orelse return null;
     // Bytecode atom operands are proven non-private at compile time (see
     // debugAssertNonPrivateFieldOperandAtom), exactly why qjs GET_FIELD_INLINE
     // carries no private-atom probe. Only the computed-key entry
@@ -732,7 +735,9 @@ pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     // inline find_own_property carries no private probe either
     // (quickjs.c:19177-19199); private stores are OP_put_private_field only.
     debugAssertNonPrivateFieldOperandAtom(rt, atom_id);
-    const object = objectFromValue(receiver) orelse return false;
+    // Same trusted-expression receiver contract as the get walker above (qjs
+    // OP_put_field's JS_VALUE_GET_OBJ, quickjs.c:19190-19192).
+    const object = object_ops.objectFromValueTrustedExpression(receiver) orelse return false;
     if (object.needsSlowPropertyAccess()) return false;
     const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
     // Integer-pair slot access (qjs set_value's ldp/stp form, quickjs.c:5091):
