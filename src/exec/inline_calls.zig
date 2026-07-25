@@ -1420,7 +1420,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, self.callerResumePc());
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Exact-args authoritative constructor (O1) — the deep fallible twin of
@@ -1482,7 +1482,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Capture-leaf authoritative constructor (O2) — the deep fallible twin
@@ -1539,7 +1539,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, self.callerResumePc());
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Padded-args authoritative constructor (Q3) — the deep fallible twin
@@ -1603,7 +1603,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, self.callerResumePc());
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Debug-only proof that the comptime `this` arm matches the published
@@ -1698,11 +1698,18 @@ pub const Machine = struct {
         region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        planned_stack_bytes: usize,
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
         const rt = self.ctx.runtime;
         const callable_slot = &region_start[@intFromBool(method_receiver)];
+        // K1 single pricing, extended through publication: the constructor's
+        // committed figure is passed in instead of re-deriving the three
+        // function-header scalars here (LLVM cannot CSE the reload across the
+        // intervening entry stores; qjs prices alloca_size exactly once,
+        // quickjs.c:17828-17836).
+        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
@@ -1712,7 +1719,7 @@ pub const Machine = struct {
                 .sloppy_global => global.value(),
             },
             .current_function = takeSourceSlot(callable_slot),
-            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
                 .this_value = if (method_receiver) .owned else .borrowed,
@@ -1756,6 +1763,7 @@ pub const Machine = struct {
         argc: u16,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        planned_stack_bytes: usize,
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
@@ -1763,6 +1771,10 @@ pub const Machine = struct {
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         const args_window: []core.JSValue =
             (region_start + @as(usize, @intFromBool(method_receiver)) + 1)[0..argc];
+        // K1 single pricing, extended through publication (see
+        // finishEmptyLeafFrame): exact-args commits price the empty
+        // padded-argv prefix, so the constructor figure IS the leaf figure.
+        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer. `var_refs`
         // borrows the closure's cell array (qjs `var_refs =
         // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
@@ -1781,7 +1793,7 @@ pub const Machine = struct {
             .actual_arg_count = argc,
             // Exact-args pricing: argc == arg_count, so the padded-argv
             // prefix is empty and the leaf figure is the committed charge.
-            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
             .args = args_window,
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
@@ -1830,11 +1842,15 @@ pub const Machine = struct {
         region_start: [*]core.JSValue,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        planned_stack_bytes: usize,
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
         const rt = self.ctx.runtime;
         const callable_slot = &region_start[@intFromBool(method_receiver)];
+        // K1 single pricing, extended through publication (see
+        // finishEmptyLeafFrame).
+        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer.
         entry.frame = .{
             .function = function,
@@ -1844,7 +1860,7 @@ pub const Machine = struct {
                 .sloppy_global => global.value(),
             },
             .current_function = takeSourceSlot(callable_slot),
-            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeLeafFrameAllocaSize(function)),
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
             .ownership = .{
@@ -1901,6 +1917,7 @@ pub const Machine = struct {
         argc: u16,
         stack_window: []core.JSValue,
         storage_on_heap: bool,
+        planned_stack_bytes: usize,
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
@@ -1908,6 +1925,9 @@ pub const Machine = struct {
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         const args_base = region_start + @as(usize, @intFromBool(method_receiver)) + 1;
         const args_window: []core.JSValue = args_base[0..function.arg_count];
+        // K1 single pricing, extended through publication (see
+        // finishEmptyLeafFrame): padded pricing includes the qjs argv prefix.
+        std.debug.assert(planned_stack_bytes == vm_call.qjsBytecodeFrameAllocaSize(function, argc, false));
         // Missing-tail fill, in place. No failable operation follows (or
         // precedes, within this tail), so an abandoned construction can
         // never leave a written pad behind for a source-cleanup errdefer to
@@ -1927,7 +1947,7 @@ pub const Machine = struct {
             .current_function = takeSourceSlot(callable_slot),
             .actual_arg_count = argc,
             // Padded pricing: argc < arg_count allocates the qjs argv prefix.
-            .planned_stack_bytes = @intCast(vm_call.qjsBytecodeFrameAllocaSize(function, argc, false)),
+            .planned_stack_bytes = @intCast(planned_stack_bytes),
             .args = args_window,
             .var_refs = captures,
             .storage_values = if (storage_on_heap) stack_window else &.{},
@@ -2013,7 +2033,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, resume_pc);
+        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free exact-args leaf construction (O1) — the
@@ -2066,7 +2086,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
+        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free capture-leaf construction (O2) — the parallel
@@ -2121,7 +2141,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, resume_pc);
+        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free padded-args leaf construction (Q3) — the
@@ -2182,7 +2202,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, resume_pc);
+        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
