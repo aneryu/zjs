@@ -1870,8 +1870,92 @@ pub const Object = extern struct {
     }
 
     pub fn createArrayFromShape(rt: *JSRuntime, shape_ref: *shape.Shape, entries: []const property.Entry) !*Object {
+        // The realm's initial array shape carries no named properties (length
+        // is header storage in zjs), so the common fresh-array allocation takes
+        // the dedicated JS_NewObjectFromShape mirror below instead of paying
+        // the general class-payload constructor.
+        if (entries.len == 0 and shape_ref.prop_count == 0) {
+            return createArrayFromInitialShape(rt, shape_ref);
+        }
         const self = try createFromShape(rt, class.ids.array, shape_ref, entries);
         self.flags.fast_array = true;
+        return self;
+    }
+
+    /// Allocate a fresh dense array straight from the realm's initial array
+    /// Shape — the zjs analogue of qjs `JS_NewArray` = `JS_NewObjectFromShape(
+    /// ctx, js_dup_shape(ctx->array_shape), JS_CLASS_ARRAY)` (quickjs.c:5575,
+    /// 5610-5680): retain the prepared Shape, run the pre-allocation GC
+    /// boundary, allocate the JSObject plus the shape-sized property buffer,
+    /// and initialize the JS_CLASS_ARRAY arm inline (`p->is_exotic = 1;
+    /// p->fast_array = 1; u.array = empty`, quickjs.c:5644-5657). The general
+    /// `createInternal` re-derives all of this per call through the class
+    /// definition plan; the array class is standard and its layout facts are
+    /// compile-time constants, exactly like qjs's hardcoded switch arm.
+    /// `createPreparedPropertyTemplate` is the same mirror for property-shaped
+    /// templates; this is its dense-array sibling (no entries, header length).
+    pub fn createArrayFromInitialShape(rt: *JSRuntime, initial_shape: *shape.Shape) !*Object {
+        std.debug.assert(initial_shape.prop_count == 0);
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered array class definition the generic path consults.
+            const definition = rt.classes.standardPlan(class.ids.array);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .none);
+            std.debug.assert(!classHasExoticMethods(class.ids.array, definition.has_exotic));
+        }
+        initial_shape.retain();
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(initial_shape);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        // qjs allocates `prop[shape->prop_size]` for every object built from a
+        // shape (quickjs.c:5630); the initial array shape's buffer is reused by
+        // later named-property appends, which trust `shape.prop_size` slots.
+        const property_capacity: usize = initial_shape.prop_size;
+        var property_storage: []property.Entry = &.{};
+        var property_storage_owned = false;
+        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
+        if (property_capacity != 0) {
+            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
+            property_storage_owned = true;
+        }
+
+        self.* = .{
+            .header = .{},
+            .class_id = class.ids.array,
+            // Null first word = qjs empty array pointer + no-payload sentinel;
+            // count/capacity/length stay zero (see createInternal's array arm).
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                // qjs JS_CLASS_ARRAY arm sets p->fast_array = 1. qjs's
+                // `p->is_exotic` has NO zjs mirror bit for arrays: zjs derives
+                // array length/index exotics from the class id itself
+                // (`classNeedsSlowPropertyAccess`), and the registered array
+                // class definition carries has_exotic = false — the
+                // hasExoticMethods() guards on the dense fast paths depend on
+                // it (hardcoding true regressed dense_array fills 4x).
+                .has_exotic_methods = false,
+                .fast_array = true,
+            },
+            .shape_ref = initial_shape,
+            .prop_values = if (property_capacity == 0) @ptrFromInt(@alignOf(property.Entry)) else property_storage.ptr,
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
+        property_storage_owned = false;
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
         return self;
     }
 
@@ -9829,6 +9913,31 @@ pub const Object = extern struct {
         }
         if (values.len != 0) self.markIndexedProperties(rt);
         return true;
+    }
+
+    /// Owned-move fill for a FRESH literal array — qjs `js_create_array_free`'s
+    /// post-`JS_NewArray` body (quickjs.c:9636-9650): `expand_fast_array` +
+    /// `p->u.array.count = len` + a plain move of every element (`u.values[i] =
+    /// tab[i]`, no dup) + the length publication. The caller guarantees the
+    /// array came straight from the initial-shape allocator (dense, empty,
+    /// extensible, writable length, zero named properties), so the sibling
+    /// borrow-mode guard chain collapses to Debug asserts, exactly like qjs
+    /// trusting JS_NewArray's output. On success the values are consumed; on
+    /// error they remain owned by the caller (the cold shell re-runs the op on
+    /// the untouched operand window — qjs frees tab on its inline fail path,
+    /// which our caller's error route performs instead).
+    pub fn initDenseArrayLiteralValuesOwnedTrusted(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
+        std.debug.assert(self.isArray() and self.flags.length_writable and self.flags.extensible);
+        std.debug.assert(self.u.array.count == 0 and self.u.array.length == 0);
+        std.debug.assert(self.shape_ref.prop_count == 0);
+        std.debug.assert(self.arrayElementStorageMode() == .dense);
+        std.debug.assert(values.len <= array.max_array_length);
+        if (values.len == 0) return;
+        try self.ensureArrayElementCapacity(rt, values.len);
+        self.setFastArrayCountAssumeCapacity(@intCast(values.len));
+        self.u.array.length = @intCast(values.len);
+        @memcpy(self.u.array.values[0..values.len], values);
+        self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {

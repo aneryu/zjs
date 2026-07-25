@@ -3015,26 +3015,27 @@ pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 
 // Frameless OP_array_from — qjs CASE(OP_array_from): `js_create_array_free(ctx,
 // argc, sp - argc)` building the dense array in one call (quickjs.c:18239), the
-// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal. The
-// cold h_array_from shell paid the 224-byte coldStd publish+spill tax plus a heap temp
-// buffer + per-element stack.pop every iteration. `constructLiteralWithPrototype`
-// DUPS the values slice into the array (initDenseArrayLiteralValuesAssumingEmpty) and
-// roots it during the create (GC-safe), so this handler hands it the register-resident
-// operand window `(sp-argc)[0..argc]` directly — no temp buffer, no per-element pop —
-// then frees the argc popped originals (balancing the dup, exactly the cold arrayFrom's
-// trailing free) and pushes the array. OOM routes to the cold shell (values untouched
-// on the stack, frame.pc left at the u16 argc operand for its own decode). 3-byte op.
+// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal.
+// The realm's prepared initial shape (`vm.ctx.array_shape`, qjs `ctx->array_shape`
+// where ctx is the running function's realm) feeds the JS_NewObjectFromShape-mirror
+// allocator directly — no runtime-wide shape-by-prototype walk — and the element
+// values MOVE from the register-resident operand window `(sp-argc)[0..argc]` into
+// the dense storage exactly like qjs's `u.array.u.values[i] = tab[i]` (no dup, no
+// balancing free; the array replaces the whole window, net stack effect -argc+1).
+// OOM (or a realm without its initial shape installed yet) routes to the cold
+// shell with the values untouched on the stack (frame.pc left at the u16 argc
+// operand for its own decode); the cold path re-runs the op with the generic
+// borrow+free contract, covering qjs's inline fail-path frees. 3-byte op.
 pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const argc: usize = readInt(u16, pc + 1);
     const rt = vm.ctx.runtime;
     const values = (sp - argc)[0..argc];
-    const array = core.array.constructLiteralWithPrototype(rt, values, array_ops.arrayPrototypeFromGlobal(rt, vm.global)) catch
+    const initial_shape = vm.ctx.array_shape orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Free the popped originals (the array dup'd them); then the array replaces the
-    // whole [v0..v_argc) window at sp-argc, so the net stack effect is -argc+1.
-    for (values) |v| v.free(rt);
+    const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const nsp = sp - argc;
-    nsp[0] = array; // owned
+    nsp[0] = array; // owned; the argc originals were consumed by the move
     return cont(pc + 3, nsp + 1, var_buf, vm);
 }
 
