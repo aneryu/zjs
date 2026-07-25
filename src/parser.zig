@@ -3724,6 +3724,16 @@ pub const parser_core = struct {
         last_token_line_num: u32 = 1,
         last_token_col_num: u32 = 1,
         last_opcode_source_offset: ?u32 = null,
+        /// Lazily-built line-start byte offsets for O(1) (line,col)->offset
+        /// conversion in `emitSourcePos`. This replaces an O(n) rescan of the
+        /// whole source from byte 0 on EVERY opcode source-position emit, which
+        /// made a full compile O(n^2) and dominated real-world parse time
+        /// (mandreel/typescript/pdfjs Octane cases timed out; code-load 43x
+        /// behind qjs). `source_line_starts[k]` is the byte offset where line
+        /// (k+1) begins (line 1 -> 0). Rebuilt if the lexer source changes
+        /// (direct eval / sub-parse); freed in `deinit`.
+        source_line_starts: []u32 = &.{},
+        source_line_starts_src: []const u8 = &.{},
         /// Scoped attribution for statement opcodes emitted after their
         /// operand expression has advanced the lexer. QuickJS emits one
         /// OP_line_num at the statement keyword before lowering the complete
@@ -3976,6 +3986,11 @@ pub const parser_core = struct {
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
+            if (self.source_line_starts.len != 0) {
+                self.function.memory.allocator.free(self.source_line_starts);
+                self.source_line_starts = &.{};
+                self.source_line_starts_src = &.{};
+            }
             self.lex.freeToken(&self.token);
             // Free any nested function definitions on the stack
             const cur_func_stack = self.cur_func_stack;
@@ -5284,7 +5299,9 @@ pub const parser_core = struct {
             try self.appendBytesAt(&bytes, line_num, col_num);
         }
 
-        fn sourceOffsetForLineCol(self: *const State, line_num: u32, col_num: u32) u32 {
+        /// O(source) scan preserved as the exact fallback when the line-start
+        /// table cannot be built (OOM). Never wrong, just slow.
+        fn sourceOffsetForLineColScan(self: *const State, line_num: u32, col_num: u32) u32 {
             if (line_num <= 1 and col_num <= 1) return 0;
             var line: u32 = 1;
             var col: u32 = 1;
@@ -5298,6 +5315,53 @@ pub const parser_core = struct {
                 }
             }
             return @intCast(self.lex.source.len);
+        }
+
+        /// Build the line-start offset table once for the current lexer source.
+        /// Guarded on source slice identity so direct-eval / sub-parses with a
+        /// different source rebuild it. Freed in `deinit`.
+        fn ensureSourceLineStarts(self: *State) Error!void {
+            const src = self.lex.source;
+            if (self.source_line_starts_src.ptr == src.ptr and
+                self.source_line_starts_src.len == src.len and
+                self.source_line_starts.len != 0)
+                return;
+            const allocator = self.function.memory.allocator;
+            if (self.source_line_starts.len != 0) allocator.free(self.source_line_starts);
+            self.source_line_starts = &.{};
+            self.source_line_starts_src = &.{};
+            var count: usize = 1;
+            for (src) |byte| {
+                if (byte == '\n') count += 1;
+            }
+            const table = try allocator.alloc(u32, count);
+            table[0] = 0;
+            var line: usize = 1;
+            for (src, 0..) |byte, index| {
+                if (byte == '\n') {
+                    table[line] = @intCast(index + 1);
+                    line += 1;
+                }
+            }
+            self.source_line_starts = table;
+            self.source_line_starts_src = src;
+        }
+
+        /// O(1) (line,col)->byte-offset via the cached line-start table. Exactly
+        /// reproduces `sourceOffsetForLineColScan` for every (line,col) the
+        /// lexer produces: `line_starts[line-1] + (col-1)`, clamped to source
+        /// length (the scan's fall-through result). Only real, in-bounds
+        /// positions reach here, so the col addition never crosses a newline.
+        fn sourceOffsetForLineCol(self: *State, line_num: u32, col_num: u32) u32 {
+            if (line_num <= 1 and col_num <= 1) return 0;
+            self.ensureSourceLineStarts() catch {
+                return self.sourceOffsetForLineColScan(line_num, col_num);
+            };
+            const li: usize = if (line_num >= 1) @as(usize, line_num) - 1 else 0;
+            if (li >= self.source_line_starts.len) return @intCast(self.lex.source.len);
+            const base: usize = self.source_line_starts[li];
+            const col: usize = if (col_num >= 1) @as(usize, col_num) - 1 else 0;
+            return @intCast(@min(base + col, self.lex.source.len));
         }
 
         fn emitSourcePos(self: *State, line_num: u32, col_num: u32) Error!void {
