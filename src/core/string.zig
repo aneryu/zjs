@@ -434,6 +434,54 @@ pub const String = struct {
         return self;
     }
 
+    /// Concatenate already-flattened mixed-width pieces into one freshly
+    /// allocated string. Mirrors qjs `JS_ConcatString1` (quickjs.c:4646): the
+    /// result is wide iff any part is wide (`p1->is_wide_char ||
+    /// p2->is_wide_char`), one `js_alloc_string`, then each part copies into
+    /// the result payload — same-width parts memcpy, latin1 parts widen per
+    /// code unit into a wide result. `wide` must be the OR of the part widths
+    /// and `total` the sum of their unit lengths (both from the caller's
+    /// measure pass).
+    pub fn createResolvedParts(rt: *JSRuntime, parts: []const ResolvedData, total: usize, wide: bool) !*String {
+        if (!wide) {
+            const self = try createUninitialized(rt, .latin1, total);
+            errdefer destroyFlat(rt, self);
+            const out = self.latin1Mut();
+            var offset: usize = 0;
+            for (parts) |part| {
+                switch (part) {
+                    .latin1 => |bytes| {
+                        @memcpy(out[offset..][0..bytes.len], bytes);
+                        offset += bytes.len;
+                    },
+                    // A wide part forces `wide` at the caller's measure pass.
+                    .utf16 => unreachable,
+                }
+            }
+            std.debug.assert(offset == total);
+            writeLatin1Terminator(out);
+            return self;
+        }
+        const self = try createUninitialized(rt, .utf16, total);
+        errdefer destroyFlat(rt, self);
+        const out = self.utf16Mut();
+        var offset: usize = 0;
+        for (parts) |part| {
+            switch (part) {
+                .latin1 => |bytes| {
+                    for (bytes, 0..) |byte, i| out[offset + i] = byte;
+                    offset += bytes.len;
+                },
+                .utf16 => |units| {
+                    @memcpy(out[offset..][0..units.len], units);
+                    offset += units.len;
+                },
+            }
+        }
+        std.debug.assert(offset == total);
+        return self;
+    }
+
     pub fn createLatin1ConcatWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
         _ = seed;
         return createLatin1Concat(rt, a, b);

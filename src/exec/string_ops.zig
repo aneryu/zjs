@@ -547,31 +547,67 @@ fn qjsStringConcatSlow(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    const rt = ctx.runtime;
+    var values = std.ArrayList(core.JSValue).empty;
+    defer {
+        for (values.items) |value| value.free(rt);
+        values.deinit(rt.memory.allocator);
+    }
+    try values.ensureTotalCapacity(rt.memory.allocator, args.len + 1);
 
     const receiver_string = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
-    defer receiver_string.free(ctx.runtime);
-    try value_ops.appendRawString(ctx.runtime, &bytes, receiver_string);
-
+    values.appendAssumeCapacity(receiver_string);
     for (args) |arg| {
         const arg_string = try toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
-        defer arg_string.free(ctx.runtime);
-        try value_ops.appendRawString(ctx.runtime, &bytes, arg_string);
+        values.appendAssumeCapacity(arg_string);
     }
 
-    return value_ops.createStringValue(ctx.runtime, bytes.items);
+    var resolved = std.ArrayList(core.string.String.ResolvedData).empty;
+    defer resolved.deinit(rt.memory.allocator);
+    try resolved.ensureTotalCapacity(rt.memory.allocator, values.items.len);
+    var total: usize = 0;
+    var wide = false;
+    for (values.items) |value| {
+        const body = value.asStringBody() orelse return error.TypeError;
+        const data = body.resolveData();
+        switch (data) {
+            .latin1 => |latin1_bytes| total = try qjsConcatAddLength(total, latin1_bytes.len),
+            .utf16 => |units| {
+                total = try qjsConcatAddLength(total, units.len);
+                wide = true;
+            },
+        }
+        resolved.appendAssumeCapacity(data);
+    }
+    if (total == 0) return (try rt.emptyString()).value().dup();
+    return (try core.string.String.createResolvedParts(rt, resolved.items, total, wide)).value();
 }
 
+/// Mixed-width / rope residue of the direct concat path. The retired
+/// implementation appended each part's RAW latin1 bytes into a byte buffer and
+/// re-decoded the buffer as UTF-8, so any high-latin1 part (code points
+/// 0x80-0xFF) reaching this leg produced a corrupt decode. Mirror qjs
+/// `JS_ConcatString1` (quickjs.c:4646) instead: flatten + measure each part
+/// (result wide iff any part is wide), then copy with per-unit widening.
 fn qjsStringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart) !core.JSValue {
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
-
-    for (parts) |part| {
-        try value_ops.appendRawString(ctx.runtime, &bytes, part.value);
+    const rt = ctx.runtime;
+    var resolved: [qjs_concat_direct_part_limit]core.string.String.ResolvedData = undefined;
+    var total: usize = 0;
+    var wide = false;
+    for (parts, 0..) |part, index| {
+        const body = part.value.asStringBody() orelse return error.TypeError;
+        const data = body.resolveData();
+        switch (data) {
+            .latin1 => |latin1_bytes| total = try qjsConcatAddLength(total, latin1_bytes.len),
+            .utf16 => |units| {
+                total = try qjsConcatAddLength(total, units.len);
+                wide = true;
+            },
+        }
+        resolved[index] = data;
     }
-
-    return value_ops.createStringValue(ctx.runtime, bytes.items);
+    if (total == 0) return (try rt.emptyString()).value().dup();
+    return (try core.string.String.createResolvedParts(rt, resolved[0..parts.len], total, wide)).value();
 }
 
 fn qjsConcatLatin1Part(value: core.JSValue) ?[]const u8 {
