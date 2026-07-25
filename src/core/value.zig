@@ -701,6 +701,42 @@ pub const JSValue = extern struct {
         return false;
     }
 
+    /// Any-tag twin of `releaseObjectAssumeObjectNeedsDestroy` for the
+    /// resident put_field handler's old-slot value (which can be any
+    /// refcounted tag, not just object): performs the refcount-range gate,
+    /// the deinit-phase skip, and the common non-zero decrement inline, but
+    /// REPORTS a would-be zero refcount (leaving rc at 1) instead of invoking
+    /// the destroy machinery, so the leaf handler can park the value and
+    /// route the rare destroy through a cold tail without carrying a
+    /// callee-saved spill frame. When this returns true the caller must
+    /// complete the release exactly once (e.g. `value.free(rt)`).
+    pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return false;
+            if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return false;
+            const hdr = self.refCountWordAssumeRefCounted();
+            std.debug.assert(hdr.rc > 0);
+            if (hdr.rc == 1) return true;
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
+            hdr.rc -= 1;
+            return false;
+        }
+        if (!self.requiresRefCount()) return false;
+        const tag = self.tagOf();
+        if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        if (hdr.rc == 1) return true;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        hdr.rc -= 1;
+        return false;
+    }
+
     inline fn refCountWordAssumeRefCounted(self: JSValue) *gc.RefCountHeader {
         const payload = ptrFromPayload(anyopaque, self.payloadOf()).?;
         return gc.refCountHeaderFromPayload(payload);

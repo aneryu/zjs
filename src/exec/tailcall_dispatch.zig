@@ -226,6 +226,8 @@ const PropertyTailSlot = enum(usize) {
     get_length_property,
     get_field_typed_property,
     get_field_release_receiver,
+    put_field_release_old,
+    put_field_release_receiver,
 };
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
@@ -2626,30 +2628,59 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-// Hot inline put_field — qjs OP_put_field's monomorphic IC: o.x = v writes the
-// value straight into the cached slot when the receiver's shape matches the site's
-// monomorphic IC entry (no allocation, no shape transition). IC miss / new property /
-// setter / exotic receiver fall to the cold h_field, which runs the full put fast
-// path (simple-put + IC install) then the slow setValueProperty. Stack is
-// [obj, value]; on a hit value is consumed by the slot write and obj is freed.
+// Hot inline put_field — qjs OP_put_field's inline fast window
+// (quickjs.c:19188-19203): tag check, find_own_property FIRST (no class
+// qualification, no cache), single-mask plain-writable-data test, set_value's
+// swap-then-free into the slot (quickjs.c:5091), free the receiver, sp -= 2.
+// Shape-changing adds, setters/read-only entries, and non-object receivers
+// fall to cold field(). Stack is [obj, value]; on a hit value is consumed by
+// the slot write and obj is freed. Mirrors the op_get_field lowering:
+// integer-pair slot/operand moves (the property slot's 64-bit half re-readers
+// — the get_field hit, the for-of done/value probes — stay forwarding-
+// eligible), and BOTH rare destroys (dying old slot value, dying receiver)
+// are routed through cold property tails so the hot body carries no
+// callee-saved spill frame — qjs's shared interpreter frame pays no per-op
+// prologue for its inline JS_FreeValue pair either.
 pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    // Integer-pair operand load: sourcing `value` from a 128-bit SIMD stack
-    // read makes LLVM re-fuse qjsPutFieldFast's split slot store back into a
-    // `str q`, which stalls the integer-half re-readers of that property slot
-    // (get_field hit, for-of done/value probes). Keeping the value in x-regs
-    // end to end preserves the stp/ldp pairing qjs uses (set_value,
-    // quickjs.c:5091).
-    const value = loadValueAsIntPair(&(sp - 1)[0]);
-    const obj = (sp - 2)[0];
+    const receiver = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
-    // qjs OP_put_field inline: find_own_property on the receiver, write the slot
-    // (consuming `value`) and free the old value. Shape-changing adds, exotic, and
-    // non-object receivers fall to cold field().
-    if (vm_property_field.qjsPutFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
-        obj.free(vm.ctx.runtime); // value consumed by the slot write
+    const rt = vm.ctx.runtime;
+    if (vm_property_field.qjsPutFieldFastSlot(rt, receiver, atom_id)) |slot| {
+        const old_value = loadValueAsIntPair(slot);
+        const value = loadValueAsIntPair(&(sp - 1)[0]);
+        storeValueAsIntPair(slot, value); // consumes the stack's ref on value
+        if (old_value.releaseRefCountedNeedsDestroy(rt)) {
+            // Park the dying old value (rc == 1) in the now-dead value slot;
+            // the tail completes both releases off the still-intact operands.
+            storeValueAsIntPair(&(sp - 1)[0], old_value);
+            return @call(.always_tail, propertyTailHandler(vm, .put_field_release_old), .{ pc, sp, var_buf, vm });
+        }
+        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+            return @call(.always_tail, propertyTailHandler(vm, .put_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
         return cont(pc + 5, sp - 2, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// Rare-leg tails for the hot put_field hit (get_field_release_receiver
+/// precedent — keeping the destroy `bl`s here is what lets op_put_field stay
+/// a prologue-free leaf).
+/// Contract: the new value is already in the property slot; the dying old
+/// value (rc == 1) has been parked in the dead value slot at (sp - 1); the
+/// receiver at (sp - 2) has NOT been released yet.
+fn op_put_field_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const rt = vm.ctx.runtime;
+    (sp - 1)[0].free(rt);
+    (sp - 2)[0].freeObjectAssumeObject(rt);
+    return cont(pc + 5, sp - 2, var_buf, vm);
+}
+
+/// Contract: slot written and old value already released inline; only the
+/// receiver at (sp - 2) (rc == 1) remains to destroy.
+fn op_put_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    (sp - 2)[0].freeObjectAssumeObject(vm.ctx.runtime);
+    return cont(pc + 5, sp - 2, var_buf, vm);
 }
 
 fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -3612,7 +3643,7 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 }
 
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
-const property_tail_table = [11]Handler{
+const property_tail_table = [13]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -3624,6 +3655,8 @@ const property_tail_table = [11]Handler{
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
     op_get_field_release_receiver_tail,
+    op_put_field_release_old_tail,
+    op_put_field_release_receiver_tail,
 };
 
 // ===========================================================================

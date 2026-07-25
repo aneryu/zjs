@@ -11043,12 +11043,6 @@ pub const Object = extern struct {
         slow,
     };
 
-    pub const WritableOwnDataPropertyFastLookup = struct {
-        index: usize,
-        flags: property.Flags,
-        value: *JSValue,
-    };
-
     const PropertyProbe = struct {
         index: usize,
         prop: shape.Property,
@@ -11159,12 +11153,42 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
-        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
-        const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.kind != .data or !flags.writable) return null;
-        const entry = &self.prop_values[lookup.index];
-        return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
+    /// Write-side twin of `findOwnDataSlotFast` for the resident put_field
+    /// handler: returns the MUTABLE own slot address only when the entry is a
+    /// plain writable data property. Same two lowerings (slot pointer instead
+    /// of a by-value struct + direct bit extraction off the packed shape word
+    /// instead of a `property.Flags` materialization, whose packed-bitcast
+    /// alloca spill was the write handler's only frame traffic); additionally
+    /// folds the writable bit into the same single-mask test, mirroring qjs
+    /// OP_put_field's hit condition `(prs->flags & (JS_PROP_TMASK |
+    /// JS_PROP_WRITABLE | JS_PROP_LENGTH)) == JS_PROP_WRITABLE`
+    /// (quickjs.c:19193-19196). zjs has no JS_PROP_LENGTH shape flag: array
+    /// `length` lives in the object header (DenseArrayStorage.length), never
+    /// in the shape, so the qjs LENGTH reject leg has no counterpart here —
+    /// `arr.length = n` simply misses the own probe and defers to the cold
+    /// resolver.
+    /// `slow` is written only when the atom matched but the entry cannot take
+    /// a direct slot write (accessor/var_ref/auto_init kind or read-only
+    /// data); the caller initializes it to false.
+    pub inline fn findWritableOwnDataSlotFast(self: *Object, atom_id: atom.Atom, slow: *bool) ?*JSValue {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            if (prop.atom_id == atom_id) {
+                // Kind bits 3-4 (.data == 0, qjs JS_PROP_TMASK) plus writable
+                // bit 0 in one mask. Deleted tombstones are unlinked from the
+                // hash chain with their atom cleared, so they cannot match.
+                if ((prop.flags & 0b011001) != 0b000001) {
+                    slow.* = true;
+                    return null;
+                }
+                return &self.prop_values[index].slot.data;
+            }
+        }
+        return null;
     }
 
     /// Trusted engine-internal shape probe. Returns just the property index and

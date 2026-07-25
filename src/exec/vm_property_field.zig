@@ -694,17 +694,49 @@ pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
     return string_ops.stringAtomId(value);
 }
 
+/// Hot-handler variant of the qjs OP_put_field fast window (quickjs.c:19188-
+/// 19203): returns the MUTABLE own plain-writable-data slot address so the
+/// resident op_put_field can perform set_value's swap-then-free itself with
+/// integer-pair slot accesses. Mirrors the get-side probe-first ordering:
+/// - Object-ness gate FIRST (qjs's leading JS_VALUE_GET_TAG(obj) ==
+///   JS_TAG_OBJECT check), then the private-atom probe.
+/// - find_own_property runs with NO class qualification at all: qjs's write
+///   fast path trusts any own shape hit whose flags pass the single
+///   (TMASK|WRITABLE|LENGTH) == WRITABLE mask, whatever the class — exotic
+///   index storage (typed arrays, strings) never lives in the shape, mapped
+///   Arguments numeric bindings are JS_PROP_VARREF entries the mask rejects,
+///   and array `length` carries JS_PROP_LENGTH. Unlike GET_FIELD_INLINE
+///   there is no miss-side `p->is_exotic` consultation either: the write
+///   window is own-hit-only and every miss already defers to the cold
+///   resolver (put_field_slow_path -> JS_SetPropertyInternal), which walks
+///   prototypes for setters/read-only holders and runs the exotic machinery.
+/// - zjs-only deviation, same as qjsGetFieldFastSlot: a mapped Arguments
+///   receiver bails before probing — its numeric bindings live in
+///   out-of-shape var-ref cells, so a shape data hit could be a stale mirror
+///   and a direct slot write would desync the aliased parameter.
+/// The pointer is only valid until the next potentially-shape-mutating
+/// operation; both callers consume it immediately.
+pub inline fn qjsPutFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*core.JSValue {
+    const object = objectFromValue(receiver) orelse return null;
+    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    if (object.class_id == core.class.ids.mapped_arguments) return null;
+    var slow_property = false;
+    if (object.findWritableOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
+    return null;
+}
+
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    if (rt.atoms.mightBePrivate(atom_id)) return false;
-    const object = objectFromValue(receiver) orelse return false;
-    if (object.needsSlowPropertyAccess()) return false;
-    const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
-    // Integer-pair slot access (qjs set_value's ldp/stp form, quickjs.c:5091):
-    // a 128-bit SIMD store here stalls every 64-bit re-reader of the slot —
-    // the get_field hit and the for-of done/value probes read property slots
-    // as integer halves (JSValue.loadSlotAsIntPair note).
-    const old_value = core.JSValue.loadSlotAsIntPair(lookup.value);
-    core.JSValue.storeSlotAsIntPair(lookup.value, value);
+    const slot = qjsPutFieldFastSlot(rt, receiver, atom_id) orelse return false;
+    // Integer-pair slot access (qjs set_value's swap-then-free ldp/stp form,
+    // quickjs.c:5091): a 128-bit SIMD store here stalls every 64-bit
+    // re-reader of the slot — the get_field hit and the for-of done/value
+    // probes read property slots as integer halves (JSValue.loadSlotAsIntPair
+    // note). (When the stored value is copy-only LLVM may re-fuse the split
+    // store into a `str q`; a 64-bit load fully contained in a 128-bit store
+    // still forwards, so that lowering is harmless — the split source form
+    // just keeps the value SSA-scalar and forwarding-eligible.)
+    const old_value = core.JSValue.loadSlotAsIntPair(slot);
+    core.JSValue.storeSlotAsIntPair(slot, value);
     old_value.free(rt);
     return true;
 }
