@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const bignum = @import("../libs/bigint.zig");
+const number_format = @import("../libs/number_format.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -82,7 +83,7 @@ pub const internal_entries = stringEntries: {
         stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with)),
         stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with)),
         stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim)),
-        stringEntry("concat", 1, @intFromEnum(PrototypeMethod.concat)),
+        stringDirectEntry("concat", 1, @intFromEnum(PrototypeMethod.concat), &stringConcatCall),
         stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start)),
         stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
         stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
@@ -234,6 +235,70 @@ inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
     if (number < @as(f64, @floatFromInt(std.math.minInt(i32)))) return std.math.minInt(i32);
     if (number > @as(f64, @floatFromInt(std.math.maxInt(i32)))) return std.math.maxInt(i32);
     return @intFromFloat(number);
+}
+
+/// Direct-part cap for the primitive `concat` fast body below. The template
+/// literal / `s.concat(a, b)` hot shapes carry one or two arguments; anything
+/// larger falls to the shared dispatcher (which handles up to qjs's uniform
+/// path) without observable difference.
+const concat_direct_max_args = 7;
+
+/// qjs `js_string_concat` (quickjs.c:45525): `JS_ToStringCheckObject(this)`,
+/// then one `JS_ConcatString(r, JS_ToString(argv[i]))` per argument. For the
+/// hot shape — flat latin1 string receiver with flat latin1 string / int32
+/// arguments (all with pure, side-effect-free ToString) — run the
+/// measure-once / allocate-once / memcpy-each-part body (`JS_ConcatString1`,
+/// quickjs.c:4646 semantics) directly from the record entry, skipping the
+/// realm resolution + double method-id dispatch tower. int32 arguments format
+/// into stack buffers instead of materializing an intermediate digits
+/// JSString (`appendAsciiSuffixOwned` / `stringAddStringInt` precedent:
+/// JS_ConcatString3 without the second JSString). Receiver/args stay rooted
+/// on the caller's operand-stack region for the whole call, so the borrowed
+/// latin1 slices cannot be freed by the result allocation.
+inline fn stringPrimitiveConcat(host_call: NativeCall) HostError!?core.JSValue {
+    const receiver = host_call.this_value;
+    if (!receiver.isString() or receiver.ropeBody() != null) return null;
+    const receiver_body = receiver.asStringBodyRaw() orelse return null;
+    const receiver_bytes = receiver_body.borrowLatin1() orelse return null;
+    const args = host_call.args;
+    if (args.len > concat_direct_max_args) return null;
+    var digit_bufs: [concat_direct_max_args][12]u8 = undefined;
+    var parts: [concat_direct_max_args + 1][]const u8 = undefined;
+    parts[0] = receiver_bytes;
+    var total: usize = receiver_bytes.len;
+    for (args, 0..) |arg, index| {
+        if (arg.asInt32()) |int_value| {
+            parts[index + 1] = number_format.formatInt32(&digit_bufs[index], int_value);
+        } else if (arg.isString() and arg.ropeBody() == null) {
+            const body = arg.asStringBodyRaw() orelse return null;
+            parts[index + 1] = body.borrowLatin1() orelse return null;
+        } else {
+            return null;
+        }
+        total += parts[index + 1].len;
+    }
+    // Overlong results fall to the shared dispatcher so the StringTooLong
+    // error shape stays on the single audited path.
+    if (total > core.string.max_length) return null;
+    const rt = host_call.ctx.runtime;
+    if (total == 0) {
+        const empty = rt.emptyString() catch |err| return @as(HostError, @errorCast(err));
+        return empty.value().dup();
+    }
+    const created = core.string.String.createLatin1Parts(rt, parts[0 .. args.len + 1], total) catch |err|
+        return @as(HostError, @errorCast(err));
+    return created.value();
+}
+
+fn stringConcatCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (try stringPrimitiveConcat(host_call)) |value| return value;
+    return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
 fn stringCharCodeAtCall(
