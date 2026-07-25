@@ -2649,15 +2649,28 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
         obj.free(rt);
         return cont(pc + 1, sp - 3, var_buf, vm);
     }
-    // Typed-array integer write: qjs JS_SetPropertyValue's typed arm
-    // (quickjs.c:9947) converts the numeric value, bounds-rechecks, and stores.
-    // Reach it from the hot handler instead of the cold_table -> write helper
-    // chain. Object/BigInt/Symbol values (user-code or throwing conversions)
-    // return .not_typed_array and fall through; a numeric/string/bool/null/
-    // undefined value writes (or is a silent OOB/detached no-op) here. The store
-    // copies the coerced bytes and does not consume the operand, so the value/
-    // key/obj refs are released exactly as the dense leg does.
     if (key.isInt() and obj.isObject()) {
+        // Slow/sparse Array existing own integer element overwrite (crypto
+        // BigInteger digit stores): once the dense append gate misses on a
+        // non-fast array, qjs JS_SetPropertyValue's JS_CLASS_ARRAY arm hands the
+        // int atom to JS_SetPropertyInternal, which for an existing writable
+        // data element is one find_own_property + set_value. Reach it inline,
+        // before the typed-array probe (an Array is never typed) and the cold
+        // write chain. A new element / non-writable / accessor slot returns
+        // false and falls through to setValuePropertyWithThrow unchanged.
+        if (vm_property_field.fastArrayOwnIntElementSet(rt, obj, key, value) catch |e| return vm.fail(e)) {
+            value.free(rt);
+            key.free(rt);
+            obj.free(rt);
+            return cont(pc + 1, sp - 3, var_buf, vm);
+        }
+        // Typed-array integer write: qjs JS_SetPropertyValue's typed arm
+        // (quickjs.c:9947) converts the numeric value, bounds-rechecks, and
+        // stores. Object/BigInt/Symbol values (user-code or throwing
+        // conversions) return .not_typed_array and fall through; a numeric/
+        // string/bool/null/undefined value writes (or is a silent OOB/detached
+        // no-op) here. The store copies the coerced bytes and does not consume
+        // the operand, so value/key/obj refs are released as the dense leg does.
         switch (vm_property_field.putTypedArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
             .handled => {
                 value.free(rt);
@@ -2946,6 +2959,20 @@ pub fn op_get_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     // cold_table -> arrayElement -> fastTypedArrayElementValue detour. Non-typed
     // /BigInt/negative/length-tracking cases return null and fall through.
     if (key.isInt() and obj.isObject()) {
+        // Slow/sparse Array own integer element (e.g. crypto BigInteger digit
+        // arrays, filled high-index-first so they convert to shape storage):
+        // read the int-atom own data property directly. Placed before the
+        // typed-array probe (an Array is never a typed array, so this also
+        // spares slow arrays that probe) and before the cold arrayElement chain
+        // (which re-tries the dense/typed fast paths and re-derives this int
+        // atom through toPropertyKeyAtom). A hole / accessor / prototype element
+        // returns null and falls through unchanged.
+        if (vm_property_field.fastArrayOwnIntElementValue(obj, key)) |value| {
+            obj.free(rt);
+            // key is an int (no refcount); nothing to free.
+            (sp - 2)[0] = value;
+            return cont(pc + 1, sp - 1, var_buf, vm);
+        }
         if (vm_property_field.fastTypedArrayElementValue(rt, obj, key)) |value| {
             obj.free(rt);
             // key is an int (no refcount); nothing to free.
