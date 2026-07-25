@@ -2334,10 +2334,17 @@ pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
 /// `this_obj` back, so the global arm skips the frame-slot store too — a later
 /// direct-eval materializeFrameThisBinding substitutes the same singleton
 /// global, and the only raw `frame.this_value` reader outside the materialize
-/// hook (finishFunctionReturn's derived-ctor arm) is strict-only. The
-/// allocating primitive ToObject arm (17944-17946, which must cache the boxed
-/// wrapper in the frame slot for identity), the strict non-object raw push, and
-/// the derived-ctor uninitialized -> ReferenceError check stay on cold
+/// hook (finishFunctionReturn's derived-ctor arm) is strict-only. The strict
+/// non-object receiver takes the same raw dup as qjs `normal_this`
+/// (17948-17950: `val = JS_DupValue(ctx, this_obj)` with no tag inspection) —
+/// under the fast-path invariant the frame slot is a bare value, so this arm
+/// is the exact hot mirror of the cold strict route (materializeFrameThisBinding
+/// returns the slot untouched for strict, pushThis dups the borrow). The mode
+/// flags load only after the mode-independent object arm misses, keeping the
+/// dominant method-call arm free of the FunctionBytecode flag reads. The
+/// allocating sloppy primitive ToObject arm (17944-17946, which must cache the
+/// boxed wrapper in the frame slot for identity) and the derived-ctor
+/// uninitialized -> ReferenceError check stay on cold
 /// pushThisVm/materializeFrameThisBinding.
 pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2346,9 +2353,12 @@ pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         sp[0] = v.dup();
         return cont(pc + 1, sp + 1, var_buf, vm);
     }
-    if ((v.isUndefined() or v.isNull()) and
-        !(vm.function.isStrictMode() or vm.function.runtimeStrictMode()))
-    {
+    if (vm.function.isStrictMode() or vm.function.runtimeStrictMode()) {
+        if (!v.isUninitialized()) {
+            sp[0] = v.dup();
+            return cont(pc + 1, sp + 1, var_buf, vm);
+        }
+    } else if (v.isUndefined() or v.isNull()) {
         sp[0] = vm.global.value().dup();
         return cont(pc + 1, sp + 1, var_buf, vm);
     }
