@@ -1278,6 +1278,10 @@ pub const Registry = struct {
         h.meta().rc = 1;
         h.meta().flags = .{ .kind = h.meta().flags.kind };
         h.meta().alloc_info.heap_accounted = false;
+        // Registration re-derives and re-stamps the large classification;
+        // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
+        // invariant for re-registered headers.
+        h.meta().alloc_info.large = false;
         h.prev = null;
         h.next = null;
         try self.addInitializedWithSize(h, bytes);
@@ -1305,16 +1309,14 @@ pub const Registry = struct {
 
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
+        // The large bit is clear on entry for every registration: initGcPrefix
+        // zeroes it on fresh allocations, and both unaccount sites
+        // (recordHeapFreeWithBytes / addWithSize) clear it together with
+        // heap_accounted. This keeps the hot RMW below the same single-bit orr
+        // it always was; only the cold large arm pays a second byte store.
+        std.debug.assert(!h.meta().alloc_info.large);
         if (h.meta().alloc_info.standalone) h.meta().size_class = encodeHeapBytes(bytes);
-        // One consolidated alloc_info RMW: publish heap_accounted and stamp the
-        // alloc-time large-space classification the free path reads back
-        // (recordHeapFreeWithBytes) instead of re-deriving it from the policy
-        // threshold. qjs writes its whole block-header byte pair exactly once
-        // per allocation (quickjs.c:275-277 JSMallocBlockHeader stamp).
-        var info = h.meta().alloc_info;
-        info.heap_accounted = true;
-        info.large = is_large;
-        h.meta().alloc_info = info;
+        h.meta().alloc_info.heap_accounted = true;
         // Fold the cycle-list flag into registration instead of a second RMW
         // inside appendGcObject — qjs add_gc_object writes its header
         // bookkeeping once and then just list_add_tail's (quickjs.c:6540-6546).
@@ -1326,8 +1328,17 @@ pub const Registry = struct {
         if (tracked) h.meta().flags.in_cycle_list = true;
         // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
         // keeps the selected space's live-byte scalar; all other allocation
-        // diagnostics are derived by statsSnapshot.
-        self.recordSpaceAlloc(is_large, bytes);
+        // diagnostics are derived by statsSnapshot. The single cold arm stamps
+        // the alloc-time large classification (read back by
+        // recordHeapFreeWithBytes) and credits the large space; the hot arm is
+        // the policy compare + a fixed-offset old_space bump.
+        if (is_large) {
+            @branchHint(.unlikely);
+            h.meta().alloc_info.large = true;
+            self.recordLargeSpaceAllocCold(bytes);
+        } else {
+            self.old_space.recordAlloc(bytes);
+        }
 
         if (tracked) self.linkGcObjectTail(h);
     }
@@ -1405,7 +1416,15 @@ pub const Registry = struct {
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
         // addInitializedWithSize); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
-        self.recordSpaceFree(is_large, bytes);
+        // The cold arm also clears the stamp, restoring the registration
+        // clear-on-entry invariant for any later re-registration of the header.
+        if (is_large) {
+            @branchHint(.unlikely);
+            header.meta().alloc_info.large = false;
+            self.recordLargeSpaceFreeCold(bytes);
+        } else {
+            self.old_space.recordFree(bytes);
+        }
         header.meta().alloc_info.heap_accounted = false;
         if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
@@ -1463,22 +1482,6 @@ pub const Registry = struct {
 
     noinline fn recordLargeSpaceFreeCold(self: *Registry, bytes: usize) void {
         self.large_space.recordFree(bytes);
-    }
-
-    fn recordSpaceAlloc(self: *Registry, is_large: bool, bytes: usize) void {
-        if (is_large) {
-            @branchHint(.unlikely);
-            return self.recordLargeSpaceAllocCold(bytes);
-        }
-        self.old_space.recordAlloc(bytes);
-    }
-
-    fn recordSpaceFree(self: *Registry, is_large: bool, bytes: usize) void {
-        if (is_large) {
-            @branchHint(.unlikely);
-            return self.recordLargeSpaceFreeCold(bytes);
-        }
-        self.old_space.recordFree(bytes);
     }
 
     fn externalTokenIndex(self: Registry, id: u64) ?usize {
