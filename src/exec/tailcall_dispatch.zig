@@ -98,16 +98,29 @@ pub const Vm = struct {
     /// through `function`. Still hot: every cold op's publish and every jump
     /// reads it, so it stays an eagerly republished per-frame mirror.
     code_base: [*]const u8,
-    /// RETIRED one-past-end mirror (F3): the hot `next` fall-off bounds check —
-    /// its only hot reader — is gone (explicit parser epilogues plus finalize's
-    /// reachable-falloff validation guarantee every dispatch lands on an opcode), and
-    /// the two cold readers (op_for_of_next operand peek, `next`'s Debug
-    /// assert) derive the bound from the authoritative `vm.function.byteCode()`. No
-    /// reader ⇒ every per-boundary publication (enterEntry / popAndResume /
-    /// reloadTop / reloadAfterPop / runTC init) is a dead store, deleted.
-    /// Field kept ONLY to preserve the measured Vm layout (same rationale as
-    /// `_dispatch_layout_padding` below).
-    code_end: [*]const u8 = undefined,
+    /// Mirror of `frame.var_refs.ptr` — the qjs `var_refs` interpreter-local
+    /// register (JS_CallInternal loads `var_refs = p->u.func.var_refs` once per
+    /// frame, quickjs.c:17817, then every OP_get_var_ref is a bare
+    /// `var_refs[idx]->pvalue`, 18627). Without it every hot var-ref op paid a
+    /// 5-deep dependent load chain (vm->frame->var_refs.ptr->cell->pvalue->tag)
+    /// vs qjs's 3 — the dominant backend-stall source on the closure-read
+    /// benchmarks. Refreshed wherever `vm.frame` is (re)published (enterEntry,
+    /// the flat leaf-return arms, reloadTop/reloadAfterPop, run init) and in
+    /// coldNext, which by construction covers every mid-frame
+    /// `frame.var_refs` reallocation (ensureVarRefsCapacity is only reachable
+    /// from cold helpers; finalized bytecode never grows — M2-刀4 bounds
+    /// contract). Every hot reader Debug-asserts freshness against the
+    /// authoritative `frame.var_refs.ptr`.
+    ///
+    /// Deliberately placed in the retired `code_end` slot (F3), directly after
+    /// `code_base`, so the boundary republication stores are stp-fusable in
+    /// principle (measured codegen still interleaves the feeding loads, so the
+    /// maintenance is ldr+str per frame switch — +4 insn per call round trip,
+    /// the quantified cost on capture-free call probes). The retired-slot
+    /// reuse keeps the dispatch tables and outcome payloads at their measured
+    /// offsets (the compact-layout experiment was instruction-neutral but less
+    /// cycle-stable on the call/closure probes).
+    var_refs_ptr: [*]*core.VarRef = undefined,
     /// RETIRED operand-stack-base mirror (X-a): every reader now derives the
     /// base from the authoritative `stack.values` (one dependent load off the
     /// `vm.stack` pointer the call handlers already hold for setTopPtr), so the
@@ -282,6 +295,12 @@ inline fn coldNext(vb: [*]JSValue, vm: *Vm) Outcome {
     // which reallocates stack.values — handlers read the base straight from
     // the authoritative `vm.stack.values` (no mirror to refresh), so the
     // pre-realloc dangling-base hazard cannot exist here.
+    //
+    // A cold helper may also have REPLACED frame.var_refs (the legacy/eval
+    // ensureVarRefsCapacity growth or the global-decl/module cell surgery
+    // paths run only under cold ops); refreshing the mirror here makes every
+    // possible mid-frame mutation visible before the next hot var-ref op.
+    vm.var_refs_ptr = vm.frame.var_refs.ptr;
     const npc = vm.code_base + vm.frame.pc;
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, vm.stack.topPtr(), vb, vm });
 }
@@ -425,6 +444,9 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
     vm.stack = &entry.stack;
     vm.catch_target = &entry.catch_target;
     vm.code_base = code_ptr;
+    // qjs per-call `var_refs = p->u.func.var_refs` (quickjs.c:17817). The
+    // frame field was just stored by pushCall, so this load store-forwards.
+    vm.var_refs_ptr = entry.frame.var_refs.ptr;
     // Just pushed, so depth > 0; the generator stop-boundary cache is L0-only
     // and must read false for the callee. Do NOT publish false unconditionally:
     // the every-call `strb wzr` re-dirtied the Vm byte that the guarded
@@ -1062,6 +1084,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+            vm.var_refs_ptr = caller.frame.var_refs.ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -1118,6 +1141,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+            vm.var_refs_ptr = caller.frame.var_refs.ptr;
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = value;
             caller.stack.setTopPtr(resume_sp + 1);
@@ -1151,6 +1175,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
             vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
+            vm.var_refs_ptr = caller.frame.var_refs.ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: the retired target slot
             // at the caller's operand top is dead (its value transferred into
@@ -2176,8 +2201,9 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
-        // I-cache pin (see op_return): this handler is a 4-hop dependent load
-        // chain (frame->ptr->cell->pvalue->tag) whose cycle cost is exquisitely
+        // I-cache pin (see op_return): this handler is a dependent load chain
+        // (var_refs_ptr->cell->pvalue->tag, the qjs OP_get_var_ref shape now
+        // that the base rides the Vm mirror) whose cycle cost is exquisitely
         // entry-alignment sensitive; keep it invariant under unrelated
         // text-size changes in the dispatch unit.
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
@@ -2203,7 +2229,11 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
             // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            // The base comes from the per-frame `vm.var_refs_ptr` mirror (qjs's
+            // register-resident `var_refs`), cutting the vm->frame->ptr front
+            // of the dependent load chain; the assert traps any refresh gap.
+            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
+            const cell = vm.var_refs_ptr[idx];
             const v = cell.pvalue.*;
             if (v.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
             // Guard #7 (nested-cell check) retired: a cell's VALUE is never
@@ -2242,7 +2272,8 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
             std.debug.assert(idx < vm.frame.var_refs.len);
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
+            const cell = vm.var_refs_ptr[idx];
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp - 1, var_buf, vm);
         }
@@ -2270,7 +2301,8 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     // finalize-validated, frames carry exactly closure_var_count cells —
     // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
     std.debug.assert(idx < vm.frame.var_refs.len);
-    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
+    const cell = vm.var_refs_ptr[idx];
     // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
     if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     // qjs set_value: publish the owned TOS value, release the displaced cell
@@ -2306,7 +2338,8 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
             // are finalize-validated, frames carry exactly closure_var_count
             // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
             std.debug.assert(idx < vm.frame.var_refs.len);
-            const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+            std.debug.assert(vm.var_refs_ptr == vm.frame.var_refs.ptr);
+            const cell = vm.var_refs_ptr[idx];
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp, var_buf, vm);
         }
@@ -3689,6 +3722,7 @@ fn reloadTop(vm: *Vm, pc: *[*]const u8, sp: *[*]JSValue, var_buf: *[*]JSValue) v
     vm.machine.loadCurrentLevel(&vm.frame, &vm.stack, &vm.catch_target);
     vm.function = vm.frame.function;
     vm.code_base = vm.function.byteCode().ptr;
+    vm.var_refs_ptr = vm.frame.var_refs.ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     // NO `frame.pc += 1`: unlike reloadInlineTopFrame (which read+consumed the resume
     // opcode), our handlers read `pc[0]` themselves, so pc must point AT the resume op.
@@ -3723,6 +3757,7 @@ inline fn reloadAfterPop(
     }
     vm.function = vm.frame.function;
     vm.code_base = vm.function.byteCode().ptr;
+    vm.var_refs_ptr = vm.frame.var_refs.ptr;
     pc.* = vm.code_base + vm.frame.pc;
     sp.* = vm.stack.topPtr();
     var_buf.* = vm.frame.locals.ptr;
@@ -3732,6 +3767,7 @@ inline fn reloadAfterPop(
 pub fn run(vm: *Vm) HostError!JSValue {
     vm.tbl = &dispatch_table; // layout-preserving init of the retired slot; dispatch reads the static table
     vm.property_tail_tbl = &property_tail_table;
+    vm.var_refs_ptr = vm.frame.var_refs.ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
     var pc = vm.code_base + vm.frame.pc;
     var sp = vm.reloadSp();
