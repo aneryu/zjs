@@ -1636,6 +1636,43 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
     );
 }
 
+/// Construct an ordinary (non-native) bytecode function object. qjs
+/// JS_CallConstructorInternal dispatches construction on the function's class,
+/// not its name — a bytecode function body is never a native builtin — so this
+/// is reached WITHOUT the builtin-name string-comparison dispatch. A derived
+/// class constructor allocates no instance (`this` stays TDZ until super());
+/// base/ordinary constructors get the eager js_create_from_ctor instance, then
+/// the simple-field fast path (this.f = arg patterns) or the full body.
+fn constructOrdinaryBytecodeFunctionObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    function_object: *core.Object,
+    function_value: core.JSValue,
+    fb: *const bytecode.FunctionBytecode,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+    copy_argv: bool,
+) HostError!core.JSValue {
+    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    if (fb.isDerivedClassConstructor()) {
+        return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
+    }
+    if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
+    const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
+    errdefer instance.free(ctx.runtime);
+    const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
+    if (result.isObject()) {
+        instance.free(ctx.runtime);
+        return result;
+    }
+    result.free(ctx.runtime);
+    return instance;
+}
+
 fn constructValueOrBytecodeWithNewTargetMode(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1698,6 +1735,17 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         }
         if (try array_ops.constructArrayBufferNativeRecord(ctx, output, global, func, function_object, args, new_target)) |constructed| {
             return constructed;
+        }
+        // Ordinary user bytecode constructor (`new Vec(x,y,z)`, class instances):
+        // dispatch on the function class, not its name. A bytecode function body
+        // is never one of the native builtins the name comparisons below match,
+        // so hoist this ahead of the ~20 std.mem.eql(name, "...") checks and the
+        // function-name materialization they require — the constructor tax that
+        // made an empty `new E()` 2.4x qjs while a plain call is at parity.
+        if (function_object.functionBytecode()) |function_value| {
+            const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+            if (!isConstructibleBytecodeFunctionObject(function_object, fb)) return error.TypeError;
+            return constructOrdinaryBytecodeFunctionObject(ctx, output, global, func, function_object, function_value, fb, args, caller_function, caller_frame, new_target, copy_argv);
         }
         // Decode the constructor's native-builtin id once: the Date/String/RegExp
         // construct branches below gate on it (not the resolved function name)
@@ -1859,26 +1907,13 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         return instance;
     }
     if (object_ops.functionObjectFromValue(func)) |function_object| {
+        // Fallback for a bytecode function object not reached through the
+        // callableObjectFromValue hoist above (kept so no construct form is
+        // lost); the common `new UserFn()` path already returned there.
         const function_value = function_object.functionBytecode() orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (!isConstructibleBytecodeFunctionObject(function_object, fb)) return error.TypeError;
-        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
-        // qjs JS_CallConstructorInternal distinguishes only derived bytecode
-        // constructors. Base classes and ordinary constructors both take the
-        // legacy eager-instance path below.
-        if (fb.isDerivedClassConstructor()) {
-            return try callFunctionBytecodeConstruct(ctx, function_value, func, core.JSValue.uninitialized(), args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
-        }
-        if (try constructSimpleFieldConstructor(ctx, global, func, function_object, fb, args, new_target, copy_argv)) |constructed| return constructed;
-        const instance = try createBytecodeConstructorInstance(ctx, output, global, func, function_object, new_target, caller_function, caller_frame);
-        errdefer instance.free(ctx.runtime);
-        const result = try callFunctionBytecodeConstruct(ctx, function_value, func, instance, args, function_object.functionCaptures(), output, function_global, new_target, copy_argv);
-        if (result.isObject()) {
-            instance.free(ctx.runtime);
-            return result;
-        }
-        result.free(ctx.runtime);
-        return instance;
+        return constructOrdinaryBytecodeFunctionObject(ctx, output, global, func, function_object, function_value, fb, args, caller_function, caller_frame, new_target, copy_argv);
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.class_id == core.class.ids.object and object.proxyTarget() == null) {
@@ -2097,7 +2132,13 @@ fn createBytecodeConstructorInstance(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (new_target.sameValue(func)) {
-        if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| {
+        // qjs js_create_from_ctor reads new_target.prototype: a base function's
+        // `.prototype` is created eagerly, so this is always a plain-data object
+        // read. zjs materializes `.prototype` lazily (auto_init), so materialize
+        // it here on the first construct — it then stays a data slot, and every
+        // later `new` (plus the simple-field fast path) takes the direct read
+        // instead of the reflectConstructPrototypeVm chain below.
+        if (function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch null) |prototype| {
             const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
             errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
             return instance.value();
@@ -2126,7 +2167,7 @@ fn constructSimpleFieldConstructor(
 ) !?core.JSValue {
     if (!new_target.sameValue(func)) return null;
     const pattern = simpleFieldConstructorPattern(fb) orelse return null;
-    const prototype = function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
+    const prototype = (function_object.getOwnConstructorPrototypeObject(ctx.runtime) catch return null) orelse return null;
     if (prototypeChainBlocksSimpleFieldStore(prototype, pattern)) return null;
 
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
@@ -2157,7 +2198,14 @@ fn simpleFieldConstructorPattern(fb: *const bytecode.FunctionBytecode) ?SimpleFi
     const code = fb.byteCode();
     if (code.len == 0 or code[0] == op.check_ctor) return null;
     if (fb.var_count > 1 or fb.closureVarCount() != 0 or fb.cpool_count != 0) return null;
-    if (fb.superCallAllowed() or fb.superAllowed() or fb.argumentsAllowed() or fb.isDirectOrIndirectEval()) return null;
+    // NOTE: argumentsAllowed() is NOT gated on — it is set for every non-arrow
+    // function (it means "`arguments` is in scope", not "used"), so gating on it
+    // made this fast path dead for all ordinary constructors. The bytecode
+    // pattern matched below is exhaustively `push_this; (get this; get_arg;
+    // put_field)*; return_undef`, which references neither `arguments` nor any
+    // local/closure, so a lazily-materialized arguments object is never
+    // observable — skipping the body is identical to running it.
+    if (fb.superCallAllowed() or fb.superAllowed() or fb.isDirectOrIndirectEval()) return null;
 
     return simpleLocalThisFieldConstructorPattern(fb) orelse simpleStackThisFieldConstructorPattern(fb);
 }

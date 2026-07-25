@@ -9327,6 +9327,33 @@ pub const Object = extern struct {
         return null;
     }
 
+    /// Borrowed own `.prototype` object for a constructor's [[Construct]], with
+    /// the one difference from getOwnDataObjectBorrowed that matters here: a
+    /// function's `.prototype` is created LAZILY (an auto_init placeholder) in
+    /// zjs, whereas qjs creates it eagerly, so a bare data read misses on the
+    /// first construct and the constructor falls all the way to
+    /// reflectConstructPrototypeVm. Materialize the auto_init here (js_closure
+    /// would have done this eagerly) — the slot becomes a permanent .data
+    /// object, so this and every later `new` take the direct read. Accessor /
+    /// var_ref prototypes (or an exotic receiver) return null to keep the
+    /// general path. Returns a BORROWED pointer (Object.create dups it).
+    pub fn getOwnConstructorPrototypeObject(self: *Object, rt: *JSRuntime) !?*Object {
+        if (self.hasExoticMethods()) return null;
+        const index = self.findProperty(atom.ids.prototype) orelse return null;
+        const flags = self.propFlagsAt(index);
+        if (flags.deleted) return null;
+        switch (flags.kind) {
+            .data => {},
+            .auto_init => {
+                const materialized = try self.materializeAutoInit(index);
+                materialized.free(rt);
+            },
+            else => return null,
+        }
+        const stored = self.asDataAt(index) orelse return null;
+        return objectFromValue(stored);
+    }
+
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.hasExoticMethods()) return null;
         if (self.findProperty(atom_id)) |index| {
