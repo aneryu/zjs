@@ -1593,12 +1593,28 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
     if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len)) {
         const depth = pc[1];
         if (iter_vm.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
-            const receiver = vm.stack.values[iterator_index];
-            const method = vm.stack.values[iterator_index + 1];
+            const iterator_record = vm.stack.values[iterator_index..][0..2];
+            // Integer-pair loads (see loadValueAsIntPair): the whole-value
+            // aggregate reads let LLVM merge the two adjacent slots into one
+            // `ldp q0, q1` + a q-spill of the pair into the handler frame,
+            // and the immediately following receiver/method tag+payload reads
+            // came back as 64-bit scalar loads from that q-written slot — a
+            // cross-domain store-to-load forward against the record the
+            // warm-path eligibility chain consumes first (the top stall of
+            // this handler on the for-of cycles profile). The values die at
+            // their eligibility checks; the cold arms below re-read the
+            // borrowed record slots instead of keeping these copies live
+            // across their `bl`s (the record stays untouched on the suspended
+            // caller stack — finishForOfNextResult's borrowed-entry
+            // invariant), so the hot path carries no 16-byte spill at all.
+            // qjs's js_for_of_next likewise reads its record as sp-relative
+            // slot loads at each use with no long-lived copy
+            // (quickjs.c:16686-16692).
+            const receiver = loadValueAsIntPair(&iterator_record[0]);
+            const method = loadValueAsIntPair(&iterator_record[1]);
             if (!receiver.isUndefined()) {
                 if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
                     vm.frame.pc += 1;
-                    const iterator_record = vm.stack.values[iterator_index..][0..2];
                     // Warm borrowed-iterator arm (M2 knife 3): the borrowed
                     // eligibility byte plus an open-var-ref-free slab (every
                     // hot `next()` shape — capture-reading bodies and the
@@ -1632,13 +1648,17 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
                         if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
                             return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr);
                         }
-                        switch (pushBorrowedIteratorMiss(vm, &resolved, receiver, method, iterator_record, depth)) {
+                        // Cold warm-miss arm: re-read the borrowed record
+                        // slots (identity — the record is untouched below the
+                        // callee region) so `receiver`/`method` are not kept
+                        // live across the carve/miss `bl`s in the hot arm.
+                        switch (pushBorrowedIteratorMiss(vm, &resolved, iterator_record[0], iterator_record[1], iterator_record, depth)) {
                             .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
                             .threw => return .threw,
                             .recovered => return coldNext(vb, vm),
                         }
                     }
-                    const target = resolved.bind(receiver, method);
+                    const target = resolved.bind(iterator_record[0], iterator_record[1]);
                     return pushBorrowedIteratorAndEnter(vb, vm, &target, iterator_record, depth);
                 }
             }
