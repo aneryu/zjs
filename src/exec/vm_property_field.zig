@@ -1,6 +1,7 @@
 //! Property field and array-element opcode handlers (get/put_field, get/put_array_el, in/instanceof, to_prop_key).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
@@ -351,24 +352,70 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     return core.JSValue.float64(@floatFromInt(len));
 }
 
-inline fn qjsGetFieldFastWithExoticOrder(
+/// Debug oracle for the trusted-atom entries below. The precise claim (kind,
+/// not the imprecise `mightBePrivate` id-range filter): a get_field/get_field2/
+/// put_field/get_length atom operand never names a private atom. Proof chain:
+/// every `.`/`?.` member site discriminates TOK_PRIVATE_NAME into the
+/// scope_get/put_private_field family or a SyntaxError (parser.zig
+/// parseMemberChain/parseNewCalleeMemberAccess), those scope ops lower only to
+/// get/put_private_field/check_brand (bytecode.zig writeLoweredPrivateField),
+/// object-property names reject TOK_PRIVATE_NAME (parseObjectPropertyName),
+/// peepholes copy atoms from already-emitted field ops, and `internString`
+/// can never mint a .private atom (kind-filtered predefinedId + .string
+/// internDynamic). Mirrors qjs, whose OP_get_field operand is likewise
+/// unreachable by JS_ATOM_TYPE_PRIVATE atoms (js_parse_postfix_expr routes
+/// #name through OP_scope_get_private_field, quickjs.c:27430, resolved at
+/// 27574 into the OP_get_private_field family, 19232).
+inline fn debugAssertNonPrivateFieldOperandAtom(rt: *const core.JSRuntime, atom_id: core.Atom) void {
+    if (comptime builtin.mode == .Debug) {
+        const kind = rt.atoms.kind(atom_id) orelse .string;
+        std.debug.assert(kind != .private);
+    }
+}
+
+inline fn qjsGetFieldFastSlotWithExoticOrder(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
-    comptime own_before_slow: bool,
-) ?core.JSValue {
+    comptime trust_mapped_arguments_probe: bool,
+    comptime trust_non_private_atom: bool,
+) ?*const core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
     // without paying the private-atom probe. Two pure guards reordered.
-    var object = objectFromValue(receiver) orelse return null;
-    if (rt.atoms.mightBePrivate(atom_id)) return null;
+    // Trusted-expression classification: the receiver came off the operand
+    // stack as an expression value, so the header-kind re-load in the generic
+    // objectFromValue is dead here (see objectFromValueTrustedExpression).
+    var object = object_ops.objectFromValueTrustedExpression(receiver) orelse return null;
+    // Bytecode atom operands are proven non-private at compile time (see
+    // debugAssertNonPrivateFieldOperandAtom), exactly why qjs GET_FIELD_INLINE
+    // carries no private-atom probe. Only the computed-key entry
+    // (atomPropertyValueForFastPath), whose atoms come from runtime string
+    // interning, still pays the range filter.
+    if (comptime trust_non_private_atom) {
+        debugAssertNonPrivateFieldOperandAtom(rt, atom_id);
+    } else {
+        if (rt.atoms.mightBePrivate(atom_id)) return null;
+    }
     while (true) {
-        if (!own_before_slow and object.needsSlowPropertyAccess()) return null;
+        // zjs-only divergence from qjs's probe-first order: mapped Arguments
+        // numeric bindings live in out-of-shape var-ref cells, so a shape data
+        // slot on a mapped Arguments object can be stale and its hit cannot be
+        // trusted — bail before probing. (qjs stores those bindings as
+        // JS_PROP_VARREF shape entries, which its own probe rejects via
+        // JS_PROP_TMASK.) The constant `length` atom never aliases a numeric
+        // binding, so the get_length caller skips this guard.
+        if (!trust_mapped_arguments_probe and object.class_id == core.class.ids.mapped_arguments) return null;
         var slow_property = false;
-        if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
         if (slow_property) return null;
-        if (own_before_slow and object.needsSlowPropertyAccess()) return null;
+        // qjs GET_FIELD_INLINE consults `p->is_exotic` only AFTER the own
+        // probe misses (quickjs.c:19135-19141): an own plain-data hit — sparse
+        // array element, named data on a typed array, anything the shape
+        // authoritatively owns — never pays the class test. Mirror that; a
+        // miss on a slow class defers to the full resolver.
+        if (object.needsSlowPropertyAccess()) return null;
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
         // class objects via a by-class-name global fallback (object_ops.getValueProperty),
@@ -380,12 +427,17 @@ inline fn qjsGetFieldFastWithExoticOrder(
     }
 }
 
+/// Hot-handler variant: returns the BORROWED own/prototype data slot address
+/// so the resident get_field handlers can re-load it as two 64-bit integer
+/// words (see findOwnDataSlotFast). The pointer is only valid until the next
+/// potentially-shape-mutating operation; both callers consume it immediately.
+pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, true);
+}
+
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    // The generic zjs fast path must stop before inspecting a slow object:
-    // mapped Arguments numeric bindings live in separate var-ref storage rather
-    // than qjs's shape-level JS_PROP_VARREF entries, so their materialized data
-    // slots cannot bypass the mapped resolver.
-    return qjsGetFieldFastWithExoticOrder(rt, receiver, atom_id, false);
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false, false) orelse return null;
+    return slot.*;
 }
 
 /// qjs GET_FIELD_INLINE probes an own shape entry before `p->is_exotic`.
@@ -394,7 +446,8 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 /// own `length` data on Arguments and typed arrays hit before their slow class
 /// semantics while misses and accessor entries still defer to the resolver.
 pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
-    return qjsGetFieldFastWithExoticOrder(rt, receiver, core.atom.ids.length, true);
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true, true) orelse return null;
+    return slot.*;
 }
 
 /// Primitive twin of qjsGetFieldFast. QuickJS selects
@@ -676,13 +729,55 @@ pub inline fn cachedStringAtomForFastPath(value: core.JSValue) ?core.Atom {
     return string_ops.stringAtomId(value);
 }
 
+/// Hot-handler variant of the qjs OP_put_field fast window (quickjs.c:19188-
+/// 19203): returns the MUTABLE own plain-writable-data slot address so the
+/// resident op_put_field can perform set_value's swap-then-free itself with
+/// integer-pair slot accesses. Mirrors the get-side probe-first ordering:
+/// - Object-ness gate FIRST (qjs's leading JS_VALUE_GET_TAG(obj) ==
+///   JS_TAG_OBJECT check), then the private-atom probe.
+/// - find_own_property runs with NO class qualification at all: qjs's write
+///   fast path trusts any own shape hit whose flags pass the single
+///   (TMASK|WRITABLE|LENGTH) == WRITABLE mask, whatever the class — exotic
+///   index storage (typed arrays, strings) never lives in the shape, mapped
+///   Arguments numeric bindings are JS_PROP_VARREF entries the mask rejects,
+///   and array `length` carries JS_PROP_LENGTH. Unlike GET_FIELD_INLINE
+///   there is no miss-side `p->is_exotic` consultation either: the write
+///   window is own-hit-only and every miss already defers to the cold
+///   resolver (put_field_slow_path -> JS_SetPropertyInternal), which walks
+///   prototypes for setters/read-only holders and runs the exotic machinery.
+/// - zjs-only deviation, same as qjsGetFieldFastSlot: a mapped Arguments
+///   receiver bails before probing — its numeric bindings live in
+///   out-of-shape var-ref cells, so a shape data hit could be a stale mirror
+///   and a direct slot write would desync the aliased parameter.
+/// The pointer is only valid until the next potentially-shape-mutating
+/// operation; both callers consume it immediately.
+pub inline fn qjsPutFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*core.JSValue {
+    // Trusted-expression receiver contract (qjs OP_put_field's raw
+    // JS_VALUE_GET_OBJ, quickjs.c:19190-19192): expression receivers are
+    // never cells, so the header-kind recheck is a Debug assert only.
+    const object = object_ops.objectFromValueTrustedExpression(receiver) orelse return null;
+    // Bytecode put_field atom operands are proven non-private (qjs
+    // OP_put_field's inline window carries no private probe either,
+    // quickjs.c:19177-19199; private stores are OP_put_private_field only).
+    debugAssertNonPrivateFieldOperandAtom(rt, atom_id);
+    if (object.class_id == core.class.ids.mapped_arguments) return null;
+    var slow_property = false;
+    if (object.findWritableOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
+    return null;
+}
+
 pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
-    if (rt.atoms.mightBePrivate(atom_id)) return false;
-    const object = objectFromValue(receiver) orelse return false;
-    if (object.needsSlowPropertyAccess()) return false;
-    const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
-    const old_value = lookup.value.*;
-    lookup.value.* = value;
+    const slot = qjsPutFieldFastSlot(rt, receiver, atom_id) orelse return false;
+    // Integer-pair slot access (qjs set_value's swap-then-free ldp/stp form,
+    // quickjs.c:5091): a 128-bit SIMD store here stalls every 64-bit
+    // re-reader of the slot — the get_field hit and the for-of done/value
+    // probes read property slots as integer halves (JSValue.loadSlotAsIntPair
+    // note). (When the stored value is copy-only LLVM may re-fuse the split
+    // store into a `str q`; a 64-bit load fully contained in a 128-bit store
+    // still forwards, so that lowering is harmless — the split source form
+    // just keeps the value SSA-scalar and forwarding-eligible.)
+    const old_value = core.JSValue.loadSlotAsIntPair(slot);
+    core.JSValue.storeSlotAsIntPair(slot, value);
     old_value.free(rt);
     return true;
 }

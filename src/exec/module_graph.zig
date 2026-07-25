@@ -770,7 +770,7 @@ pub fn evalFileModuleGraphWithOutput(
     // measures against a precise base. The construction-time baseline already
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
-    if (context.runtime.call_depth == 0) runtime.updateNativeStackTop();
+    if (context.runtime.hot.call_depth == 0) runtime.updateNativeStackTop();
     const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
     defer allocator.free(normalized_filename);
 

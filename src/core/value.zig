@@ -652,6 +652,91 @@ pub const JSValue = extern struct {
         }
     }
 
+    /// Read a 16-byte JSValue slot as two 64-bit integer loads (identity under
+    /// the nan-boxed 8-byte repr). Hot property/operand slots are written and
+    /// read across handlers as 64-bit integer halves; letting LLVM lower either
+    /// side as one 128-bit SIMD access breaks store-to-load forwarding against
+    /// the integer half on the other side (double-digit cycles per hit). qjs's
+    /// JSValue moves are integer ldp/stp pairs throughout (e.g. set_value,
+    /// quickjs.c:5091; GET_FIELD_INLINE's val handling, quickjs.c:19131-19158).
+    pub inline fn loadSlotAsIntPair(slot: *const JSValue) JSValue {
+        if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) return slot.*;
+        const words: *const [2]u64 = @ptrCast(@alignCast(slot));
+        const lo = words[0];
+        const hi = words[1];
+        return @bitCast([2]u64{ lo, hi });
+    }
+
+    /// Store twin of `loadSlotAsIntPair`: write a JSValue slot as two 64-bit
+    /// integer stores so downstream 64-bit readers stay forwarding-eligible.
+    pub inline fn storeSlotAsIntPair(slot: *JSValue, value: JSValue) void {
+        if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) {
+            slot.* = value;
+            return;
+        }
+        const words: *[2]u64 = @ptrCast(@alignCast(slot));
+        const src: [2]u64 = @bitCast(value);
+        words[0] = src[0];
+        words[1] = src[1];
+    }
+
+    /// Frameless-handler variant of `freeObjectAssumeObject`: performs the
+    /// deinit-phase gate and the common non-zero refcount decrement inline, but
+    /// REPORTS a would-be zero refcount (leaving rc at 1) instead of invoking
+    /// the destroy machinery, so a leaf dispatch handler can route the rare
+    /// destroy through a tail-call and stay prologue-free (the destroy `bl` was
+    /// the only call in the hot get_field body, and it alone forced the
+    /// callee-saved spill frame). When this returns true the caller must
+    /// complete the release exactly once (e.g. `value.free(rt)`).
+    pub inline fn releaseObjectAssumeObjectNeedsDestroy(self: JSValue, rt: anytype) bool {
+        std.debug.assert(self.tagOf() == Tag.object);
+        if (rt.gc.phase == .deinit) return false;
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        if (hdr.rc == 1) return true;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        hdr.rc -= 1;
+        return false;
+    }
+
+    /// Any-tag twin of `releaseObjectAssumeObjectNeedsDestroy` for the
+    /// resident put_field handler's old-slot value (which can be any
+    /// refcounted tag, not just object): performs the refcount-range gate,
+    /// the deinit-phase skip, and the common non-zero decrement inline, but
+    /// REPORTS a would-be zero refcount (leaving rc at 1) instead of invoking
+    /// the destroy machinery, so the leaf handler can park the value and
+    /// route the rare destroy through a cold tail without carrying a
+    /// callee-saved spill frame. When this returns true the caller must
+    /// complete the release exactly once (e.g. `value.free(rt)`).
+    pub inline fn releaseRefCountedNeedsDestroy(self: JSValue, rt: anytype) bool {
+        if (comptime nan_boxing) {
+            const p = NanBox.prefixBits(self.repr.bits);
+            if (p < NanBox.refcount_min or p > NanBox.refcount_max) return false;
+            if (rt.gc.phase == .deinit and p >= NanBox.deinit_skip_min) return false;
+            const hdr = self.refCountWordAssumeRefCounted();
+            std.debug.assert(hdr.rc > 0);
+            if (hdr.rc == 1) return true;
+            if (comptime build_options.zjs_enable_opcode_profile) {
+                if (rt.opcode_profile) |prof| prof.recordValueFree();
+            }
+            hdr.rc -= 1;
+            return false;
+        }
+        if (!self.requiresRefCount()) return false;
+        const tag = self.tagOf();
+        if (rt.gc.phase == .deinit and tag >= Tag.module and tag <= Tag.object) return false;
+        const hdr = self.refCountWordAssumeRefCounted();
+        std.debug.assert(hdr.rc > 0);
+        if (hdr.rc == 1) return true;
+        if (comptime build_options.zjs_enable_opcode_profile) {
+            if (rt.opcode_profile) |prof| prof.recordValueFree();
+        }
+        hdr.rc -= 1;
+        return false;
+    }
+
     inline fn refCountWordAssumeRefCounted(self: JSValue) *gc.RefCountHeader {
         const payload = ptrFromPayload(anyopaque, self.payloadOf()).?;
         return gc.refCountHeaderFromPayload(payload);

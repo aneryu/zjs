@@ -42,6 +42,7 @@ const value_format = @import("value_format.zig");
 const value_semantics = @import("value_semantics.zig");
 
 const bignum = @import("../libs/bigint.zig");
+const unicode = @import("../libs/unicode.zig");
 
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -1006,21 +1007,18 @@ fn appendValueString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue)
 }
 
 fn appendRawString(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
+    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
+    // JS_ToCStringLen2, quickjs.c:4458): raw latin1 0x80-0xFF bytes and the
+    // old "\u{x}" wide-unit escapes both corrupted the byte buffer that
+    // downstream parsing (trimJsWhitespace handles UTF-8) consumes.
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                if (unit <= 0x7f) {
-                    try buffer.append(rt.memory.allocator, @intCast(unit));
-                } else {
-                    var unit_buf: [16]u8 = undefined;
-                    const printed = try std.fmt.bufPrint(&unit_buf, "\\u{x}", .{unit});
-                    try buffer.appendSlice(rt.memory.allocator, printed);
-                }
-            }
+        .latin1 => |bytes| {
+            if (string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
         },
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }
 

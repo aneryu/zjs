@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const core_array = @import("../core/array.zig");
+const unicode = @import("../libs/unicode.zig");
 const buffer_builtin = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
@@ -1252,15 +1253,19 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
+    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
+    // JS_ToCStringLen2, quickjs.c:4458). The old legs appended raw latin1
+    // bytes and silently DROPPED non-ASCII UTF-16 units, so the byte
+    // haystack in stringSearchValue could never match the UTF-8 query that
+    // appendValueString builds for wide needles.
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                if (unit <= 0x7f) try buffer.append(rt.memory.allocator, @intCast(unit));
-            }
+        .latin1 => |bytes| {
+            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
         },
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }
 
@@ -1296,22 +1301,10 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
     } else if (value.isNull()) {
         try buffer.appendSlice(rt.memory.allocator, "null");
     } else if (value.isString()) {
-        const string_value = value.asStringBody() orelse return;
-        try string_value.ensureFlat(rt);
-        switch (string_value.resolveData()) {
-            .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-            .utf16 => |units| {
-                for (units) |unit| {
-                    if (unit <= 0x7f) {
-                        try buffer.append(rt.memory.allocator, @intCast(unit));
-                    } else {
-                        var unit_buf: [16]u8 = undefined;
-                        const printed = try std.fmt.bufPrint(&unit_buf, "\\u{x}", .{unit});
-                        try buffer.appendSlice(rt.memory.allocator, printed);
-                    }
-                }
-            },
-        }
+        // Same width-aware UTF-8 encoding as appendRawString above so the
+        // buffers this module builds (search queries, sort keys) share one
+        // deterministic byte form across string representations.
+        try appendRawString(rt, buffer, value);
     } else if (value.isObject()) {
         const header = value.refHeader() orelse return;
         const object_value: *core.Object = @fieldParentPtr("header", header);

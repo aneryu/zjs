@@ -138,10 +138,18 @@ pub const VmStackArena = struct {
         window: []JSValue,
     };
 
-    chunks: [max_chunks][]JSValue = @splat(&.{}),
-    used: [max_chunks]usize = @splat(0),
+    // K4 hot head: `mark`/`carveActiveMarked`/`restore` read chunk_count,
+    // active, and used[active] on every bytecode call and return, and
+    // active == 0 for virtually every frame (deeper chunks are the slow
+    // path). Declared first so the scalar head and the front of `used`
+    // share the arena's first cache line; `chunks[active]` is the only
+    // remaining second-line load. Mirrors QuickJS keeping its hot stack
+    // state (`stack_top`/`stack_limit`, quickjs.c:348-351) in the runtime
+    // struct head. Layout verified by @offsetOf probe (K4 dossier).
     chunk_count: usize = 0,
     active: usize = 0,
+    used: [max_chunks]usize = @splat(0),
+    chunks: [max_chunks][]JSValue = @splat(&.{}),
 
     pub fn mark(self: *const VmStackArena) Mark {
         return .{ .chunk = self.active, .used = if (self.chunk_count == 0) 0 else self.used[self.active] };
@@ -725,6 +733,52 @@ const RuntimeCompactState = packed struct(u8) {
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
+    /// K4 hot-state cluster: the per-call/per-return execution scalars that
+    /// call admission (`canEnterInlineCallDepthBytes`), commit
+    /// (`commitInlineCallDepthBytes`), release (`leaveInlineCallDepthBytesRt`)
+    /// and the native recursion guard (`checkNativeStackOverflow`) touch on
+    /// every bytecode call. QuickJS keeps this state in the first cache lines
+    /// of its JSRuntime (`stack_size`/`stack_top`/`stack_limit`,
+    /// quickjs.c:348-351, plus `gc_phase`/`current_stack_frame` in the same
+    /// head, quickjs.c:319-360); zjs's auto struct layout had scattered these
+    /// fields across the 18-26KB tail of JSRuntime, so every call/return
+    /// walked 5-6 distant cache lines (M1 dossier K4). `extern struct`
+    /// guarantees declaration-order layout (auto layout scrambles same-
+    /// alignment buckets); `align(64)` on the field pins the cluster into the
+    /// highest-alignment bucket, i.e. the lowest offsets of JSRuntime. All
+    /// seven scalars fit one cache line (56 bytes).
+    pub const HotExecState = extern struct {
+        /// QuickJS runtime execution state. These fields describe the
+        /// currently executing stack, not a Realm, and are shared by every
+        /// context belonging to this runtime.
+        call_depth: usize = 0,
+        native_call_depth: usize = 0,
+        /// Planned QuickJS bytecode-frame bytes for every active bytecode
+        /// call, including tail-call callers whose physical zjs Entry storage
+        /// has been reused. This Runtime owner survives nested Machines and
+        /// Realm switches. It remains separate from Realm interrupt cadence
+        /// and native call depth.
+        active_bytecode_stack_bytes: usize = 0,
+        /// Logical stack budget (`rt->stack_size` analogue); the data source
+        /// for both call-depth ceilings (`maxLogicalJsCallDepth` /
+        /// `maxNativeJsCallDepth`).
+        stack_size: usize = default_stack_size,
+        /// Native (machine C-stack) recursion guard, mirroring QuickJS
+        /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860).
+        /// Captured via `@frameAddress()` at the outermost eval entry
+        /// (`updateNativeStackTop`, the JS_UpdateStackTop analogue — refreshed
+        /// per thread because worker threads run on a different C stack than
+        /// where the runtime was constructed). Zero limit means "no limit
+        /// yet". `native_stack_limit` is the lower address bound
+        /// (`native_stack_top - native_stack_size`); a native frame pointer
+        /// below it is an overflow. See `checkNativeStackOverflow`.
+        native_stack_top: usize = 0,
+        native_stack_limit: usize = 0,
+        native_stack_size: usize = default_native_stack_size,
+    };
+
+    hot: HotExecState align(64) = .{},
+
     owner_thread_id: std.Thread.Id,
     memory: memory.MemoryAccount,
     compact_state: RuntimeCompactState = .{},
@@ -813,36 +867,18 @@ pub const JSRuntime = struct {
     /// a real pending InternalError but bytecode catch markers must not consume
     /// it. Every ordinary throw resets this flag.
     current_exception_uncatchable: bool = false,
-    /// QuickJS runtime execution state. These fields describe the currently
-    /// executing stack, not a Realm, and are shared by every context belonging
-    /// to this runtime.
-    call_depth: usize = 0,
-    native_call_depth: usize = 0,
-    /// Planned QuickJS bytecode-frame bytes for every active bytecode call,
-    /// including tail-call callers whose physical zjs Entry storage has been
-    /// reused. This Runtime owner survives nested Machines and Realm switches.
-    /// It remains separate from Realm interrupt cadence and native call depth.
-    active_bytecode_stack_bytes: usize = 0,
     formatting_error_stack: bool = false,
     backtrace_frames: []context_mod.BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
     current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
     active_native_call: ?*const anyopaque = null,
-    stack_size: usize = default_stack_size,
     vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
-    /// Native (machine C-stack) recursion guard, mirroring QuickJS
-    /// `rt->stack_top`/`rt->stack_limit` (quickjs.c:349-350, 2841-2860). Captured
-    /// via `@frameAddress()` at the outermost eval entry (`updateNativeStackTop`,
-    /// the JS_UpdateStackTop analogue — refreshed per thread because worker
-    /// threads run on a different C stack than where the runtime was
-    /// constructed). Zero limit means "no limit yet". `native_stack_limit` is the
-    /// lower address bound (`native_stack_top - native_stack_size`); a native
-    /// frame pointer below it is an overflow. See `checkNativeStackOverflow`.
-    native_stack_top: usize = 0,
-    native_stack_limit: usize = 0,
-    native_stack_size: usize = default_native_stack_size,
-    /// Per-runtime VM value-stack arena for bytecode call frames.
-    vm_stack: VmStackArena = .{},
+    /// Per-runtime VM value-stack arena for bytecode call frames. Pinned
+    /// `align(64)` alongside `hot` so its scalar head (chunk_count/active/
+    /// used[active], touched by every call's carve and every return's
+    /// restore) stays in the runtime's front cache lines instead of the
+    /// auto-layout 24-26KB tail (M1 dossier K4).
+    vm_stack: VmStackArena align(64) = .{},
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
@@ -1001,17 +1037,17 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.current_exception_uncatchable = false;
-        rt.call_depth = 0;
-        rt.native_call_depth = 0;
-        rt.active_bytecode_stack_bytes = 0;
+        rt.hot.call_depth = 0;
+        rt.hot.native_call_depth = 0;
+        rt.hot.active_bytecode_stack_bytes = 0;
         rt.formatting_error_stack = false;
         rt.backtrace_frames = &.{};
         rt.backtrace_capacity = 0;
         rt.current_backtrace_frame = null;
         rt.active_native_call = null;
-        rt.stack_size = options.stack_size;
+        rt.hot.stack_size = options.stack_size;
         rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
-        rt.native_stack_size = initial_native_stack_size;
+        rt.hot.native_stack_size = initial_native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop (quickjs.c:2116). This covers every
         // entry path (eval / evalScript / ES module graph) even those that do not
@@ -1020,8 +1056,8 @@ pub const JSRuntime = struct {
         // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
         // per-thread base — required when execution runs on a different thread
         // than construction (conformance worker runtimes).
-        rt.native_stack_top = @frameAddress();
-        rt.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.native_stack_top -| initial_native_stack_size;
+        rt.hot.native_stack_top = @frameAddress();
+        rt.hot.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.hot.native_stack_top -| initial_native_stack_size;
         rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
@@ -1281,13 +1317,12 @@ pub const JSRuntime = struct {
         // gc_obj_list; it never re-evaluates the GC threshold. The single
         // object-creation threshold check is js_trigger_gc(sizeof(JSObject))
         // at the top of JS_NewObjectFromShape (quickjs.c:5619) — mirrored here
-        // by createInternal's collectBeforeObjectAllocation immediately before
-        // the object body allocation. Property arrays and separate payloads
-        // retain their existing allocRuntime* requests. By the time we link,
-        // those sub-allocations have observed the final allocated_bytes and set
-        // major_request.pending iff over threshold, so re-loading allocated_bytes
-        // here is pure redundant work. Keep addWithSize (the faithful
-        // add_gc_object) and only service an already-pending request.
+        // by collectBeforeObjectAllocation immediately before the object body
+        // allocation. Property arrays and separate payloads retain their
+        // existing allocRuntime* requests; a crossing they produce stays
+        // pending until the next pre-allocation boundary or scheduler poll,
+        // exactly like a prop-array js_malloc crossing in qjs
+        // (quickjs.c:5636) waits for the next js_trigger_gc.
         try self.registerObjectWithBytes(object, object.allocationSize(self));
     }
 
@@ -1297,32 +1332,44 @@ pub const JSRuntime = struct {
     /// second record-table lookup + inline-layout recompute on the object-creation
     /// hot path (mirror of `unregisterObjectWithBytes` on the free path). The
     /// stored value is identical to what `allocationSize` would recompute.
+    ///
+    /// Thread ownership is a safe-build assertion only: qjs `add_gc_object`
+    /// (quickjs.c:6540) has no per-registration thread check, and the release
+    /// check was the single largest cost of this boundary (~18 insns: a cached
+    /// TLS `getCurrentId` read pair + compare, plus the panic arm's `bl`
+    /// forcing a callee-saved frame on an otherwise leaf function).
     pub fn registerObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) !void {
-        self.assertOwnerThread();
+        std.debug.assert(self.isOwnerThread());
         try self.gc.addInitializedWithSize(&object.header, bytes);
-        if (self.gc.hasPendingMajorRequest()) {
-            _ = self.pollGC(null, .normal) catch {};
-        }
     }
 
-    pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
-        self.assertOwnerThread();
-        self.unregisterObjectWithBytes(object, object.allocationSize(self));
-    }
-
-    /// Same as `unregisterObject` but with the object's allocation size supplied
-    /// by the caller. `destroyFromHeader` already computes the inline-class-payload
-    /// layout (for the tail `freeObjectAllocation`); its `object_size` is bit-for-bit
-    /// the value `allocationSize` would recompute here (both go through
+    /// GC-list unlink + free-byte accounting boundary of an object teardown,
+    /// with the allocation size supplied by the caller. `destroyFromHeader`
+    /// (the sole caller) already computes the inline-class-payload layout (for
+    /// the tail `freeObjectAllocation`); its `object_size` is bit-for-bit the
+    /// value `allocationSize` would recompute here (both go through
     /// `inlineClassPayloadLayout(recordPtr(class_id))`, and `class_id` is unchanged
     /// between the two calls). Reusing it drops a redundant record-table lookup +
     /// 88-byte-stride multiply + inline-layout recompute off the hot free path —
     /// qjs `free_object` (quickjs.c:6340) never recomputes an object's size at
     /// teardown either (the slab block carries it).
+    ///
+    /// The weak/borrowed side-table links were already detached at the TOP of
+    /// `destroyFromHeader` (before class-payload teardown, because those links
+    /// borrow payload-owned storage), and nothing during payload teardown can
+    /// re-register a finalizing object — so this boundary no longer repeats the
+    /// two unregister scans. qjs `free_object` keeps no such side tables at all;
+    /// `remove_gc_object` (quickjs.c:6548) is a bare `list_del`.
+    ///
+    /// Thread ownership is a safe-build assertion only, mirroring the register
+    /// side (qjs `remove_gc_object` has no thread check either).
     pub fn unregisterObjectWithBytes(self: *JSRuntime, object: *Object, bytes: usize) void {
-        self.assertOwnerThread();
-        self.unregisterWeakReferenceHolder(object);
-        self.unregisterBorrowedReferenceHolder(object);
+        std.debug.assert(self.isOwnerThread());
+        if (builtin.mode == .Debug) {
+            // Catch any future payload finalizer that re-registers mid-teardown.
+            if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
+            std.debug.assert(!object.flags.is_borrowed_reference_holder);
+        }
         self.gc.unlinkObjectWithBytes(&object.header, bytes);
     }
 
@@ -1524,7 +1571,7 @@ pub const JSRuntime = struct {
     fn releaseNativeFunctionRealmsForContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
         var iter = self.gc.objectIterator();
         while (iter.next()) |header| {
-            if (header.metaConst().kind != .object) continue;
+            if (header.metaConst().flags.kind != .object) continue;
             const candidate: *Object = @alignCast(@fieldParentPtr("header", header));
             candidate.releaseNativeFunctionRealmForRuntimeTeardown(ctx);
         }
@@ -1888,9 +1935,9 @@ pub const JSRuntime = struct {
     /// gone before teardown in every optimization mode; silently continuing
     /// would leave their deferred cleanup pointing into a destroyed Runtime.
     fn assertIdleForTeardown(self: *const JSRuntime) void {
-        if (self.call_depth != 0 or
-            self.native_call_depth != 0 or
-            self.active_bytecode_stack_bytes != 0 or
+        if (self.hot.call_depth != 0 or
+            self.hot.native_call_depth != 0 or
+            self.hot.active_bytecode_stack_bytes != 0 or
             self.current_backtrace_frame != null or
             self.active_native_call != null or
             self.active_value_roots != null or
@@ -1997,7 +2044,7 @@ pub const JSRuntime = struct {
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.header.meta().flags.has_weak_id) {
+        if (object.flags.has_weak_id) {
             const weak_id = self.weak_object_ids.get(address) orelse unreachable;
             return weak_id << 1;
         }
@@ -2008,13 +2055,13 @@ pub const JSRuntime = struct {
             return err;
         };
         self.next_weak_id += 1;
-        object.header.meta().flags.has_weak_id = true;
+        object.flags.has_weak_id = true;
         return weak_id << 1;
     }
 
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        if (!object.header.metaConst().flags.has_weak_id) return null;
+        if (!object.flags.has_weak_id) return null;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         return weak_id << 1;
@@ -2023,8 +2070,8 @@ pub const JSRuntime = struct {
     /// Removes `object` from the weak identity registry, returning its encoded
     /// weak identity (if any) so destruction can propagate it to weak slots.
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        if (!object.header.meta().flags.has_weak_id) return null;
-        object.header.meta().flags.has_weak_id = false;
+        if (!object.flags.has_weak_id) return null;
+        object.flags.has_weak_id = false;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         _ = self.weak_object_ids.remove(address);
@@ -2380,7 +2427,7 @@ pub const JSRuntime = struct {
         }
 
         const object_count = self.gc.liveCountKind(.object);
-        const shape_count = self.shapes.live_shape_count;
+        const shape_count = self.gc.liveCountKind(.shape);
         // Count heap nodes, not Realm registry membership: an externally
         // retained record remains live and reportable after its Realm unlinks.
         const module_count = self.gc.liveCountKind(.module);
@@ -2473,7 +2520,7 @@ pub const JSRuntime = struct {
         }
         var gc_iter = self.gc.objectIterator();
         while (gc_iter.next()) |header| {
-            if (header.meta().kind == .object) {
+            if (header.meta().flags.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 count +|= obj.weakCollectionEntries().len;
                 count +|= obj.finalizationRegistryCells().len;
@@ -2671,16 +2718,16 @@ pub const JSRuntime = struct {
     }
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
-        self.stack_size = size;
+        self.hot.stack_size = size;
         self.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(size);
     }
 
     pub fn stackSize(self: JSRuntime) usize {
-        return self.stack_size;
+        return self.hot.stack_size;
     }
 
     pub fn setNativeStackSize(self: *JSRuntime, size: usize) void {
-        self.native_stack_size = size;
+        self.hot.native_stack_size = size;
         self.updateNativeStackTop();
     }
 
@@ -2691,11 +2738,11 @@ pub const JSRuntime = struct {
     /// deeper native frames (parser / JSON / interpreter) measure against a real,
     /// same-stack base. A `native_stack_size` of 0 disables the limit.
     pub fn updateNativeStackTop(self: *JSRuntime) void {
-        self.native_stack_top = @frameAddress();
-        self.native_stack_limit = if (self.native_stack_size == 0)
+        self.hot.native_stack_top = @frameAddress();
+        self.hot.native_stack_limit = if (self.hot.native_stack_size == 0)
             0
         else
-            self.native_stack_top -| self.native_stack_size;
+            self.hot.native_stack_top -| self.hot.native_stack_size;
     }
 
     /// Return true if consuming `alloca_size` more native stack would cross the
@@ -2704,9 +2751,9 @@ pub const JSRuntime = struct {
     /// Stack grows down, so "below the limit" is overflow. Returns false when the
     /// limit is unset (0), matching the no-limit build.
     pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
-        if (self.native_stack_limit == 0) return false;
+        if (self.hot.native_stack_limit == 0) return false;
         const sp = @frameAddress() -| alloca_size;
-        return sp < self.native_stack_limit;
+        return sp < self.hot.native_stack_limit;
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {
@@ -3066,7 +3113,7 @@ pub const JSRuntime = struct {
             if (item.value.refCountHeader()) |header| {
                 if (header.meta().rc == 0) {
                     const already_consumed_prepared_object =
-                        header.meta().kind == .object and
+                        header.meta().flags.kind == .object and
                         skip_identity != null and
                         skip_identity.? == (@intFromPtr(header) & ~@as(usize, 1));
                     std.debug.assert(already_consumed_prepared_object);
@@ -3298,7 +3345,7 @@ pub const JSRuntime = struct {
 
 fn objectFromLastRefValue(value: JSValue) ?*Object {
     const header = value.refHeader() orelse return null;
-    if (header.meta().kind != .object) return null;
+    if (header.meta().flags.kind != .object) return null;
     if (header.meta().rc != 1) return null;
     return @alignCast(@fieldParentPtr("header", header));
 }

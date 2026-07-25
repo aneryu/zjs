@@ -44,7 +44,7 @@ pub const VarRef = struct {
             .header = .{},
             .value = initial_value,
         };
-        std.debug.assert(self.header.meta().kind == .var_ref);
+        std.debug.assert(self.header.meta().flags.kind == .var_ref);
         self.pvalue = &self.value;
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
@@ -59,7 +59,7 @@ pub const VarRef = struct {
             .pvalue = slot,
             .is_open = true,
         };
-        std.debug.assert(self.header.meta().kind == .var_ref);
+        std.debug.assert(self.header.meta().flags.kind == .var_ref);
         try rt.gc.addInitializedWithSize(&self.header, @sizeOf(VarRef));
         return self;
     }
@@ -102,7 +102,7 @@ pub const VarRef = struct {
 
     pub fn fromValue(value: JSValue) ?*VarRef {
         const header = value.refHeader() orelse return null;
-        if (header.meta().kind != .var_ref) return null;
+        if (header.meta().flags.kind != .var_ref) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 

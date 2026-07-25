@@ -253,7 +253,7 @@ test "heap BigInt value uses reserved QuickJS tag" {
     defer value.free(rt);
 
     try std.testing.expect(value.isBigInt());
-    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().kind);
+    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.meta().flags.kind);
 }
 
 test "heap BigInt limbs participate in runtime memory limit and accounting" {
@@ -304,7 +304,7 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     const first = try core.RealmContext.create(rt);
     const second = try core.RealmContext.create(rt);
 
-    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().kind);
+    try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().flags.kind);
     try std.testing.expectEqual(first, rt.firstContext().?);
 
     var owner = core.RealmRef.retain(first);
@@ -380,7 +380,7 @@ test "RealmContext owns the five QuickJS initial layouts as Shapes" {
         ctx.regexp_result_shape.?,
     };
     for (initial_shapes) |initial_shape| {
-        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().kind);
+        try std.testing.expectEqual(core.gc.GcKind.shape, initial_shape.header.meta().flags.kind);
     }
     try std.testing.expectEqual(array_prototype, ctx.array_shape.?.proto.?);
     try std.testing.expectEqual(object_prototype, ctx.arguments_shape.?.proto.?);
@@ -1926,7 +1926,7 @@ const ObjectConstructionOrderProbe = struct {
         if (size != @sizeOf(core.Object)) return;
         self.object_boundary_calls += 1;
         self.shape_owned_at_object_boundary =
-            self.rt.shapes.live_shape_count == self.live_shape_count_before + 1 and
+            self.rt.gc.liveCountKind(.shape) == self.live_shape_count_before + 1 and
             self.rt.shapes.shape_hash_count == self.shape_hash_count_before + 1 and
             self.rt.gcStats().heap_live_bytes == self.heap_live_bytes_before + emptyRootShapeAllocationBytes() and
             self.prototype.header.meta().rc == self.prototype_refs_before + 1;
@@ -4084,7 +4084,7 @@ test "shape registry release maintains hashed and live counts" {
     defer rt.destroy();
 
     const hashed_baseline = rt.shapes.shape_hash_count;
-    const live_baseline = rt.shapes.live_shape_count;
+    const live_baseline = rt.gc.liveCountKind(.shape);
 
     const first = try rt.shapes.create(null);
     const second = try rt.shapes.create(null);
@@ -4093,16 +4093,16 @@ test "shape registry release maintains hashed and live counts" {
     // Every created shape is both hashed and live (qjs counts hashed shapes only,
     // and zjs has no separate registry array — both are intrusive GC-list shapes).
     try std.testing.expectEqual(hashed_baseline + 3, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline + 3, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline + 3, rt.gc.liveCountKind(.shape));
 
     rt.shapes.release(second);
     try std.testing.expectEqual(hashed_baseline + 2, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline + 2, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline + 2, rt.gc.liveCountKind(.shape));
 
     rt.shapes.release(first);
     rt.shapes.release(third);
     try std.testing.expectEqual(hashed_baseline, rt.shapes.shape_hash_count);
-    try std.testing.expectEqual(live_baseline, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_baseline, rt.gc.liveCountKind(.shape));
 }
 
 test "shape registry hash grows and reuses object root shapes" {
@@ -4891,7 +4891,7 @@ test "function bytecode registration is old-space accounted" {
 
     try std.testing.expectEqual(fixture_layout.total_size, fb.layout().total_size);
     try std.testing.expectEqual(fixture_layout.total_size, fb.heapByteSize());
-    try std.testing.expect(!fb.header.meta().flags.metadata_in_slab);
+    try std.testing.expect(fb.header.meta().alloc_info.standalone);
     try std.testing.expectEqual(
         baseline_bytes + fixture_layout.total_size + core.gc.metadata_prefix_size,
         rt.memory.allocated_bytes,
@@ -5282,9 +5282,9 @@ test "gc heap accounting verifier catches missing allocation entries" {
     defer obj.value().free(rt);
     try rt.gc.verifyHeapAccounting(rt);
 
-    obj.header.meta().flags.heap_accounted = false;
+    obj.header.meta().alloc_info.heap_accounted = false;
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting(rt));
-    obj.header.meta().flags.heap_accounted = true;
+    obj.header.meta().alloc_info.heap_accounted = true;
     try rt.gc.verifyHeapAccounting(rt);
 }
 
@@ -5440,7 +5440,7 @@ const closed_property_cycle_reclaimed_count: usize = 4;
 
 fn expectNoLiveGc(rt: *core.JSRuntime) !void {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 0), rt.shapes.live_shape_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.shape));
 }
 
 fn expectCycleReclaimedIncludingShapes(rt: *core.JSRuntime, expected: usize, actual: usize) !void {
@@ -6928,6 +6928,65 @@ test "replacing auto-init transfers the owned Realm edge" {
     try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
 }
 
+test "replacing auto-init rolls back descriptor OOM and retries in same runtime" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_ctx = try core.RealmContext.create(rt);
+    defer first_ctx.destroy();
+    const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try first_global.ensureGlobalPayload(rt);
+    first_ctx.global = first_global;
+    const second_ctx = try core.RealmContext.create(rt);
+    defer second_ctx.destroy();
+    const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
+    _ = try second_global.ensureGlobalPayload(rt);
+    second_ctx.global = second_global;
+    const holder = try core.Object.create(rt, core.class.ids.object, null);
+    defer holder.value().free(rt);
+    const key = try rt.internAtom("oom-replace-realm");
+    defer rt.atoms.free(key);
+
+    try holder.defineAutoInitPropertyWithRealmAndNative(
+        rt,
+        key,
+        "oom-replace-realm",
+        0,
+        core.property.Flags.data(true, false, true),
+        first_global,
+        0,
+    );
+    // A unique shape pins the replacement's only fallible allocation to the
+    // auto-init slot construction, after the old code had already published
+    // the new descriptor bits.
+    try std.testing.expectEqual(@as(usize, 1), holder.shape_ref.refCount());
+
+    const original_flags = holder.propFlagsAt(0);
+    const first_realm_refs = first_ctx.header.meta().rc;
+    const second_realm_refs = second_ctx.header.meta().rc;
+    const baseline_allocated_bytes = rt.memory.allocated_bytes;
+    const next_flags = core.property.Flags.data(false, true, true);
+    rt.setMemoryLimit(baseline_allocated_bytes);
+    defer rt.setMemoryLimit(null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0),
+    );
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(original_flags.bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(&first_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_realm_refs, first_ctx.header.meta().rc);
+    try std.testing.expectEqual(second_realm_refs, second_ctx.header.meta().rc);
+    try std.testing.expectEqual(baseline_allocated_bytes, rt.memory.allocated_bytes);
+
+    try holder.replaceAutoInitPropertyWithRealmAndNative(rt, key, "oom-replace-realm", 0, next_flags, second_global, 0);
+    try std.testing.expectEqual(next_flags.withKind(.auto_init).bits(), holder.propFlagsAt(0).bits());
+    try std.testing.expectEqual(&second_ctx.header, holder.prop_values[0].slot.auto_init.realm_and_id.realmHeader().?);
+    try std.testing.expectEqual(first_realm_refs - 1, first_ctx.header.meta().rc);
+    try std.testing.expectEqual(second_realm_refs + 1, second_ctx.header.meta().rc);
+}
+
 test "deleting auto-init releases its owned Realm edge" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -7804,7 +7863,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     const root_shape_bytes = emptyRootShapeAllocationBytes();
     try std.testing.expect(root_shape_bytes > @sizeOf(core.Object));
-    const live_shape_count_before = rt.shapes.live_shape_count;
+    const live_shape_count_before = rt.gc.liveCountKind(.shape);
     const shape_hash_count_before = rt.shapes.shape_hash_count;
     const heap_live_bytes_before = rt.gcStats().heap_live_bytes;
     const allocated_bytes_before = rt.memory.allocated_bytes;
@@ -7835,7 +7894,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 
     try std.testing.expectEqual(@as(usize, 1), probe.object_boundary_calls);
     try std.testing.expect(probe.shape_owned_at_object_boundary);
-    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(allocated_bytes_before, rt.memory.allocated_bytes);
@@ -7855,7 +7914,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
     try std.testing.expect(probe.shape_owned_at_object_boundary);
     try std.testing.expectEqual(prototype, retry.getPrototype());
     retry.value().free(rt);
-    try std.testing.expectEqual(live_shape_count_before, rt.shapes.live_shape_count);
+    try std.testing.expectEqual(live_shape_count_before, rt.gc.liveCountKind(.shape));
     try std.testing.expectEqual(shape_hash_count_before, rt.shapes.shape_hash_count);
     try std.testing.expectEqual(heap_live_bytes_before, rt.gcStats().heap_live_bytes);
     try std.testing.expectEqual(retry_allocated_bytes_before, rt.memory.allocated_bytes);
@@ -8172,7 +8231,7 @@ test "realm module registry keeps published record addresses stable" {
     defer rt.atoms.free(first_name);
     const first = try publishEmptyModule(rt, &ctx.modules, first_name);
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.ModuleRecord, "header"));
-    try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().kind);
+    try std.testing.expectEqual(core.gc.GcKind.module, first.header.meta().flags.kind);
 
     var buffer: [48]u8 = undefined;
     for (0..48) |index| {

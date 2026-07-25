@@ -664,11 +664,21 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
     return if (rt.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
+/// Append the UTF-8 (WTF-8 for lone surrogates) encoding of a string value.
+/// Mirrors qjs JS_ToCStringLen2 (quickjs.c:4458): ASCII latin1 is copied
+/// as-is, latin1 code points 0x80-0xFF widen to two-byte UTF-8 sequences,
+/// and UTF-16 units encode with surrogate-pair combining. The latin1 bytes
+/// MUST NOT be appended raw: every consumer treats the buffer as UTF-8
+/// (createStringValue re-decode, atom interning, host/FS boundaries), and
+/// raw 0x80-0xFF bytes are invalid UTF-8 lead/continuation bytes.
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
+        .latin1 => |bytes| {
+            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
+        },
         .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
     }
 }

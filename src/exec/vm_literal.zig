@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -44,13 +45,25 @@ pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !c
 /// needs no value rooting — an int/bool/undefined cannot be collected) and a plain,
 /// extensible, non-array, non-exotic, non-proxy `obj`. Returns true on a completed
 /// add (handler pops the value + frees the popped obj slot); false routes to the cold
-/// shell (arrays, private atoms, proxies, non-extensible, setters, refcounted values —
-/// every backtrace/user-code-capable case stays on the publishing path). `value` is
+/// shell (arrays, proxies, non-extensible, setters, refcounted values — every
+/// backtrace/user-code-capable case stays on the publishing path). `value` is
 /// CONSUMED into the property slot on success (like the cold leg's Descriptor.data).
+///
+/// No private-atom probe: OP_define_field's u32 operand is a parser-minted
+/// property-name atom — every private name is discriminated at parse time into
+/// the define/get/put_private_field family (qjs OP_define_field likewise
+/// carries no JS_ATOM_TYPE_PRIVATE test, quickjs.c:19269), so the
+/// mightBePrivate 3-load chain was a zjs-only tax on the trusted bytecode-atom
+/// path (op_get/put_field precedent). Debug keeps the precise kind claim.
+/// The receiver is likewise an evaluated expression value (OP_object /
+/// push_this / any literal-start), never a make_ref cell pair, so the
+/// trusted-expression classification skips the header-kind re-load.
 pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
     if (value.requiresRefCount()) return false;
-    if (rt.atoms.mightBePrivate(atom_id)) return false;
-    const target = object_ops.objectFromValue(obj) orelse return false;
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(rt.atoms.kind(atom_id) != .private);
+    }
+    const target = object_ops.objectFromValueTrustedExpression(obj) orelse return false;
     // qjs OP_define_field → JS_DefinePropertyValue with JS_PROP_THROW: only a plain
     // ordinary object with room to add a data property takes the in-CASE fast add;
     // everything exotic/proxy/array/non-extensible defers to the general define.
@@ -59,7 +72,7 @@ pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: c
     if (target.proxyTarget() != null) return false;
     if (target.isArray()) return false;
     if (!target.flags.extensible) return false;
-    target.definePlainDataPropertyKnownFast(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch return false;
+    target.definePlainDataPropertyKnownFast(rt, atom_id, value) catch return false;
     return true;
 }
 
@@ -207,7 +220,7 @@ pub noinline fn defineField(
                 !target.isArray() and
                 target.flags.extensible)
             {
-                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+                try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, value);
                 return .done;
             }
         } else |_| {}
@@ -395,7 +408,14 @@ pub noinline fn copyDataProperties(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    if (rooted_source_value.isNull() or rooted_source_value.isUndefined()) return .done;
+    // qjs JS_CopyDataProperties (quickjs.c:16912-16913) skips EVERY non-object
+    // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
+    // properties, not just null/undefined. (Object-rest destructuring still
+    // copies from a wrapped string because its source is objectified upstream
+    // before OP_copy_data_properties, both engines.) The former
+    // null/undefined-only skip let a primitive source fall into expectObject's
+    // TypeError — a divergence from qjs, not a spec-ordering guard.
+    if (!rooted_source_value.isObject()) return .done;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);

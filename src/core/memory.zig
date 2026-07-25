@@ -78,6 +78,16 @@ pub const SmallObjectSlab = struct {
     const BlockHeader = extern struct {
         /// Allocated: block index. Free: next free block index.
         index_or_next: u16,
+        /// Size-class index of the owning arena, mirroring qjs
+        /// `JSMallocBlockHeader.block_size_idx` (quickjs.c:275) so a free never
+        /// has to recompute the class from the byte size. GC allocations stamp
+        /// it too (low 5 bits of `gc.Metadata.alloc_info`, written by
+        /// initGcPrefix together with the kind/flags byte); GC tenants may also
+        /// set the accounting bits in its high bits, so rather than qjs's
+        /// write-once-per-arena (quickjs.c:1527), each allocation re-stamps the
+        /// byte at block-pop/prefix-init time and it stays valid for that
+        /// block's lifetime.
+        block_size_idx: u8,
     };
 
     const Arena = struct {
@@ -101,19 +111,49 @@ pub const SmallObjectSlab = struct {
         return classIndex(byte_count, alignment) != null;
     }
 
-    pub inline fn alloc(self: *SmallObjectSlab, backing: std.mem.Allocator, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
-        const index = classIndex(byte_count, alignment).?;
-        return self.allocAtIndex(backing, index);
+    /// Eligibility-only variant of `classIndex`: true iff that would return an
+    /// index, without materializing the class arithmetic. Free paths pair this
+    /// with `headerClassIndex` (qjs `__js_free` reads `b->block_size_idx`,
+    /// quickjs.c:1614-1617, instead of re-deriving the class from the size).
+    inline fn eligibleSize(byte_count: usize, alignment: std.mem.Alignment) bool {
+        if (alignment.compare(.gt, slab_alignment)) return false;
+        return totalBlockSize(byte_count) != null;
     }
 
-    inline fn allocAtIndex(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) ![*]u8 {
-        var arena = self.free_arenas[index] orelse try self.addArena(backing, index);
+    /// Class index carried by the block header of a slab-backed allocation.
+    /// Only valid for blocks that are free or occupied by non-GC payloads
+    /// (live GC blocks carry the class in the low 5 bits plus GC accounting
+    /// bits above; their frees read it through `gcAllocInfoByte` instead).
+    inline fn headerClassIndex(ptr: [*]u8) usize {
+        return blockHeaderFromUser(ptr).block_size_idx;
+    }
+
+    pub inline fn alloc(self: *SmallObjectSlab, backing: std.mem.Allocator, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
+        const index = classIndex(byte_count, alignment).?;
+        return self.allocAtIndex(backing, index, true);
+    }
+
+    /// `stamp_class` = the block will hold a raw (non-GC) payload, so record
+    /// its class index in the header for `headerClassIndex` on the free side.
+    /// GC objects skip the pop-time stamp only because initGcPrefix immediately
+    /// rewrites the same byte with the identical class index (plus clear GC
+    /// accounting bits) as part of its combined class+kind u16 store.
+    inline fn allocAtIndex(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize, comptime stamp_class: bool) ![*]u8 {
+        const arena = self.free_arenas[index] orelse try self.addArena(backing, index);
+        return self.popFreeBlock(arena, index, stamp_class);
+    }
+
+    /// Hot small-block pop, mirroring the qjs `__js_malloc` small arm
+    /// (quickjs.c:1566-1587): unlink the first free block, stamp its live
+    /// block index, and retire the arena from the free list when it fills.
+    inline fn popFreeBlock(self: *SmallObjectSlab, arena: *Arena, index: usize, comptime stamp_class: bool) [*]u8 {
         const block_size = block_sizes[index];
         const block_idx = arena.first_free_block;
         std.debug.assert(block_idx != free_nil);
         const header = blockHeaderAt(arena, block_idx, block_size);
         arena.first_free_block = header.index_or_next;
         header.index_or_next = block_idx;
+        if (comptime stamp_class) header.block_size_idx = @intCast(index);
         arena.used_blocks += 1;
         if (arena.used_blocks == arena.block_count) {
             self.removeFreeArena(index, arena);
@@ -123,10 +163,13 @@ pub const SmallObjectSlab = struct {
 
     pub inline fn free(self: *SmallObjectSlab, backing: std.mem.Allocator, bytes: []u8, alignment: std.mem.Alignment) void {
         const index = classIndex(bytes.len, alignment).?;
-        self.freeAtIndex(backing, bytes.ptr, index);
+        self.freeAtIndex(&backing, bytes.ptr, index);
     }
 
-    inline fn freeAtIndex(self: *SmallObjectSlab, backing: std.mem.Allocator, ptr: [*]u8, index: usize) void {
+    /// `backing` is taken by pointer so the hot free path materializes only an
+    /// address; the 16-byte allocator value is loaded solely inside the cold
+    /// empty-arena arm that actually calls it.
+    inline fn freeAtIndex(self: *SmallObjectSlab, backing: *const std.mem.Allocator, ptr: [*]u8, index: usize) void {
         const header = blockHeaderFromUser(ptr);
         const block_idx = header.index_or_next;
         const block_size = block_sizes[index];
@@ -145,13 +188,19 @@ pub const SmallObjectSlab = struct {
         }
         arena.used_blocks -= 1;
         if (arena.used_blocks == 0) {
-            // QuickJS `js_free` returns an empty 4 KiB arena immediately.
-            // Keeping a per-class reserve would leave physical backing alive
-            // after the runtime's logical/accounted bytes reached zero.
-            self.removeArena(index, arena);
-            self.removeFreeArena(index, arena);
-            backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
+            return self.releaseEmptyArena(backing, index, arena);
         }
+    }
+
+    /// QuickJS `js_free` returns an empty 4 KiB arena immediately
+    /// (quickjs.c:1626-1630). Keeping a per-class reserve would leave physical
+    /// backing alive after the runtime's logical/accounted bytes reached zero.
+    /// Out of line so the per-free hot path stays call-free (the mirror of qjs
+    /// keeping `js_malloc_new_arena` no_inline on the alloc side).
+    noinline fn releaseEmptyArena(self: *SmallObjectSlab, backing: *const std.mem.Allocator, index: usize, arena: *Arena) void {
+        self.removeArena(index, arena);
+        self.removeFreeArena(index, arena);
+        backing.rawFree(arenaAllocation(arena), slab_alignment, @returnAddress());
     }
 
     pub fn deinit(self: *SmallObjectSlab, backing: std.mem.Allocator) void {
@@ -165,7 +214,10 @@ pub const SmallObjectSlab = struct {
         self.* = .{};
     }
 
-    fn addArena(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) !*Arena {
+    /// qjs `js_malloc_new_arena` is no_inline (quickjs.c:1496); keeping the
+    /// arena-construction loop out of the per-alloc hot functions saves their
+    /// prologues from carrying its register pressure.
+    noinline fn addArena(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) !*Arena {
         const block_size = block_sizes[index];
         const block_count = (arena_size - arena_header_size) / block_size;
         std.debug.assert(block_count > 0 and block_count <= free_nil);
@@ -180,9 +232,7 @@ pub const SmallObjectSlab = struct {
         var block_idx: u16 = 0;
         while (block_idx < arena.block_count) : (block_idx += 1) {
             const header = blockHeaderAt(arena, block_idx, block_size);
-            header.* = .{
-                .index_or_next = if (block_idx + 1 == arena.block_count) free_nil else block_idx + 1,
-            };
+            header.index_or_next = if (block_idx + 1 == arena.block_count) free_nil else block_idx + 1;
         }
         self.addArenaList(index, arena);
         self.addFreeArena(index, arena);
@@ -477,6 +527,46 @@ pub const MemoryAccount = struct {
         return self.allocInternal(T, count, false);
     }
 
+    /// Pop a block from an already-available free arena of `index`'s class, or
+    /// null when the class has no free arena (caller falls back to the slow
+    /// twin, which builds a new arena / routes to the backing allocator).
+    /// Inline: this is the entire qjs `__js_malloc` small-block hot arm.
+    inline fn slabPopHot(self: *MemoryAccount, index: usize, comptime stamp_class: bool) ?[*]u8 {
+        const arena = self.small_slab.free_arenas[index] orelse return null;
+        return self.small_slab.popFreeBlock(arena, index, stamp_class);
+    }
+
+    inline fn noteAllocDiagnostics(
+        self: *MemoryAccount,
+        comptime is_create: bool,
+        comptime element_size: usize,
+        count: usize,
+        address: usize,
+    ) void {
+        if (comptime diagnostic_accounting_enabled) {
+            self.allocation_count += 1;
+            if (comptime is_create) {
+                self.create_calls += 1;
+            } else {
+                self.alloc_calls += 1;
+            }
+            self.updatePeak();
+            if (self.profile_alloc_count) |counter| counter.* +|= 1;
+            self.traceAlloc(element_size, count, address);
+        }
+    }
+
+    inline fn noteFreeDiagnostics(self: *MemoryAccount, comptime is_destroy: bool) void {
+        if (comptime diagnostic_accounting_enabled) {
+            self.allocation_count -= 1;
+            if (comptime is_destroy) {
+                self.destroy_calls += 1;
+            } else {
+                self.free_calls += 1;
+            }
+        }
+    }
+
     fn allocInternal(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (count == 0) return &.{};
@@ -485,36 +575,72 @@ pub const MemoryAccount = struct {
         // aligned allocations keep the standalone prefix.
         const is_gc = comptime isGcObject(T);
         if (comptime is_gc) std.debug.assert(count == 1);
+        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566):
+        // limit check + block pop + single-scalar ledger bump. Arena refill and
+        // the backing/standalone-prefix routes live in the noinline slow twin
+        // (qjs keeps `js_malloc_new_arena` / `js_malloc_large` no_inline too).
+        if (comptime is_gc) {
+            const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), gcAlignment(T));
+            if (comptime slab_class != null) {
+                if (self.small_slab_enabled) {
+                    const bytes: usize = @sizeOf(T);
+                    try self.checkAllocation(bytes);
+                    if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
+                    const raw = self.slabPopHot(comptime slab_class.?, false) orelse
+                        return self.allocInternalSlow(T, count, trigger_gc);
+                    initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
+                    self.allocated_bytes +%= bytes;
+                    self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(raw));
+                    const ptr: [*]T = @ptrCast(@alignCast(raw));
+                    return ptr[0..count];
+                }
+            }
+        } else {
+            const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
+            if (self.small_slab_enabled) {
+                if (SmallObjectSlab.classIndex(payload_bytes, std.mem.Alignment.of(T))) |slab_class| {
+                    try self.checkAllocation(payload_bytes);
+                    if (comptime trigger_gc) self.triggerGCBeforeAllocation(payload_bytes);
+                    const raw = self.slabPopHot(slab_class, true) orelse
+                        return self.allocInternalSlow(T, count, trigger_gc);
+                    self.allocated_bytes +%= payload_bytes;
+                    self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(raw));
+                    const ptr: [*]T = @ptrCast(@alignCast(raw));
+                    return ptr[0..count];
+                }
+            }
+        }
+        return self.allocInternalSlow(T, count, trigger_gc);
+    }
+
+    /// Cold continuation of `allocInternal`: arena refill, non-slab classes,
+    /// and the slab-disabled/standalone-prefix routes. Re-running the limit
+    /// check (and, on refill, the GC trigger request) here is idempotent.
+    noinline fn allocInternalSlow(self: *MemoryAccount, comptime T: type, count: usize, comptime trigger_gc: bool) ![]T {
+        const is_gc = comptime isGcObject(T);
+        if (comptime is_gc) std.debug.assert(count == 1);
         const payload_bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const slab_index = if (comptime is_gc) self.gcSlabClassIndex(payload_bytes, alignment) else null;
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (comptime is_gc) (if (metadata_in_slab) 0 else gcPrefixSize(T)) else 0;
+        const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
         const bytes = prefix + payload_bytes;
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         const raw = if (comptime is_gc)
             try self.rawAllocForGc(bytes, alignment, slab_index)
         else
             try self.rawAlloc(bytes, alignment);
         const obj_addr = @intFromPtr(raw) + prefix;
-        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), metadata_in_slab);
+        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
         const ptr: [*]T = if (comptime is_gc)
             @ptrFromInt(obj_addr)
         else
             @ptrCast(@alignCast(raw));
         const slice = ptr[0..count];
-        self.allocated_bytes = next_allocated_bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count += 1;
-            self.alloc_calls += 1;
-            self.updatePeak();
-            if (self.profile_alloc_count) |counter| counter.* +|= 1;
-            self.traceAlloc(@sizeOf(T), count, @intFromPtr(slice.ptr));
-        }
+        self.allocated_bytes +%= bytes;
+        self.noteAllocDiagnostics(false, @sizeOf(T), count, @intFromPtr(slice.ptr));
         return slice;
     }
 
@@ -522,24 +648,43 @@ pub const MemoryAccount = struct {
         if (slice.len == 0) return;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(slice.ptr));
         const is_gc = comptime isGcObject(T);
-        const payload_bytes = std.math.mul(usize, @sizeOf(T), slice.len) catch return;
+        // GC objects are allocated singly (`allocInternal` asserts count == 1),
+        // so their payload size is comptime-known here.
+        if (comptime is_gc) std.debug.assert(slice.len == 1);
+        // The alloc side validated this product with a checked multiply; qjs
+        // `__js_free` (quickjs.c:1595) recomputes nothing on free.
+        const payload_bytes = if (comptime is_gc) @sizeOf(T) else @sizeOf(T) *% slice.len;
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (comptime is_gc) self.gcSlabClassIndex(payload_bytes, alignment) else null;
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (comptime is_gc) (if (metadata_in_slab) 0 else gcPrefixSize(T)) else 0;
-        const bytes = prefix + payload_bytes;
-        self.allocated_bytes -= bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count -= 1;
-            self.free_calls += 1;
-        }
-        const base: usize = @intFromPtr(slice.ptr) - prefix;
-        const bytes_ptr: [*]u8 = @ptrFromInt(base);
+        const bytes_ptr: [*]u8 = @ptrCast(slice.ptr);
         if (comptime is_gc) {
-            self.rawFreeForGc(bytes_ptr[0..bytes], alignment, slab_index);
-        } else {
-            self.rawFree(bytes_ptr[0..bytes], alignment);
+            const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), gcAlignment(T));
+            if (comptime slab_class != null) {
+                if (self.small_slab_enabled) {
+                    std.debug.assert(gcAllocInfoByte(bytes_ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
+                    self.allocated_bytes -%= payload_bytes;
+                    self.noteFreeDiagnostics(false);
+                    return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
+                }
+            }
+            const prefix = comptime gcPrefixSize(T);
+            const bytes = prefix + payload_bytes;
+            self.allocated_bytes -%= bytes;
+            self.noteFreeDiagnostics(false);
+            const base: [*]u8 = @ptrFromInt(@intFromPtr(slice.ptr) - prefix);
+            return self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
         }
+        self.allocated_bytes -%= payload_bytes;
+        self.noteFreeDiagnostics(false);
+        if (self.small_slab_enabled and SmallObjectSlab.eligibleSize(payload_bytes, alignment)) {
+            // The runtime enables the slab before managed allocations begin;
+            // while enabled, every eligible allocation comes from it. Non-GC
+            // blocks keep the allocator's class byte, so read it back instead
+            // of re-deriving the class (qjs __js_free, quickjs.c:1614).
+            const slab_class = SmallObjectSlab.headerClassIndex(bytes_ptr);
+            std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
+            return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, slab_class);
+        }
+        self.backing_allocator.rawFree(bytes_ptr[0..payload_bytes], alignment, @returnAddress());
     }
 
     /// Attempts to resize an existing allocation through the backing allocator's
@@ -667,61 +812,96 @@ pub const MemoryAccount = struct {
     }
 
     inline fn rawAllocForGc(self: *MemoryAccount, bytes: usize, alignment: std.mem.Alignment, slab_index: ?usize) ![*]u8 {
-        if (slab_index) |index| return self.small_slab.allocAtIndex(self.backing_allocator, index);
+        if (slab_index) |index| return self.small_slab.allocAtIndex(self.backing_allocator, index, false);
         return self.backing_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
-    inline fn rawFreeForGc(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment, slab_index: ?usize) void {
-        if (slab_index) |index| {
-            self.small_slab.freeAtIndex(self.backing_allocator, bytes.ptr, index);
-            return;
-        }
-        self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
+    /// Byte 2 of the GC prefix (`gc.Metadata.alloc_info`): bits 0..4 slab
+    /// class index, bit 6 heap-accounted (registry-owned), bit 7 standalone
+    /// prefix. Bit positions are asserted against gc.AllocInfo in gc.zig.
+    const alloc_info_standalone: u8 = 1 << 7;
+    const alloc_info_class_mask: u8 = 0x1f;
+
+    /// Reads back byte 2 of a live GC object's prefix. For slab-backed objects
+    /// it carries the allocator's class index (qjs `__js_free` reads
+    /// `b->block_size_idx`, quickjs.c:1614-1617, instead of re-deriving the
+    /// class); for standalone prefixes bit 7 is set.
+    inline fn gcAllocInfoByte(ptr: *const anyopaque) u8 {
+        return @as(*const u8, @ptrFromInt(@intFromPtr(ptr) - gc_prefix_size + 2)).*;
     }
 
     /// Initialize GC metadata at `meta` (= objectPtr - 8). Bytes 0..2 are the
     /// slab allocator's live block index when the metadata is overlaid, so that
-    /// case must preserve them. `metadata_in_slab` occupies flags bit 5; the
-    /// raw offsets/mask are asserted against gc.Metadata in gc.zig.
-    inline fn initGcPrefix(comptime T: type, meta: [*]u8, metadata_in_slab: bool) void {
-        if (!metadata_in_slab) @memset(meta[0..2], 0);
-        @memset(meta[2..gc_prefix_size], 0);
-        meta[2] = T.gc_kind_tag;
-        if (metadata_in_slab) meta[3] = 1 << 5;
-        meta[4] = 1;
+    /// case must preserve them. `slab_class` = the slab size-class backing this
+    /// allocation (null = standalone prefix); it lands in the alloc_info byte,
+    /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
+    /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
+    inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
+        // The kind must stay inside the low 3 bits of the shared kind/flags
+        // byte (gc.BlockFlags.kind).
+        comptime std.debug.assert(T.gc_kind_tag < 8);
+        // Exact-value stores (no memset-then-overwrite): size_class (bytes
+        // 0..2, preserved when the slab header is overlaid), alloc_info + kind
+        // as one u16 (byte order fixed by the gc.zig offset asserts), and the
+        // refcount as a native i32 (gc reads Metadata.rc as a struct field).
+        if (slab_class == null) std.mem.writeInt(u16, meta[0..2], 0, .little);
+        if (slab_class) |index| std.debug.assert(index <= alloc_info_class_mask);
+        const info: u8 = if (slab_class) |index| @intCast(index) else alloc_info_standalone;
+        std.mem.writeInt(u16, meta[2..4], @as(u16, info) | (@as(u16, T.gc_kind_tag) << 8), .little);
+        @as(*align(4) i32, @ptrCast(@alignCast(meta + 4))).* = 1;
     }
 
     fn createInternal(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const is_gc = comptime isGcObject(T);
+        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566);
+        // everything else (arena refill, slab-disabled, standalone prefix,
+        // non-slab classes) lives in the noinline slow twin.
+        const slab_class = comptime SmallObjectSlab.classIndex(
+            @sizeOf(T),
+            if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T),
+        );
+        if (comptime slab_class != null) {
+            if (self.small_slab_enabled) {
+                const bytes: usize = @sizeOf(T);
+                try self.checkAllocation(bytes);
+                if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
+                const raw = self.slabPopHot(comptime slab_class.?, !is_gc) orelse
+                    return self.createInternalSlow(T, trigger_gc);
+                if (comptime is_gc) initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
+                self.allocated_bytes +%= bytes;
+                self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(raw));
+                return @ptrCast(@alignCast(raw));
+            }
+        }
+        return self.createInternalSlow(T, trigger_gc);
+    }
+
+    /// Cold continuation of `createInternal`: arena refill, non-slab classes,
+    /// and the slab-disabled/standalone-prefix routes. Re-running the limit
+    /// check (and, on refill, the GC trigger request) here is idempotent.
+    noinline fn createInternalSlow(self: *MemoryAccount, comptime T: type, comptime trigger_gc: bool) !*T {
+        const is_gc = comptime isGcObject(T);
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
         const slab_index = if (comptime is_gc) self.gcSlabClassIndex(@sizeOf(T), alignment) else null;
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (comptime is_gc) (if (metadata_in_slab) 0 else gcPrefixSize(T)) else 0;
+        const prefix = if (comptime is_gc) (if (slab_index != null) 0 else gcPrefixSize(T)) else 0;
         const bytes = prefix + @sizeOf(T);
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         const raw = if (comptime is_gc)
             try self.rawAllocForGc(bytes, alignment, slab_index)
         else
             try self.rawAlloc(bytes, alignment);
         const obj_addr = @intFromPtr(raw) + prefix;
-        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), metadata_in_slab);
+        if (comptime is_gc) initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
         const ptr: *T = if (comptime is_gc)
             @ptrFromInt(obj_addr)
         else
             @ptrCast(@alignCast(raw));
-        self.allocated_bytes = next_allocated_bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count += 1;
-            self.create_calls += 1;
-            self.updatePeak();
-            if (self.profile_alloc_count) |counter| counter.* +|= 1;
-            self.traceAlloc(@sizeOf(T), 1, @intFromPtr(ptr));
-        }
+        self.allocated_bytes +%= bytes;
+        self.noteAllocDiagnostics(true, @sizeOf(T), 1, @intFromPtr(ptr));
         return ptr;
     }
 
@@ -729,22 +909,24 @@ pub const MemoryAccount = struct {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
         const is_gc = comptime isGcObject(T);
         const alignment = if (comptime is_gc) gcAlignment(T) else std.mem.Alignment.of(T);
-        const slab_index = if (comptime is_gc) self.gcSlabClassIndex(@sizeOf(T), alignment) else null;
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (comptime is_gc) (if (metadata_in_slab) 0 else gcPrefixSize(T)) else 0;
+        const bytes_ptr: [*]u8 = @ptrCast(ptr);
+        // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
+        // (quickjs.c:1613); the class index is comptime for a sized type.
+        const slab_class = comptime SmallObjectSlab.classIndex(@sizeOf(T), if (is_gc) gcAlignment(T) else std.mem.Alignment.of(T));
+        if (comptime slab_class != null) {
+            if (self.small_slab_enabled) {
+                if (comptime is_gc) std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == comptime slab_class.?);
+                self.allocated_bytes -%= @sizeOf(T);
+                self.noteFreeDiagnostics(true);
+                return self.small_slab.freeAtIndex(&self.backing_allocator, bytes_ptr, comptime slab_class.?);
+            }
+        }
+        const prefix = if (comptime is_gc) gcPrefixSize(T) else 0;
         const bytes = prefix + @sizeOf(T);
-        self.allocated_bytes -= bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count -= 1;
-            self.destroy_calls += 1;
-        }
-        const base: usize = @intFromPtr(ptr) - prefix;
-        const bytes_ptr: [*]u8 = @ptrFromInt(base);
-        if (comptime is_gc) {
-            self.rawFreeForGc(bytes_ptr[0..bytes], alignment, slab_index);
-        } else {
-            self.rawFree(bytes_ptr[0..bytes], alignment);
-        }
+        self.allocated_bytes -%= bytes;
+        self.noteFreeDiagnostics(true);
+        const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
+        self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
     }
 
     /// Variable-size GC allocation: the `T` struct immediately followed by
@@ -767,28 +949,44 @@ pub const MemoryAccount = struct {
         comptime std.debug.assert(isGcObject(T));
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
+        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566)
+        // with the runtime `get_block_size_index` classification qjs also pays
+        // for a runtime size. Arena refill and the standalone-prefix route live
+        // in the noinline slow twin.
+        if (self.small_slab_enabled) {
+            if (SmallObjectSlab.classIndex(payload_bytes, comptime gcAlignment(T))) |slab_class| {
+                try self.checkAllocation(payload_bytes);
+                if (comptime trigger_gc) self.triggerGCBeforeAllocation(payload_bytes);
+                const raw = self.slabPopHot(slab_class, false) orelse
+                    return self.createWithFamInternalSlow(T, fam_bytes, trigger_gc);
+                initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), slab_class);
+                self.allocated_bytes +%= payload_bytes;
+                self.noteAllocDiagnostics(true, 1, payload_bytes, @intFromPtr(raw));
+                return @ptrCast(@alignCast(raw));
+            }
+        }
+        return self.createWithFamInternalSlow(T, fam_bytes, trigger_gc);
+    }
+
+    /// Cold continuation of `createWithFamInternal`: arena refill and the
+    /// slab-disabled/standalone-prefix routes. Re-running the limit check
+    /// (and, on refill, the GC trigger request) here is idempotent.
+    noinline fn createWithFamInternalSlow(self: *MemoryAccount, comptime T: type, fam_bytes: usize, comptime trigger_gc: bool) !*T {
+        const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
         const alignment = comptime gcAlignment(T);
         const slab_index = self.gcSlabClassIndex(payload_bytes, alignment);
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (metadata_in_slab) 0 else comptime gcPrefixSize(T);
+        const prefix = if (slab_index != null) 0 else comptime gcPrefixSize(T);
         const bytes = std.math.add(usize, prefix, payload_bytes) catch return error.OutOfMemory;
         try self.checkAllocation(bytes);
         if (comptime trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
-        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         const raw = try self.rawAllocForGc(bytes, alignment, slab_index);
         const obj_addr = @intFromPtr(raw) + prefix;
-        initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), metadata_in_slab);
+        initGcPrefix(T, @ptrFromInt(obj_addr - gc_prefix_size), slab_index);
         const ptr: *T = @ptrFromInt(obj_addr);
-        self.allocated_bytes = next_allocated_bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count += 1;
-            self.create_calls += 1;
-            self.updatePeak();
-            if (self.profile_alloc_count) |counter| counter.* +|= 1;
-            self.traceAlloc(1, bytes, @intFromPtr(ptr));
-        }
+        self.allocated_bytes +%= bytes;
+        self.noteAllocDiagnostics(true, 1, bytes, @intFromPtr(ptr));
         return ptr;
     }
 
@@ -800,18 +998,24 @@ pub const MemoryAccount = struct {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
         const payload_bytes = @sizeOf(T) + fam_bytes;
         const alignment = comptime gcAlignment(T);
-        const slab_index = self.gcSlabClassIndex(payload_bytes, alignment);
-        const metadata_in_slab = slab_index != null;
-        const prefix = if (metadata_in_slab) 0 else comptime gcPrefixSize(T);
-        const bytes = prefix + payload_bytes;
-        self.allocated_bytes -= bytes;
-        if (comptime diagnostic_accounting_enabled) {
-            self.allocation_count -= 1;
-            self.destroy_calls += 1;
+        // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
+        // (quickjs.c:1613-1617): the block header byte carries the class index,
+        // so the free never re-derives the class from the byte size.
+        const info = gcAllocInfoByte(ptr);
+        if (info & alloc_info_standalone == 0) {
+            const slab_class: usize = info & alloc_info_class_mask;
+            std.debug.assert(self.small_slab_enabled);
+            std.debug.assert(slab_class == SmallObjectSlab.classIndex(payload_bytes, alignment).?);
+            self.allocated_bytes -%= payload_bytes;
+            self.noteFreeDiagnostics(true);
+            return self.small_slab.freeAtIndex(&self.backing_allocator, @ptrCast(ptr), slab_class);
         }
-        const base: usize = @intFromPtr(ptr) - prefix;
-        const bytes_ptr: [*]u8 = @ptrFromInt(base);
-        self.rawFreeForGc(bytes_ptr[0..bytes], alignment, slab_index);
+        const prefix = comptime gcPrefixSize(T);
+        const bytes = prefix + payload_bytes;
+        self.allocated_bytes -%= bytes;
+        self.noteFreeDiagnostics(true);
+        const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
+        self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
     }
 
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {
@@ -859,20 +1063,22 @@ pub const MemoryAccount = struct {
     inline fn rawAlloc(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![*]u8 {
         if (self.small_slab_enabled) {
             if (SmallObjectSlab.classIndex(byte_count, alignment)) |index| {
-                return self.small_slab.allocAtIndex(self.backing_allocator, index);
+                return self.small_slab.allocAtIndex(self.backing_allocator, index, true);
             }
         }
         return self.backing_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
     inline fn rawFree(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
-        if (self.small_slab_enabled) {
-            if (SmallObjectSlab.classIndex(bytes.len, alignment)) |index| {
-                // The runtime enables the slab before managed allocations begin;
-                // while enabled, every eligible allocation comes from it.
-                self.small_slab.freeAtIndex(self.backing_allocator, bytes.ptr, index);
-                return;
-            }
+        if (self.small_slab_enabled and SmallObjectSlab.eligibleSize(bytes.len, alignment)) {
+            // The runtime enables the slab before managed allocations begin;
+            // while enabled, every eligible allocation comes from it. This path
+            // frees raw (non-GC-object) payloads, whose blocks keep the
+            // allocator's class byte (qjs __js_free, quickjs.c:1614).
+            const index = SmallObjectSlab.headerClassIndex(bytes.ptr);
+            std.debug.assert(index == SmallObjectSlab.classIndex(bytes.len, alignment).?);
+            self.small_slab.freeAtIndex(&self.backing_allocator, bytes.ptr, index);
+            return;
         }
         self.backing_allocator.rawFree(bytes, alignment, @returnAddress());
     }
@@ -963,7 +1169,11 @@ test "small slab GC allocation reuses allocator header for metadata" {
     try std.testing.expectEqual(2 * @sizeOf(TestGc), account.allocated_bytes);
 
     const second_meta: [*]const u8 = @ptrFromInt(@intFromPtr(second) - MemoryAccount.gc_prefix_size);
-    try std.testing.expectEqual(TestGc.gc_kind_tag, second_meta[2]);
+    // Byte 2 = allocator class stamp (qjs block_size_idx), byte 3 = kind in
+    // the low 3 bits of the shared kind/flags byte (qjs gc_obj_type:7|mark:1).
+    const expected_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), MemoryAccount.gcAlignment(TestGc)).?;
+    try std.testing.expectEqual(expected_class, second_meta[2]);
+    try std.testing.expectEqual(TestGc.gc_kind_tag, second_meta[3] & 0x7);
     try std.testing.expectEqual(@as(i32, 1), @as(*align(4) const i32, @ptrFromInt(@intFromPtr(second) - 4)).*);
 
     // Free a non-zero-index block, then prove its allocator index survived GC

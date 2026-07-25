@@ -2619,7 +2619,29 @@ fn nativeFunctionSourceName(name: []const u8) ?[]const u8 {
 }
 
 fn isNativeFunctionPropertyName(name: []const u8) bool {
-    return call_runtime.isSimpleIdentifierName(name) or isNativeFunctionComputedPropertyName(name);
+    return call_runtime.isSimpleIdentifierName(name) or
+        isUnicodeIdentifierName(name) or
+        isNativeFunctionComputedPropertyName(name);
+}
+
+/// Non-ASCII identifier names ("ém") are legal JS identifiers and qjs
+/// js_function_toString (quickjs.c:41335) emits the name property verbatim,
+/// so the native-source name filter must not drop them. The name bytes are
+/// UTF-8 (appendRawString post-widening); reject invalid sequences.
+fn isUnicodeIdentifierName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const view = std.unicode.Utf8View.init(name) catch return false;
+    var it = view.iterator();
+    var first = true;
+    while (it.nextCodepoint()) |cp| {
+        if (cp > 0x10ffff) return false;
+        const c: u21 = @intCast(cp);
+        if (first) {
+            if (!unicode.isIdentifierStart(c)) return false;
+            first = false;
+        } else if (!unicode.isIdentifierContinue(c)) return false;
+    }
+    return true;
 }
 
 fn isNativeFunctionComputedPropertyName(name: []const u8) bool {
@@ -3141,7 +3163,7 @@ pub fn qjsEvalGlobalScriptSource(
     // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
     // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
     // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.runtime.call_depth == 0) ctx.runtime.updateNativeStackTop();
+    if (ctx.runtime.hot.call_depth == 0) ctx.runtime.updateNativeStackTop();
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;

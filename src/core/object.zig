@@ -42,8 +42,8 @@ const OwnKeysError = std.mem.Allocator.Error;
 /// object mutation from a class finalizer remains outside the callback contract.
 const FinalizingShapeStorage = extern struct {
     metadata: gc.Metadata = .{
-        .kind = .shape,
-        .flags = .{ .is_pinned = true },
+        .alloc_info = .{ .standalone = true },
+        .flags = .{ .kind = .shape, .is_pinned = true },
         .rc = std.math.maxInt(i32) / 2,
     },
     value: shape.Shape = .{
@@ -1604,9 +1604,11 @@ pub const ObjectFlags = packed struct(u16) {
     /// intrinsic %Array.prototype% and cleared permanently by mutations that
     /// can make dense Array extension observe the prototype chain.
     is_std_array_prototype: bool = false,
-    // Reserved to keep the packed ObjectFlags ABI at 16 bits after class
-    // payload finalization moved onto the infallible zero-ref drain.
-    _reserved_lifecycle_bit: bool = false,
+    /// Weak-identity table membership. Moved here from the GC metadata prefix
+    /// when the prefix kind/flags byte collapsed to the qjs single-byte
+    /// `gc_obj_type:7|mark:1` shape (quickjs.c:276); this bit is object-only,
+    /// and it reuses the reserved lifecycle bit so the packed ABI stays 16 bits.
+    has_weak_id: bool = false,
     has_exotic_methods: bool = false,
     is_borrowed_reference_holder: bool = false,
     /// Actual active payload state. This is distinct from the class's declared
@@ -1726,6 +1728,11 @@ pub const Object = extern struct {
     }
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
+        // The bare plain-object allocation (`{}` — qjs JS_NewObject) is the
+        // hottest create form. Route it to the dedicated
+        // JS_NewObjectFromShape mirror instead of the general class-payload
+        // constructor (createArrayFromInitialShape precedent for arrays).
+        if (class_id == class.ids.object) return createPlainObject(rt, prototype);
         return createInternal(rt, class_id, prototype, 0, null);
     }
 
@@ -1762,13 +1769,21 @@ pub const Object = extern struct {
     /// cycle collection cannot reclaim them.
     pub fn createGeneratorShell(rt: *JSRuntime, class_id: class.ClassId) !*Object {
         std.debug.assert(class_id == class.ids.generator or class_id == class.ids.async_generator);
-        var construction = try rt.classes.beginConstruction(class_id);
-        defer construction.abort();
-        const definition = construction.definition;
+        // Generator ids are standard: no pin traffic, so the by-value plan
+        // avoids materializing a Construction across the fallible window.
+        const definition = rt.classes.standardPlan(class_id);
         std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
         std.debug.assert(definition.payload_kind == .generator);
 
-        const self = try rt.createRuntime(Object);
+        // qjs creates the public generator object through js_create_from_ctor →
+        // JS_NewObjectFromShape, whose js_trigger_gc(sizeof(JSObject))
+        // (quickjs.c:5619) runs BEFORE the JSObject allocation. With
+        // registration no longer polling (add_gc_object never re-checks the
+        // threshold, quickjs.c:6540), this pre-allocation boundary is the
+        // generator path's faithful GC service point. The shell is not yet
+        // reachable, so a collection here sees only rooted/refcounted state.
+        rt.collectBeforeObjectAllocation(@sizeOf(Object));
+        const self = try rt.memory.createNoTrigger(Object);
         errdefer rt.memory.destroy(Object, self);
         // The detached path knows the finalized operand-stack size and installs
         // a variable-sized execution record immediately afterwards. Allocate
@@ -1781,7 +1796,6 @@ pub const Object = extern struct {
         errdefer freeClassPayloadAllocation(rt, class_payload, .generator);
 
         const has_exotic_methods = classHasExoticMethods(class_id, definition.has_exotic);
-        construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
@@ -1802,7 +1816,7 @@ pub const Object = extern struct {
     pub fn finishGeneratorShell(self: *Object, rt: *JSRuntime, prototype: ?*Object) !void {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
         std.debug.assert(self.flags.class_payload_kind == .generator);
-        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        std.debug.assert(!self.header.meta().alloc_info.heap_accounted);
         const final_shape = try rt.shapes.createObjectRoot(prototype);
         self.shape_ref = final_shape;
         rt.registerObjectWithBytes(self, @sizeOf(Object)) catch |err| {
@@ -1820,7 +1834,7 @@ pub const Object = extern struct {
     /// Error-path counterpart for a shell that has not been registered yet.
     pub fn destroyGeneratorShell(self: *Object, rt: *JSRuntime) void {
         std.debug.assert(self.class_id == class.ids.generator or self.class_id == class.ids.async_generator);
-        std.debug.assert(!self.header.meta().flags.heap_accounted);
+        std.debug.assert(!self.header.meta().alloc_info.heap_accounted);
         if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
         freeClassPayloadAllocation(rt, self.u.payload, self.flags.class_payload_kind);
         self.u.payload = null;
@@ -1861,8 +1875,157 @@ pub const Object = extern struct {
     }
 
     pub fn createArrayFromShape(rt: *JSRuntime, shape_ref: *shape.Shape, entries: []const property.Entry) !*Object {
+        // The realm's initial array shape carries no named properties (length
+        // is header storage in zjs), so the common fresh-array allocation takes
+        // the dedicated JS_NewObjectFromShape mirror below instead of paying
+        // the general class-payload constructor.
+        if (entries.len == 0 and shape_ref.prop_count == 0) {
+            return createArrayFromInitialShape(rt, shape_ref);
+        }
         const self = try createFromShape(rt, class.ids.array, shape_ref, entries);
         self.flags.fast_array = true;
+        return self;
+    }
+
+    /// Allocate a fresh dense array straight from the realm's initial array
+    /// Shape — the zjs analogue of qjs `JS_NewArray` = `JS_NewObjectFromShape(
+    /// ctx, js_dup_shape(ctx->array_shape), JS_CLASS_ARRAY)` (quickjs.c:5575,
+    /// 5610-5680): retain the prepared Shape, run the pre-allocation GC
+    /// boundary, allocate the JSObject plus the shape-sized property buffer,
+    /// and initialize the JS_CLASS_ARRAY arm inline (`p->is_exotic = 1;
+    /// p->fast_array = 1; u.array = empty`, quickjs.c:5644-5657). The general
+    /// `createInternal` re-derives all of this per call through the class
+    /// definition plan; the array class is standard and its layout facts are
+    /// compile-time constants, exactly like qjs's hardcoded switch arm.
+    /// `createPreparedPropertyTemplate` is the same mirror for property-shaped
+    /// templates; this is its dense-array sibling (no entries, header length).
+    pub fn createArrayFromInitialShape(rt: *JSRuntime, initial_shape: *shape.Shape) !*Object {
+        std.debug.assert(initial_shape.prop_count == 0);
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered array class definition the generic path consults.
+            const definition = rt.classes.standardPlan(class.ids.array);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .none);
+            std.debug.assert(!classHasExoticMethods(class.ids.array, definition.has_exotic));
+        }
+        initial_shape.retain();
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(initial_shape);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        // qjs allocates `prop[shape->prop_size]` for every object built from a
+        // shape (quickjs.c:5630); the initial array shape's buffer is reused by
+        // later named-property appends, which trust `shape.prop_size` slots.
+        const property_capacity: usize = initial_shape.prop_size;
+        var property_storage: []property.Entry = &.{};
+        var property_storage_owned = false;
+        errdefer if (property_storage_owned) rt.memory.free(property.Entry, property_storage);
+        if (property_capacity != 0) {
+            property_storage = try rt.allocRuntime(property.Entry, property_capacity);
+            property_storage_owned = true;
+        }
+
+        self.* = .{
+            .header = .{},
+            .class_id = class.ids.array,
+            // Null first word = qjs empty array pointer + no-payload sentinel;
+            // count/capacity/length stay zero (see createInternal's array arm).
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                // qjs JS_CLASS_ARRAY arm sets p->fast_array = 1. qjs's
+                // `p->is_exotic` has NO zjs mirror bit for arrays: zjs derives
+                // array length/index exotics from the class id itself
+                // (`classNeedsSlowPropertyAccess`), and the registered array
+                // class definition carries has_exotic = false — the
+                // hasExoticMethods() guards on the dense fast paths depend on
+                // it (hardcoding true regressed dense_array fills 4x).
+                .has_exotic_methods = false,
+                .fast_array = true,
+            },
+            .shape_ref = initial_shape,
+            .prop_values = if (property_capacity == 0) @ptrFromInt(@alignOf(property.Entry)) else property_storage.ptr,
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
+        property_storage_owned = false;
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
+        return self;
+    }
+
+    /// Allocate a bare plain object straight from the runtime's hashed root
+    /// Shape for `prototype` — the zjs analogue of qjs `JS_NewObject` =
+    /// `JS_NewObjectProtoClass(ctx, proto, JS_CLASS_OBJECT)` (quickjs.c:5847,
+    /// 5743-5759): find_hashed_shape_proto/js_new_shape (both mirrored inside
+    /// `createObjectRoot`), then JS_NewObjectFromShape's pre-allocation GC
+    /// boundary, the raw JSObject allocation, and the EMPTY `JS_CLASS_OBJECT`
+    /// switch arm (quickjs.c:5651-5653 — scalar flag init only, no payload, no
+    /// exotics). The general `createInternal` re-derives all of this per call
+    /// through the class definition plan (plan load + payload-kind triage +
+    /// template loop + the union-of-arms spill frame); the object class is
+    /// standard and its layout facts are compile-time constants, exactly like
+    /// qjs's hardcoded arm. `createArrayFromInitialShape` is the same mirror
+    /// for dense arrays; `createPreparedPropertyTemplate` for property-shaped
+    /// templates. Non-plain classes and capacity/template forms keep the
+    /// general constructor.
+    pub fn createPlainObject(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered object class definition the generic path consults.
+            const definition = rt.classes.standardPlan(class.ids.object);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .ordinary);
+            std.debug.assert(!payloadKindAllocates(definition.payload_kind));
+            std.debug.assert(!classHasExoticMethods(class.ids.object, definition.has_exotic));
+        }
+        const shape_ref = try rt.shapes.createObjectRoot(prototype);
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(shape_ref);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        self.* = .{
+            .header = .{},
+            .class_id = class.ids.object,
+            // Null payload pointer: the object class's declared `.ordinary`
+            // payload is attached lazily, so a fresh `{}` carries no payload
+            // allocation and `class_payload_kind` stays `.none` (identical to
+            // createInternal's non-allocating ordinary path).
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                .has_exotic_methods = false,
+            },
+            .shape_ref = shape_ref,
+            // A fresh root-shape object defers its property VALUE buffer to
+            // the first append (ensurePropertyCapacity), matching
+            // createInternal's `own_property_capacity == 0` path: the dangling
+            // aligned sentinel means no storage yet.
+            .prop_values = @ptrFromInt(@alignOf(property.Entry)),
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
         return self;
     }
 
@@ -2061,9 +2224,20 @@ pub const Object = extern struct {
         // The class table may move while GC or any fallible preparation runs.
         // Keep only the minimal immutable scalars plus a generation-bearing
         // construction pin; never retain a `Record *` across that window.
-        var construction = try rt.classes.beginConstruction(class_id);
-        defer construction.abort();
-        const definition = construction.definition;
+        // Standard ids read the registration-time plan by value and skip the
+        // pin object entirely: `abort`/`publishObject` take *Construction, so
+        // touching one on the hot path escapes its alloca and pins every plan
+        // field access to memory. Only dynamic ids materialize it.
+        const is_standard_class = class_id < class.ids.init_count;
+        var construction: class.Table.Construction = if (is_standard_class)
+            undefined
+        else
+            try rt.classes.beginConstruction(class_id);
+        defer if (!is_standard_class) construction.abort();
+        const definition: class.Table.DefinitionPlan = if (is_standard_class)
+            rt.classes.standardPlan(class_id)
+        else
+            construction.definition;
         const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
         // qjs shape model (faithful): start from the SHARED, transition-cacheable
@@ -2107,7 +2281,7 @@ pub const Object = extern struct {
             if (initialized) {
                 destroyFromHeader(rt, &self.header);
             } else {
-                freeObjectAllocation(rt, self, inline_layout);
+                freeObjectAllocation(rt, self, definition);
             }
         }
         var property_storage: []property.Entry = &.{};
@@ -2173,8 +2347,9 @@ pub const Object = extern struct {
         // Reacquire by id after the complete fallible window and validate the
         // pinned generation. An unregister requested mid-construction remains
         // pending; this exact in-flight object atomically transfers that pin to
-        // its allocation before the object reaches the GC list.
-        construction.publishObject();
+        // its allocation before the object reaches the GC list. Standard ids
+        // never pin, so publish (like the deferred abort) is dynamic-only.
+        if (!is_standard_class) construction.publishObject();
         self.* = .{
             .header = .{},
             .class_id = class_id,
@@ -2411,10 +2586,12 @@ pub const Object = extern struct {
     }
 
     fn initInlineClassPayloadGcPrefix(self: *Object) void {
-        const meta: [*]u8 = @ptrFromInt(@intFromPtr(self) - 8);
-        @memset(meta[0..8], 0);
-        meta[2] = Object.gc_kind_tag;
-        meta[4] = 1;
+        // Inline-payload objects live inside a raw aligned allocation (freed
+        // via freeObjectAllocation with the full layout), so their prefix is a
+        // standalone one: no slab class to stamp, size_class carries encoded
+        // heap bytes once registered.
+        const meta: *gc.Metadata = @ptrFromInt(@intFromPtr(self) - 8);
+        meta.* = .{ .alloc_info = .{ .standalone = true }, .flags = .{ .kind = .object }, .rc = 1 };
     }
 
     fn inlineClassPayloadPtr(self: *Object, layout: InlineClassPayloadLayout) *anyopaque {
@@ -2422,13 +2599,41 @@ pub const Object = extern struct {
         return @ptrCast(bytes + layout.payload_offset);
     }
 
-    fn freeObjectAllocation(rt: *JSRuntime, self: *Object, inline_layout: ?InlineClassPayloadLayout) void {
-        if (inline_layout) |layout| {
-            const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-            rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-            return;
+    /// Free the object's raw allocation from its immutable destruction plan.
+    /// Plain (non-inline-payload) objects — ~every object — go straight to the
+    /// typed slab free (the qjs `js_free_rt(rt, p)` tail of free_object,
+    /// quickjs.c:6382); only inline-payload classes rederive the aligned
+    /// layout, in the cold outlined arm.
+    /// inline: without it LLVM outlines the three-caller body and the hot
+    /// destroy tail pays a call that ships the whole spilled DefinitionPlan by
+    /// pointer; inlined, the plain-object arm is the bare typed slab free and
+    /// only `inline_payload_size` stays live across the teardown calls.
+    inline fn freeObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
+        if (definition.inline_payload_size != 0) {
+            return freeInlinePayloadObjectAllocation(rt, self, definition);
         }
         rt.memory.destroy(Object, self);
+    }
+
+    noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
+        const layout = inlineClassPayloadLayoutForDefinition(definition) orelse unreachable;
+        const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
+        rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
+    }
+
+    /// `InlineClassPayloadLayout.object_size` (== the byte count the register
+    /// side stored via `registerObjectWithBytes`) as a bare scalar: the payload
+    /// trails the Object struct at the payload's own alignment. The layout
+    /// helper's overflow arm cannot fire for a registered u32 size + u16
+    /// power-of-two alignment on a 64-bit target, so unlike
+    /// `inlineClassPayloadLayoutFromScalars` there is no failure path — and no
+    /// Alignment-enum round trip (rbit/clz) on the destroy hot path.
+    fn inlineClassObjectSize(definition: class.Table.DefinitionPlan) usize {
+        comptime std.debug.assert(@bitSizeOf(usize) == 64);
+        std.debug.assert(definition.inline_payload_size != 0);
+        std.debug.assert(std.math.isPowerOfTwo(definition.inline_payload_align));
+        const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), definition.inline_payload_align);
+        return payload_offset + definition.inline_payload_size;
     }
 
     pub fn allocationSize(self: *const Object, rt: *const JSRuntime) usize {
@@ -2762,18 +2967,29 @@ pub const Object = extern struct {
         // and generation immediately before invocation.
         const destroying_class_id = self.class_id;
         const definition = rt.classes.destructionPlan(destroying_class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
-        // Size for GC free-accounting is the same value `allocationSize` derives
-        // from `inline_layout` (object_size for inline-payload classes, else
-        // @sizeOf(Object)) — reuse the layout we just computed instead of a second
-        // record-table lookup + inline-layout recompute inside unregisterObject.
-        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
+        // qjs free_object never derives a layout at teardown: the malloc block
+        // header already carries what the free needs (quickjs.c:1613-1617).
+        // The full InlineClassPayloadLayout (offsets + Alignment enum +
+        // overflow-checked adds) is only needed by the rare inline-payload
+        // free, so it is rederived inside `freeObjectAllocation`'s cold arm
+        // instead of being materialized (and spilled as a stack aggregate) on
+        // every plain-object destroy.
+        const has_inline_payload = definition.inline_payload_size != 0;
+        // Size for GC free-accounting must be bit-for-bit the value the
+        // register side stored (`layout.object_size` for inline-payload
+        // classes, else @sizeOf(Object)); `inlineClassObjectSize` computes
+        // exactly that scalar without the rest of the layout.
+        const alloc_size = if (has_inline_payload) inlineClassObjectSize(definition) else @sizeOf(Object);
         // These intrusive/side-table links borrow storage owned by class
         // payloads, so detach them before that storage is destroyed. Heap-list
         // unlink and live-byte accounting deliberately remain at the qjs
         // remove_gc_object boundary below, after the class finalizer.
         rt.unregisterWeakReferenceHolder(self);
-        rt.unregisterBorrowedReferenceHolder(self);
+        // Same hoisted-entry-guard shape as the borrowed/std-file calls below:
+        // the callee's own first check is `!flags.is_borrowed_reference_holder
+        // -> return`, so the ~every-object destroy keeps the test inline and
+        // never pays the outlined call.
+        if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
         // qjs free_object keeps no borrowed-ref / std-file side tables, so the
         // plain-object hot free path must not call into either scan. Hoist each
         // helper's own entry guard to the call site: an object with no realm-
@@ -2788,8 +3004,18 @@ pub const Object = extern struct {
         const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.prop_values = @ptrFromInt(@alignOf(property.Entry));
         for (old_properties, 0..) |entry, index| {
-            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
+            // qjs free_property (quickjs.c:6097-6113): one unlikely TMASK test,
+            // then the untagged plain-data arm frees the slot value inline.
+            // Only the tagged arms (accessor/var_ref/auto_init) take the
+            // out-of-line path; a deleted entry (`atom == JS_ATOM_NULL` in
+            // qjs, an undefined data slot there) has nothing to free.
+            if (entry_flags.isData()) {
+                entry.slot.data.free(rt);
+                continue;
+            }
+            if (entry_flags.deleted) continue;
+            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
@@ -2805,7 +3031,7 @@ pub const Object = extern struct {
         // object. qjs runs this callback synchronously, before remove_gc_object
         // and before the raw allocation is freed.
         if (definition.has_payload_finalizer) {
-            self.finalizeClassPayload(rt, definition.generation, inline_layout != null);
+            self.finalizeClassPayload(rt, definition.generation, has_inline_payload);
         }
         // Array elements live in qjs's class-specific union arm and are released
         // by the Array class finalizer, after the shape/prototype edge. Keep the
@@ -2818,8 +3044,18 @@ pub const Object = extern struct {
         // ever live per object. A synchronous callback clears that payload and
         // its discriminant above, so this switch handles only definitions
         // without a payload finalizer.
-        switch (self.flags.class_payload_kind) {
-            .none => {},
+        //
+        // qjs free_object reaches class teardown through one nullable pointer
+        // pair (class_array[p->class_id].finalizer / p->u.opaque). Mirror that
+        // for the dominant teardown — an ordinary object that never allocated
+        // a side payload — instead of paying the 21-arm jump-table dispatch:
+        // `.none`, and `.ordinary` with a null payload, have nothing to
+        // release (destroyOrdinaryPayload's own first check).
+        const payload_kind = self.flags.class_payload_kind;
+        const payload_dead = payload_kind == .none or
+            (payload_kind == .ordinary and self.u.payload == null);
+        if (!payload_dead) switch (payload_kind) {
+            .none => unreachable,
             .ordinary => self.destroyOrdinaryPayload(rt),
             .arguments => self.destroyArgumentsPayload(rt),
             .object_data => self.destroyObjectDataPayload(rt),
@@ -2840,7 +3076,7 @@ pub const Object = extern struct {
             .disposable_stack => self.destroyDisposableStackPayload(rt),
             .global => self.destroyGlobalPayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
-        }
+        };
         // The callback and every class-specific owned edge run while the object
         // is still heap-accounted. This is qjs free_object's remove_gc_object
         // boundary: after it returns, callbacks must no longer observe the
@@ -2870,8 +3106,8 @@ pub const Object = extern struct {
         // object; only objects handed a weak id (has_weak_id) have an entry, so
         // gate the call — a plain object never enters takeWeakObjectIdentity just
         // to load the flag and return.
-        if (self.header.meta().flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(destroying_class_id, definition.generation);
     }
 
@@ -2881,9 +3117,8 @@ pub const Object = extern struct {
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
@@ -2893,9 +3128,8 @@ pub const Object = extern struct {
         std.debug.assert(!self.header.meta().flags.mark);
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
@@ -5565,7 +5799,7 @@ pub const Object = extern struct {
         if (!next_value.isFunctionBytecode()) return error.InvalidBytecode;
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
         const header = next_value.objectHeader() orelse return error.InvalidBytecode;
-        std.debug.assert(header.meta().kind == .function_bytecode);
+        std.debug.assert(header.meta().flags.kind == .function_bytecode);
         const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
         const old_fb = self.u.bytecode_function.function_bytecode;
         self.u.bytecode_function.function_bytecode = fb;
@@ -6757,7 +6991,7 @@ pub const Object = extern struct {
     }
 
     fn traceChildren(rt: *JSRuntime, header: *gc.Header, visitor: anytype) void {
-        switch (header.meta().kind) {
+        switch (header.meta().flags.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 obj.traceChildEdgesNoFail(rt, visitor);
@@ -6793,7 +7027,7 @@ pub const Object = extern struct {
     }
 
     inline fn headerHasTraceableChildren(header: *const gc.Header) bool {
-        return header.metaConst().kind == .object or header.metaConst().kind == .function_bytecode or header.metaConst().kind == .var_ref or header.metaConst().kind == .shape or header.metaConst().kind == .realm_context or header.metaConst().kind == .module;
+        return header.metaConst().flags.kind == .object or header.metaConst().flags.kind == .function_bytecode or header.metaConst().flags.kind == .var_ref or header.metaConst().flags.kind == .shape or header.metaConst().flags.kind == .realm_context or header.metaConst().flags.kind == .module;
     }
 
     const DecrefVisitor = struct {
@@ -7162,7 +7396,7 @@ pub const Object = extern struct {
         {
             var cursor = garbage.head;
             while (cursor) |h| : (cursor = h.next) {
-                if (h.meta().kind == .object or h.meta().kind == .var_ref or h.meta().kind == .shape or h.meta().kind == .realm_context or h.meta().kind == .module) garbage_count += 1;
+                if (h.meta().flags.kind == .object or h.meta().flags.kind == .var_ref or h.meta().flags.kind == .shape or h.meta().flags.kind == .realm_context or h.meta().flags.kind == .module) garbage_count += 1;
             }
         }
 
@@ -7177,7 +7411,7 @@ pub const Object = extern struct {
         var garbage_modules: gc.HeaderList = .{};
         garbage_committed = true;
         while (garbage.popFront()) |h| {
-            switch (h.meta().kind) {
+            switch (h.meta().flags.kind) {
                 .object => garbage_objects.append(h),
                 .function_bytecode => garbage_bytecodes.append(h),
                 .var_ref => garbage_var_refs.append(h),
@@ -7252,7 +7486,7 @@ pub const Object = extern struct {
     /// REMOVE_CYCLES resource pass). Mirrors qjs Pass B (quickjs.c:6797-6810).
     pub fn drainCycleDeferredFrees(rt: *JSRuntime) void {
         while (rt.gc.popCycleDeferredFree()) |h| {
-            switch (h.meta().kind) {
+            switch (h.meta().flags.kind) {
                 .object => {
                     const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     if (rt.gc.phase == .remove_cycles and (h.meta().rc != 0 or obj.weakref_count != 0)) {
@@ -7356,7 +7590,7 @@ pub const Object = extern struct {
 
     fn objectFromValue(stored: JSValue) ?*Object {
         const stored_header = stored.refHeader() orelse return null;
-        if (stored_header.meta().kind != .object) return null;
+        if (stored_header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", stored_header);
     }
 
@@ -7877,7 +8111,7 @@ pub const Object = extern struct {
 
     fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -8022,7 +8256,7 @@ pub const Object = extern struct {
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
-        if (header.meta().kind != .function_bytecode) return null;
+        if (header.meta().flags.kind != .function_bytecode) return null;
         return @fieldParentPtr("header", header);
     }
 
@@ -8092,7 +8326,7 @@ pub const Object = extern struct {
     }
 
     fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
-        if (header.meta().kind != .function_bytecode) return null;
+        if (header.meta().flags.kind != .function_bytecode) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
@@ -9434,18 +9668,17 @@ pub const Object = extern struct {
         if (self.findProperty(atom_id)) |index| {
             if (!self.isAutoInitAt(index)) return error.TypeError;
             const ai_flags = flags.withKind(.auto_init);
-            if (self.propFlagsAt(index).bits() != ai_flags.bits()) {
+            // Prepare before publication: every fallible step (unique-shape
+            // clone, replacement slot construction) completes before any flag
+            // or slot byte is published, so an OOM leaves the entry untouched.
+            if (self.propFlagsAt(index).bits() != ai_flags.bits())
                 try self.ensureUniqueShapeForMutation(rt);
-                rt.shapes.updatePropertyFlags(self.shape_ref, index, ai_flags.bits());
-            }
             const next_slot = try self.createPropAutoInitSlot(rt, realm_global, .{
                 .name = name,
                 .length = length,
                 .native_builtin_id = native_builtin_id,
             });
-            const old_slot = self.prop_values[index].slot;
-            self.prop_values[index].slot = .{ .auto_init = next_slot };
-            destroyPropertySlot(rt, atom_id, ai_flags, old_slot);
+            self.setEntryKindAndSlot(rt, atom_id, index, ai_flags, .{ .auto_init = next_slot });
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -9807,6 +10040,31 @@ pub const Object = extern struct {
         }
         if (values.len != 0) self.markIndexedProperties(rt);
         return true;
+    }
+
+    /// Owned-move fill for a FRESH literal array — qjs `js_create_array_free`'s
+    /// post-`JS_NewArray` body (quickjs.c:9636-9650): `expand_fast_array` +
+    /// `p->u.array.count = len` + a plain move of every element (`u.values[i] =
+    /// tab[i]`, no dup) + the length publication. The caller guarantees the
+    /// array came straight from the initial-shape allocator (dense, empty,
+    /// extensible, writable length, zero named properties), so the sibling
+    /// borrow-mode guard chain collapses to Debug asserts, exactly like qjs
+    /// trusting JS_NewArray's output. On success the values are consumed; on
+    /// error they remain owned by the caller (the cold shell re-runs the op on
+    /// the untouched operand window — qjs frees tab on its inline fail path,
+    /// which our caller's error route performs instead).
+    pub fn initDenseArrayLiteralValuesOwnedTrusted(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
+        std.debug.assert(self.isArray() and self.flags.length_writable and self.flags.extensible);
+        std.debug.assert(self.u.array.count == 0 and self.u.array.length == 0);
+        std.debug.assert(self.shape_ref.prop_count == 0);
+        std.debug.assert(self.arrayElementStorageMode() == .dense);
+        std.debug.assert(values.len <= array.max_array_length);
+        if (values.len == 0) return;
+        try self.ensureArrayElementCapacity(rt, values.len);
+        self.setFastArrayCountAssumeCapacity(@intCast(values.len));
+        self.u.array.length = @intCast(values.len);
+        @memcpy(self.u.array.values[0..values.len], values);
+        self.markIndexedProperties(rt);
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
@@ -10632,17 +10890,6 @@ pub const Object = extern struct {
         try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
-    /// Trusted variant of `addProperty` for callers that already hold a live
-    /// `atom_id` ref across the whole call (see `appendPreparedPropertyEntryTrusted`
-    /// for the guard-elision rationale). Used only by
-    /// `definePlainDataPropertyKnownFast` on the object-literal `OP_define_field`
-    /// path, where `atom_id` is the executing function bytecode's inline operand
-    /// and is rooted for the entire opcode.
-    fn addPropertyTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
-        try self.appendPreparedPropertyEntryTrusted(rt, atom_id, flagsFromDescriptor(desc), slot);
-    }
-
     /// Lean plain-object define for the object-literal fast path (OP_define_field
     /// on a fresh ordinary object). Mirrors qjs JS_DefineProperty -> JS_CreateProperty
     /// for a NON-exotic object (quickjs.c:10164 `if (p->is_exotic)` gates the whole
@@ -10652,9 +10899,30 @@ pub const Object = extern struct {
     /// preludes and the duplicate arrayIndexFromAtom of defineOwnProperty+
     /// defineOrdinaryOwnProperty. Preserves duplicate-literal-key semantics
     /// (`{a:1,a:2}`) via the findProperty branch. Caller guarantees:
-    /// class_id==object, !hasExoticMethods, !is_array, extensible.
-    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+    /// class_id==object, !hasExoticMethods, !is_array, extensible, and a
+    /// NON-refcounted `value` (both call sites guard `requiresRefCount`).
+    ///
+    /// Takes the bare value instead of a `Descriptor`: qjs OP_define_field
+    /// carries its property flags as the constant int `JS_PROP_C_W_E`
+    /// (quickjs.c:19269) straight into add_property — no descriptor record is
+    /// ever materialized on the literal path. The Descriptor round-trip
+    /// (96B stack build in the handler + kind/flag re-derivation in the add
+    /// path) is confined to the rare duplicate-key branch, which feeds the
+    /// generic isCompatible/replaceProperty machinery.
+    ///
+    /// OUTLINED (`noinline`) as the one publish body behind the resident
+    /// op_define_field arm — the qjs frame shape: CASE(OP_define_field) makes a
+    /// single call into the define chain (JS_DefinePropertyValue,
+    /// quickjs.c:19269) and keeps only pc/sp live across it. Inlining this into
+    /// the handler dragged the duplicate-key Descriptor build and the append
+    /// marshaling into the hot arm (a 176-byte frame + 10 callee-saved
+    /// registers per literal property); the probe/append run here instead, and
+    /// `appendPreparedPropertyEntryImpl` folds INTO this body so the 16-byte
+    /// property slot is assembled in registers rather than spilled through a
+    /// by-pointer call boundary (the loadSlotAsIntPair store-forward hazard).
+    pub noinline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
         if (self.findPropertyIndexTrusted(atom_id)) |index| {
+            const desc = descriptor.Descriptor.data(data_value, true, true, true);
             try self.materializeAutoInitEntryForMutation(index);
             if (!isCompatible(self.propFlagsAt(index), self.prop_values[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
@@ -10666,8 +10934,22 @@ pub const Object = extern struct {
         // FunctionBytecode holds a ref on (dupBytecodeAtoms) and the frame's
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
-        // so use the trusted (guard-free) add.
-        try self.addPropertyTrusted(rt, atom_id, desc);
+        // so use the trusted (guard-free) add. Flags are the comptime C_W_E
+        // constant. No `.dup()` on the slot install: both call sites guard
+        // `!value.requiresRefCount()`, for which dup is the identity — the
+        // residual rc-branch was dead weight on the literal hot path (qjs
+        // OP_define_field hands sp[-1] to JS_DefinePropertyValue pre-owned
+        // with no extra dup either).
+        if (comptime builtin.mode == .Debug) {
+            std.debug.assert(!data_value.requiresRefCount());
+        }
+        try self.appendPreparedPropertyEntryImpl(
+            true, // caller_holds_atom_ref: the bytecode operand root (see above)
+            rt,
+            atom_id,
+            comptime property.Flags.data(true, true, true),
+            .{ .data = data_value },
+        );
     }
 
     /// Default entry point: the caller does NOT guarantee an independent live
@@ -10678,8 +10960,9 @@ pub const Object = extern struct {
         return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
     }
 
-    /// Trusted entry point: the caller already holds a live `atom_id` ref for
-    /// the whole call (e.g. the object-literal `OP_define_field` path, whose atom
+    /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
+    /// holds a live `atom_id` ref for the whole call (the object-literal
+    /// `OP_define_field` path via definePlainDataPropertyKnownFast, whose atom
     /// is the executing function bytecode's inline operand — rooted by the
     /// finalized-bytecode atom-retention walk + the frame's `current_function`
     /// ref). With that external root the local dup/free guard is pure redundancy
@@ -10687,11 +10970,7 @@ pub const Object = extern struct {
     /// so elide it. qjs add_property likewise relies on the single caller-held
     /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
     /// per-property guard. MUST NOT be used with a transient/just-interned atom
-    /// that has no other root than the (removed) guard.
-    pub fn appendPreparedPropertyEntryTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(true, rt, atom_id, entry_flags, slot);
-    }
-
+    /// that has no other root than the (elided) guard.
     inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function
@@ -10717,7 +10996,10 @@ pub const Object = extern struct {
             const next_capacity = shape.propertyCapacityForNeeded(old_len + 1);
             const next = try rt.allocRuntime(property.Entry, next_capacity);
             errdefer rt.memory.free(property.Entry, next);
-            @memcpy(next[0..old_len], self.prop_values[0..old_len]);
+            // The dominant grow is a fresh object's FIRST property (old_len ==
+            // 0, no storage yet): skip the memcpy-runtime call for the empty
+            // copy instead of paying a zero-length `bl memcpy` per literal.
+            if (old_len != 0) @memcpy(next[0..old_len], self.prop_values[0..old_len]);
             self.prop_values = next.ptr;
             current_capacity = next_capacity;
             grew_properties = true;
@@ -10760,7 +11042,13 @@ pub const Object = extern struct {
         if (is_array_index) {
             self.flags.may_have_indexed_properties = true;
         }
-        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
+        // qjs add_property (quickjs.c:9209-9222) probes the transition cache
+        // and commits a hit (js_dup_shape + swap + js_free_shape) inline in its
+        // own frame; only the miss triage (shared clone / rc==1 in-place
+        // append) and the sparse array-index path pay an outlined call.
+        if (is_array_index or !rt.shapes.tryCachedTransition(&self.shape_ref, atom_id, entry_flags.bits(), current_capacity)) {
+            try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits(), current_capacity, is_array_index);
+        }
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -10786,15 +11074,18 @@ pub const Object = extern struct {
         // add_property likewise relies on the single caller-held atom ref
         // through add_shape_property (which does the one owning JS_DupAtom).
         // Indexed properties mutate a unique sparse shape in place. Named
-        // properties use the qjs transition triage: cache hit, shared clone, or
-        // rc==1 in-place append. transitionProperty owns replacement releases
-        // and threads relocation back through self.shape_ref.
+        // properties reach here only after the caller's inline
+        // `tryCachedTransition` probe MISSED (qjs add_property cache-hit leg,
+        // quickjs.c:9209-9222, runs in the append frame); the remaining triage
+        // is shared clone or rc==1 in-place append. transitionPropertyUncached
+        // owns replacement releases and threads relocation back through
+        // self.shape_ref.
         if (is_array_index) {
             try self.ensureUniqueShapeForMutation(rt);
             try rt.shapes.addProperty(&self.shape_ref, atom_id, flags);
             return;
         }
-        try rt.shapes.transitionProperty(&self.shape_ref, atom_id, flags, property_capacity);
+        try rt.shapes.transitionPropertyUncached(&self.shape_ref, atom_id, flags, property_capacity);
     }
 
     fn ensurePropertyCapacity(self: *Object, rt: *JSRuntime, needed: usize) !void {
@@ -11002,12 +11293,6 @@ pub const Object = extern struct {
         slow,
     };
 
-    pub const WritableOwnDataPropertyFastLookup = struct {
-        index: usize,
-        flags: property.Flags,
-        value: *JSValue,
-    };
-
     const PropertyProbe = struct {
         index: usize,
         prop: shape.Property,
@@ -11085,12 +11370,75 @@ pub const Object = extern struct {
         return null;
     }
 
-    pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
-        const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
-        const flags = property.Flags.fromBits(lookup.prop.flags);
-        if (flags.kind != .data or !flags.writable) return null;
-        const entry = &self.prop_values[lookup.index];
-        return .{ .index = lookup.index, .flags = flags, .value = &entry.slot.data };
+    /// Slot-pointer twin of `findOwnDataValueFast` for the resident get_field
+    /// handlers. Two deliberate lowerings for the hot hit:
+    /// - Returns the BORROWED slot ADDRESS instead of a 16-byte value so the
+    ///   caller can re-load it as two 64-bit integer words (loadValueAsIntPair
+    ///   precedent): a by-value return makes LLVM round-trip the optional
+    ///   through a 128-bit stack slot whose 64-bit tag reload defeats
+    ///   store-to-load forwarding (the top cycle sink of op_get_field).
+    /// - Tests the kind bits straight off the packed shape word; materializing
+    ///   `property.Flags.fromBits` here costs a packed-bitcast alloca spill in
+    ///   the handler frame.
+    /// Mirrors qjs find_own_property + the JS_PROP_TMASK guard feeding
+    /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
+    pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            if (prop.atom_id == atom_id) {
+                // Kind bits 3-4 of the 6-bit flags field; .data == 0 (qjs
+                // JS_PROP_TMASK). Deleted tombstones are unlinked from the
+                // hash chain with their atom cleared, so they cannot match.
+                if ((prop.flags >> 3) & 0x3 != 0) {
+                    slow.* = true;
+                    return null;
+                }
+                return &self.prop_values[index].slot.data;
+            }
+        }
+        return null;
+    }
+
+    /// Write-side twin of `findOwnDataSlotFast` for the resident put_field
+    /// handler: returns the MUTABLE own slot address only when the entry is a
+    /// plain writable data property. Same two lowerings (slot pointer instead
+    /// of a by-value struct + direct bit extraction off the packed shape word
+    /// instead of a `property.Flags` materialization, whose packed-bitcast
+    /// alloca spill was the write handler's only frame traffic); additionally
+    /// folds the writable bit into the same single-mask test, mirroring qjs
+    /// OP_put_field's hit condition `(prs->flags & (JS_PROP_TMASK |
+    /// JS_PROP_WRITABLE | JS_PROP_LENGTH)) == JS_PROP_WRITABLE`
+    /// (quickjs.c:19193-19196). zjs has no JS_PROP_LENGTH shape flag: array
+    /// `length` lives in the object header (DenseArrayStorage.length), never
+    /// in the shape, so the qjs LENGTH reject leg has no counterpart here —
+    /// `arr.length = n` simply misses the own probe and defers to the cold
+    /// resolver.
+    /// `slow` is written only when the atom matched but the entry cannot take
+    /// a direct slot write (accessor/var_ref/auto_init kind or read-only
+    /// data); the caller initializes it to false.
+    pub inline fn findWritableOwnDataSlotFast(self: *Object, atom_id: atom.Atom, slow: *bool) ?*JSValue {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            if (prop.atom_id == atom_id) {
+                // Kind bits 3-4 (.data == 0, qjs JS_PROP_TMASK) plus writable
+                // bit 0 in one mask. Deleted tombstones are unlinked from the
+                // hash chain with their atom cleared, so they cannot match.
+                if ((prop.flags & 0b011001) != 0b000001) {
+                    slow.* = true;
+                    return null;
+                }
+                return &self.prop_values[index].slot.data;
+            }
+        }
+        return null;
     }
 
     /// Trusted engine-internal shape probe. Returns just the property index and

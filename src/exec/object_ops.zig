@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
@@ -2630,10 +2631,48 @@ pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
+/// Inline-call resolution twin of `functionObjectFromValue` with qjs's exact
+/// discrimination: JS_CallInternal admits only `p->class_id ==
+/// JS_CLASS_BYTECODE_FUNCTION` with a single compare (quickjs.c:17816) —
+/// generator/async classes take the class_array call slow path there. zjs's
+/// four-class set test (`isBytecodeFunctionClass`) compiles to a 1<<id
+/// shift+mask chain (8 insn); on the inline-call path the three non-normal
+/// classes are ALWAYS rejected two loads later by `functionKind() != .normal`,
+/// so the exact compare is a strict refinement: same accept set, and the
+/// generator/async miss reaches the authoritative slow path earlier.
+pub inline fn plainBytecodeFunctionObjectFromValue(value: core.JSValue) ?*core.Object {
+    const object = objectFromValue(value) orelse return null;
+    if (object.class_id != core.class.ids.bytecode_function) return null;
+    return object;
+}
+
 pub fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.meta().kind != .object) return null;
+    if (header.meta().flags.kind != .object) return null;
+    return @fieldParentPtr("header", header);
+}
+
+/// Expression-receiver classification for the resident field ops — qjs
+/// JS_VALUE_GET_OBJ: tag test then raw pointer cast, no second header-kind
+/// probe (GET_FIELD_INLINE, quickjs.c:19123-19125; OP_put_field, 19190-19192).
+/// The generic objectFromValue re-checks `meta().kind == .object` because zjs
+/// wraps VarRef cells in the SAME object tag (VarRef.valueRef) for the
+/// JSValue-typed cell domains (eval name tables, property cells, make_ref
+/// pairs) — a discrimination qjs never needs since its JSVarRef* stays typed.
+/// A field-op RECEIVER, however, is always an evaluated expression value: the
+/// only handler that pushes a cell wrapper onto the operand stack is
+/// h_make_slot_ref (make_loc_ref/make_arg_ref/make_var_ref_ref), and the
+/// parser consumes that ref pair exclusively through get_ref_value /
+/// put_ref_value, which unwrap the cell before any value flows on (the same
+/// trusted-compiler stack discipline that lets get_loc skip bounds checks).
+/// So the kind re-load is dead on this path; Debug keeps it as an assert.
+pub inline fn objectFromValueTrustedExpression(value: core.JSValue) ?*core.Object {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(header.meta().flags.kind == .object);
+    }
     return @fieldParentPtr("header", header);
 }
 
@@ -3964,15 +4003,9 @@ pub fn setSuperPropertyValue(
         switch (desc.kind) {
             .accessor => {
                 if (desc.setter.isUndefined()) {
-                    if (throw_on_set_failure) {
-                        const exception = try throwSetFailureTypeError(
-                            ctx,
-                            global,
-                            atom_id,
-                            error.AccessorWithoutSetter,
-                        );
-                        exception.free(ctx.runtime);
-                    }
+                    // The throw helper always raises; its value arm is never
+                    // produced, so `try` is the whole control flow here.
+                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.AccessorWithoutSetter);
                     return;
                 }
                 const result = try callValueOrBytecode(ctx, output, global, receiver, desc.setter, &.{value}, caller_function, caller_frame);
@@ -3981,15 +4014,9 @@ pub fn setSuperPropertyValue(
             },
             .data => {
                 if (desc.writable == false) {
-                    if (throw_on_set_failure) {
-                        const exception = try throwSetFailureTypeError(
-                            ctx,
-                            global,
-                            atom_id,
-                            error.ReadOnly,
-                        );
-                        exception.free(ctx.runtime);
-                    }
+                    // The throw helper always raises; its value arm is never
+                    // produced, so `try` is the whole control flow here.
+                    if (throw_on_set_failure) _ = try throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
                     return;
                 }
                 if (try rejectModuleNamespaceSuperSet(ctx, receiver, atom_id)) return;

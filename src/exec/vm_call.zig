@@ -54,10 +54,10 @@ pub const CallDepthGuard = struct {
 
     pub fn deinit(self: CallDepthGuard) void {
         const rt = self.ctx.runtime;
-        std.debug.assert(rt.active_bytecode_stack_bytes >= self.planned_stack_bytes);
-        rt.active_bytecode_stack_bytes -= self.planned_stack_bytes;
-        rt.call_depth -= 1;
-        rt.native_call_depth -= 1;
+        std.debug.assert(rt.hot.active_bytecode_stack_bytes >= self.planned_stack_bytes);
+        rt.hot.active_bytecode_stack_bytes -= self.planned_stack_bytes;
+        rt.hot.call_depth -= 1;
+        rt.hot.native_call_depth -= 1;
     }
 };
 
@@ -91,8 +91,8 @@ pub fn enterCallDepth(
     planned_stack_bytes: usize,
 ) !CallDepthGuard {
     const rt = ctx.runtime;
-    if (rt.native_call_depth >= maxNativeJsCallDepth(ctx) or
-        rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+    if (rt.hot.native_call_depth >= maxNativeJsCallDepth(ctx) or
+        rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
@@ -100,9 +100,9 @@ pub fn enterCallDepth(
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
-    rt.native_call_depth += 1;
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
+    rt.hot.native_call_depth += 1;
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
@@ -148,13 +148,27 @@ pub fn qjsBytecodeFrameAllocaSize(
         @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
 }
 
+/// Leaf-family pricing of `qjsBytecodeFrameAllocaSize`. Every published leaf
+/// commits with copy_argv=false and argc >= arg_count (empty/forwarded leaves
+/// are zero-arg bodies; the exact-args family asserts argc == arg_count), so
+/// the qjs padded-argv prefix is always empty and the figure collapses to
+/// function-header scalars — no argc load and no pricing select on the
+/// per-return release path.
+pub inline fn qjsBytecodeLeafFrameAllocaSize(
+    function: *const bytecode.FunctionBytecode,
+) usize {
+    const value_slots = @as(usize, function.var_count) + @as(usize, function.stack_size);
+    return value_slots * @sizeOf(core.JSValue) +
+        @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
+}
+
 inline fn bytecodeStackBudgetWouldOverflow(
     rt: *const core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
     const accumulated = std.math.add(
         usize,
-        rt.active_bytecode_stack_bytes,
+        rt.hot.active_bytecode_stack_bytes,
         planned_stack_bytes,
     ) catch return true;
     return rt.checkNativeStackOverflow(accumulated);
@@ -174,9 +188,19 @@ pub inline fn canEnterInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) bool {
+    return canEnterInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+}
+
+/// Byte-priced variants: constructors that already hold the planned frame
+/// bytes (to persist them into the Entry for the O(1) teardown release) check
+/// and commit that exact figure instead of re-deriving it from the function
+/// header.
+pub inline fn canEnterInlineCallDepthBytes(
+    ctx: *const core.JSContext,
+    planned_stack_bytes: usize,
+) bool {
     const rt = ctx.runtime;
-    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
-    return rt.call_depth < maxLogicalJsCallDepth(ctx) and
+    return rt.hot.call_depth < maxLogicalJsCallDepth(ctx) and
         !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
 }
 
@@ -194,21 +218,81 @@ pub inline fn commitInlineCallDepthMode(
     argc: usize,
     copy_argv: bool,
 ) void {
+    commitInlineCallDepthBytes(ctx, qjsBytecodeFrameAllocaSize(function, argc, copy_argv));
+}
+
+pub inline fn commitInlineCallDepthBytes(
+    ctx: *core.JSContext,
+    planned_stack_bytes: usize,
+) void {
     const rt = ctx.runtime;
-    const planned_stack_bytes = qjsBytecodeFrameAllocaSize(function, argc, copy_argv);
-    std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.call_depth += 1;
+    std.debug.assert(std.math.maxInt(usize) - rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
+}
+
+/// K2 fused admission+commit for the warm leaf constructors: the check and
+/// the commit RMW run back-to-back on one caller-supplied `rt` (no chunk or
+/// carve stores in between), so the whole budget transaction is a single
+/// hot-line load cluster instead of the admission/commit split that reloaded
+/// ctx→runtime after the arena carve's aliasing store (M1 dossier K2: rt
+/// reloads #3/#4). Mirrors qjs check-then-alloca where the check IS the
+/// commitment (quickjs.c:17837/17845); a later chunk/carve miss must retreat
+/// the charge via `retreatInlineCallDepthBytesMiss` before the pure-miss
+/// null return. `bytecodeStackBudgetWouldOverflow` already rejects a wrapping
+/// add, so the commit needs no second overflow assert.
+pub inline fn tryCommitInlineCallDepthBytesRt(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) bool {
+    if (rt.hot.call_depth >= maxLogicalJsCallDepthRt(rt) or
+        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes)) return false;
+    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.hot.call_depth += 1;
+    return true;
+}
+
+/// K2 cold unwind: commit-before-carve means a warm constructor's rare
+/// chunk/carve miss holds an already-committed budget charge; retreat it so
+/// the authoritative slow constructor re-enters from balanced accounting.
+/// noinline keeps the unwind bl-only on the warm body's miss exits.
+pub noinline fn retreatInlineCallDepthBytesMiss(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) void {
+    leaveInlineCallDepthBytesRt(rt, planned_stack_bytes);
+}
+
+/// Bytes-priced sibling of `enterInlineCallDepthMode` for callers that keep
+/// the planned figure alive across the push (Entry persistence + errdefer).
+pub inline fn enterInlineCallDepthBytes(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    planned_stack_bytes: usize,
+) !void {
+    if (!canEnterInlineCallDepthBytes(ctx, planned_stack_bytes)) {
+        return inlineCallDepthOverflow(ctx, global);
+    }
+    commitInlineCallDepthBytes(ctx, planned_stack_bytes);
 }
 
 pub inline fn leaveInlineCallDepthBytes(
     ctx: *core.JSContext,
     planned_stack_bytes: usize,
 ) void {
-    const rt = ctx.runtime;
-    std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.active_bytecode_stack_bytes -= planned_stack_bytes;
-    rt.call_depth -= 1;
+    leaveInlineCallDepthBytesRt(ctx.runtime, planned_stack_bytes);
+}
+
+/// rt-threaded sibling: the leaf pops load `rt` once BEFORE their inline
+/// teardown's arena store, whose aliasing otherwise blocks CSE of the
+/// ctx->runtime reload on the release path (M1 dossier K3).
+pub inline fn leaveInlineCallDepthBytesRt(
+    rt: *core.JSRuntime,
+    planned_stack_bytes: usize,
+) void {
+    std.debug.assert(rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.hot.active_bytecode_stack_bytes -= planned_stack_bytes;
+    rt.hot.call_depth -= 1;
 }
 
 pub inline fn leaveInlineCallDepth(
@@ -232,7 +316,7 @@ pub fn checkTailCallChainStackBudget(
     planned_stack_bytes: usize,
 ) !void {
     const rt = ctx.runtime;
-    if (rt.call_depth >= maxLogicalJsCallDepth(ctx) or
+    if (rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         return inlineCallDepthOverflow(ctx, global);
@@ -942,11 +1026,19 @@ const native_depth_fallback_margin: usize = 8;
 /// path (which absorbs the remaining depth on the Machine at logical depth)
 /// instead of recursing. See ARCH-RECURSIVE-REWRITE.md "S2a-v3".
 pub fn nativeDepthNearCap(ctx: *const core.JSContext) bool {
-    return ctx.runtime.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
+    return ctx.runtime.hot.native_call_depth + native_depth_fallback_margin >= maxNativeJsCallDepth(ctx);
 }
 
 fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
     return ctx.stackLimit();
+}
+
+/// rt-threaded twin of `maxLogicalJsCallDepth` (`ctx.stackLimit()` is exactly
+/// `ctx.runtime.stackSize()` == `rt.hot.stack_size`); the fused K2 admission
+/// already holds `rt`, and the direct field read avoids the by-value
+/// `stackSize(self: JSRuntime)` receiver copy in unoptimized builds.
+inline fn maxLogicalJsCallDepthRt(rt: *const core.JSRuntime) usize {
+    return rt.hot.stack_size;
 }
 
 fn maxJsCallDepth(ctx: *const core.JSContext) usize {

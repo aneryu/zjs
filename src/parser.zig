@@ -3724,6 +3724,16 @@ pub const parser_core = struct {
         last_token_line_num: u32 = 1,
         last_token_col_num: u32 = 1,
         last_opcode_source_offset: ?u32 = null,
+        /// Lazily-built line-start byte offsets for O(1) (line,col)->offset
+        /// conversion in `emitSourcePos`. This replaces an O(n) rescan of the
+        /// whole source from byte 0 on EVERY opcode source-position emit, which
+        /// made a full compile O(n^2) and dominated real-world parse time
+        /// (mandreel/typescript/pdfjs Octane cases timed out; code-load 43x
+        /// behind qjs). `source_line_starts[k]` is the byte offset where line
+        /// (k+1) begins (line 1 -> 0). Rebuilt if the lexer source changes
+        /// (direct eval / sub-parse); freed in `deinit`.
+        source_line_starts: []u32 = &.{},
+        source_line_starts_src: []const u8 = &.{},
         /// Scoped attribution for statement opcodes emitted after their
         /// operand expression has advanced the lexer. QuickJS emits one
         /// OP_line_num at the statement keyword before lowering the complete
@@ -3976,6 +3986,11 @@ pub const parser_core = struct {
         /// be released. `anytype` matches `Bytecode.deinit`'s signature
         /// so callers pass their existing runtime pointer.
         pub fn deinit(self: *State, rt: anytype) void {
+            if (self.source_line_starts.len != 0) {
+                self.function.memory.allocator.free(self.source_line_starts);
+                self.source_line_starts = &.{};
+                self.source_line_starts_src = &.{};
+            }
             self.lex.freeToken(&self.token);
             // Free any nested function definitions on the stack
             const cur_func_stack = self.cur_func_stack;
@@ -5284,7 +5299,9 @@ pub const parser_core = struct {
             try self.appendBytesAt(&bytes, line_num, col_num);
         }
 
-        fn sourceOffsetForLineCol(self: *const State, line_num: u32, col_num: u32) u32 {
+        /// O(source) scan preserved as the exact fallback when the line-start
+        /// table cannot be built (OOM). Never wrong, just slow.
+        fn sourceOffsetForLineColScan(self: *const State, line_num: u32, col_num: u32) u32 {
             if (line_num <= 1 and col_num <= 1) return 0;
             var line: u32 = 1;
             var col: u32 = 1;
@@ -5298,6 +5315,53 @@ pub const parser_core = struct {
                 }
             }
             return @intCast(self.lex.source.len);
+        }
+
+        /// Build the line-start offset table once for the current lexer source.
+        /// Guarded on source slice identity so direct-eval / sub-parses with a
+        /// different source rebuild it. Freed in `deinit`.
+        fn ensureSourceLineStarts(self: *State) Error!void {
+            const src = self.lex.source;
+            if (self.source_line_starts_src.ptr == src.ptr and
+                self.source_line_starts_src.len == src.len and
+                self.source_line_starts.len != 0)
+                return;
+            const allocator = self.function.memory.allocator;
+            if (self.source_line_starts.len != 0) allocator.free(self.source_line_starts);
+            self.source_line_starts = &.{};
+            self.source_line_starts_src = &.{};
+            var count: usize = 1;
+            for (src) |byte| {
+                if (byte == '\n') count += 1;
+            }
+            const table = try allocator.alloc(u32, count);
+            table[0] = 0;
+            var line: usize = 1;
+            for (src, 0..) |byte, index| {
+                if (byte == '\n') {
+                    table[line] = @intCast(index + 1);
+                    line += 1;
+                }
+            }
+            self.source_line_starts = table;
+            self.source_line_starts_src = src;
+        }
+
+        /// O(1) (line,col)->byte-offset via the cached line-start table. Exactly
+        /// reproduces `sourceOffsetForLineColScan` for every (line,col) the
+        /// lexer produces: `line_starts[line-1] + (col-1)`, clamped to source
+        /// length (the scan's fall-through result). Only real, in-bounds
+        /// positions reach here, so the col addition never crosses a newline.
+        fn sourceOffsetForLineCol(self: *State, line_num: u32, col_num: u32) u32 {
+            if (line_num <= 1 and col_num <= 1) return 0;
+            self.ensureSourceLineStarts() catch {
+                return self.sourceOffsetForLineColScan(line_num, col_num);
+            };
+            const li: usize = if (line_num >= 1) @as(usize, line_num) - 1 else 0;
+            if (li >= self.source_line_starts.len) return @intCast(self.lex.source.len);
+            const base: usize = self.source_line_starts[li];
+            const col: usize = if (col_num >= 1) @as(usize, col_num) - 1 else 0;
+            return @intCast(@min(base + col, self.lex.source.len));
         }
 
         fn emitSourcePos(self: *State, line_num: u32, col_num: u32) Error!void {
@@ -12354,11 +12418,10 @@ pub const parser_core = struct {
                 }
                 if (export_decl) try addModuleExportName(s, atom_id, atom_id);
 
-                if (local_lexical_idx) |idx| {
-                    if (s.emit_lexical_tdz_at_decl) {
-                        try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
-                    }
-                }
+                // No decl-time set_loc_uninitialized: the enter_scope lowering
+                // (qjs OP_enter_scope, writeEnterScopeRefresh) owns the single
+                // TDZ arming, exactly as in QuickJS resolve_variables. Emitting
+                // here again produced a duplicate arming per for-head lexical.
 
                 // Check for initializer
                 if (s.peekKind() == '=') {
@@ -14442,9 +14505,10 @@ pub const parser_core = struct {
         const defined = try s.defineVar(name, binding.define_type);
         if (binding.define_type == .let_ or binding.define_type == .const_) {
             switch (defined) {
+                // No decl-time set_loc_uninitialized — see the simple-decl
+                // producer: the enter_scope lowering owns the single arming.
                 .local => |idx| if (s.emit_lexical_tdz_at_decl) {
                     s.cur_func().vars[idx].tdz_emitted_at_decl = true;
-                    try s.emitOpU16(opcode.op.set_loc_uninitialized, idx);
                 },
                 .global => {},
                 .argument => unreachable,
@@ -16578,19 +16642,36 @@ pub const parser_core = struct {
         fd: *function_def_mod.FunctionDef,
         this_idx: u16,
     ) Error!void {
-        var code: [18]u8 = undefined;
+        // qjs emit_class_field_init (quickjs.c:25184-25207) reads `this`
+        // through a phase-1 scope_get_var; resolve_scope_var lowers that to
+        // get_loc_check only when the binding is lexical, which add_var_this
+        // (quickjs.c:32834-32845) grants exclusively to derived-class
+        // constructors (lowering arm quickjs.c:33068-33087). The base default
+        // constructor's `this` is a plain var, so qjs reads it with get_loc
+        // and resolve_labels shortens that to get_loc0. Emit the long form
+        // here (short-slot ids live in the phase-1 temp overlap range) with a
+        // long-form if_false: resolve_labels remaps its absolute target and
+        // re-shortens the jump after get_loc shrinks to get_loc0. A raw
+        // if_false8 relative operand is never remapped, so it must not span
+        // instructions whose lowered size can change.
+        const this_read_op: u8 = if (fd.is_derived_class_constructor)
+            opcode.op.get_loc_check
+        else
+            opcode.op.get_loc;
+        const base: u32 = @intCast(fd.byte_code.len);
+        var code: [21]u8 = undefined;
         code[0] = opcode.op.scope_get_var;
         std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
         std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
         code[7] = opcode.op.dup;
-        code[8] = opcode.op.if_false8;
-        code[9] = 8;
-        code[10] = opcode.op.get_loc_check;
-        std.mem.writeInt(u16, code[11..13], this_idx, .little);
-        code[13] = opcode.op.swap;
-        code[14] = opcode.op.call_method;
-        std.mem.writeInt(u16, code[15..17], 0, .little);
-        code[17] = opcode.op.drop;
+        code[8] = opcode.op.if_false;
+        std.mem.writeInt(u32, code[9..13], base + 20, .little); // target: the drop
+        code[13] = this_read_op;
+        std.mem.writeInt(u16, code[14..16], this_idx, .little);
+        code[16] = opcode.op.swap;
+        code[17] = opcode.op.call_method;
+        std.mem.writeInt(u16, code[18..20], 0, .little);
+        code[20] = opcode.op.drop;
         try fd.appendAtomOperand(atom_class_fields_init);
         try fd.appendByteCode(&code);
     }
@@ -16647,8 +16728,13 @@ pub const parser_core = struct {
                 @truncate(this_idx >> 8),
             });
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+            // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
+            // (quickjs.c:25152); the derived arm (quickjs.c:28455-28472)
+            // reads `this` with scope_get_var_checkthis so an uninitialized
+            // ReferenceError is raised in the caller context, lowered to
+            // get_loc_checkthis (quickjs.c:33073-33077).
             try child_fd.appendByteCode(&.{
-                opcode.op.get_loc_check,
+                opcode.op.get_loc_checkthis,
                 @truncate(this_idx),
                 @truncate(this_idx >> 8),
                 opcode.op.@"return",

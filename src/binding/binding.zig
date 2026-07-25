@@ -819,7 +819,7 @@ fn typeIsGcVisible(comptime T: type) bool {
 fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
-    if (header.meta().kind != .object) return null;
+    if (header.meta().flags.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 

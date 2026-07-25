@@ -615,9 +615,18 @@ pub const JSContext = struct {
     /// when the Runtime handler requests termination. The counter advances and
     /// resets even while no handler is installed.
     pub inline fn pollInterrupt(self: *JSContext) bool {
-        self.interrupt_counter -= 1;
-        if (self.interrupt_counter > 0) return false;
+        if (!self.pollInterruptTick()) return false;
         return self.pollInterruptSlow();
+    }
+
+    /// Hot half of the cadence poll — qjs js_poll_interrupts' inline leg
+    /// (`--ctx->interrupt_counter <= 0`, quickjs.c). Returns true on a cadence
+    /// hit; the caller must then route to a cold path whose own `pollInterrupt`
+    /// resets the counter and runs the handler (a hit leaves the counter ≤0,
+    /// so the cold re-poll still triggers the slow leg).
+    pub inline fn pollInterruptTick(self: *JSContext) bool {
+        self.interrupt_counter -= 1;
+        return self.interrupt_counter <= 0;
     }
 
     noinline fn pollInterruptSlow(self: *JSContext) bool {
@@ -720,7 +729,7 @@ pub const JSContext = struct {
         const value = self.class_prototypes[index];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 
@@ -738,7 +747,7 @@ pub const JSContext = struct {
         const value = self.native_error_prototypes[@intFromEnum(kind)];
         if (!value.isObject()) return null;
         const header = value.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 

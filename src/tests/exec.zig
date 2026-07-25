@@ -190,9 +190,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     defer function.free(js.runtime);
     const preallocated = js.context.preallocated_oom_error orelse return error.TestUnexpectedResult;
 
-    const baseline_call_depth = js.runtime.call_depth;
-    const baseline_native_depth = js.runtime.native_call_depth;
-    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
@@ -227,9 +227,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     const caught = try global.getProperty(caught_key);
     defer caught.free(js.runtime);
     try std.testing.expectEqual(false, caught.asBool().?);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     js.runtime.setInterruptHandler(null, null);
@@ -246,9 +246,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     defer recovered.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 42), recovered.asInt32());
     try std.testing.expectEqual(@as(usize, 2), arm.calls);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -530,9 +530,9 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     const async_function = try child_global.getProperty(function_key);
     defer async_function.free(js.runtime);
 
-    const baseline_call_depth = js.runtime.call_depth;
-    const baseline_native_depth = js.runtime.native_call_depth;
-    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
@@ -582,9 +582,9 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     try std.testing.expectEqual(@as(usize, 1), state.hits);
     try std.testing.expect(!js.context.hasException());
     try std.testing.expect(!js.context.exceptionIsUncatchable());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -746,9 +746,9 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
     defer js.deinit();
     js.runtime.setNativeStackSize(128 * 1024);
 
-    const baseline_call_depth = js.runtime.call_depth;
-    const baseline_native_depth = js.runtime.native_call_depth;
-    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
 
     const setup = try js.eval(
         \\globalThis.__w2SmallLinks = 0;
@@ -837,9 +837,9 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
             "bounded:done\n",
         stream.buffered(),
     );
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
 }
 
 test "tail target setup OOM remains catchable in the retiring caller" {
@@ -910,9 +910,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     defer body_runs_before.free(js.runtime);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_before.asNumber());
 
-    const baseline_call_depth = js.runtime.call_depth;
-    const baseline_native_depth = js.runtime.native_call_depth;
-    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     // The host callback clamps the account after all native-call setup. argc=1
@@ -940,9 +940,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const body_runs_after_oom = try global.getProperty(body_runs_key);
     defer body_runs_after_oom.free(js.runtime);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_after_oom.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     const stable_allocated_bytes = js.runtime.memory.allocated_bytes;
     const stable_allocation_count = js.runtime.memory.allocation_count;
@@ -970,9 +970,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const body_runs_after_second_oom = try global.getProperty(body_runs_key);
     defer body_runs_after_second_oom.free(js.runtime);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_after_second_oom.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -993,9 +993,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const body_runs_after_recovery = try global.getProperty(body_runs_key);
     defer body_runs_after_recovery.free(js.runtime);
     try std.testing.expectEqual(@as(?f64, 2), body_runs_after_recovery.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.memory.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.memory.allocation_count);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
@@ -1042,9 +1042,9 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         core.Descriptor.data(method, true, true, true),
     );
 
-    const baseline_call_depth = js.runtime.call_depth;
-    const baseline_native_depth = js.runtime.native_call_depth;
-    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
@@ -1066,9 +1066,9 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
             "recovered:42\n",
         stream.buffered(),
     );
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
 }
 
 const CrossRealmNativeProbe = struct {
@@ -11330,7 +11330,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.call_depth;
+    const initial_call_depth = ctx.runtime.hot.call_depth;
 
     // A fresh Machine has neither Entry nor arena backing. The speculative
     // arm must miss without consuming the source or changing call depth.
@@ -11338,14 +11338,14 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
     const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
-    machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    machine.popReturnedEmptyLeaf(ctx.runtime);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Entry and arena chunks are now warm. A second exact call must publish
@@ -11355,12 +11355,12 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // An oversized operand window cannot use the active arena chunk. The fast
@@ -11372,8 +11372,8 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
@@ -11389,7 +11389,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expectEqual(oversized_bytes, rt.memory.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
@@ -11461,7 +11461,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.call_depth;
+    const initial_call_depth = ctx.runtime.hot.call_depth;
 
     // A fresh Machine has neither Entry nor arena backing. The speculative
     // arm must miss without consuming EITHER owned source slot (target and
@@ -11473,7 +11473,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
     region_start[1].free(rt);
@@ -11483,8 +11483,8 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     // constructor (the forwarded twin shares both pools).
     const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(primed.isEmptyLeaf());
-    machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    machine.popReturnedEmptyLeaf(ctx.runtime);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm hit: allocation-free, publishes the forwarded-leaf teardown shape
@@ -11508,8 +11508,8 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
-    machine.popReturnedForwardedLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    machine.popReturnedForwardedLeaf(ctx.runtime);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // An oversized operand window cannot use the active arena chunk. The
@@ -11524,7 +11524,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
     region_start[0].free(rt);
@@ -11743,7 +11743,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.call_depth;
+    const initial_call_depth = ctx.runtime.hot.call_depth;
     const baseline_rc = receiver_object.header.meta().rc;
 
     // Fresh Machine: the speculative arm must miss without consuming either
@@ -11753,8 +11753,8 @@ test "method empty leaf warm constructor moves receiver ownership" {
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
 
@@ -11767,9 +11767,9 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(first.frame.ownership.this_value == .owned);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm hit: same leaf shape, allocation-free, same ownership movement.
@@ -11779,7 +11779,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.same(receiver));
@@ -11787,7 +11787,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
@@ -11805,7 +11805,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     const failed = machine.pushEmptyLeafCall(.receiver, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setMemoryLimit(null);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
@@ -11935,7 +11935,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.call_depth;
+    const initial_call_depth = ctx.runtime.hot.call_depth;
 
     // Authoritative constructor: `this` stays undefined and borrowed (no rc
     // traffic), matching setupSimpleInlineEntryImpl's strict plain arm.
@@ -11946,8 +11946,8 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.isUndefined());
     try std.testing.expect(first.frame.ownership.this_value == .borrowed);
-    machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    machine.popReturnedEmptyLeaf(ctx.runtime);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
     // Warm arm publishes the same strict shape allocation-free.
@@ -11957,15 +11957,15 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.isUndefined());
     try std.testing.expect(warm.frame.ownership.this_value == .borrowed);
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    machine.popReturnedEmptyLeaf();
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
+    machine.popReturnedEmptyLeaf(ctx.runtime);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }
 
@@ -17399,4 +17399,146 @@ test "named function expression self-binding materializes lazily with pinned Qui
     defer verdict.free(rt);
     // 22 probes, all green.
     try std.testing.expectEqual(@as(?i32, 22001), verdict.asInt32());
+}
+
+test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and carve misses" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    // The budget check compares native SP minus the accumulated bytecode
+    // budget against the native limit; this test intentionally accumulates
+    // ~0.8MB of planned frame bytes to cross the 32K-slot arena chunk, so
+    // widen the native window (the miss-retreat mechanism under test never
+    // depends on it — an admission failure commits nothing).
+    js.runtime.setNativeStackSize(8 * 1024 * 1024);
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+
+    // A right-nested addition gives the leaf bodies a ~97-slot operand stack
+    // window, an order of magnitude above the driver's ~20 slots/frame, so
+    // the level at which arena chunk 0 first lacks leaf capacity is reached
+    // while the driver itself still fits: the warm leaf constructors take the
+    // carve-miss retreat there (and the entries-chunk 16-boundary miss ~150
+    // times on the way down). bigleaf covers the empty-leaf family, bigleaf1
+    // the exact-args family, cap the capture family.
+    const deep_expr = ("1+(" ** 96) ++ "1" ++ (")" ** 96);
+    const source =
+        "function bigleaf(){ return " ++ deep_expr ++ "; }\n" ++
+        "function bigleaf1(x){ return " ++ deep_expr ++ "; }\n" ++
+        "function mkcap(){ var q = 3; return function(){ return q + q; }; }\n" ++
+        "var cap = mkcap();\n" ++
+        "function f(n){\n" ++
+        "  bigleaf(); bigleaf1(n); cap();\n" ++
+        "  var a=n+1, b=a+1, c=b+1, d=c+1, e=d+1, g=e+1, h=g+1, k=h+1, m=k+1, p=m+1, r=p+1, s=r+1;\n" ++
+        "  if (n === 0) return a+b+c+d+e+g+h+k+m+p+r+s;\n" ++
+        "  return f(n-1) + 1;\n" ++
+        "}\n" ++
+        "var __k2_deep = f(2400);\n";
+
+    const result = try js.eval(source);
+    result.free(js.runtime);
+    try std.testing.expect(!js.context.hasException());
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const key = try js.runtime.internAtom("__k2_deep");
+    defer js.runtime.atoms.free(key);
+    const deep_value = try global.getProperty(key);
+    defer deep_value.free(js.runtime);
+    // n=0 level: locals sum 1+2+...+12 = 78, plus one per recursion level.
+    try std.testing.expectEqual(@as(?i32, 78 + 2400), deep_value.asInt32());
+
+    // The arena must actually have crossed into a second chunk — otherwise
+    // this test lost its carve-miss coverage (e.g. geometry drift).
+    try std.testing.expect(js.runtime.vm_stack.chunk_count >= 2);
+
+    // Every warm miss committed and then retreated its budget charge; any
+    // imbalance (missing or doubled retreat) leaves a residue here.
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
+test "latin1 high bytes survive raw-string byte bridges (qjs JS_ToCStringLen2 mirror)" {
+    // Regression: value_ops.appendRawString used to append latin1 payload
+    // bytes raw into UTF-8 byte buffers; any 0x80-0xFF code point then broke
+    // the createStringValue re-decode ("URIError: expecting hex digit").
+    // Each leg below reproduced against qjs before the width-aware fix.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    var out = [];
+        \\    var f = function () {};
+        \\    Object.defineProperty(f, "name", { value: "é" });
+        \\    out.push(f.bind(null).name === "bound é");
+        \\    var tagged = {};
+        \\    tagged[Symbol.toStringTag] = "étag";
+        \\    out.push(Object.prototype.toString.call(tagged) === "[object étag]");
+        \\    out.push(Symbol("é").toString() === "Symbol(é)");
+        \\    out.push(Symbol("é").description === "é");
+        \\    out.push(new Error("mé").toString() === "Error: mé");
+        \\    out.push(["a", "b"].join("é") === "aéb");
+        \\    out.push(new Int8Array([1, 2]).join("é") === "1é2");
+        \\    out.push(new RegExp("éx").toString() === "/éx/");
+        \\    out.push(["é"].toLocaleString() === "é");
+        \\    try {
+        \\        var C = class éc {};
+        \\        C();
+        \\        out.push("no-throw");
+        \\    } catch (e) {
+        \\        out.push(e instanceof TypeError);
+        \\    }
+        \\    var stack_ok = false;
+        \\    try {
+        \\        (function éfn() { throw new Error("boom"); })();
+        \\    } catch (e) {
+        \\        stack_ok = typeof e.stack === "string" && e.stack.indexOf("éfn") >= 0;
+        \\    }
+        \\    out.push(stack_ok);
+        \\    return out.join(",");
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(
+        result,
+        "true,true,true,true,true,true,true,true,true,true,true",
+    );
+}
+
+test "JSON.rawJSON latin1 payload survives the simple stringify byte buffer" {
+    // Regression: json_ops' local appendRawString clone appended raw latin1
+    // bytes into the stringify buffer, breaking the final UTF-8 re-decode.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\[
+        \\    JSON.stringify(JSON.rawJSON('"é"')) === '"é"',
+        \\    JSON.stringify({ x: JSON.rawJSON('"é"') }, null, 1) === '{\n "x": "é"\n}',
+        \\].join(",")
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try helpers.expectStringValueBytes(result, "true,true");
+}
+
+test "native function toString keeps non-ASCII identifier names (qjs js_function_toString)" {
+    // Regression: the native-source name filter only accepted ASCII
+    // identifiers, silently dropping latin1/unicode identifier names that
+    // qjs js_function_toString (quickjs.c:41335) emits verbatim.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.evalWithOptions(
+        \\(function () {
+        \\    Object.defineProperty(Math.max, "name", { value: "ém", configurable: true });
+        \\    return Math.max.toString() === "function ém() {\n    [native code]\n}";
+        \\})()
+    , .{ .filename = "<repl>" });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(true, result.asBool().?);
 }

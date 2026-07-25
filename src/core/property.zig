@@ -216,7 +216,7 @@ pub const RealmAndAutoInitId = extern struct {
     const id_mask: usize = 0b11;
 
     pub fn retain(realm_header: *gc.Header, init_id: AutoInitId) RealmAndAutoInitId {
-        std.debug.assert(realm_header.metaConst().kind == .realm_context);
+        std.debug.assert(realm_header.metaConst().flags.kind == .realm_context);
         const address = @intFromPtr(realm_header);
         std.debug.assert(address & id_mask == 0);
         gc.retain(realm_header);
@@ -239,7 +239,7 @@ pub const RealmAndAutoInitId = extern struct {
     }
 
     pub fn syncRealmHeader(self: *RealmAndAutoInitId, realm_header: *gc.Header) void {
-        std.debug.assert(realm_header.metaConst().kind == .realm_context);
+        std.debug.assert(realm_header.metaConst().flags.kind == .realm_context);
         const address = @intFromPtr(realm_header);
         std.debug.assert(address & id_mask == 0);
         const init_id = self.id();

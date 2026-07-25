@@ -1250,6 +1250,7 @@ pub const CompileContext = struct {
 
 pub const function_bytecode = struct {
     const std = @import("std");
+    const builtin = @import("builtin");
 
     const atom = @import("core/atom.zig");
     const context = @import("core/context.zig");
@@ -1543,7 +1544,17 @@ pub const function_bytecode = struct {
         capture_leaf_kind: ExactArgsLeafKind = .none,
         /// The finalized root is an ECMAScript module body.
         is_module: bool = false,
-        _reserved: u3 = 0,
+        /// Publication-time image of the entry-opcode probe
+        /// `byte_code[0] == OP_check_ctor` (base-class constructors): plain
+        /// [[Call]] must take the authoritative slow path so rejection runs
+        /// with full construct-context semantics. Published code is immutable,
+        /// so hoisting the probe out of per-call resolution is exact. qjs
+        /// needs no such bit — its OP_check_ctor throws inside the callee
+        /// (quickjs.c:18253) — but zjs's inline frame constructors must reject
+        /// before entering. Derived constructors keep the canonical qjs
+        /// header bit; this covers only the base-class entry probe.
+        entry_rejects_plain_call: bool = false,
+        _reserved: u2 = 0,
     };
 
     /// Immutable execution policy published before a FunctionBytecode escapes.
@@ -1638,7 +1649,17 @@ pub const function_bytecode = struct {
         js_mode: u8, // 0x10
         flag_byte17: u8, // 0x11
         flag_byte18: u8, // 0x12
-        _flag_padding: [5]u8, // 0x13..0x17, js_mallocz zero holes
+        _flag_padding0: u8, // 0x13, js_mallocz zero hole
+        /// Header-resident image of the hot-extension CallFacts word, living
+        /// in QuickJS's 0x13..0x17 flag-padding hole so no core offset moves.
+        /// The FAM tail behind the code bytes stays authoritative (it is what
+        /// layout/serialization own); both copies are written together by the
+        /// only two publication funnels (publishExecutionFlags /
+        /// setExecutionFlags), so per-call resolution reads one fixed-offset
+        /// halfword instead of a code-ptr + code-len dependent tail load that
+        /// touches the far end of the bytecode array every call.
+        call_facts_mirror: function_bytecode.CallFacts, // 0x14
+        _flag_padding: [2]u8, // 0x16..0x17, js_mallocz zero holes
         byte_code: ?[*]u8, // 0x18
         byte_code_len: i32, // 0x20
         func_name: atom.Atom,
@@ -1662,7 +1683,9 @@ pub const function_bytecode = struct {
             std.debug.assert(@offsetOf(@This(), "js_mode") == 0x10);
             std.debug.assert(@offsetOf(@This(), "flag_byte17") == 0x11);
             std.debug.assert(@offsetOf(@This(), "flag_byte18") == 0x12);
-            std.debug.assert(@offsetOf(@This(), "_flag_padding") == 0x13);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding0") == 0x13);
+            std.debug.assert(@offsetOf(@This(), "call_facts_mirror") == 0x14);
+            std.debug.assert(@offsetOf(@This(), "_flag_padding") == 0x16);
             std.debug.assert(@offsetOf(@This(), "byte_code") == 0x18);
             std.debug.assert(@offsetOf(@This(), "byte_code_len") == 0x20);
             std.debug.assert(@offsetOf(@This(), "func_name") == 0x24);
@@ -1783,18 +1806,25 @@ pub const function_bytecode = struct {
         /// `callFacts()` below.
         pub inline fn canonicalCallFacts(self: *const FunctionBytecodeImpl) function_bytecode.CallFacts {
             // Production publication rejects empty code and always installs
-            // the zjs tail. Keep the unsafe hot load self-checking in Debug so
-            // fixture/embedding misuse fails at the contract boundary instead
-            // of silently reading beyond a non-canonical record.
+            // the zjs tail, and every publication funnel writes the header
+            // mirror together with the authoritative FAM word — so the hot
+            // read is one fixed-offset halfword instead of a code-ptr +
+            // code-len dependent load that touches the far end of the
+            // bytecode array. Keep the mirror self-checking in Debug so
+            // fixture/embedding misuse fails at the contract boundary.
             std.debug.assert(self.hasExtension());
             std.debug.assert(self.byte_code != null);
             std.debug.assert(self.byte_code_len > 0);
-            @setRuntimeSafety(false);
-            const code_ptr = self.byte_code orelse unreachable;
-            const code_len: usize = @intCast(self.byte_code_len);
-            const hot: *align(1) const FunctionBytecodeHotExtension =
-                @ptrFromInt(@intFromPtr(code_ptr) +% code_len);
-            return hot.call_facts;
+            if (comptime builtin.mode == .Debug) {
+                @setRuntimeSafety(false);
+                const code_ptr = self.byte_code orelse unreachable;
+                const code_len: usize = @intCast(self.byte_code_len);
+                const hot: *align(1) const FunctionBytecodeHotExtension =
+                    @ptrFromInt(@intFromPtr(code_ptr) +% code_len);
+                std.debug.assert(@as(u16, @bitCast(hot.call_facts)) ==
+                    @as(u16, @bitCast(self.call_facts_mirror)));
+            }
+            return self.call_facts_mirror;
         }
 
         pub fn applyFlags(self: *FunctionBytecodeImpl, flags: Flags) void {
@@ -1897,6 +1927,17 @@ pub const function_bytecode = struct {
 
         // Slice accessors materialize a `[]T` from the bare pointer + length pair.
         // The VM/readers use these instead of touching the raw fields.
+        /// Hot-path sibling of `byteCode` for callers holding a proven
+        /// materialization invariant: a resolved InlineTarget (its published
+        /// call_facts and code[0] eligibility reads exist only for finalized,
+        /// materialized FBs) or a resumed caller (its bytecode is executing).
+        /// Skips the optional probe branch the interpreter otherwise re-runs
+        /// on every call entry and return republication.
+        pub inline fn byteCodeAssumeMaterialized(self: *const FunctionBytecodeImpl) []u8 {
+            std.debug.assert(self.byte_code != null and self.byte_code_len > 0);
+            return self.byte_code.?[0..@intCast(self.byte_code_len)];
+        }
+
         pub inline fn byteCode(self: *const FunctionBytecodeImpl) []u8 {
             // Canonical compiler-produced FBs always have exact, non-empty
             // code in the QJS core pointer/length pair. Keep that path to the
@@ -2053,6 +2094,9 @@ pub const function_bytecode = struct {
             var facts = hot.call_facts;
             facts.execution = value;
             hot.call_facts = facts;
+            // Keep the header-resident hot mirror coherent with the
+            // authoritative FAM word (canonicalCallFacts reads the mirror).
+            self.call_facts_mirror = facts;
         }
         pub inline fn hasMappedArguments(self: *const FunctionBytecodeImpl) bool {
             return self.executionFlags().has_mapped_arguments;
@@ -8332,7 +8376,60 @@ pub const pipeline_resolve_labels = struct {
         return owned;
     }
 
+    // Pass-scoped jump-target bitset (bit p set iff some jump op targets pc p).
+    // `computeLayout`'s up-to-64-pass fixpoint reads a stable `code`, so the
+    // target set is constant; building it once turns every peephole
+    // `hasJumpTargetInRange` query from an O(code) rescan into an O(window)
+    // bit check (windows are <= 12 bytes). Threadlocal so concurrent parses on
+    // different threads don't collide; guarded on code slice identity and
+    // save/restored across re-entrancy so a query only trusts a bitset built
+    // for that exact buffer, else it falls back to the exact scan below.
+    threadlocal var pass_jump_target_bits: []const u8 = &.{};
+    threadlocal var pass_jump_target_code_ptr: usize = 0;
+    threadlocal var pass_jump_target_code_len: usize = 0;
+
+    /// Build the jump-target bitset for `code`. Stops at the first malformed op
+    /// exactly like the scan (so the bitset covers the same targets the scan
+    /// could reach). Sized for bits [0, code.len] since a jump target may equal
+    /// code.len (jump-to-end).
+    fn buildJumpTargetBits(mem: *memory.MemoryAccount, code: []const u8) ![]u8 {
+        const nbytes = (code.len + 1 + 7) / 8;
+        const bits = try mem.alloc(u8, nbytes);
+        @memset(bits, 0);
+        var scan_pc: usize = 0;
+        while (scan_pc < code.len) {
+            const op_id = code[scan_pc];
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
+            if (size == 0 or scan_pc + size > code.len) break;
+            const target: ?usize = if (isJumpOp(op_id))
+                (jumpTarget(code, scan_pc) catch break)
+            else if (isAtomLabelU8Op(op_id))
+                (atomLabelTarget(code, scan_pc) catch break)
+            else
+                null;
+            if (target) |t| {
+                if (t <= code.len) bits[t >> 3] |= (@as(u8, 1) << @as(u3, @intCast(t & 7)));
+            }
+            scan_pc += size;
+        }
+        return bits;
+    }
+
     fn hasJumpTargetInRange(code: []const u8, start_pc: usize, end_pc: usize) bool {
+        if (pass_jump_target_bits.len != 0 and
+            pass_jump_target_code_ptr == @intFromPtr(code.ptr) and
+            pass_jump_target_code_len == code.len)
+        {
+            const bit_capacity = pass_jump_target_bits.len * 8;
+            const limit = @min(end_pc, code.len + 1);
+            var pc = start_pc;
+            while (pc < limit) : (pc += 1) {
+                if (pc < bit_capacity and
+                    (pass_jump_target_bits[pc >> 3] & (@as(u8, 1) << @as(u3, @intCast(pc & 7)))) != 0)
+                    return true;
+            }
+            return false;
+        }
         var scan_pc: usize = 0;
         while (scan_pc < code.len) {
             const op_id = code[scan_pc];
@@ -8448,6 +8545,10 @@ pub const pipeline_resolve_labels = struct {
             return null;
         }
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
+        // qjs (resolve_labels OP_push_bigint_i32) guards the whole neg fold —
+        // including the drop discard — behind `val != INT32_MIN`, so the
+        // INT32_MIN sequence is preserved verbatim.
+        if (value == std.math.minInt(i32)) return null;
         if (pc + 7 <= code.len and
             code[pc + 6] == opcode.op.drop and
             !hasJumpTargetInRange(code, pc + 1, pc + 7))
@@ -8455,7 +8556,6 @@ pub const pipeline_resolve_labels = struct {
             return .{ .value = value, .discarded = true, .total_size = 7 };
         }
         if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
-        if (value == std.math.minInt(i32)) return null;
         return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
@@ -9242,6 +9342,36 @@ pub const pipeline_resolve_labels = struct {
         const code = ctx.function.code;
         @memset(positions, 0);
         @memset(sizes, 0);
+
+        // Precompute the jump-target set once for the whole layout fixpoint:
+        // `code` is read-only here, so the peephole matchers' repeated
+        // `hasJumpTargetInRange` queries become O(window) instead of O(code)
+        // rescans (the O(64*n^2) that timed out on large generated functions).
+        // Save/restore the threadlocal across any re-entrant computeLayout;
+        // fall back to the per-call scan on OOM. Only built for large functions:
+        // below the threshold the per-call scan's O(n^2) is sub-millisecond, so
+        // small functions keep the exact allocation-free scan path (this also
+        // keeps the resolve_labels OOM-injection unit tests, which use tiny
+        // synthetic functions, on their original allocation sequence).
+        const jump_target_bitset_threshold = 4096;
+        const jt_bits: ?[]u8 = if (code.len >= jump_target_bitset_threshold)
+            (buildJumpTargetBits(ctx.memory, code) catch null)
+        else
+            null;
+        const jt_saved_bits = pass_jump_target_bits;
+        const jt_saved_ptr = pass_jump_target_code_ptr;
+        const jt_saved_len = pass_jump_target_code_len;
+        if (jt_bits) |b| {
+            pass_jump_target_bits = b;
+            pass_jump_target_code_ptr = @intFromPtr(code.ptr);
+            pass_jump_target_code_len = code.len;
+        }
+        defer {
+            pass_jump_target_bits = jt_saved_bits;
+            pass_jump_target_code_ptr = jt_saved_ptr;
+            pass_jump_target_code_len = jt_saved_len;
+            if (jt_bits) |b| ctx.memory.free(u8, b);
+        }
 
         var changed = true;
         var final_size: usize = 0;
@@ -10334,7 +10464,8 @@ pub const pipeline_stack_size = struct {
 
         // set_loc_uninitialized this ; init_ctor ; put_loc_check_init this ;
         // get_var_ref_check <class_fields_init> ; dup ; if_false8 8 ;
-        // get_loc_check this ; swap ; call_method 0 ; drop ; get_loc_check this ; return
+        // get_loc_check this ; swap ; call_method 0 ; drop ;
+        // get_loc_checkthis this ; return
         var bc = [_]u8{0} ** 25;
         bc[0] = op.set_loc_uninitialized;
         std.mem.writeInt(u16, bc[1..3], 0, .little);
@@ -10352,7 +10483,7 @@ pub const pipeline_stack_size = struct {
         bc[17] = op.call_method;
         std.mem.writeInt(u16, bc[18..20], 0, .little);
         bc[20] = op.drop;
-        bc[21] = op.get_loc_check;
+        bc[21] = op.get_loc_checkthis;
         std.mem.writeInt(u16, bc[22..24], 0, .little);
         bc[24] = op.@"return";
 
@@ -10864,6 +10995,46 @@ pub const pipeline_finalize = struct {
         return std.math.add(usize, fd.args.len, fd.vars.len) catch return error.BytecodeOverflow;
     }
 
+    /// qjs's resolve_scope_var only ever emits a var-ref operand it obtained
+    /// from `fd->closure_var` (get_closure_var/add_closure_var append-only
+    /// indices, quickjs.c:32736-32760, 33290-33354), so the interpreter reads
+    /// `var_refs[idx]` with no bounds check at all (OP_get_var_ref 18627,
+    /// OP_get_var_ref_check 18655, OP_get_var 18461). zjs's lowering has the
+    /// same construction invariant: every producer (lookupClosureVar,
+    /// lookupGlobalClosureVar/emitGlobalVarOp, ensureGlobalClosureVar,
+    /// addOrFindClosureSource, lookupTopLevelModuleLexicalClosureVar) returns
+    /// an index into the append-only `fd.closure_var`. Enforce that invariant
+    /// once here, at the single production choke point every executable
+    /// FunctionBytecode passes through, so the resident var-ref handlers can
+    /// trust their operands exactly like qjs (Debug asserts remain in the
+    /// handlers for the test-only legacy adapter bridge).
+    fn validateVarRefOperandBounds(code: []const u8, closure_var_count: usize) FinalizeError!void {
+        var pc: usize = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            const size: usize = opcode.sizeOf(op_id);
+            if (size == 0 or size > code.len - pc) return error.InvalidBytecode;
+            switch (opcode.formatOf(op_id)) {
+                .var_ref => {
+                    if (size < 3) return error.InvalidBytecode;
+                    const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+                    if (idx >= closure_var_count) return error.InvalidBytecode;
+                },
+                .none_var_ref => {
+                    const idx: usize = switch (op_id) {
+                        opcode.op.get_var_ref0...opcode.op.get_var_ref3 => op_id - opcode.op.get_var_ref0,
+                        opcode.op.put_var_ref0...opcode.op.put_var_ref3 => op_id - opcode.op.put_var_ref0,
+                        opcode.op.set_var_ref0...opcode.op.set_var_ref3 => op_id - opcode.op.set_var_ref0,
+                        else => return error.InvalidBytecode,
+                    };
+                    if (idx >= closure_var_count) return error.InvalidBytecode;
+                },
+                else => {},
+            }
+            pc += size;
+        }
+    }
+
     /// The lowered side array is the owner ledger for atoms encoded inline in
     /// final bytecode. Validate both topology and the exact ID sequence before
     /// transferring those refs; a count-only check could free unrelated atoms.
@@ -10931,6 +11102,7 @@ pub const pipeline_finalize = struct {
 
         _ = try validateFinalArtifactShape(fd, &lowered);
         try validateFinalAtomOwners(lowered.code, lowered.atom_operands);
+        try validateVarRefOperandBounds(lowered.code, fd.closure_var.len);
 
         // Preflight the exact packed FunctionBytecode layout before the first
         // artifact allocation. Source and pc2line remain independent moved
@@ -12169,6 +12341,13 @@ const function_mod = struct {
             fb.closureVarCount() > 0 and leaf_body_geometry;
         const raw_capture = simple_inline_base and strict_mode and
             fb.arg_count == 0 and fb.closureVarCount() > 0 and leaf_body_geometry;
+        // Publication-time image of the per-call entry probe the inline call
+        // resolver used to run (`code[0] == OP_check_ctor`). The code bytes
+        // are final here (copied and authoritative above), so this is the
+        // same predicate evaluated once.
+        const entry_code = fb.byteCode();
+        const entry_rejects_plain_call = entry_code.len == 0 or
+            entry_code[0] == opcode.op.check_ctor;
 
         call_facts.execution = .{
             .has_mapped_arguments = has_mapped_arguments,
@@ -12182,8 +12361,12 @@ const function_mod = struct {
             .exact_args_leaf_kind = if (sloppy_exact) .sloppy else if (raw_exact) .raw_this else .none,
             .capture_leaf_kind = if (sloppy_capture) .sloppy else if (raw_capture) .raw_this else .none,
             .is_module = is_module,
+            .entry_rejects_plain_call = entry_rejects_plain_call,
         };
         fb.hotExtensionRequiredMut().call_facts = call_facts;
+        // Keep the header-resident hot mirror coherent with the authoritative
+        // FAM word (canonicalCallFacts reads the mirror).
+        fb.call_facts_mirror = call_facts;
     }
 
     pub const destroyFunctionBytecode = function_bytecode_mod.destroyFunctionBytecode;

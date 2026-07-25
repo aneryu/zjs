@@ -109,15 +109,26 @@ pub const ExternalMemoryToken = struct {
 };
 
 /// 6.2 BlockHeader / GcKind definition
-pub const RefKind = enum(u8) {
-    string = 0,
-    object = 1,
-    big_int = 2,
-    function_bytecode = 3,
-    var_ref = 4,
+/// 3-bit tag packed into the shared kind/flags byte of `Metadata` (qjs
+/// `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276, also shares its byte
+/// with the mark bit).
+///
+/// Value order is load-bearing for codegen, mirroring qjs's
+/// `JS_GC_OBJ_TYPE_JS_OBJECT == 0` (quickjs.c:423): the hot `kind == .object`
+/// guards compile to a single `tst` of the masked byte, and the recurring
+/// zero-ref kind sets become contiguous ranges — {object..module} is the
+/// enqueue/finalize/remove_cycles set and {object..shape} is the
+/// cycle-candidate/deinit set, each a single unsigned compare. string/big_int
+/// (plain refcounted payloads, never cycle-tracked) sit at the top.
+pub const RefKind = enum(u3) {
+    object = 0,
+    function_bytecode = 1,
+    var_ref = 2,
+    realm_context = 3,
+    module = 4,
     shape = 5,
-    realm_context = 6,
-    module = 7,
+    string = 6,
+    big_int = 7,
 };
 
 pub const GcKind = RefKind;
@@ -221,13 +232,26 @@ pub const SpaceAccount = struct {
     // only). SmallObjectSlab returns an arena as soon as its last block is freed,
     // so there is no retained-empty-page hysteresis to carry on the hot path.
     fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
-        if (bytes == 0) return;
-        self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
+        // Plain unsigned add, exactly qjs `s->malloc_size += ...`
+        // (quickjs.c:2166). The former checked-add-with-saturation compiled to
+        // adds+cset+tst+csinv on the per-object hot path for an overflow that
+        // cannot occur (live bytes are bounded by the address space); wrapping
+        // `+%=` keeps the codegen a bare ldr/add/str in every build mode. The
+        // zero-bytes early-out is dropped for the same reason: adding 0 is a
+        // no-op, and qjs has no such guard.
+        self.live_bytes +%= bytes;
     }
 
     fn recordFree(self: *SpaceAccount, bytes: usize) void {
-        if (bytes == 0) return;
-        self.live_bytes -|= bytes;
+        // Plain wrapping sub, exactly qjs `s->malloc_size -= ...`
+        // (quickjs.c:2174 js_def_free): the alloc side records the same exact
+        // byte total the free side debits (Debug verifyHeapAccounting walks the
+        // object list and proves the balance), so saturation guarded an
+        // underflow that cannot occur while costing a subs+csel pair on every
+        // GC-object free. The zero-bytes early-out mirrors recordAlloc's
+        // removal: subtracting 0 is a no-op.
+        std.debug.assert(self.live_bytes >= bytes);
+        self.live_bytes -%= bytes;
     }
 
     fn fragmentationPerMille(self: SpaceAccount) usize {
@@ -306,7 +330,14 @@ fn alignForwardSaturating(value: usize, alignment: usize) usize {
     return std.math.add(usize, value, alignment - rem) catch std.math.maxInt(usize);
 }
 
+/// Byte 3 of the metadata prefix: the GC kind and the GC lifecycle bits share
+/// one byte, mirroring qjs `JSMallocBlockHeader` byte 3 = `gc_obj_type : 7 |
+/// mark : 1` (quickjs.c:276). zjs needs four extra cycle/lifecycle bits qjs
+/// carries in its wider 4-bit `mark` value ranges and list membership, so the
+/// kind is 3 bits and the flags take the remaining five.
 pub const BlockFlags = packed struct(u8) {
+    /// GC kind tag (qjs `gc_obj_type`). Bits 0-2.
+    kind: GcKind = .object,
     mark: bool = false,
     in_cycle_list: bool = false,
     finalizing: bool = false,
@@ -318,29 +349,49 @@ pub const BlockFlags = packed struct(u8) {
     /// the `mark` bit (ScanIncrefVisitor clears `mark` on reachable objects, so they
     /// never get `cycle_visited` set); there is no separate "preserved" bit.
     cycle_visited: bool = false,
-    /// The metadata occupies the small-object slab's allocator header. In that
-    /// layout Metadata.size_class is the allocator's block index and must not be
-    /// overwritten by GC accounting.
-    metadata_in_slab: bool = false,
+};
+
+/// Byte 2 of the metadata prefix = the allocator's `block_size_idx` byte (qjs
+/// `JSMallocBlockHeader.block_size_idx`, quickjs.c:275), now stamped for GC
+/// allocations too, plus two zjs accounting bits in the unused high bits
+/// (slab classes only need 5 bits; qjs marks its large blocks via
+/// `u.block_idx == FREE_NIL` instead, but zjs stores encoded heap bytes in
+/// that u16 for standalone prefixes, so the discriminator lives here).
+pub const AllocInfo = packed struct(u8) {
+    /// Slab size-class index of the owning block. Valid iff `!standalone`;
+    /// free paths read it back instead of re-deriving the class from the byte
+    /// size (qjs `__js_free`, quickjs.c:1614-1617).
+    block_size_idx: u5 = 0,
+    /// Alloc-time large-space classification, stamped by registration
+    /// (`addInitializedWithSizeNoFail`) and valid iff `heap_accounted`. The
+    /// free path reads it from the alloc_info byte it already loads instead of
+    /// re-deriving `bytes >= policy.large_object_threshold` (a policy load +
+    /// compare qjs never pays: js_free_rt has no space split at all,
+    /// quickjs.c:1613-1617). Stamping also pins the classification to the
+    /// space that was actually credited, so a policy-threshold change between
+    /// alloc and free can no longer unbalance the two space accounts.
+    large: bool = false,
     /// The allocation has been added to the live-byte accounts. Kept separate
     /// from size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
-    /// Object-only weak-identity membership bit. Keeping this lifecycle bit in
-    /// the already-resident GC metadata avoids widening JSObject's semantic
-    /// flag word; non-object GC kinds leave it false.
-    has_weak_id: bool = false,
+    /// The metadata is a dedicated prefix ahead of the object (slab-ineligible
+    /// or over-aligned allocation); `size_class` then holds encoded heap bytes.
+    /// When false the metadata occupies the small-object slab's allocator
+    /// header and `size_class` is the allocator's block index.
+    standalone: bool = false,
 };
 
 /// qjs-style block-prefix metadata. Mirrors `JSMallocBlockHeader`
-/// (quickjs.c:270): refcount + gc type + GC mark/cycle bits live immediately
-/// before the object. For slab-backed objects these 8 bytes ARE the allocator
-/// block header; persistent/over-aligned objects keep a standalone prefix.
+/// (quickjs.c:270-280): {block_idx:u16, block_size_idx:u8, gc_obj_type:7|mark:1,
+/// ref_count:i32} live immediately before the object. For slab-backed objects
+/// these 8 bytes ARE the allocator block header; persistent/over-aligned
+/// objects keep a standalone prefix.
 pub const Metadata = extern struct {
     /// Standalone prefix: encoded heap bytes. Slab overlay: allocator block
-    /// index (or free-list link while free). Check flags.metadata_in_slab before
+    /// index (or free-list link while free). Check alloc_info.standalone before
     /// interpreting this field as a heap size.
     size_class: u16 align(8) = 0,
-    kind: GcKind = .object,
+    alloc_info: AllocInfo = .{},
     flags: BlockFlags = .{},
     rc: i32 = 1,
 };
@@ -350,11 +401,23 @@ pub const metadata_prefix_size: usize = @sizeOf(Metadata);
 
 comptime {
     // The allocator initializes the prefix by raw byte writes (memory.zig has no
-    // gc import); these offsets and flag bit must remain stable.
-    std.debug.assert(@offsetOf(Metadata, "kind") == 2);
+    // gc import); these offsets and bit positions must remain stable.
+    std.debug.assert(@offsetOf(Metadata, "alloc_info") == 2);
     std.debug.assert(@offsetOf(Metadata, "flags") == 3);
     std.debug.assert(@offsetOf(Metadata, "rc") == 4);
-    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .metadata_in_slab = true })) == 1 << 5);
+    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .standalone = true })) == 1 << 7);
+    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .heap_accounted = true })) == 1 << 6);
+    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .large = true })) == 1 << 5);
+    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .block_size_idx = 31 })) == 31);
+    // Kind occupies the low 3 bits of the shared kind/flags byte; a bare tag
+    // byte (all flags clear) equals the enum value, which is what the raw
+    // prefix writers in memory.zig and object.zig store.
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
+    std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .mark = true })) == 1 << 3);
+    // The contiguous kind ranges documented on RefKind.
+    std.debug.assert(@intFromEnum(GcKind.object) == 0);
+    std.debug.assert(@intFromEnum(GcKind.module) == 4 and @intFromEnum(GcKind.shape) == 5);
+    std.debug.assert(@intFromEnum(GcKind.string) == 6 and @intFromEnum(GcKind.big_int) == 7);
 }
 
 /// In-object GC header = intrusive list links only (qjs `JSGCObjectHeader`,
@@ -674,6 +737,18 @@ pub const Stats = struct {
 
 /// Z-GE Registry
 pub const Registry = struct {
+    /// K4: `phase` is read by every JSValue release (value.zig
+    /// `freeObjectAssumeObject`/`free`, mirroring qjs `__JS_FreeValueRT`'s
+    /// `gc_phase` check) — including the per-return function rc-- on the hot
+    /// call path. QuickJS keeps `gc_phase` in the JSRuntime head
+    /// (quickjs.c:342); zjs auto layout had pushed it to the Registry tail at
+    /// rt+18-19KB, costing a `mov #imm` address materialization plus a cold
+    /// cache line on every release (M1 dossier K4). `align(64)` pins it to
+    /// Registry offset 0 and lifts the Registry field itself into JSRuntime's
+    /// highest-alignment (front) bucket, so `rt.gc.phase` is a single
+    /// imm-offset ldrb in the runtime's front cache lines.
+    phase: Phase align(64) = .none,
+
     memory: *memory.MemoryAccount,
     policy: Policy = .{},
 
@@ -682,7 +757,10 @@ pub const Registry = struct {
     // O(1) pointer splices.
     gc_object_head: ?*GCObjectHeader = null,
     gc_object_tail: ?*GCObjectHeader = null,
-    gc_object_count: usize = 0,
+    // No live-object counter: qjs add_gc_object/remove_gc_object
+    // (quickjs.c:6540/6548) are pure list splices with no count scalar.
+    // Diagnostics (`liveCount`) derive the count by walking, like
+    // `liveCountKind` always has.
     // QuickJS-style zero-ref queue. Once a value-bearing GC node reaches zero,
     // its intrusive link is moved out of gc_object_* and into this queue. The
     // outermost release drains it iteratively, so child releases performed by a
@@ -701,7 +779,6 @@ pub const Registry = struct {
     pin_entries: []PinEntry = &.{},
     pin_entries_capacity: usize = 0,
 
-    phase: Phase = .none,
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
     major_epoch: u64 = 0,
@@ -768,13 +845,13 @@ pub const Registry = struct {
         var held_var_refs: ?*GCObjectHeader = null;
         var held_function_bytecodes: ?*GCObjectHeader = null;
         while (self.gc_object_tail) |h| {
-            if (h.meta().kind == .shape) {
+            if (h.meta().flags.kind == .shape) {
                 self.removeGcObject(h);
                 h.next = held_shapes;
                 held_shapes = h;
                 continue;
             }
-            if (h.meta().kind == .var_ref) {
+            if (h.meta().flags.kind == .var_ref) {
                 self.removeGcObject(h);
                 h.meta().flags.finalizing = true;
                 var_ref.VarRef.prepareForRuntimeDeinit(rt, h);
@@ -785,12 +862,12 @@ pub const Registry = struct {
             self.removeGcObject(h);
             self.recordHeapFreeWithBytes(h, heapByteSizeFromHeader(rt, h));
             h.meta().flags.finalizing = true;
-            if (h.meta().kind == .function_bytecode) {
+            if (h.meta().flags.kind == .function_bytecode) {
                 h.next = held_function_bytecodes;
                 held_function_bytecodes = h;
                 continue;
             }
-            switch (h.meta().kind) {
+            switch (h.meta().flags.kind) {
                 .object => object.Object.destroyFromHeader(rt, h),
                 .realm_context => context_mod.JSContext.destroyFromHeader(rt, h),
                 .module => module_mod.ModuleRecord.destroyFromHeader(rt, h),
@@ -838,7 +915,6 @@ pub const Registry = struct {
 
         self.gc_object_head = null;
         self.gc_object_tail = null;
-        self.gc_object_count = 0;
         self.zero_ref_head = null;
         self.zero_ref_tail = null;
 
@@ -1199,9 +1275,13 @@ pub const Registry = struct {
     }
 
     pub fn addWithSize(self: *Registry, h: *GCObjectHeader, bytes: usize) !void {
-        const metadata_in_slab = h.meta().flags.metadata_in_slab;
         h.meta().rc = 1;
-        h.meta().flags = .{ .metadata_in_slab = metadata_in_slab };
+        h.meta().flags = .{ .kind = h.meta().flags.kind };
+        h.meta().alloc_info.heap_accounted = false;
+        // Registration re-derives and re-stamps the large classification;
+        // clearing it here upholds addInitializedWithSizeNoFail's clear-on-entry
+        // invariant for re-registered headers.
+        h.meta().alloc_info.large = false;
         h.prev = null;
         h.next = null;
         try self.addInitializedWithSize(h, bytes);
@@ -1224,23 +1304,47 @@ pub const Registry = struct {
         std.debug.assert(!h.meta().flags.finalizing);
         std.debug.assert(!h.meta().flags.is_pinned);
         std.debug.assert(!h.meta().flags.cycle_visited);
-        std.debug.assert(!h.meta().flags.heap_accounted);
+        std.debug.assert(!h.meta().alloc_info.heap_accounted);
         std.debug.assert(h.prev == null and h.next == null);
 
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
-        if (!h.meta().flags.metadata_in_slab) h.meta().size_class = encodeHeapBytes(bytes);
-        h.meta().flags.heap_accounted = true;
+        // The large bit is clear on entry for every registration: initGcPrefix
+        // zeroes it on fresh allocations, and both unaccount sites
+        // (recordHeapFreeWithBytes / addWithSize) clear it together with
+        // heap_accounted. This keeps the hot RMW below the same single-bit orr
+        // it always was; only the cold large arm pays a second byte store.
+        std.debug.assert(!h.meta().alloc_info.large);
+        if (h.meta().alloc_info.standalone) h.meta().size_class = encodeHeapBytes(bytes);
+        h.meta().alloc_info.heap_accounted = true;
+        // Fold the cycle-list flag into registration instead of a second RMW
+        // inside appendGcObject — qjs add_gc_object writes its header
+        // bookkeeping once and then just list_add_tail's (quickjs.c:6540-6546).
+        // The earlier in_cycle_list publication is unobservable: only
+        // straight-line owner-thread scalar code separates it from the splice.
+        // (heap_accounted now lives in the byte-2 AllocInfo, so the two bits
+        // are two single-byte RMWs rather than one; the appendGcObject-side
+        // store is still gone.)
+        if (tracked) h.meta().flags.in_cycle_list = true;
         // GC pacing is owned by MemoryAccount.allocated_bytes. The registry only
         // keeps the selected space's live-byte scalar; all other allocation
-        // diagnostics are derived by statsSnapshot.
-        self.recordSpaceAlloc(is_large, bytes);
+        // diagnostics are derived by statsSnapshot. The single cold arm stamps
+        // the alloc-time large classification (read back by
+        // recordHeapFreeWithBytes) and credits the large space; the hot arm is
+        // the policy compare + a fixed-offset old_space bump.
+        if (is_large) {
+            @branchHint(.unlikely);
+            h.meta().alloc_info.large = true;
+            self.recordLargeSpaceAllocCold(bytes);
+        } else {
+            self.old_space.recordAlloc(bytes);
+        }
 
-        if (tracked) self.appendGcObject(h);
+        if (tracked) self.linkGcObjectTail(h);
     }
 
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
-        return switch (h.metaConst().kind) {
+        return switch (h.metaConst().flags.kind) {
             .object => @sizeOf(object.Object),
             .function_bytecode => blk: {
                 const fb: *const FunctionBytecode = @fieldParentPtr("header", h);
@@ -1264,7 +1368,7 @@ pub const Registry = struct {
     }
 
     fn storedHeapBytes(h: *const GCObjectHeader) ?usize {
-        if (h.metaConst().flags.metadata_in_slab) return null;
+        if (!h.metaConst().alloc_info.standalone) return null;
         if (h.metaConst().size_class == 0) return 0;
         if (h.metaConst().size_class == large_heap_size_class) return null;
         return h.metaConst().size_class;
@@ -1272,7 +1376,7 @@ pub const Registry = struct {
 
     pub fn heapByteSizeFromHeader(rt: anytype, h: *const GCObjectHeader) usize {
         if (storedHeapBytes(h)) |bytes| return bytes;
-        return switch (h.metaConst().kind) {
+        return switch (h.metaConst().flags.kind) {
             .object => blk: {
                 const obj: *const object.Object = @alignCast(@fieldParentPtr("header", h));
                 break :blk obj.allocationSize(rt);
@@ -1297,18 +1401,32 @@ pub const Registry = struct {
     }
 
     fn isCycleCandidate(h: *const GCObjectHeader) bool {
-        return h.metaConst().kind == .object or h.metaConst().kind == .function_bytecode or h.metaConst().kind == .var_ref or h.metaConst().kind == .shape or h.metaConst().kind == .realm_context or h.metaConst().kind == .module;
+        return h.metaConst().flags.kind == .object or h.metaConst().flags.kind == .function_bytecode or h.metaConst().flags.kind == .var_ref or h.metaConst().flags.kind == .shape or h.metaConst().flags.kind == .realm_context or h.metaConst().flags.kind == .module;
     }
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
-        if (!header.meta().flags.heap_accounted or bytes == 0) return;
-        const is_large = self.isLargeAllocation(bytes);
+        if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
+        // Alloc-time classification stamped by addInitializedWithSizeNoFail:
+        // reading it back from the already-loaded alloc_info byte replaces the
+        // policy-threshold reload + compare (qjs js_free_rt re-derives nothing,
+        // quickjs.c:1613-1617), and guarantees the debit hits the same space
+        // account the registration credited.
+        const is_large = header.meta().alloc_info.large;
+        std.debug.assert(is_large == self.isLargeAllocation(bytes));
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
         // addInitializedWithSize); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
-        self.recordSpaceFree(is_large, bytes);
-        header.meta().flags.heap_accounted = false;
-        if (!header.meta().flags.metadata_in_slab) header.meta().size_class = 0;
+        // The cold arm also clears the stamp, restoring the registration
+        // clear-on-entry invariant for any later re-registration of the header.
+        if (is_large) {
+            @branchHint(.unlikely);
+            header.meta().alloc_info.large = false;
+            self.recordLargeSpaceFreeCold(bytes);
+        } else {
+            self.old_space.recordFree(bytes);
+        }
+        header.meta().alloc_info.heap_accounted = false;
+        if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
 
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
@@ -1351,20 +1469,19 @@ pub const Registry = struct {
     // malloc_count/malloc_size (quickjs.c:2160), add_gc_object only links the
     // object (quickjs.c:6540), and js_trigger_gc gates on one threshold
     // (quickjs.c:1780). Page state is derived by consumers.
-    fn recordSpaceAlloc(self: *Registry, is_large: bool, bytes: usize) void {
-        if (is_large) {
-            self.large_space.recordAlloc(bytes);
-        } else {
-            self.old_space.recordAlloc(bytes);
-        }
+    // The large arm is an outlined cold twin: virtually every GC allocation is
+    // a small-slab object/shape, and the call boundary is the only reliable way
+    // to keep the hot arm a fixed-offset ldr/add/str on old_space.live_bytes —
+    // with both arms inline LLVM if-converts the two-way select into a
+    // csel-computed store address (a store whose address depends on the policy
+    // compare was the top stall of both the registration and destroy paths;
+    // @branchHint alone did not defeat the if-conversion).
+    noinline fn recordLargeSpaceAllocCold(self: *Registry, bytes: usize) void {
+        self.large_space.recordAlloc(bytes);
     }
 
-    fn recordSpaceFree(self: *Registry, is_large: bool, bytes: usize) void {
-        if (is_large) {
-            self.large_space.recordFree(bytes);
-        } else {
-            self.old_space.recordFree(bytes);
-        }
+    noinline fn recordLargeSpaceFreeCold(self: *Registry, bytes: usize) void {
+        self.large_space.recordFree(bytes);
     }
 
     fn externalTokenIndex(self: Registry, id: u64) ?usize {
@@ -1474,16 +1591,27 @@ pub const Registry = struct {
         std.debug.assert(header.prev == null);
         std.debug.assert(header.next == null);
 
-        header.prev = self.gc_object_tail;
+        header.meta().flags.in_cycle_list = true;
+        self.linkGcObjectTail(header);
+    }
+
+    /// Tail-link an already-flagged header (qjs list_add_tail, quickjs.c:6545).
+    /// `in_cycle_list` must already be set by the caller so the link is a pure
+    /// pointer splice. The tail pointer is cached in a local because LLVM
+    /// cannot prove the `header.prev` store does not alias
+    /// `self.gc_object_tail` and would otherwise reload it (this was the
+    /// hottest single load of the registration path).
+    inline fn linkGcObjectTail(self: *Registry, header: *GCObjectHeader) void {
+        std.debug.assert(header.meta().flags.in_cycle_list);
+        const tail = self.gc_object_tail;
+        header.prev = tail;
         header.next = null;
-        if (self.gc_object_tail) |tail| {
-            tail.next = header;
+        if (tail) |prior| {
+            prior.next = header;
         } else {
             self.gc_object_head = header;
         }
         self.gc_object_tail = header;
-        header.meta().flags.in_cycle_list = true;
-        self.gc_object_count += 1;
     }
 
     fn removeGcObject(self: *Registry, header: *GCObjectHeader) void {
@@ -1504,8 +1632,6 @@ pub const Registry = struct {
         header.prev = null;
         header.next = null;
         header.meta().flags.in_cycle_list = false;
-        std.debug.assert(self.gc_object_count != 0);
-        self.gc_object_count -= 1;
     }
 
     pub fn detachCycleCandidate(self: *Registry, header: *GCObjectHeader) void {
@@ -1613,11 +1739,11 @@ pub const Registry = struct {
     }
 
     pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
-        if (self.gc_object_count == 0) {
-            if (self.gc_object_head != null or self.gc_object_tail != null) return error.CorruptGcList;
+        if (self.gc_object_head == null) {
+            if (self.gc_object_tail != null) return error.CorruptGcList;
             return;
         }
-        if (self.gc_object_head == null or self.gc_object_tail == null) return error.CorruptGcList;
+        if (self.gc_object_tail == null) return error.CorruptGcList;
 
         var tortoise = self.gc_object_head;
         var hare = self.gc_object_head;
@@ -1630,7 +1756,6 @@ pub const Registry = struct {
 
         var previous: ?*GCObjectHeader = null;
         var current = self.gc_object_head;
-        var count: usize = 0;
         while (current) |h| {
             if (!isCycleCandidate(h)) return error.CorruptGcList;
             if (!h.meta().flags.in_cycle_list) return error.CorruptGcList;
@@ -1645,10 +1770,8 @@ pub const Registry = struct {
 
             previous = h;
             current = h.next;
-            count += 1;
         }
         if (previous != self.gc_object_tail) return error.CorruptGcList;
-        if (count != self.gc_object_count) return error.CorruptGcList;
     }
 
     pub fn verifyHeapAccounting(self: Registry, rt: anytype) InvariantError!void {
@@ -1658,7 +1781,7 @@ pub const Registry = struct {
 
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
-            if (!header.metaConst().flags.heap_accounted) return error.MissingHeapAllocation;
+            if (!header.metaConst().alloc_info.heap_accounted) return error.MissingHeapAllocation;
             const bytes = heapByteSizeFromHeader(rt, header);
             if (bytes == 0) return error.MissingHeapAllocation;
             heap_live_bytes = std.math.add(usize, heap_live_bytes, bytes) catch std.math.maxInt(usize);
@@ -1727,15 +1850,21 @@ pub const Registry = struct {
             expected.evacuation_candidate_page_count == current.evacuation_candidate_page_count;
     }
 
+    /// Diagnostic/test-only: derived by walking, exactly like `liveCountKind`.
+    /// The hot alloc/free paths keep no live-object counter (qjs
+    /// add_gc_object/remove_gc_object are pure list splices).
     pub fn liveCount(self: Registry) usize {
-        return self.gc_object_count;
+        var count: usize = 0;
+        var iterator = self.objectIterator();
+        while (iterator.next()) |_| count += 1;
+        return count;
     }
 
     pub fn liveCountKind(self: Registry, kind: GcKind) usize {
         var count: usize = 0;
         var iterator = self.objectIterator();
         while (iterator.next()) |header| {
-            if (header.metaConst().kind == kind) count += 1;
+            if (header.metaConst().flags.kind == kind) count += 1;
         }
         return count;
     }
@@ -1798,8 +1927,8 @@ pub inline fn release(rt: anytype, header: anytype) void {
 /// GC owners also arrive here through `release` above.
 pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     std.debug.assert(header.meta().rc == 0);
-    if (header.meta().flags.finalizing and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context or header.meta().kind == .module)) return;
-    if (rt.gc.phase == .deinit and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .shape or header.meta().kind == .realm_context or header.meta().kind == .module)) return;
+    if (header.meta().flags.finalizing and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
+    if (rt.gc.phase == .deinit and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .shape or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
     // During cycle removal, a child reaching rc 0 must NOT be freed here: the
     // dedicated batch loop in `destroyRuntimeCyclesWithValueRoots` frees every
     // marked-garbage object exactly once. Freeing it here (a cascade) would
@@ -1818,14 +1947,14 @@ pub noinline fn destroyZeroRef(rt: anytype, header: *Header) void {
     // destroyFromHeader shape-skip);
     // a live/shared shape's eager release here can never reach rc 0 during a cycle
     // round, so shape needs no gate.
-    if (rt.gc.phase == .remove_cycles and (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context or header.meta().kind == .module)) return;
+    if (rt.gc.phase == .remove_cycles and (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module)) return;
 
     // QJS queues the GC kinds reachable through JSValue and lets the outermost
     // free drain them. Strings/ropes and BigInt remain immediate; Shape has its
     // own direct release path and can only add object work while a queued node
     // is being destroyed. This removes unbounded Object/FB/VarRef destructor
     // recursion without adding a fallible allocation to the zero-ref path.
-    if (header.meta().kind == .object or header.meta().kind == .var_ref or header.meta().kind == .function_bytecode or header.meta().kind == .realm_context or header.meta().kind == .module) {
+    if (header.meta().flags.kind == .object or header.meta().flags.kind == .var_ref or header.meta().flags.kind == .function_bytecode or header.meta().flags.kind == .realm_context or header.meta().flags.kind == .module) {
         rt.gc.enqueueZeroRef(rt, header);
         return;
     }
@@ -1852,13 +1981,13 @@ fn destroyZeroRefNow(rt: anytype, header: *Header) void {
     // self-unlink, so they still need the unlink here. This mirrors qjs, where
     // `free_object` / `free_shape` do the gc_obj_list unlink + malloc_size
     // adjustment exactly once inside the object/shape teardown, never twice.
-    switch (header.meta().kind) {
+    switch (header.meta().flags.kind) {
         .object, .shape => {},
         else => rt.gc.unlinkObjectWithBytes(header, Registry.heapByteSizeFromHeader(rt, header)),
     }
 
     // 10.1 静态 kind switch 派发销毁
-    switch (header.meta().kind) {
+    switch (header.meta().flags.kind) {
         .string => unreachable,
         .object => object.Object.destroyFromHeader(rt, header),
         .big_int => bigint.BigInt.destroyFromHeader(rt, header),

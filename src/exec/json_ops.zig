@@ -1659,7 +1659,13 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     const string_value = rooted_value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
+        // Width-aware like value_ops.appendRawString (qjs JS_ToCStringLen2,
+        // quickjs.c:4458): the stringify buffer is re-decoded as UTF-8, so
+        // latin1 0x80-0xFF must widen instead of landing as raw bytes.
+        .latin1 => |bytes| {
+            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
+        },
         .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }

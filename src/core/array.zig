@@ -4,6 +4,7 @@ const Object = @import("object.zig").Object;
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const runtime = @import("runtime.zig");
 const Descriptor = @import("descriptor.zig").Descriptor;
+const shape_mod = @import("shape.zig");
 
 pub const max_array_index: u32 = 0xffff_fffe;
 pub const max_array_length: u32 = 0xffff_ffff;
@@ -113,6 +114,26 @@ pub fn expectArray(value: JSValue) !*Object {
 /// instead of the previous per-value `requiresRefCount` pre-scan + a rooted
 /// dual-allocation copy. Immediate-only literals cost the same single
 /// linked-list push as refcounted ones.
+/// Hot-path array-literal constructor — the direct mirror of qjs
+/// `OP_array_from`'s `js_create_array_free(ctx, argc, sp - argc)`
+/// (quickjs.c:18239 -> 9625): allocate the array from the realm's prepared
+/// initial Shape (`ctx->array_shape`) and MOVE the already-evaluated element
+/// values into its dense storage — no per-element retain/release pair and no
+/// root registration. qjs roots nothing here either: the elements sit on the
+/// operand stack holding ordinary refcounts across the two allocations, and
+/// the cycle collector derives its roots from external refcounts
+/// (gc_decref/gc_scan — `destroyRuntimeCyclesWithValueRoots` ignores value
+/// root frames entirely), so a mid-construction collection observes every
+/// element as externally referenced. On success the values are consumed
+/// (caller must NOT free them); on error they are untouched (the caller's
+/// cold route re-runs the op or frees them, covering qjs's fail-path frees).
+pub fn constructLiteralOwnedDenseFromShape(rt: *JSRuntime, values: []const JSValue, initial_shape: *shape_mod.Shape) !JSValue {
+    const object = try Object.createArrayFromInitialShape(rt, initial_shape);
+    errdefer Object.destroyFromHeader(rt, &object.header);
+    try object.initDenseArrayLiteralValuesOwnedTrusted(rt, values);
+    return object.value();
+}
+
 pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, prototype: ?*Object) !JSValue {
     // The backing storage is mutable (caller-owned stack/heap buffer); the
     // const on the borrow is a contract, not a guarantee the memory is

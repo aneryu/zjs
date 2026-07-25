@@ -203,7 +203,7 @@ pub const object = struct {
     fn coreFromValue(v: value.Value) ?*CoreObject {
         if (!v.isObject()) return null;
         const header = v.refHeader() orelse return null;
-        if (header.meta().kind != .object) return null;
+        if (header.meta().flags.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 

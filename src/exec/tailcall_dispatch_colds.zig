@@ -854,6 +854,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     inline for ([_]u8{ op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3 }) |o| t[o] = td.op_get_arg_short;
     t[op.push_atom_value] = td.op_push_atom_value;
     t[op.special_object] = td.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
+    t[op.push_this] = td.op_push_this; // object dup / sloppy nullish->global; ToObject boxing + strict non-object + uninitialized stay cold
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
     // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).
@@ -875,6 +876,11 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
     // no runtime predicate select on the int fast path).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = td.opCompare(o);
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = td.op_inc_dec;
+    // qjs OP_post_inc/OP_post_dec int fast leg (quickjs.c:20009-20045). Every
+    // `let` loop update emits post_inc+put_loc_check+drop (checked lvalues are
+    // outside the resolve_labels plain-loc fusions, matching qjs), so this is
+    // the per-iteration update op of every lexical counter loop.
+    inline for ([_]u8{ op.post_inc, op.post_dec }) |o| t[o] = td.op_post_inc_dec;
     t[op.dup] = td.op_dup;
     t[op.swap] = td.op_swap;
     // Trailing expression-statement drop (the per-iter `dup; put_loc_check; DROP`
@@ -917,6 +923,10 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
         .{ .o = op.put_var_ref2, .h = td.opPutVarRef(.c2) },
         .{ .o = op.put_var_ref3, .h = td.opPutVarRef(.c3) },
         .{ .o = op.put_var_ref, .h = td.opPutVarRef(.half) },
+        // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
+        // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
+        // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
+        .{ .o = op.put_var_ref_check, .h = td.op_put_var_ref_check },
         .{ .o = op.set_var_ref0, .h = td.opSetVarRef(.c0) },
         .{ .o = op.set_var_ref1, .h = td.opSetVarRef(.c1) },
         .{ .o = op.set_var_ref2, .h = td.opSetVarRef(.c2) },

@@ -118,11 +118,15 @@ pub const Vm = struct {
     /// Field kept ONLY to preserve the measured Vm layout (same rationale as
     /// `_dispatch_layout_padding` below).
     stack_base: [*]JSValue = undefined,
-    /// Keep the dispatch tables and outcome payloads at their measured offsets
-    /// after deriving the single-consumer argument pointer from `frame`. The
-    /// compact layout was instruction-neutral but less cycle-stable on the
-    /// call/closure probes, so this slot is deliberately not reclaimed.
-    _dispatch_layout_padding: usize = undefined,
+    /// Resident `ctx.runtime` — invariant for the Vm's lifetime (a JSContext
+    /// never changes runtime), set once at driver entry. The hot call/return
+    /// legs (budget commit, leaf teardown frees, arena restore) previously
+    /// re-derived rt through the machine→ctx→runtime two-level dependent
+    /// chain on every call AND every return; qjs holds `rt` in a local for
+    /// the whole JS_CallInternal body (quickjs.c:17770 `rt = caller_ctx->rt`).
+    /// Occupies the retired `_dispatch_layout_padding` slot, so the measured
+    /// Vm layout (dispatch tables / outcome payload offsets) is unchanged.
+    rt: *core.JSRuntime,
     /// RETIRED dispatch-table base (B1: hot dispatch is `dispatch_table[op]` static
     /// `adrp+add` now — two dependency-free insns beat the `ldr vm.tbl` whose load sat
     /// on the `br`-target critical path; the historical remat tax this indirection
@@ -225,6 +229,9 @@ const PropertyTailSlot = enum(usize) {
     get_static_cached_proxy,
     get_length_property,
     get_field_typed_property,
+    get_field_release_receiver,
+    put_field_release_old,
+    put_field_release_receiver,
 };
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
@@ -454,22 +461,52 @@ inline fn enterEntry(vm: *Vm, entry: *inline_calls.Entry, code_ptr: [*]const u8)
 /// poll must precede stack preflight, but an uncatchable interruption before
 /// the constructor runs leaves ownership with the caller; restore that top so
 /// normal frame unwind releases the complete region.
+///
+/// K7 scalarization: qjs js_poll_interrupts' inline leg is the bare cadence
+/// decrement (`--ctx->interrupt_counter <= 0`, quickjs.c:7877-7883, polled at
+/// call entry 17787). Keeping only that tick in the warm body stops the
+/// publishing poll's `!void` error union from materializing as a rodata
+/// constant + merge phi on every call (the op_goto8 tick/cold precedent).
+/// The cold half's re-poll decrements again, still lands <= 0, and runs the
+/// reset+handler leg exactly once per cadence hit.
+/// Returns true when the poll threw (pending_error published): the caller
+/// must `return .threw`. A bool keeps the whole contract in one register —
+/// an `?Outcome` result here re-materialized the merge as a memory phi
+/// (rodata null constant + sret + merged tag load), the exact phantom this
+/// scalarization removes.
 inline fn pollRetreatedCallRegion(
     vm: *Vm,
     region_start: [*]JSValue,
     value_count: usize,
-) ?Outcome {
+) bool {
+    if (!vm.ctx.pollInterruptTick()) return false;
+    return pollRetreatedCallRegionCold(vm, region_start, value_count);
+}
+
+/// Cold half of the call-entry poll: the publishing re-poll plus the
+/// region-restore semantics — an uncatchable interruption before the
+/// constructor runs leaves ownership with the caller, so the retreated top is
+/// restored before failing. noinline keeps the throw machinery (and the
+/// error-union materialization) off the warm call body.
+noinline fn pollRetreatedCallRegionCold(
+    vm: *Vm,
+    region_start: [*]JSValue,
+    value_count: usize,
+) bool {
     exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
         vm.stack.setTopPtr(region_start + value_count);
-        return vm.fail(err);
+        // vm.fail publishes pending_error and yields `.threw`; the bool
+        // carries that verdict to the caller's register-scalar return.
+        _ = vm.fail(err);
+        return true;
     };
-    return null;
+    return false;
 }
 
 inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.InlineTarget, region_start: [*]JSValue, argc: u16, comptime layout: inline_calls.RegionLayout, comptime inline_exact: bool) Outcome {
     comptime std.debug.assert(layout == .plain or !inline_exact);
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(layout == .method));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (layout) {
         .plain => vm.machine.pushPlainCall(inline_exact, vm.global, vm.stack, target, region_start, argc),
         .method => vm.machine.pushMethodCall(vm.global, vm.stack, target, region_start, argc),
@@ -477,7 +514,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// Warm OP_call0 / OP_call_method(argc=0) entry after receiver-independent
@@ -492,8 +529,8 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 /// realm global, strict preserves undefined.
 inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
-    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
+    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -509,8 +546,8 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// fixed handler body.
 inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -540,7 +577,7 @@ noinline fn pushEmptyLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *Vm
 /// Handler-side adapter for the outline warm constructor above.
 inline fn pushWarmOutlineExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmExactArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -567,7 +604,7 @@ inline fn paddedLeafRegionHasCapacity(stack: *const stack_mod.Stack, region_star
 /// instance gains a new inline constructor (see `warmPaddedArgsLeafOutline`).
 inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmPaddedArgsLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, argc, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -583,7 +620,7 @@ inline fn pushWarmOutlinePaddedArgsLeafAndEnter(comptime leaf_this: inline_calls
 /// constructor captures as the resume record.
 inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushEmptyLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
@@ -599,7 +636,7 @@ inline fn pushEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [
 /// chain, and the resume record and return epilogue are identical from there.
 inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
@@ -613,8 +650,8 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 /// capture binding (two frame stores off the already-resolved closure record).
 inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -626,7 +663,7 @@ inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis,
 /// non-pivot sloppy plain twin; see `warmCaptureLeafOutline`).
 inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = switch (warmCaptureLeafOutline(leaf_this, vm, function, call_facts, captures, region_start, resume_pc)) {
         .entry => |e| e,
         .threw => return .threw,
@@ -642,12 +679,28 @@ inline fn pushWarmOutlineCaptureLeafAndEnter(comptime leaf_this: inline_calls.Le
 /// into a shared discrimination head on the established arms.
 inline fn pushCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
-    if (pollRetreatedCallRegion(vm, region_start, source_count)) |outcome| return outcome;
+    if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
     const entry = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
     return enterEntry(vm, entry, code_ptr);
+}
+
+/// Cold half of the moved/borrowed-region entry polls — the K7 sibling of
+/// `pollRetreatedCallRegionCold` without region-restore semantics: moved and
+/// borrowed sources keep ownership in their scoped caller cleanup (defer
+/// frees), so a poll throw needs only the publishing re-poll plus the
+/// pending_error store. noinline keeps the throw machinery (and the warm-path
+/// `vm.global` load it forces) off the warm entry bodies. Returns true when
+/// the poll threw: the caller must `return .threw` (bool-in-register
+/// contract, see pollRetreatedCallRegion).
+noinline fn pollCallEntryCold(vm: *Vm) bool {
+    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+        _ = vm.fail(err);
+        return true;
+    };
+    return false;
 }
 
 /// Same-Machine entry for a call region already moved out of the caller's
@@ -664,7 +717,12 @@ inline fn pushMovedAndEnter(
     comptime interrupt_polled: bool,
 ) Outcome {
     if (!interrupt_polled) {
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        // K7 scalarization (see pollRetreatedCallRegion): warm body keeps only
+        // the qjs cadence tick (quickjs.c:7877-7883); the cold half's re-poll
+        // still lands <= 0 and runs the reset+handler leg once per hit.
+        if (vm.ctx.pollInterruptTick()) {
+            if (pollCallEntryCold(vm)) return .threw;
+        }
     }
     const entry = vm.machine.pushMovedCall(vm.global, target, moved_values, .method, return_action, continuation_payload) catch |err| {
         const recovered = if (return_action == .for_of_next)
@@ -674,7 +732,7 @@ inline fn pushMovedAndEnter(
         if (!recovered) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// qjs internal IteratorNext borrows `enum_obj` and `method` from the caller's
@@ -688,7 +746,14 @@ inline fn pushBorrowedIteratorAndEnter(
     iterator_record: []JSValue,
     depth: u8,
 ) Outcome {
-    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+    // K7 scalarization (see pollCallEntryCold): tick-only warm poll; borrowed
+    // bindings stay rooted on the suspended caller stack, so a poll throw
+    // needs no ownership restore. The borrowed-miss fallback below still
+    // enters pushMovedAndEnter with interrupt_polled=true — this entry poll
+    // remains the single semantic call poll on both legs.
+    if (vm.ctx.pollInterruptTick()) {
+        if (pollCallEntryCold(vm)) return .threw;
+    }
     const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, target, iterator_record, depth) catch |err| {
         if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
         return coldNext(vb, vm);
@@ -698,7 +763,7 @@ inline fn pushBorrowedIteratorAndEnter(
         defer for (moved) |value| value.free(vm.ctx.runtime);
         return pushMovedAndEnter(vb, vm, target, &moved, .for_of_next, depth, true);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 inline fn isForwardingCallRecord(ctx: *core.JSContext, method: JSValue) bool {
@@ -765,7 +830,7 @@ inline fn pushForwardedAndEnter(
         if (!callSetupRecover(vm, err)) return .threw;
         return coldNext(vb, vm);
     };
-    return enterEntry(vm, entry, target.fb.byteCode().ptr);
+    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
 }
 
 /// Complete the qjs `js_proxy_get` work that must happen *after* a bytecode
@@ -827,10 +892,29 @@ fn completeProxyGetContinuation(vm: *Vm, result: JSValue, atom_id: core.Atom) Ho
 /// Cold post-return dispatcher. Keeping both continuation bodies out of
 /// `popAndResume` preserves the ordinary return's original one-compare shape;
 /// only calls that actually carry post-call work publish these fields.
+///
+/// The `.for_of_next` arm carries the same-chain fast leg for the dominant
+/// iterator-result shape — qjs's straight-line C after JS_Call returns:
+/// JS_IteratorNext's done tail (JS_GetProperty(obj, JS_ATOM_done) →
+/// JS_ToBoolFree, quickjs.c:16607-16617) and js_for_of_next's result layout
+/// (`sp[0] = value; sp[1] = JS_NewBool(done)`, quickjs.c:16700-16712) — with
+/// no driver hop and no re-validation. The `pc`/`sp` arguments ARE the
+/// caller's resume state: popAndResume republished the caller through
+/// reloadAfterPop before tail-calling here, so a plain own-data `{value,
+/// done:false}` step finishes with two probe loads, two stores and a
+/// tail-jump. Eligibility mirrors `iteratorResultProperty`'s fast leg
+/// (ordinary receiver, own data slots); `done` must be a plain bool (qjs
+/// JS_ToBoolFree's bool leg). Everything else — accessors/Proxy/exotic
+/// receivers, prototype-walk misses, non-bool `done`, the done==true loop
+/// exit (which clears the iterator slot), capacity shortfalls, and the
+/// L0 stop-fixture seam — bails to the authoritative completion below.
+/// The borrowed-entry invariant ("the caller stack was deliberately left
+/// untouched while the method frame ran", finishForOfNextResult) is what
+/// makes the operand-layout re-validation unnecessary on the fast leg, the
+/// same trust qjs's js_for_of_next places in its sp-relative slots
+/// (quickjs.c:16686-16699).
 fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    _ = pc;
-    _ = sp;
-    const result = vm.return_value;
+    const result = loadValueAsIntPair(&vm.return_value);
     const action = vm.return_action;
     const payload = vm.return_payload;
     vm.return_value = JSValue.undefinedValue();
@@ -838,7 +922,47 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
     vm.return_payload = 0;
     switch (action) {
         .proxy_get => completeProxyGetContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
-        .for_of_next => completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err),
+        .for_of_next => {
+            fast: {
+                // Legacy stop-boundary fixtures suspend through coldNext's
+                // maybeStop; keep them on the publishing path (op_drop_fast
+                // precedent).
+                if (vm.local_fast_blocked) break :fast;
+                const next_object = class_vm.objectFromValue(result) orelse break :fast;
+                if (next_object.proxyTarget() != null or next_object.hasExoticMethods()) break :fast;
+                const stack = vm.stack;
+                std.debug.assert(sp == stack.topPtr());
+                // Same capacity contract as finishForOfNextResult: normal
+                // frames reserve stack_size + 1, synthetic/heap-backed frames
+                // keep the checked growth path.
+                if (stack.len() > stack.capacity or stack.capacity - stack.len() < 2) break :fast;
+                var slow_property = false;
+                // Slot-pointer probes + integer-pair reloads: `result.value`
+                // was just written by the callee's op_put_field as an x-pair
+                // store, so a 128-bit SIMD re-read of the slot would stall on
+                // store-to-load forwarding every iteration (loadValueAsIntPair
+                // note above).
+                const done_slot = next_object.findOwnDataSlotFast(core.atom.ids.done, &slow_property) orelse break :fast;
+                const done = loadValueAsIntPair(done_slot).asBool() orelse break :fast;
+                if (done) break :fast;
+                const result_value_slot = next_object.findOwnDataSlotFast(core.atom.ids.value, &slow_property) orelse break :fast;
+                const value = loadValueAsIntPair(result_value_slot);
+                _ = value.dup();
+                // Deliver `[value, done]` and publish the new operand top
+                // BEFORE releasing the result object — mirror of
+                // finishForOfNextResult's push-then-deferred-free order, so a
+                // destroy-triggered GC scans a consistent caller window.
+                storeValueAsIntPair(&sp[0], value);
+                // Split store for `done` too: the aggregate form lowered to an
+                // SVE index + 128-bit store whose 64-bit reload by the loop's
+                // if_false consumer stalled on forwarding every iteration.
+                storeValueAsIntPair(&sp[1], JSValue.boolean(false));
+                stack.setTopPtr(sp + 2);
+                result.free(vm.ctx.runtime);
+                return @call(.always_tail, next, .{ pc, sp + 2, var_buf, vm });
+            }
+            completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
+        },
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
@@ -880,15 +1004,18 @@ fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!
 /// x-pair store — matching qjs, whose 16-byte JSValue return moves are
 /// ldp/stp integer pairs throughout (`ret_val = *--sp`, quickjs.c:18266).
 inline fn loadValueAsIntPair(slot: *const JSValue) JSValue {
-    if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) {
-        // Nan-boxed 8-byte repr: the slot is one machine word; a plain load is
-        // already width-matched with the single-word store that wrote it.
-        return slot.*;
-    }
-    const words: *const [2]u64 = @ptrCast(@alignCast(slot));
-    const lo = words[0];
-    const hi = words[1];
-    return @bitCast([2]u64{ lo, hi });
+    return JSValue.loadSlotAsIntPair(slot);
+}
+
+/// Store twin of `loadValueAsIntPair`: writes a 16-byte JSValue operand slot as
+/// two 64-bit integer stores. A whole-value aggregate assignment after a branch
+/// join (e.g. the dup-or-borrow select in the get_field hit) makes LLVM
+/// materialize the value in a 128-bit stack slot and copy it with a q-register
+/// round trip; the split store keeps the value SSA-scalar and forwarding-
+/// eligible for the 64-bit reads of downstream handlers — matching qjs's
+/// `stp` of the two JSValue words (`sp[-1] = val`, quickjs.c:19158).
+inline fn storeValueAsIntPair(slot: *JSValue, value: JSValue) void {
+    JSValue.storeSlotAsIntPair(slot, value);
 }
 
 /// Fused popFrame + reload for an in-handler return to an inline caller —
@@ -922,7 +1049,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
-        machine.popReturnedEmptyLeaf();
+        machine.popReturnedEmptyLeaf(vm.rt);
         if (caller_opt) |caller| {
             // Flat caller republication — same fields reloadAfterPop's
             // entry arm publishes (enterEntry overwrote them with callee
@@ -932,13 +1059,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
             // exactly like reloadAfterPop's entry arm.
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: resume_sp IS the
             // caller's operand top (asserted above), so store through the
@@ -984,17 +1111,17 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
-        machine.popReturnedExactArgsLeaf();
+        machine.popReturnedExactArgsLeaf(vm.rt);
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            std.debug.assert(resume_pc == caller_function.byteCode().ptr + caller.frame.pc);
+            std.debug.assert(resume_pc == caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc);
             std.debug.assert(resume_sp == caller.stack.topPtr());
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             resume_sp[0] = value;
             caller.stack.setTopPtr(resume_sp + 1);
@@ -1017,17 +1144,17 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // releases the remaining window (and the native frame) exactly once.
         const dying = machine.topEntry();
         const caller_opt = dying.prev;
-        machine.popReturnedForwardedLeaf();
+        machine.popReturnedForwardedLeaf(vm.rt);
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
-            const resume_pc = caller_function.byteCode().ptr + caller.frame.pc;
+            const resume_pc = caller_function.byteCodeAssumeMaterialized().ptr + caller.frame.pc;
             const resume_sp = caller.stack.topPtr();
             vm.frame = &caller.frame;
             vm.stack = &caller.stack;
             vm.catch_target = &caller.catch_target;
             vm.function = caller_function;
-            vm.code_base = caller_function.byteCode().ptr;
+            vm.code_base = caller_function.byteCodeAssumeMaterialized().ptr;
             vb2 = caller.frame.locals.ptr;
             // Deliver the result on the caller stack: the retired target slot
             // at the caller's operand top is dead (its value transferred into
@@ -1435,7 +1562,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     vm.stack.setTopPtr(region_start);
                     if (vm.machine.tryPushForwardedEmptyLeafCallFast(.sloppy_global, vm.global, vm.stack, target.fb, target.call_facts, region_start)) |entry| {
                         vm.frame.pc += 2;
-                        return enterEntry(vm, entry, target.fb.byteCode().ptr);
+                        return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
                     }
                     vm.stack.setTopPtr(sp);
                 }
@@ -1470,12 +1597,72 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) call
     if (@intFromPtr(pc + 1) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len)) {
         const depth = pc[1];
         if (iter_vm.forOfIteratorIndex(vm.stack, depth)) |iterator_index| {
-            const receiver = vm.stack.values[iterator_index];
-            const method = vm.stack.values[iterator_index + 1];
+            const iterator_record = vm.stack.values[iterator_index..][0..2];
+            // Integer-pair loads (see loadValueAsIntPair): the whole-value
+            // aggregate reads let LLVM merge the two adjacent slots into one
+            // `ldp q0, q1` + a q-spill of the pair into the handler frame,
+            // and the immediately following receiver/method tag+payload reads
+            // came back as 64-bit scalar loads from that q-written slot — a
+            // cross-domain store-to-load forward against the record the
+            // warm-path eligibility chain consumes first (the top stall of
+            // this handler on the for-of cycles profile). The values die at
+            // their eligibility checks; the cold arms below re-read the
+            // borrowed record slots instead of keeping these copies live
+            // across their `bl`s (the record stays untouched on the suspended
+            // caller stack — finishForOfNextResult's borrowed-entry
+            // invariant), so the hot path carries no 16-byte spill at all.
+            // qjs's js_for_of_next likewise reads its record as sp-relative
+            // slot loads at each use with no long-lived copy
+            // (quickjs.c:16686-16692).
+            const receiver = loadValueAsIntPair(&iterator_record[0]);
+            const method = loadValueAsIntPair(&iterator_record[1]);
             if (!receiver.isUndefined()) {
-                if (inline_calls.resolveInlineTarget(vm.ctx, vm.global, receiver, method)) |target| {
+                if (inline_calls.resolveInlineFunction(vm.global, method)) |resolved| {
                     vm.frame.pc += 1;
-                    const iterator_record = vm.stack.values[iterator_index..][0..2];
+                    // Warm borrowed-iterator arm (M2 knife 3): the borrowed
+                    // eligibility byte plus an open-var-ref-free slab (every
+                    // hot `next()` shape — capture-reading bodies and the
+                    // sloppy this-in-loc0 lowering alike) prove the frame the
+                    // authoritative constructor would build is one contiguous
+                    // args/locals/operand carve, so a warm hit goes poll →
+                    // warm carve → tail-jump into the callee's first opcode
+                    // with no noinline constructor bl, no generic
+                    // depth-accounting shell, and no acquireSlot round-trip —
+                    // qjs's alloca + seven sf stores (quickjs.c:17841-17871).
+                    // A warm miss (first use, chunk boundary, budget
+                    // shortfall) takes ONE outlined bl into the authoritative
+                    // constructor (poll already paid); open-binding targets
+                    // keep the established inline generic path below
+                    // unchanged.
+                    const execution = resolved.call_facts.execution;
+                    const borrowed_simple = execution.simple_inline_eligible or
+                        execution.strict_simple_inline_eligible or
+                        execution.strict_simple_snapshot_inline_eligible;
+                    if (borrowed_simple and resolved.fb.openVarRefCount() == 0) {
+                        // K7 scalarization (see pollCallEntryCold): the warm
+                        // arm keeps only the cadence tick; the publishing
+                        // re-poll and its vm.global load live in the cold
+                        // half. "Poll already paid" for the warm-miss bl
+                        // below is unchanged — a cadence hit resolves fully
+                        // (handler run or .threw) before the carve attempt.
+                        if (vm.ctx.pollInterruptTick()) {
+                            if (pollCallEntryCold(vm)) return .threw;
+                        }
+                        const captures = resolved.var_refs[0..resolved.fb.closureVarCount()];
+                        if (vm.machine.tryPushBorrowedIteratorNextFast(resolved.fb, resolved.call_facts, captures, iterator_record, depth)) |entry| {
+                            return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr);
+                        }
+                        // Cold warm-miss arm: re-read the borrowed record
+                        // slots (identity — the record is untouched below the
+                        // callee region) so `receiver`/`method` are not kept
+                        // live across the carve/miss `bl`s in the hot arm.
+                        switch (pushBorrowedIteratorMiss(vm, &resolved, iterator_record[0], iterator_record[1], iterator_record, depth)) {
+                            .entry => |entry| return enterEntry(vm, entry, resolved.fb.byteCodeAssumeMaterialized().ptr),
+                            .threw => return .threw,
+                            .recovered => return coldNext(vb, vm),
+                        }
+                    }
+                    const target = resolved.bind(iterator_record[0], iterator_record[1]);
                     return pushBorrowedIteratorAndEnter(vb, vm, &target, iterator_record, depth);
                 }
             }
@@ -1993,7 +2180,11 @@ pub fn op_put_loc_check_init(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
 const VarRefIdx = enum { c0, c1, c2, c3, half };
 pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
-        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+        // I-cache pin (see op_return): this handler is a 4-hop dependent load
+        // chain (frame->ptr->cell->pvalue->tag) whose cycle cost is exquisitely
+        // entry-alignment sensitive; keep it invariant under unrelated
+        // text-size changes in the dispatch unit.
+        fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
             const idx: u16 = switch (idx_src) {
                 .c0 => 0,
                 .c1 => 1,
@@ -2005,9 +2196,14 @@ pub fn opGetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            // Keep Zig's boundary check for synthetic/legacy bytecode; normal
-            // parser output has construction-fixed length like qjs.
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4): finalize validates every
+            // var-ref operand against closure_var_count
+            // (validateVarRefOperandBounds), and frame construction sizes
+            // var_refs to exactly that count (captureSlice/initFrameVarRefs),
+            // so the resident read is unchecked like qjs OP_get_var_ref_check
+            // (quickjs.c:18655). The assert covers the test-only legacy
+            // adapter bridge, which bypasses finalize.
+            std.debug.assert(idx < vm.frame.var_refs.len);
             // Slot is a cell by type (`[]*core.VarRef`): the pre-typed
             // "is this slot a cell" header load (guard #4) is deleted —
             // qjs OP_get_var_ref is a bare `*var_refs[idx]->pvalue` (18627).
@@ -2046,9 +2242,10 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            // Parser-produced bytecode has construction-fixed var-ref bounds.
-            // Retain the cold checked adapter for synthetic/legacy bytecode.
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+            // are finalize-validated, frames carry exactly closure_var_count
+            // cells — unchecked like qjs OP_put_var_ref (quickjs.c:18638).
+            std.debug.assert(idx < vm.frame.var_refs.len);
             const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp - 1, var_buf, vm);
@@ -2056,12 +2253,44 @@ pub fn opPutVarRef(comptime idx_src: VarRefIdx) Handler {
     }.h;
 }
 
+/// TDZ-checked closure var-ref write (qjs OP_put_var_ref_check,
+/// quickjs.c:18670-18682) — the per-iteration index write-back of the for-of
+/// `next()` body. The only difference from OP_put_var_ref is the uninitialized
+/// probe on the CURRENT cell value before the store; the throw leg
+/// (JS_ThrowReferenceErrorUninitialized2) falls to the cold op, which rebuilds
+/// the proper TDZ ReferenceError. Const violations and sloppy function-name
+/// writes never reach this opcode: they are consumed at lowering time exactly
+/// like qjs resolve_scope_var (quickjs.c:33301-33345 → bytecode.zig
+/// closureVarWriteThrowsReadOnly / the function_name drop arm), which is what
+/// lets the resident path be the bare qjs TDZ-check + set_value. Kept separate
+/// from opPutVarRef: put_var_ref is also the lexical-INIT opcode
+/// (scope_put_var_init lowering), so folding the TDZ probe into the shared
+/// handler would send every closure `let` initialization to the cold shell.
+/// No short forms exist for the check variant (qjs has none either).
+pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const idx = readInt(u16, pc + 1);
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands are
+    // finalize-validated, frames carry exactly closure_var_count cells —
+    // unchecked like qjs OP_put_var_ref_check (quickjs.c:18670).
+    std.debug.assert(idx < vm.frame.var_refs.len);
+    const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
+    // qjs 18675-18678: JS_IsUninitialized(*var_refs[idx]->pvalue) -> throw.
+    if (cell.pvalue.*.isUninitialized()) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // qjs set_value: publish the owned TOS value, release the displaced cell
+    // value. The freed value is the OLD cell value — never the (stale-window)
+    // operand slot — so no stack shrink is required before free (same GC-window
+    // reasoning as opPutVarRef; contrast op_drop_fast, which frees the slot).
+    value_slot.replaceOwned(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
+    return cont(pc + 3, sp - 1, var_buf, vm);
+}
+
 /// Assignment-expression closure/global var-ref write (qjs OP_set_var_ref0..3 /
 /// OP_set_var_ref, quickjs.c:18646-18654). Unlike put_var_ref, set_var_ref keeps
 /// the owned TOS value as the expression result, so the cell takes a retained
 /// copy. Publishing the copy before releasing the displaced value also makes a
-/// refcounted `captured = captured` safe. Synthetic/legacy bounds growth and
-/// generator/eval stop boundaries retain the checked cold adapter.
+/// refcounted `captured = captured` safe. Generator/eval stop boundaries
+/// retain the cold adapter; bounds are a compile-time contract (M2-刀4).
 pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
     return struct {
         fn h(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -2077,7 +2306,10 @@ pub fn opSetVarRef(comptime idx_src: VarRefIdx) Handler {
                 .c0, .c1, .c2, .c3 => 1,
                 .half => 3,
             };
-            if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+            // Compile-time bounds contract (M2-刀4, see opGetVarRef): operands
+            // are finalize-validated, frames carry exactly closure_var_count
+            // cells — unchecked like qjs OP_set_var_ref (quickjs.c:18646).
+            std.debug.assert(idx < vm.frame.var_refs.len);
             const cell = slot_ops.varRefSlotCellUnchecked(vm.frame, idx);
             value_slot.replaceBorrowed(vm.ctx.runtime, cell.pvalue, (sp - 1)[0]);
             return cont(pc + advance, sp, var_buf, vm);
@@ -2117,6 +2349,46 @@ pub fn op_special_object(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, v
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     sp[0] = vm.frame.current_function.dup();
     return cont(pc + 2, sp + 1, var_buf, vm);
+}
+
+/// qjs OP_push_this (quickjs.c:17933-17954): a register-resident tag check on the
+/// raw receiver. The dominant arms inline — an object `this` dups directly
+/// (`likely(tag == JS_TAG_OBJECT) goto normal_this`, 17939-17940/17948-17950;
+/// mode-independent, strict pushes the same raw dup), and a sloppy
+/// undefined/null receiver substitutes the realm global
+/// (`JS_DupValue(ctx, ctx->global_obj)`, 17941-17943). qjs never writes
+/// `this_obj` back, so the global arm skips the frame-slot store too — a later
+/// direct-eval materializeFrameThisBinding substitutes the same singleton
+/// global, and the only raw `frame.this_value` reader outside the materialize
+/// hook (finishFunctionReturn's derived-ctor arm) is strict-only. The strict
+/// non-object receiver takes the same raw dup as qjs `normal_this`
+/// (17948-17950: `val = JS_DupValue(ctx, this_obj)` with no tag inspection) —
+/// under the fast-path invariant the frame slot is a bare value, so this arm
+/// is the exact hot mirror of the cold strict route (materializeFrameThisBinding
+/// returns the slot untouched for strict, pushThis dups the borrow). The mode
+/// flags load only after the mode-independent object arm misses, keeping the
+/// dominant method-call arm free of the FunctionBytecode flag reads. The
+/// allocating sloppy primitive ToObject arm (17944-17946, which must cache the
+/// boxed wrapper in the frame slot for identity) and the derived-ctor
+/// uninitialized -> ReferenceError check stay on cold
+/// pushThisVm/materializeFrameThisBinding.
+pub fn op_push_this(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    const v = vm.frame.this_value;
+    if (v.isObject()) {
+        sp[0] = v.dup();
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
+    if (vm.function.isStrictMode() or vm.function.runtimeStrictMode()) {
+        if (!v.isUninitialized()) {
+            sp[0] = v.dup();
+            return cont(pc + 1, sp + 1, var_buf, vm);
+        }
+    } else if (v.isUndefined() or v.isNull()) {
+        sp[0] = vm.global.value().dup();
+        return cont(pc + 1, sp + 1, var_buf, vm);
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
 /// Frameless primitive constant pushes. QuickJS's `CASE(OP_null)` is the direct
@@ -2236,6 +2508,17 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// Rare-leg tail for the hot get_field hit: the receiver's refcount reached
+/// zero, so run the full release (deinit gate + decrement + destroy) here and
+/// resume at the next opcode. Keeping the destroy call out of op_get_field's
+/// body is what lets that handler stay a prologue-free leaf. Contract: the
+/// result has already been stored at (sp - 1) and the dying receiver (rc == 1)
+/// is stashed in vm.property_holder.
+fn op_get_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.property_holder.value().free(vm.ctx.runtime);
+    return cont(pc + 5, sp, var_buf, vm);
+}
+
 fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -2271,10 +2554,30 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // Walk self+prototype for a plain data property; on a hit the value is BORROWED
     // from the holder slot, so dup onto the stack (which owns its entries) and free
     // the receiver. Accessor/missing/private/exotic misses stay out of this handler.
-    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        const stack_value = if (value.requiresRefCount()) value.dup() else value;
-        (sp - 1)[0] = stack_value;
-        receiver.free(vm.ctx.runtime);
+    // The slot is re-read as two 64-bit integer words (loadValueAsIntPair): the
+    // by-value form made LLVM round-trip the 16-byte hit through a 128-bit
+    // stack slot whose 64-bit tag reload defeated store-to-load forwarding —
+    // qjs's own hit is an integer load pair straight off pr->u.value
+    // (quickjs.c:19131).
+    const rt = vm.ctx.runtime;
+    if (vm_property_field.qjsGetFieldFastSlot(rt, receiver, atom_id)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        // dup() returns `value` bitwise (it only bumps the refcount when the
+        // tag requires one); discarding the result keeps the pushed value a
+        // single SSA scalar instead of a two-arm join that LLVM would park in
+        // a stack slot (see storeValueAsIntPair).
+        _ = value.dup();
+        storeValueAsIntPair(&(sp - 1)[0], value);
+        // Inline the common receiver release (deinit gate + rc decrement) and
+        // route the rare zero-ref destroy through a cold tail: the destroy
+        // `bl` was this handler's only call, and eliding it drops the whole
+        // callee-saved spill frame from every hit (qjs's shared interpreter
+        // frame pays no per-op prologue for its inline JS_FreeValue either,
+        // quickjs.c:19157).
+        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
         return cont(pc + 5, sp, var_buf, vm);
     }
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
@@ -2318,9 +2621,12 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
     // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
-    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        const stack_value = if (value.requiresRefCount()) value.dup() else value;
-        sp[0] = stack_value;
+    // Integer-pair slot reload + split push for the same forwarding reasons as
+    // op_get_field (dup() returns the value bitwise; see that handler's note).
+    if (vm_property_field.qjsGetFieldFastSlot(vm.ctx.runtime, receiver, atom_id)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&sp[0], value);
         return cont(pc + 5, sp + 1, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2346,24 +2652,59 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
-// Hot inline put_field — qjs OP_put_field's monomorphic IC: o.x = v writes the
-// value straight into the cached slot when the receiver's shape matches the site's
-// monomorphic IC entry (no allocation, no shape transition). IC miss / new property /
-// setter / exotic receiver fall to the cold h_field, which runs the full put fast
-// path (simple-put + IC install) then the slow setValueProperty. Stack is
-// [obj, value]; on a hit value is consumed by the slot write and obj is freed.
+// Hot inline put_field — qjs OP_put_field's inline fast window
+// (quickjs.c:19188-19203): tag check, find_own_property FIRST (no class
+// qualification, no cache), single-mask plain-writable-data test, set_value's
+// swap-then-free into the slot (quickjs.c:5091), free the receiver, sp -= 2.
+// Shape-changing adds, setters/read-only entries, and non-object receivers
+// fall to cold field(). Stack is [obj, value]; on a hit value is consumed by
+// the slot write and obj is freed. Mirrors the op_get_field lowering:
+// integer-pair slot/operand moves (the property slot's 64-bit half re-readers
+// — the get_field hit, the for-of done/value probes — stay forwarding-
+// eligible), and BOTH rare destroys (dying old slot value, dying receiver)
+// are routed through cold property tails so the hot body carries no
+// callee-saved spill frame — qjs's shared interpreter frame pays no per-op
+// prologue for its inline JS_FreeValue pair either.
 pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
-    const obj = (sp - 2)[0];
+    const receiver = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
-    // qjs OP_put_field inline: find_own_property on the receiver, write the slot
-    // (consuming `value`) and free the old value. Shape-changing adds, exotic, and
-    // non-object receivers fall to cold field().
-    if (vm_property_field.qjsPutFieldFast(vm.ctx.runtime, obj, atom_id, value)) {
-        obj.free(vm.ctx.runtime); // value consumed by the slot write
+    const rt = vm.ctx.runtime;
+    if (vm_property_field.qjsPutFieldFastSlot(rt, receiver, atom_id)) |slot| {
+        const old_value = loadValueAsIntPair(slot);
+        const value = loadValueAsIntPair(&(sp - 1)[0]);
+        storeValueAsIntPair(slot, value); // consumes the stack's ref on value
+        if (old_value.releaseRefCountedNeedsDestroy(rt)) {
+            // Park the dying old value (rc == 1) in the now-dead value slot;
+            // the tail completes both releases off the still-intact operands.
+            storeValueAsIntPair(&(sp - 1)[0], old_value);
+            return @call(.always_tail, propertyTailHandler(vm, .put_field_release_old), .{ pc, sp, var_buf, vm });
+        }
+        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+            return @call(.always_tail, propertyTailHandler(vm, .put_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
         return cont(pc + 5, sp - 2, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
+/// Rare-leg tails for the hot put_field hit (get_field_release_receiver
+/// precedent — keeping the destroy `bl`s here is what lets op_put_field stay
+/// a prologue-free leaf).
+/// Contract: the new value is already in the property slot; the dying old
+/// value (rc == 1) has been parked in the dead value slot at (sp - 1); the
+/// receiver at (sp - 2) has NOT been released yet.
+fn op_put_field_release_old_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const rt = vm.ctx.runtime;
+    (sp - 1)[0].free(rt);
+    (sp - 2)[0].freeObjectAssumeObject(rt);
+    return cont(pc + 5, sp - 2, var_buf, vm);
+}
+
+/// Contract: slot written and old value already released inline; only the
+/// receiver at (sp - 2) (rc == 1) remains to destroy.
+fn op_put_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    (sp - 2)[0].freeObjectAssumeObject(vm.ctx.runtime);
+    return cont(pc + 5, sp - 2, var_buf, vm);
 }
 
 fn op_get_array_el_cached_string(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
@@ -2698,26 +3039,27 @@ pub fn op_define_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 
 // Frameless OP_array_from — qjs CASE(OP_array_from): `js_create_array_free(ctx,
 // argc, sp - argc)` building the dense array in one call (quickjs.c:18239), the
-// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal. The
-// cold h_array_from shell paid the 224-byte coldStd publish+spill tax plus a heap temp
-// buffer + per-element stack.pop every iteration. `constructLiteralWithPrototype`
-// DUPS the values slice into the array (initDenseArrayLiteralValuesAssumingEmpty) and
-// roots it during the create (GC-safe), so this handler hands it the register-resident
-// operand window `(sp-argc)[0..argc]` directly — no temp buffer, no per-element pop —
-// then frees the argc popped originals (balancing the dup, exactly the cold arrayFrom's
-// trailing free) and pushes the array. OOM routes to the cold shell (values untouched
-// on the stack, frame.pc left at the u16 argc operand for its own decode). 3-byte op.
+// per-iteration hot op of `a = [i, i+1, i+2]` and every non-spread array literal.
+// The realm's prepared initial shape (`vm.ctx.array_shape`, qjs `ctx->array_shape`
+// where ctx is the running function's realm) feeds the JS_NewObjectFromShape-mirror
+// allocator directly — no runtime-wide shape-by-prototype walk — and the element
+// values MOVE from the register-resident operand window `(sp-argc)[0..argc]` into
+// the dense storage exactly like qjs's `u.array.u.values[i] = tab[i]` (no dup, no
+// balancing free; the array replaces the whole window, net stack effect -argc+1).
+// OOM (or a realm without its initial shape installed yet) routes to the cold
+// shell with the values untouched on the stack (frame.pc left at the u16 argc
+// operand for its own decode); the cold path re-runs the op with the generic
+// borrow+free contract, covering qjs's inline fail-path frees. 3-byte op.
 pub fn op_array_from(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const argc: usize = readInt(u16, pc + 1);
     const rt = vm.ctx.runtime;
     const values = (sp - argc)[0..argc];
-    const array = core.array.constructLiteralWithPrototype(rt, values, array_ops.arrayPrototypeFromGlobal(rt, vm.global)) catch
+    const initial_shape = vm.ctx.array_shape orelse
         return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-    // Free the popped originals (the array dup'd them); then the array replaces the
-    // whole [v0..v_argc) window at sp-argc, so the net stack effect is -argc+1.
-    for (values) |v| v.free(rt);
+    const array = core.array.constructLiteralOwnedDenseFromShape(rt, values, initial_shape) catch
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const nsp = sp - argc;
-    nsp[0] = array; // owned
+    nsp[0] = array; // owned; the argc originals were consumed by the move
     return cont(pc + 3, nsp + 1, var_buf, vm);
 }
 
@@ -2849,6 +3191,23 @@ pub fn op_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+// qjs CASE(OP_post_inc)/CASE(OP_post_dec) int fast leg (quickjs.c:20009-20045):
+// the old int stays at sp[-1], the stepped int lands at sp[0], and sp grows by
+// one — the emitter's n_push=2 stack account covers the slot (same unchecked
+// push contract as op_dup). INT32_MAX/INT32_MIN steps and non-int operands
+// fall to the cold shell (js_post_inc_slow mirror) with the stack untouched.
+pub fn op_post_inc_dec(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    const opc = pc[0];
+    if ((sp - 1)[0].asInt32()) |iv| {
+        const res = if (opc == op.post_inc) @addWithOverflow(iv, 1) else @subWithOverflow(iv, 1);
+        if (res[1] == 0) {
+            sp[0] = JSValue.int32(res[0]);
+            return cont(pc + 1, sp + 1, var_buf, vm);
+        }
+    }
+    return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+}
+
 pub fn op_dup(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const v = (sp - 1)[0];
     sp[0] = if (v.requiresRefCount()) v.dup() else v;
@@ -2877,10 +3236,14 @@ inline fn jump8Target(pc: [*]const u8, vm: *Vm) [*]const u8 {
 // invariant under unrelated text-size changes elsewhere in the dispatch unit.
 pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     // qjs CASE(OP_goto) polls interrupts on every unconditional jump — the
-    // loop back edge (quickjs.c:18822-18826). Without this, a pure loop never
-    // reaches a poll point and an installed interrupt handler can't abort it.
-    vm.publish(pc, sp);
-    exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+    // loop back edge (quickjs.c:18822-18826). js_poll_interrupts' inline leg
+    // is a bare cadence decrement; only a cadence hit publishes and runs the
+    // Runtime handler. That cold leg re-executes this op via cold_table — the
+    // indirect route LLVM cannot fold back (see op_if_false8's cold-routing
+    // note), keeping this hot body prologue-free. The cold poll's second
+    // decrement lands at ≤0 and still triggers the reset+handler run.
+    if (vm.ctx.pollInterruptTick())
+        return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     return @call(.always_tail, next, .{ jump8Target(pc, vm), sp, var_buf, vm });
 }
 // The boolean fast path (a comparison result — the hot loop condition) inlines; a
@@ -2897,8 +3260,11 @@ pub fn op_goto8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) a
 pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(64) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        // Cadence tick only (qjs js_poll_interrupts inline leg); a hit routes
+        // to the cold branch8, which re-executes the untouched operand with
+        // the publishing poll (see op_goto8).
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (!b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2907,8 +3273,8 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
         // from the original pc/sp; branch8 consumes its operand, so shrink the GC
         // root window before the inline free just as stack.pop() does there.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
@@ -2919,8 +3285,8 @@ pub fn op_if_false8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
 pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const value = (sp - 1)[0];
     if (value.asBool()) |b| {
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         if (b) return @call(.always_tail, next, .{ jump8Target(pc, vm), sp - 1, var_buf, vm });
         return cont(pc + 2, sp - 1, var_buf, vm);
     }
@@ -2928,8 +3294,8 @@ pub fn op_if_true8(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
         // See op_if_false8: non-HTMLDDA objects are truthy, and the consumed
         // operand's root must be removed before its inline rc==1 destruction.
         if (core.value_semantics.isHTMLDDA(value)) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
-        vm.publish(pc, sp);
-        exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| return vm.fail(err);
+        if (vm.ctx.pollInterruptTick())
+            return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
         const nsp = sp - 1;
         vm.stack.setTopPtr(nsp);
         value.free(vm.ctx.runtime);
@@ -3073,9 +3439,14 @@ pub fn op_add_loc_cold(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     if (vm.local_fast_blocked) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
     const idx = readInt(u16, pc + 1);
-    // Keep Zig's boundary check for synthetic/legacy bytecode; normal parser
-    // output has construction-fixed length (qjs reads unchecked, 18461).
-    if (idx >= vm.frame.var_refs.len) return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
+    // Compile-time bounds contract (M2-刀4, see opGetVarRef): get_var /
+    // get_var_undef are .var_ref-format ops, so finalize validates their
+    // operands against closure_var_count (validateVarRefOperandBounds) and
+    // frame construction sizes var_refs to exactly that count
+    // (captureSlice/initFrameVarRefs). The resident read is unchecked like
+    // qjs OP_get_var (quickjs.c:18461); the assert covers the test-only
+    // legacy adapter bridge, which bypasses finalize.
+    std.debug.assert(idx < vm.frame.var_refs.len);
     // Slot is a cell by type: guard #4 (slot header load) deleted — qjs
     // OP_get_var is `*var_refs[idx]->pvalue` + one uninitialized check
     // (18461-18488).
@@ -3100,38 +3471,41 @@ pub fn op_get_var(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
         // exact cold waterfall (vm_property_globals.getVar), which starts
         // with this same own-data probe.
         const function = vm.function;
-        if (idx < function.closureVar().len) {
-            const cv = function.closureVar()[idx];
-            if (!cv.isLexical() and !function.runtimeStrictMode()) {
-                const global = vm.global;
-                if (!global.hasExoticMethods()) {
-                    // Private frameless twin of Object.findProperty + the
-                    // asDataAt data test (traversal identical, hot-arm
-                    // non-sharing discipline): the shared helpers'
-                    // Flags.fromBits packed-struct bitcast materializes
-                    // through a stack slot when inlined here, which grew a
-                    // scratch frame on the WHOLE handler and taxed the
-                    // initialized hit leg (+2 sp insns per read). Raw-bits
-                    // probe: atom match + !deleted (bit 5) + kind == .data
-                    // (bits 3-4) — register tests only. Mirrors qjs
-                    // find_own_property + the JS_PROP_NORMAL value read.
-                    const shape_ref = global.shape_ref;
-                    const props = global.shapeProps();
-                    var shape_index: u32 = @call(.always_inline, core.Shape.firstPropertyIndex, .{ shape_ref, cv.var_name });
-                    var steps: usize = 0;
-                    while (shape_index != core.shape.no_property_index and steps < shape_ref.prop_count) : (steps += 1) {
-                        const prop_index: usize = @intCast(shape_index);
-                        if (prop_index >= shape_ref.prop_count) break;
-                        const prop = shape_ref.props()[prop_index];
-                        shape_index = prop.hash_next;
-                        if (prop_index >= props.len) continue;
-                        if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
-                            if ((prop.flags & 0b011000) == 0) {
-                                sp[0] = global.prop_values[prop_index].slot.data.dup();
-                                return cont(pc + 3, sp + 1, var_buf, vm);
-                            }
-                            break; // found, but not a plain data slot → cold waterfall
+        // Same finalize-validated operand contract as the initialized leg
+        // above: idx < closureVarCount is construction-fixed, so the arm
+        // reads the closure-var record unchecked (assert covers the
+        // test-only legacy adapter bridge).
+        std.debug.assert(idx < function.closureVar().len);
+        const cv = function.closureVar()[idx];
+        if (!cv.isLexical() and !function.runtimeStrictMode()) {
+            const global = vm.global;
+            if (!global.hasExoticMethods()) {
+                // Private frameless twin of Object.findProperty + the
+                // asDataAt data test (traversal identical, hot-arm
+                // non-sharing discipline): the shared helpers'
+                // Flags.fromBits packed-struct bitcast materializes
+                // through a stack slot when inlined here, which grew a
+                // scratch frame on the WHOLE handler and taxed the
+                // initialized hit leg (+2 sp insns per read). Raw-bits
+                // probe: atom match + !deleted (bit 5) + kind == .data
+                // (bits 3-4) — register tests only. Mirrors qjs
+                // find_own_property + the JS_PROP_NORMAL value read.
+                const shape_ref = global.shape_ref;
+                const props = global.shapeProps();
+                var shape_index: u32 = @call(.always_inline, core.Shape.firstPropertyIndex, .{ shape_ref, cv.var_name });
+                var steps: usize = 0;
+                while (shape_index != core.shape.no_property_index and steps < shape_ref.prop_count) : (steps += 1) {
+                    const prop_index: usize = @intCast(shape_index);
+                    if (prop_index >= shape_ref.prop_count) break;
+                    const prop = shape_ref.props()[prop_index];
+                    shape_index = prop.hash_next;
+                    if (prop_index >= props.len) continue;
+                    if (prop.atom_id == cv.var_name and (prop.flags & 0b100000) == 0) {
+                        if ((prop.flags & 0b011000) == 0) {
+                            sp[0] = global.prop_values[prop_index].slot.data.dup();
+                            return cont(pc + 3, sp + 1, var_buf, vm);
                         }
+                        break; // found, but not a plain data slot → cold waterfall
                     }
                 }
             }
@@ -3199,7 +3573,7 @@ noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm:
 /// constructor chain for strict callees, mirroring the zero-arg method arm's
 /// warm/outline split rationale.
 noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
         const slow = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
@@ -3229,7 +3603,7 @@ noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *
 /// +1.3% cyc from spilled freight stores). One bl into this warm body still
 /// deletes the InlineTarget freight and the three-deep constructor chain.
 noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse {
         const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
@@ -3256,7 +3630,7 @@ noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm
 /// first-use Entry allocation, chunk switching, heap fallback, OOM, and
 /// stack-overflow recovery.
 noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
         const slow = vm.machine.pushPaddedArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
@@ -3266,8 +3640,35 @@ noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis,
     return .{ .entry = entry };
 }
 
+// Borrowed-iterator warm-miss constructor (M2 knife 3): same
+// after-the-cluster placement as the O1/O2/Q3 outline bodies above.
+/// Authoritative fallback for a borrowed-iterator warm miss (first-use Entry
+/// allocation, chunk switching, heap fallback, OOM, stack overflow). The
+/// dispatch arm already paid the caller-Realm interrupt poll. The warm gate
+/// implies the borrowed-simple eligibility `pushBorrowedIteratorNext`
+/// re-proves, so its moved fallback (null) is unreachable here; keep the
+/// authoritative dup/move arm anyway so a future eligibility drift fails
+/// safe instead of executing an unproven frame shape.
+noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.ResolvedInlineFunction, receiver: JSValue, method: JSValue, iterator_record: []JSValue, depth: u8) EmptyLeafMiss {
+    const target = resolved.bind(receiver, method);
+    const maybe_entry = vm.machine.pushBorrowedIteratorNext(vm.global, &target, iterator_record, depth) catch |err| {
+        if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
+        return .recovered;
+    };
+    const entry = maybe_entry orelse {
+        var moved = [2]JSValue{ iterator_record[0].dup(), iterator_record[1].dup() };
+        defer for (moved) |value| value.free(vm.ctx.runtime);
+        const moved_entry = vm.machine.pushMovedCall(vm.global, &target, &moved, .method, .for_of_next, depth) catch |err| {
+            if (!iteratorNextCallSetupRecover(vm, depth, err)) return .threw;
+            return .recovered;
+        };
+        return .{ .entry = moved_entry };
+    };
+    return .{ .entry = entry };
+}
+
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
-const property_tail_table = [10]Handler{
+const property_tail_table = [13]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -3278,6 +3679,9 @@ const property_tail_table = [10]Handler{
     op_get_static_cached_proxy,
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
+    op_get_field_release_receiver_tail,
+    op_put_field_release_old_tail,
+    op_put_field_release_receiver_tail,
 };
 
 // ===========================================================================

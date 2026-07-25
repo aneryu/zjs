@@ -243,15 +243,17 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
+    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
+    // JS_ToCStringLen2, quickjs.c:4458); the ToNumber trimmer consumes the
+    // buffer as UTF-8, so latin1 0x80-0xFF must widen rather than land raw.
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            for (units) |unit| {
-                try appendUtf8CodePoint(rt, buffer, unit);
-            }
+        .latin1 => |bytes| {
+            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
         },
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }
 

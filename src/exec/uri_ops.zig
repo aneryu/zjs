@@ -746,18 +746,22 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 }
 
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
+    // Width-aware UTF-8 like exec.value_ops.appendRawString (qjs
+    // JS_ToCStringLen2, quickjs.c:4458): raw latin1 bytes and "\u{x}"
+    // wide-unit escapes both corrupted the bare-runtime URI input buffer.
     const string_value = value.asStringBody() orelse return;
     try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
+        .latin1 => |bytes| {
+            if (core.string.isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
+        },
         .utf16 => |units| {
             for (units) |unit| {
                 if (unit <= 0x7f) {
                     try buffer.append(rt.memory.allocator, @intCast(unit));
                 } else {
-                    var unit_buf: [16]u8 = undefined;
-                    const printed = try std.fmt.bufPrint(&unit_buf, "\\u{x}", .{unit});
-                    try buffer.appendSlice(rt.memory.allocator, printed);
+                    try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, unit);
                 }
             }
         },
