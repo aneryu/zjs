@@ -2211,7 +2211,7 @@ pub const Object = extern struct {
             if (initialized) {
                 destroyFromHeader(rt, &self.header);
             } else {
-                freeObjectAllocation(rt, self, inline_layout);
+                freeObjectAllocation(rt, self, definition);
             }
         }
         var property_storage: []property.Entry = &.{};
@@ -2529,13 +2529,41 @@ pub const Object = extern struct {
         return @ptrCast(bytes + layout.payload_offset);
     }
 
-    fn freeObjectAllocation(rt: *JSRuntime, self: *Object, inline_layout: ?InlineClassPayloadLayout) void {
-        if (inline_layout) |layout| {
-            const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-            rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-            return;
+    /// Free the object's raw allocation from its immutable destruction plan.
+    /// Plain (non-inline-payload) objects — ~every object — go straight to the
+    /// typed slab free (the qjs `js_free_rt(rt, p)` tail of free_object,
+    /// quickjs.c:6382); only inline-payload classes rederive the aligned
+    /// layout, in the cold outlined arm.
+    /// inline: without it LLVM outlines the three-caller body and the hot
+    /// destroy tail pays a call that ships the whole spilled DefinitionPlan by
+    /// pointer; inlined, the plain-object arm is the bare typed slab free and
+    /// only `inline_payload_size` stays live across the teardown calls.
+    inline fn freeObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
+        if (definition.inline_payload_size != 0) {
+            return freeInlinePayloadObjectAllocation(rt, self, definition);
         }
         rt.memory.destroy(Object, self);
+    }
+
+    noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
+        const layout = inlineClassPayloadLayoutForDefinition(definition) orelse unreachable;
+        const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
+        rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
+    }
+
+    /// `InlineClassPayloadLayout.object_size` (== the byte count the register
+    /// side stored via `registerObjectWithBytes`) as a bare scalar: the payload
+    /// trails the Object struct at the payload's own alignment. The layout
+    /// helper's overflow arm cannot fire for a registered u32 size + u16
+    /// power-of-two alignment on a 64-bit target, so unlike
+    /// `inlineClassPayloadLayoutFromScalars` there is no failure path — and no
+    /// Alignment-enum round trip (rbit/clz) on the destroy hot path.
+    fn inlineClassObjectSize(definition: class.Table.DefinitionPlan) usize {
+        comptime std.debug.assert(@bitSizeOf(usize) == 64);
+        std.debug.assert(definition.inline_payload_size != 0);
+        std.debug.assert(std.math.isPowerOfTwo(definition.inline_payload_align));
+        const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), definition.inline_payload_align);
+        return payload_offset + definition.inline_payload_size;
     }
 
     pub fn allocationSize(self: *const Object, rt: *const JSRuntime) usize {
@@ -2869,18 +2897,29 @@ pub const Object = extern struct {
         // and generation immediately before invocation.
         const destroying_class_id = self.class_id;
         const definition = rt.classes.destructionPlan(destroying_class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
-        // Size for GC free-accounting is the same value `allocationSize` derives
-        // from `inline_layout` (object_size for inline-payload classes, else
-        // @sizeOf(Object)) — reuse the layout we just computed instead of a second
-        // record-table lookup + inline-layout recompute inside unregisterObject.
-        const alloc_size = if (inline_layout) |layout| layout.object_size else @sizeOf(Object);
+        // qjs free_object never derives a layout at teardown: the malloc block
+        // header already carries what the free needs (quickjs.c:1613-1617).
+        // The full InlineClassPayloadLayout (offsets + Alignment enum +
+        // overflow-checked adds) is only needed by the rare inline-payload
+        // free, so it is rederived inside `freeObjectAllocation`'s cold arm
+        // instead of being materialized (and spilled as a stack aggregate) on
+        // every plain-object destroy.
+        const has_inline_payload = definition.inline_payload_size != 0;
+        // Size for GC free-accounting must be bit-for-bit the value the
+        // register side stored (`layout.object_size` for inline-payload
+        // classes, else @sizeOf(Object)); `inlineClassObjectSize` computes
+        // exactly that scalar without the rest of the layout.
+        const alloc_size = if (has_inline_payload) inlineClassObjectSize(definition) else @sizeOf(Object);
         // These intrusive/side-table links borrow storage owned by class
         // payloads, so detach them before that storage is destroyed. Heap-list
         // unlink and live-byte accounting deliberately remain at the qjs
         // remove_gc_object boundary below, after the class finalizer.
         rt.unregisterWeakReferenceHolder(self);
-        rt.unregisterBorrowedReferenceHolder(self);
+        // Same hoisted-entry-guard shape as the borrowed/std-file calls below:
+        // the callee's own first check is `!flags.is_borrowed_reference_holder
+        // -> return`, so the ~every-object destroy keeps the test inline and
+        // never pays the outlined call.
+        if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
         // qjs free_object keeps no borrowed-ref / std-file side tables, so the
         // plain-object hot free path must not call into either scan. Hoist each
         // helper's own entry guard to the call site: an object with no realm-
@@ -2895,8 +2934,18 @@ pub const Object = extern struct {
         const old_shape_props = self.shape_ref.props()[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.prop_values = @ptrFromInt(@alignOf(property.Entry));
         for (old_properties, 0..) |entry, index| {
-            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             const entry_flags = if (index < old_shape_props.len) property.Flags.fromBits(old_shape_props[index].flags) else property.Flags{};
+            // qjs free_property (quickjs.c:6097-6113): one unlikely TMASK test,
+            // then the untagged plain-data arm frees the slot value inline.
+            // Only the tagged arms (accessor/var_ref/auto_init) take the
+            // out-of-line path; a deleted entry (`atom == JS_ATOM_NULL` in
+            // qjs, an undefined data slot there) has nothing to free.
+            if (entry_flags.isData()) {
+                entry.slot.data.free(rt);
+                continue;
+            }
+            if (entry_flags.deleted) continue;
+            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
             destroyPropertySlot(rt, entry_atom, entry_flags, entry.slot);
         }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
@@ -2912,7 +2961,7 @@ pub const Object = extern struct {
         // object. qjs runs this callback synchronously, before remove_gc_object
         // and before the raw allocation is freed.
         if (definition.has_payload_finalizer) {
-            self.finalizeClassPayload(rt, definition.generation, inline_layout != null);
+            self.finalizeClassPayload(rt, definition.generation, has_inline_payload);
         }
         // Array elements live in qjs's class-specific union arm and are released
         // by the Array class finalizer, after the shape/prototype edge. Keep the
@@ -2925,8 +2974,18 @@ pub const Object = extern struct {
         // ever live per object. A synchronous callback clears that payload and
         // its discriminant above, so this switch handles only definitions
         // without a payload finalizer.
-        switch (self.flags.class_payload_kind) {
-            .none => {},
+        //
+        // qjs free_object reaches class teardown through one nullable pointer
+        // pair (class_array[p->class_id].finalizer / p->u.opaque). Mirror that
+        // for the dominant teardown — an ordinary object that never allocated
+        // a side payload — instead of paying the 21-arm jump-table dispatch:
+        // `.none`, and `.ordinary` with a null payload, have nothing to
+        // release (destroyOrdinaryPayload's own first check).
+        const payload_kind = self.flags.class_payload_kind;
+        const payload_dead = payload_kind == .none or
+            (payload_kind == .ordinary and self.u.payload == null);
+        if (!payload_dead) switch (payload_kind) {
+            .none => unreachable,
             .ordinary => self.destroyOrdinaryPayload(rt),
             .arguments => self.destroyArgumentsPayload(rt),
             .object_data => self.destroyObjectDataPayload(rt),
@@ -2947,7 +3006,7 @@ pub const Object = extern struct {
             .disposable_stack => self.destroyDisposableStackPayload(rt),
             .global => self.destroyGlobalPayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
-        }
+        };
         // The callback and every class-specific owned edge run while the object
         // is still heap-accounted. This is qjs free_object's remove_gc_object
         // boundary: after it returns, callbacks must no longer observe the
@@ -2978,7 +3037,7 @@ pub const Object = extern struct {
         // gate the call — a plain object never enters takeWeakObjectIdentity just
         // to load the flag and return.
         if (self.flags.has_weak_id) _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(destroying_class_id, definition.generation);
     }
 
@@ -2988,9 +3047,8 @@ pub const Object = extern struct {
     pub fn freeCycleDeferredStruct(rt: *JSRuntime, self: *Object) void {
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 
@@ -3000,9 +3058,8 @@ pub const Object = extern struct {
         std.debug.assert(!self.header.meta().flags.mark);
         const class_id = self.class_id;
         const definition = rt.classes.destructionPlan(class_id) orelse unreachable;
-        const inline_layout = inlineClassPayloadLayoutForDefinition(definition);
         _ = rt.takeWeakObjectIdentity(self);
-        freeObjectAllocation(rt, self, inline_layout);
+        freeObjectAllocation(rt, self, definition);
         rt.classes.releaseObjectDefinition(class_id, definition.generation);
     }
 

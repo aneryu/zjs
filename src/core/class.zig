@@ -384,7 +384,13 @@ pub const Table = struct {
         if (!self.isOwnerThread()) return error.WrongRuntimeThread;
     }
 
-    pub fn assertOwnerThread(self: *const Table) void {
+    /// noinline: the cached-gettid TLS probe inside `getCurrentId` is
+    /// speculatable, so when this inlines into a caller that only asserts on a
+    /// dynamic-id arm (releaseObjectDefinition), LLVM hoists the probe above
+    /// the standard-id early-out — putting 6 dead instructions on every
+    /// object-destroy tail. All callers are mutation/registration paths where
+    /// one call is noise.
+    pub noinline fn assertOwnerThread(self: *const Table) void {
         if (!self.isOwnerThread()) @panic("class table mutation from non-owner Runtime thread");
     }
 
@@ -500,8 +506,13 @@ pub const Table = struct {
     /// Release a dynamic object's definition pin only after its allocation is
     /// gone (including weak-husk and cycle pass-B lifetimes).
     pub fn releaseObjectDefinition(self: *Table, id: ClassId, generation: u64) void {
-        self.assertOwnerThread();
+        // Standard ids carry no pin bookkeeping, so return before the
+        // owner-thread panic guard: `assertOwnerThread` survives release
+        // builds (it is an explicit @panic, not a std.debug.assert) and its
+        // cached-gettid TLS probe was the single hottest tail cost of every
+        // object destroy. qjs free_object has no thread check (quickjs.c:6340).
         if (id < ids.init_count) return;
+        self.assertOwnerThread();
         std.debug.assert(id < self.registration_states.len);
         const state = &self.registration_states[id];
         std.debug.assert(state.generation == generation);
