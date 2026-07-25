@@ -16578,19 +16578,36 @@ pub const parser_core = struct {
         fd: *function_def_mod.FunctionDef,
         this_idx: u16,
     ) Error!void {
-        var code: [18]u8 = undefined;
+        // qjs emit_class_field_init (quickjs.c:25184-25207) reads `this`
+        // through a phase-1 scope_get_var; resolve_scope_var lowers that to
+        // get_loc_check only when the binding is lexical, which add_var_this
+        // (quickjs.c:32834-32845) grants exclusively to derived-class
+        // constructors (lowering arm quickjs.c:33068-33087). The base default
+        // constructor's `this` is a plain var, so qjs reads it with get_loc
+        // and resolve_labels shortens that to get_loc0. Emit the long form
+        // here (short-slot ids live in the phase-1 temp overlap range) with a
+        // long-form if_false: resolve_labels remaps its absolute target and
+        // re-shortens the jump after get_loc shrinks to get_loc0. A raw
+        // if_false8 relative operand is never remapped, so it must not span
+        // instructions whose lowered size can change.
+        const this_read_op: u8 = if (fd.is_derived_class_constructor)
+            opcode.op.get_loc_check
+        else
+            opcode.op.get_loc;
+        const base: u32 = @intCast(fd.byte_code.len);
+        var code: [21]u8 = undefined;
         code[0] = opcode.op.scope_get_var;
         std.mem.writeInt(u32, code[1..5], atom_class_fields_init, .little);
         std.mem.writeInt(u16, code[5..7], @intCast(fd.scope_level), .little);
         code[7] = opcode.op.dup;
-        code[8] = opcode.op.if_false8;
-        code[9] = 8;
-        code[10] = opcode.op.get_loc_check;
-        std.mem.writeInt(u16, code[11..13], this_idx, .little);
-        code[13] = opcode.op.swap;
-        code[14] = opcode.op.call_method;
-        std.mem.writeInt(u16, code[15..17], 0, .little);
-        code[17] = opcode.op.drop;
+        code[8] = opcode.op.if_false;
+        std.mem.writeInt(u32, code[9..13], base + 20, .little); // target: the drop
+        code[13] = this_read_op;
+        std.mem.writeInt(u16, code[14..16], this_idx, .little);
+        code[16] = opcode.op.swap;
+        code[17] = opcode.op.call_method;
+        std.mem.writeInt(u16, code[18..20], 0, .little);
+        code[20] = opcode.op.drop;
         try fd.appendAtomOperand(atom_class_fields_init);
         try fd.appendByteCode(&code);
     }
@@ -16647,8 +16664,13 @@ pub const parser_core = struct {
                 @truncate(this_idx >> 8),
             });
             try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
+            // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
+            // (quickjs.c:25152); the derived arm (quickjs.c:28455-28472)
+            // reads `this` with scope_get_var_checkthis so an uninitialized
+            // ReferenceError is raised in the caller context, lowered to
+            // get_loc_checkthis (quickjs.c:33073-33077).
             try child_fd.appendByteCode(&.{
-                opcode.op.get_loc_check,
+                opcode.op.get_loc_checkthis,
                 @truncate(this_idx),
                 @truncate(this_idx >> 8),
                 opcode.op.@"return",

@@ -10348,7 +10348,8 @@ pub const pipeline_stack_size = struct {
 
         // set_loc_uninitialized this ; init_ctor ; put_loc_check_init this ;
         // get_var_ref_check <class_fields_init> ; dup ; if_false8 8 ;
-        // get_loc_check this ; swap ; call_method 0 ; drop ; get_loc_check this ; return
+        // get_loc_check this ; swap ; call_method 0 ; drop ;
+        // get_loc_checkthis this ; return
         var bc = [_]u8{0} ** 25;
         bc[0] = op.set_loc_uninitialized;
         std.mem.writeInt(u16, bc[1..3], 0, .little);
@@ -10366,7 +10367,7 @@ pub const pipeline_stack_size = struct {
         bc[17] = op.call_method;
         std.mem.writeInt(u16, bc[18..20], 0, .little);
         bc[20] = op.drop;
-        bc[21] = op.get_loc_check;
+        bc[21] = op.get_loc_checkthis;
         std.mem.writeInt(u16, bc[22..24], 0, .little);
         bc[24] = op.@"return";
 
