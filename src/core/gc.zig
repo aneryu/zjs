@@ -243,8 +243,15 @@ pub const SpaceAccount = struct {
     }
 
     fn recordFree(self: *SpaceAccount, bytes: usize) void {
-        if (bytes == 0) return;
-        self.live_bytes -|= bytes;
+        // Plain wrapping sub, exactly qjs `s->malloc_size -= ...`
+        // (quickjs.c:2174 js_def_free): the alloc side records the same exact
+        // byte total the free side debits (Debug verifyHeapAccounting walks the
+        // object list and proves the balance), so saturation guarded an
+        // underflow that cannot occur while costing a subs+csel pair on every
+        // GC-object free. The zero-bytes early-out mirrors recordAlloc's
+        // removal: subtracting 0 is a no-op.
+        std.debug.assert(self.live_bytes >= bytes);
+        self.live_bytes -%= bytes;
     }
 
     fn fragmentationPerMille(self: SpaceAccount) usize {
@@ -355,7 +362,15 @@ pub const AllocInfo = packed struct(u8) {
     /// free paths read it back instead of re-deriving the class from the byte
     /// size (qjs `__js_free`, quickjs.c:1614-1617).
     block_size_idx: u5 = 0,
-    _spare: u1 = 0,
+    /// Alloc-time large-space classification, stamped by registration
+    /// (`addInitializedWithSizeNoFail`) and valid iff `heap_accounted`. The
+    /// free path reads it from the alloc_info byte it already loads instead of
+    /// re-deriving `bytes >= policy.large_object_threshold` (a policy load +
+    /// compare qjs never pays: js_free_rt has no space split at all,
+    /// quickjs.c:1613-1617). Stamping also pins the classification to the
+    /// space that was actually credited, so a policy-threshold change between
+    /// alloc and free can no longer unbalance the two space accounts.
+    large: bool = false,
     /// The allocation has been added to the live-byte accounts. Kept separate
     /// from size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
@@ -392,6 +407,7 @@ comptime {
     std.debug.assert(@offsetOf(Metadata, "rc") == 4);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .standalone = true })) == 1 << 7);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .heap_accounted = true })) == 1 << 6);
+    std.debug.assert(@as(u8, @bitCast(AllocInfo{ .large = true })) == 1 << 5);
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .block_size_idx = 31 })) == 31);
     // Kind occupies the low 3 bits of the shared kind/flags byte; a bare tag
     // byte (all flags clear) equals the enum value, which is what the raw
@@ -1290,7 +1306,15 @@ pub const Registry = struct {
         const is_large = self.isLargeAllocation(bytes);
         const tracked = isCycleCandidate(h);
         if (h.meta().alloc_info.standalone) h.meta().size_class = encodeHeapBytes(bytes);
-        h.meta().alloc_info.heap_accounted = true;
+        // One consolidated alloc_info RMW: publish heap_accounted and stamp the
+        // alloc-time large-space classification the free path reads back
+        // (recordHeapFreeWithBytes) instead of re-deriving it from the policy
+        // threshold. qjs writes its whole block-header byte pair exactly once
+        // per allocation (quickjs.c:275-277 JSMallocBlockHeader stamp).
+        var info = h.meta().alloc_info;
+        info.heap_accounted = true;
+        info.large = is_large;
+        h.meta().alloc_info = info;
         // Fold the cycle-list flag into registration instead of a second RMW
         // inside appendGcObject — qjs add_gc_object writes its header
         // bookkeeping once and then just list_add_tail's (quickjs.c:6540-6546).
@@ -1371,7 +1395,13 @@ pub const Registry = struct {
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *GCObjectHeader, bytes: usize) void {
         if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
-        const is_large = self.isLargeAllocation(bytes);
+        // Alloc-time classification stamped by addInitializedWithSizeNoFail:
+        // reading it back from the already-loaded alloc_info byte replaces the
+        // policy-threshold reload + compare (qjs js_free_rt re-derives nothing,
+        // quickjs.c:1613-1617), and guarantees the debit hits the same space
+        // account the registration credited.
+        const is_large = header.meta().alloc_info.large;
+        std.debug.assert(is_large == self.isLargeAllocation(bytes));
         // Live-bytes bookkeeping lives entirely in the space accounts now (see
         // addInitializedWithSize); the free path just decrements live_bytes. Page
         // geometry is derived lazily in refreshPageState, not trimmed here.
@@ -1420,20 +1450,35 @@ pub const Registry = struct {
     // malloc_count/malloc_size (quickjs.c:2160), add_gc_object only links the
     // object (quickjs.c:6540), and js_trigger_gc gates on one threshold
     // (quickjs.c:1780). Page state is derived by consumers.
+    // The large arm is an outlined cold twin: virtually every GC allocation is
+    // a small-slab object/shape, and the call boundary is the only reliable way
+    // to keep the hot arm a fixed-offset ldr/add/str on old_space.live_bytes —
+    // with both arms inline LLVM if-converts the two-way select into a
+    // csel-computed store address (a store whose address depends on the policy
+    // compare was the top stall of both the registration and destroy paths;
+    // @branchHint alone did not defeat the if-conversion).
+    noinline fn recordLargeSpaceAllocCold(self: *Registry, bytes: usize) void {
+        self.large_space.recordAlloc(bytes);
+    }
+
+    noinline fn recordLargeSpaceFreeCold(self: *Registry, bytes: usize) void {
+        self.large_space.recordFree(bytes);
+    }
+
     fn recordSpaceAlloc(self: *Registry, is_large: bool, bytes: usize) void {
         if (is_large) {
-            self.large_space.recordAlloc(bytes);
-        } else {
-            self.old_space.recordAlloc(bytes);
+            @branchHint(.unlikely);
+            return self.recordLargeSpaceAllocCold(bytes);
         }
+        self.old_space.recordAlloc(bytes);
     }
 
     fn recordSpaceFree(self: *Registry, is_large: bool, bytes: usize) void {
         if (is_large) {
-            self.large_space.recordFree(bytes);
-        } else {
-            self.old_space.recordFree(bytes);
+            @branchHint(.unlikely);
+            return self.recordLargeSpaceFreeCold(bytes);
         }
+        self.old_space.recordFree(bytes);
     }
 
     fn externalTokenIndex(self: Registry, id: u64) ?usize {

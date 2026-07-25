@@ -732,9 +732,13 @@ pub const Registry = struct {
         for (shape.props()[0..prop_count]) |prop| {
             if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
         }
-        if (old_proto) |proto| {
-            if (self.gc_registry.phase != .deinit) proto.value().free(self.runtime);
-        }
+        // qjs js_free_shape0 releases the proto edge with one direct
+        // JS_FreeValueRT on a known JS_TAG_OBJECT value (quickjs.c:5308-5310).
+        // The typed object release keeps a single deinit-phase check; the old
+        // `phase != .deinit` pre-guard around a generic value().free was
+        // redundant (free's own deinit skip already covers the object tag), so
+        // the phase byte was loaded and tested twice per shape teardown.
+        if (old_proto) |proto| proto.value().freeObjectAssumeObject(self.runtime);
         self.memory.destroyWithFam(Shape, shape, fam_bytes);
     }
 
@@ -854,12 +858,25 @@ pub const Registry = struct {
         shape.hashBuckets()[bucket] = @intCast(index);
     }
 
-    fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
+    inline fn link(self: *Registry, shape: *Shape, hashed: bool) !void {
         // Shapes are tracked solely through the GC object list (added by the
         // caller via `gc_registry.addWithSize`), exactly like qjs `add_gc_object`.
         // The only per-shape bookkeeping here is hash-table insertion.
+        //
+        // Inline: qjs pays this boundary as straight-line code inside
+        // js_new_shape2 — an inline resize check (quickjs.c:5244-5246) plus
+        // js_shape_hash_link's three stores (quickjs.c:5191-5198). With three
+        // call sites (createShape / createShapeWithPropertyCapacity /
+        // cloneShape) LLVM outlined the whole body, adding a bl + full
+        // prologue/epilogue to every shape creation. The grow path stays
+        // outlined (noinline ensureShapeHashCapacity); the hot leg is the
+        // capacity compare + bucket splice + count bump.
         if (hashed) {
-            try self.ensureShapeHashCapacity(1);
+            const buckets_len = self.shape_hash_buckets.len;
+            if (buckets_len == 0 or 2 * (self.shape_hash_count + 1) > buckets_len) {
+                @branchHint(.unlikely);
+                try self.ensureShapeHashCapacity(1);
+            }
             shape.is_hashed = true;
             self.insertShapeHash(shape);
             self.shape_hash_count += 1;
@@ -877,7 +894,7 @@ pub const Registry = struct {
         }
     }
 
-    fn ensureShapeHashCapacity(self: *Registry, additional: usize) !void {
+    noinline fn ensureShapeHashCapacity(self: *Registry, additional: usize) !void {
         if (self.shape_hash_buckets.len == 0) {
             const bucket_count = @as(usize, 1) << self.shape_hash_bits;
             self.shape_hash_buckets = try self.memory.alloc(?*Shape, bucket_count);
