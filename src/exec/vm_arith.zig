@@ -24,10 +24,16 @@ pub fn binary(
     defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
+    // The two pops above guarantee capacity for one push, and none of the
+    // fast legs below run user code that could touch the operand stack in
+    // between — mirror qjs js_add_slow/js_binary_arith_slow writing the
+    // result straight to sp[-2] with no capacity check (quickjs.c:15098,
+    // 14905). The coercing tail below keeps the checked push: toPrimitive
+    // re-enters user code.
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             if (fastBinaryInt32(binop, lhs_int, rhs_int)) |fast| {
-                try stack.pushOwned(fast);
+                stack.pushOwnedAssumeCapacity(fast);
                 return;
             }
         }
@@ -35,15 +41,14 @@ pub fn binary(
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(binop, lhs_bigint, rhs_bigint)) |fast| {
-                try stack.pushOwned(fast);
+                stack.pushOwnedAssumeCapacity(fast);
                 return;
             }
         }
     }
     if (binop == op.add and ((lhs.isString() and !rhs.isObject()) or (rhs.isString() and !lhs.isObject()))) {
         const result = try value_ops.binary(ctx.runtime, binop, lhs, rhs);
-        errdefer result.free(ctx.runtime);
-        try stack.pushOwned(result);
+        stack.pushOwnedAssumeCapacity(result);
         return;
     }
     const result = if (binop == op.add) blk: {
