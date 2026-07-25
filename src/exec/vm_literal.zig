@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -44,13 +45,25 @@ pub inline fn newPlainObjectValue(ctx: *core.JSContext, global: *core.Object) !c
 /// needs no value rooting — an int/bool/undefined cannot be collected) and a plain,
 /// extensible, non-array, non-exotic, non-proxy `obj`. Returns true on a completed
 /// add (handler pops the value + frees the popped obj slot); false routes to the cold
-/// shell (arrays, private atoms, proxies, non-extensible, setters, refcounted values —
-/// every backtrace/user-code-capable case stays on the publishing path). `value` is
+/// shell (arrays, proxies, non-extensible, setters, refcounted values — every
+/// backtrace/user-code-capable case stays on the publishing path). `value` is
 /// CONSUMED into the property slot on success (like the cold leg's Descriptor.data).
+///
+/// No private-atom probe: OP_define_field's u32 operand is a parser-minted
+/// property-name atom — every private name is discriminated at parse time into
+/// the define/get/put_private_field family (qjs OP_define_field likewise
+/// carries no JS_ATOM_TYPE_PRIVATE test, quickjs.c:19269), so the
+/// mightBePrivate 3-load chain was a zjs-only tax on the trusted bytecode-atom
+/// path (op_get/put_field precedent). Debug keeps the precise kind claim.
+/// The receiver is likewise an evaluated expression value (OP_object /
+/// push_this / any literal-start), never a make_ref cell pair, so the
+/// trusted-expression classification skips the header-kind re-load.
 pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: core.Atom, value: core.JSValue) bool {
     if (value.requiresRefCount()) return false;
-    if (rt.atoms.mightBePrivate(atom_id)) return false;
-    const target = object_ops.objectFromValue(obj) orelse return false;
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(rt.atoms.kind(atom_id) != .private);
+    }
+    const target = object_ops.objectFromValueTrustedExpression(obj) orelse return false;
     // qjs OP_define_field → JS_DefinePropertyValue with JS_PROP_THROW: only a plain
     // ordinary object with room to add a data property takes the in-CASE fast add;
     // everything exotic/proxy/array/non-extensible defers to the general define.

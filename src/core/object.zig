@@ -10673,7 +10673,18 @@ pub const Object = extern struct {
     /// (96B stack build in the handler + kind/flag re-derivation in the add
     /// path) is confined to the rare duplicate-key branch, which feeds the
     /// generic isCompatible/replaceProperty machinery.
-    pub inline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
+    ///
+    /// OUTLINED (`noinline`) as the one publish body behind the resident
+    /// op_define_field arm — the qjs frame shape: CASE(OP_define_field) makes a
+    /// single call into the define chain (JS_DefinePropertyValue,
+    /// quickjs.c:19269) and keeps only pc/sp live across it. Inlining this into
+    /// the handler dragged the duplicate-key Descriptor build and the append
+    /// marshaling into the hot arm (a 176-byte frame + 10 callee-saved
+    /// registers per literal property); the probe/append run here instead, and
+    /// `appendPreparedPropertyEntryImpl` folds INTO this body so the 16-byte
+    /// property slot is assembled in registers rather than spilled through a
+    /// by-pointer call boundary (the loadSlotAsIntPair store-forward hazard).
+    pub noinline fn definePlainDataPropertyKnownFast(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, data_value: JSValue) !void {
         if (self.findPropertyIndexTrusted(atom_id)) |index| {
             const desc = descriptor.Descriptor.data(data_value, true, true, true);
             try self.materializeAutoInitEntryForMutation(index);
@@ -10688,14 +10699,20 @@ pub const Object = extern struct {
         // current_function ref keeps live for the whole opcode. That external
         // root makes appendPreparedPropertyEntry's own atom guard redundant here,
         // so use the trusted (guard-free) add. Flags are the comptime C_W_E
-        // constant; the slot dup mirrors slotFromDescriptor's
-        // dupPropertyDataValue (a no-op rc path for the guarded
-        // non-refcounted value).
-        try self.appendPreparedPropertyEntryTrusted(
+        // constant. No `.dup()` on the slot install: both call sites guard
+        // `!value.requiresRefCount()`, for which dup is the identity — the
+        // residual rc-branch was dead weight on the literal hot path (qjs
+        // OP_define_field hands sp[-1] to JS_DefinePropertyValue pre-owned
+        // with no extra dup either).
+        if (comptime builtin.mode == .Debug) {
+            std.debug.assert(!data_value.requiresRefCount());
+        }
+        try self.appendPreparedPropertyEntryImpl(
+            true, // caller_holds_atom_ref: the bytecode operand root (see above)
             rt,
             atom_id,
             comptime property.Flags.data(true, true, true),
-            .{ .data = data_value.dup() },
+            .{ .data = data_value },
         );
     }
 
@@ -10707,8 +10724,9 @@ pub const Object = extern struct {
         return self.appendPreparedPropertyEntryImpl(false, rt, atom_id, entry_flags, slot);
     }
 
-    /// Trusted entry point: the caller already holds a live `atom_id` ref for
-    /// the whole call (e.g. the object-literal `OP_define_field` path, whose atom
+    /// `caller_holds_atom_ref == true` is the trusted leg: the caller already
+    /// holds a live `atom_id` ref for the whole call (the object-literal
+    /// `OP_define_field` path via definePlainDataPropertyKnownFast, whose atom
     /// is the executing function bytecode's inline operand — rooted by the
     /// finalized-bytecode atom-retention walk + the frame's `current_function`
     /// ref). With that external root the local dup/free guard is pure redundancy
@@ -10716,11 +10734,7 @@ pub const Object = extern struct {
     /// so elide it. qjs add_property likewise relies on the single caller-held
     /// atom ref through add_shape_property (the one owning JS_DupAtom) and has no
     /// per-property guard. MUST NOT be used with a transient/just-interned atom
-    /// that has no other root than the (removed) guard.
-    pub fn appendPreparedPropertyEntryTrusted(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        return self.appendPreparedPropertyEntryImpl(true, rt, atom_id, entry_flags, slot);
-    }
-
+    /// that has no other root than the (elided) guard.
     inline fn appendPreparedPropertyEntryImpl(self: *Object, comptime caller_holds_atom_ref: bool, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
         // Root the atom across the shape allocations below unless the caller
         // already holds a live ref. The dup/free must span the WHOLE function

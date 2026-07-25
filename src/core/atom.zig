@@ -1104,8 +1104,17 @@ pub const AtomTable = struct {
         const idx = dynamicEntryIndex(atom) orelse return false;
         if (idx >= self.entries.len) return false;
         const entry = &self.entries[idx];
-        if (!entry.hasLiveValue() or entry.kind != .string) return false;
+        // Length probe FIRST: a canonical array index that interns as a
+        // DYNAMIC string atom is always >= 10 digits ("2147483648" ..
+        // "4294967294" — everything smaller became a tagged-int atom), so
+        // this single in-struct field read rejects every ordinary identifier
+        // key without touching the liveness/kind fields (two dependent loads
+        // through the lazily-cached string body). Pure conjunct reorder: the
+        // len field lives in the entry struct itself (always readable), and
+        // the live/kind gates still precede the parse that dereferences
+        // `bytes.ptr`.
         if (entry.bytes.len < 10) return false;
+        if (!entry.hasLiveValue() or entry.kind != .string) return false;
         return parseHighArrayIndex(entry.bytes) != null;
     }
 
