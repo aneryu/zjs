@@ -1195,6 +1195,17 @@ pub const AtomTable = struct {
         const text = entry.bytes;
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = (try rt.singleByteString(text[0])).?;
+            // QJS `__JS_AtomToValue` (quickjs.c:3595) is a single
+            // `atom_array[atom]` load + refcount bump because the atom entry
+            // IS the string. Bind the shared single-byte body into the
+            // entry's materialized-string slot so `toStringValueForPush`'s
+            // inline cached arm hits on every later push instead of
+            // repeating this findDynamic hash walk per OP_push_atom_value.
+            if (entry.kind == .string and entry.str == null) {
+                entry.str = cached;
+                gc.retain(cached.header());
+                if (cached.atom_id == string.String.no_atom_id) cached.atom_id = atom_id;
+            }
             return cached.value().dup();
         }
         if (entry.kind != .string) {
