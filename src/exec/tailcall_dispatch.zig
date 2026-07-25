@@ -225,6 +225,7 @@ const PropertyTailSlot = enum(usize) {
     get_static_cached_proxy,
     get_length_property,
     get_field_typed_property,
+    get_field_release_receiver,
 };
 
 inline fn propertyTailHandler(vm: *const Vm, comptime slot: PropertyTailSlot) Handler {
@@ -930,17 +931,26 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
                 // keep the checked growth path.
                 if (stack.len() > stack.capacity or stack.capacity - stack.len() < 2) break :fast;
                 var slow_property = false;
-                const done_value = next_object.findOwnDataValueFast(core.atom.ids.done, &slow_property) orelse break :fast;
-                const done = done_value.asBool() orelse break :fast;
+                // Slot-pointer probes + integer-pair reloads: `result.value`
+                // was just written by the callee's op_put_field as an x-pair
+                // store, so a 128-bit SIMD re-read of the slot would stall on
+                // store-to-load forwarding every iteration (loadValueAsIntPair
+                // note above).
+                const done_slot = next_object.findOwnDataSlotFast(core.atom.ids.done, &slow_property) orelse break :fast;
+                const done = loadValueAsIntPair(done_slot).asBool() orelse break :fast;
                 if (done) break :fast;
-                const value_borrowed = next_object.findOwnDataValueFast(core.atom.ids.value, &slow_property) orelse break :fast;
-                const value = value_borrowed.dup();
+                const result_value_slot = next_object.findOwnDataSlotFast(core.atom.ids.value, &slow_property) orelse break :fast;
+                const value = loadValueAsIntPair(result_value_slot);
+                _ = value.dup();
                 // Deliver `[value, done]` and publish the new operand top
                 // BEFORE releasing the result object — mirror of
                 // finishForOfNextResult's push-then-deferred-free order, so a
                 // destroy-triggered GC scans a consistent caller window.
-                sp[0] = value;
-                sp[1] = JSValue.boolean(false);
+                storeValueAsIntPair(&sp[0], value);
+                // Split store for `done` too: the aggregate form lowered to an
+                // SVE index + 128-bit store whose 64-bit reload by the loop's
+                // if_false consumer stalled on forwarding every iteration.
+                storeValueAsIntPair(&sp[1], JSValue.boolean(false));
                 stack.setTopPtr(sp + 2);
                 result.free(vm.ctx.runtime);
                 return @call(.always_tail, next, .{ pc, sp + 2, var_buf, vm });
@@ -988,15 +998,18 @@ fn completeForOfNextContinuation(vm: *Vm, result: JSValue, depth: u8) HostError!
 /// x-pair store — matching qjs, whose 16-byte JSValue return moves are
 /// ldp/stp integer pairs throughout (`ret_val = *--sp`, quickjs.c:18266).
 inline fn loadValueAsIntPair(slot: *const JSValue) JSValue {
-    if (comptime @sizeOf(JSValue) != 2 * @sizeOf(u64)) {
-        // Nan-boxed 8-byte repr: the slot is one machine word; a plain load is
-        // already width-matched with the single-word store that wrote it.
-        return slot.*;
-    }
-    const words: *const [2]u64 = @ptrCast(@alignCast(slot));
-    const lo = words[0];
-    const hi = words[1];
-    return @bitCast([2]u64{ lo, hi });
+    return JSValue.loadSlotAsIntPair(slot);
+}
+
+/// Store twin of `loadValueAsIntPair`: writes a 16-byte JSValue operand slot as
+/// two 64-bit integer stores. A whole-value aggregate assignment after a branch
+/// join (e.g. the dup-or-borrow select in the get_field hit) makes LLVM
+/// materialize the value in a 128-bit stack slot and copy it with a q-register
+/// round trip; the split store keeps the value SSA-scalar and forwarding-
+/// eligible for the 64-bit reads of downstream handlers — matching qjs's
+/// `stp` of the two JSValue words (`sp[-1] = val`, quickjs.c:19158).
+inline fn storeValueAsIntPair(slot: *JSValue, value: JSValue) void {
+    JSValue.storeSlotAsIntPair(slot, value);
 }
 
 /// Fused popFrame + reload for an in-handler return to an inline caller —
@@ -2459,6 +2472,17 @@ fn op_get_field_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSVal
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
+/// Rare-leg tail for the hot get_field hit: the receiver's refcount reached
+/// zero, so run the full release (deinit gate + decrement + destroy) here and
+/// resume at the next opcode. Keeping the destroy call out of op_get_field's
+/// body is what lets that handler stay a prologue-free leaf. Contract: the
+/// result has already been stored at (sp - 1) and the dying receiver (rc == 1)
+/// is stashed in vm.property_holder.
+fn op_get_field_release_receiver_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.property_holder.value().free(vm.ctx.runtime);
+    return cont(pc + 5, sp, var_buf, vm);
+}
+
 fn op_get_field_typed_property_tail(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
     const receiver = (sp - 1)[0];
     const atom_id = readInt(u32, pc + 1);
@@ -2494,10 +2518,30 @@ pub fn op_get_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *V
     // Walk self+prototype for a plain data property; on a hit the value is BORROWED
     // from the holder slot, so dup onto the stack (which owns its entries) and free
     // the receiver. Accessor/missing/private/exotic misses stay out of this handler.
-    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        const stack_value = if (value.requiresRefCount()) value.dup() else value;
-        (sp - 1)[0] = stack_value;
-        receiver.free(vm.ctx.runtime);
+    // The slot is re-read as two 64-bit integer words (loadValueAsIntPair): the
+    // by-value form made LLVM round-trip the 16-byte hit through a 128-bit
+    // stack slot whose 64-bit tag reload defeated store-to-load forwarding —
+    // qjs's own hit is an integer load pair straight off pr->u.value
+    // (quickjs.c:19131).
+    const rt = vm.ctx.runtime;
+    if (vm_property_field.qjsGetFieldFastSlot(rt, receiver, atom_id)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        // dup() returns `value` bitwise (it only bumps the refcount when the
+        // tag requires one); discarding the result keeps the pushed value a
+        // single SSA scalar instead of a two-arm join that LLVM would park in
+        // a stack slot (see storeValueAsIntPair).
+        _ = value.dup();
+        storeValueAsIntPair(&(sp - 1)[0], value);
+        // Inline the common receiver release (deinit gate + rc decrement) and
+        // route the rare zero-ref destroy through a cold tail: the destroy
+        // `bl` was this handler's only call, and eliding it drops the whole
+        // callee-saved spill frame from every hit (qjs's shared interpreter
+        // frame pays no per-op prologue for its inline JS_FreeValue either,
+        // quickjs.c:19157).
+        if (receiver.releaseObjectAssumeObjectNeedsDestroy(rt)) {
+            vm.property_holder = class_vm.objectFromValue(receiver) orelse unreachable;
+            return @call(.always_tail, propertyTailHandler(vm, .get_field_release_receiver), .{ pc, sp, var_buf, vm });
+        }
         return cont(pc + 5, sp, var_buf, vm);
     }
     if (vm_property_field.isTypedArrayPayloadAtomForFastPath(atom_id)) {
@@ -2541,9 +2585,12 @@ pub fn op_get_field2(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *
     // walk the cold get_field2 runs first (e.g. arr.push, map.get). The value is
     // BORROWED from its holder slot, so dup it onto the stack exactly as the cold
     // path's `pushAssumeCapacity` does; the receiver stays beneath as `this`.
-    if (vm_property_field.qjsGetFieldFast(vm.ctx.runtime, receiver, atom_id)) |value| {
-        const stack_value = if (value.requiresRefCount()) value.dup() else value;
-        sp[0] = stack_value;
+    // Integer-pair slot reload + split push for the same forwarding reasons as
+    // op_get_field (dup() returns the value bitwise; see that handler's note).
+    if (vm_property_field.qjsGetFieldFastSlot(vm.ctx.runtime, receiver, atom_id)) |slot| {
+        const value = loadValueAsIntPair(slot);
+        _ = value.dup();
+        storeValueAsIntPair(&sp[0], value);
         return cont(pc + 5, sp + 1, var_buf, vm);
     }
     return @call(.always_tail, cold_table[pc[0]], .{ pc, sp, var_buf, vm });
@@ -2576,7 +2623,13 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
 // path (simple-put + IC install) then the slow setValueProperty. Stack is
 // [obj, value]; on a hit value is consumed by the slot write and obj is freed.
 pub fn op_put_field(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
-    const value = (sp - 1)[0];
+    // Integer-pair operand load: sourcing `value` from a 128-bit SIMD stack
+    // read makes LLVM re-fuse qjsPutFieldFast's split slot store back into a
+    // `str q`, which stalls the integer-half re-readers of that property slot
+    // (get_field hit, for-of done/value probes). Keeping the value in x-regs
+    // end to end preserves the stp/ldp pairing qjs uses (set_value,
+    // quickjs.c:5091).
+    const value = loadValueAsIntPair(&(sp - 1)[0]);
     const obj = (sp - 2)[0];
     const atom_id = readInt(u32, pc + 1);
     // qjs OP_put_field inline: find_own_property on the receiver, write the slot
@@ -3549,7 +3602,7 @@ noinline fn pushBorrowedIteratorMiss(vm: *Vm, resolved: *const inline_calls.Reso
 }
 
 const dispatch_table: [256]Handler = colds.buildTable(specials, true);
-const property_tail_table = [10]Handler{
+const property_tail_table = [11]Handler{
     op_get_field_primitive,
     op_get_field2_primitive,
     op_get_array_el_cached_string,
@@ -3560,6 +3613,7 @@ const property_tail_table = [10]Handler{
     op_get_static_cached_proxy,
     op_get_length_property_tail,
     op_get_field_typed_property_tail,
+    op_get_field_release_receiver_tail,
 };
 
 // ===========================================================================

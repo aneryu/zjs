@@ -351,12 +351,12 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
     return core.JSValue.float64(@floatFromInt(len));
 }
 
-inline fn qjsGetFieldFastWithExoticOrder(
+inline fn qjsGetFieldFastSlotWithExoticOrder(
     rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
-    comptime own_before_slow: bool,
-) ?core.JSValue {
+    comptime trust_mapped_arguments_probe: bool,
+) ?*const core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
     // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
@@ -364,11 +364,23 @@ inline fn qjsGetFieldFastWithExoticOrder(
     var object = objectFromValue(receiver) orelse return null;
     if (rt.atoms.mightBePrivate(atom_id)) return null;
     while (true) {
-        if (!own_before_slow and object.needsSlowPropertyAccess()) return null;
+        // zjs-only divergence from qjs's probe-first order: mapped Arguments
+        // numeric bindings live in out-of-shape var-ref cells, so a shape data
+        // slot on a mapped Arguments object can be stale and its hit cannot be
+        // trusted — bail before probing. (qjs stores those bindings as
+        // JS_PROP_VARREF shape entries, which its own probe rejects via
+        // JS_PROP_TMASK.) The constant `length` atom never aliases a numeric
+        // binding, so the get_length caller skips this guard.
+        if (!trust_mapped_arguments_probe and object.class_id == core.class.ids.mapped_arguments) return null;
         var slow_property = false;
-        if (object.findOwnDataValueFast(atom_id, &slow_property)) |v| return v;
+        if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
         if (slow_property) return null;
-        if (own_before_slow and object.needsSlowPropertyAccess()) return null;
+        // qjs GET_FIELD_INLINE consults `p->is_exotic` only AFTER the own
+        // probe misses (quickjs.c:19135-19141): an own plain-data hit — sparse
+        // array element, named data on a typed array, anything the shape
+        // authoritatively owns — never pays the class test. Mirror that; a
+        // miss on a slow class defers to the full resolver.
+        if (object.needsSlowPropertyAccess()) return null;
         // End of the explicit self.prototype chain. We must NOT synthesize `undefined`
         // here: zjs resolves built-in prototype methods/constructor for arrays and other
         // class objects via a by-class-name global fallback (object_ops.getValueProperty),
@@ -380,12 +392,17 @@ inline fn qjsGetFieldFastWithExoticOrder(
     }
 }
 
+/// Hot-handler variant: returns the BORROWED own/prototype data slot address
+/// so the resident get_field handlers can re-load it as two 64-bit integer
+/// words (see findOwnDataSlotFast). The pointer is only valid until the next
+/// potentially-shape-mutating operation; both callers consume it immediately.
+pub inline fn qjsGetFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*const core.JSValue {
+    return qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false);
+}
+
 pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.JSValue {
-    // The generic zjs fast path must stop before inspecting a slow object:
-    // mapped Arguments numeric bindings live in separate var-ref storage rather
-    // than qjs's shape-level JS_PROP_VARREF entries, so their materialized data
-    // slots cannot bypass the mapped resolver.
-    return qjsGetFieldFastWithExoticOrder(rt, receiver, atom_id, false);
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, atom_id, false) orelse return null;
+    return slot.*;
 }
 
 /// qjs GET_FIELD_INLINE probes an own shape entry before `p->is_exotic`.
@@ -394,7 +411,8 @@ pub inline fn qjsGetFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
 /// own `length` data on Arguments and typed arrays hit before their slow class
 /// semantics while misses and accessor entries still defer to the resolver.
 pub inline fn qjsGetLengthFieldFast(rt: *core.JSRuntime, receiver: core.JSValue) ?core.JSValue {
-    return qjsGetFieldFastWithExoticOrder(rt, receiver, core.atom.ids.length, true);
+    const slot = qjsGetFieldFastSlotWithExoticOrder(rt, receiver, core.atom.ids.length, true) orelse return null;
+    return slot.*;
 }
 
 /// Primitive twin of qjsGetFieldFast. QuickJS selects
@@ -681,8 +699,12 @@ pub inline fn qjsPutFieldFast(rt: *core.JSRuntime, receiver: core.JSValue, atom_
     const object = objectFromValue(receiver) orelse return false;
     if (object.needsSlowPropertyAccess()) return false;
     const lookup = object.findWritableOwnDataPropertyFast(atom_id) orelse return false;
-    const old_value = lookup.value.*;
-    lookup.value.* = value;
+    // Integer-pair slot access (qjs set_value's ldp/stp form, quickjs.c:5091):
+    // a 128-bit SIMD store here stalls every 64-bit re-reader of the slot —
+    // the get_field hit and the for-of done/value probes read property slots
+    // as integer halves (JSValue.loadSlotAsIntPair note).
+    const old_value = core.JSValue.loadSlotAsIntPair(lookup.value);
+    core.JSValue.storeSlotAsIntPair(lookup.value, value);
     old_value.free(rt);
     return true;
 }

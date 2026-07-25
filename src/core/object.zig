@@ -11122,6 +11122,39 @@ pub const Object = extern struct {
         return null;
     }
 
+    /// Slot-pointer twin of `findOwnDataValueFast` for the resident get_field
+    /// handlers. Two deliberate lowerings for the hot hit:
+    /// - Returns the BORROWED slot ADDRESS instead of a 16-byte value so the
+    ///   caller can re-load it as two 64-bit integer words (loadValueAsIntPair
+    ///   precedent): a by-value return makes LLVM round-trip the optional
+    ///   through a 128-bit stack slot whose 64-bit tag reload defeats
+    ///   store-to-load forwarding (the top cycle sink of op_get_field).
+    /// - Tests the kind bits straight off the packed shape word; materializing
+    ///   `property.Flags.fromBits` here costs a packed-bitcast alloca spill in
+    ///   the handler frame.
+    /// Mirrors qjs find_own_property + the JS_PROP_TMASK guard feeding
+    /// JS_DupValue(pr->u.value) (quickjs.c:6135, 19125-19133).
+    pub inline fn findOwnDataSlotFast(self: *const Object, atom_id: atom.Atom, slow: *bool) ?*const JSValue {
+        const props = self.shape_ref.props().ptr;
+        var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
+        while (shape_index != shape.no_property_index) {
+            const index: usize = @intCast(shape_index);
+            const prop = props[index];
+            shape_index = prop.hash_next;
+            if (prop.atom_id == atom_id) {
+                // Kind bits 3-4 of the 6-bit flags field; .data == 0 (qjs
+                // JS_PROP_TMASK). Deleted tombstones are unlinked from the
+                // hash chain with their atom cleared, so they cannot match.
+                if ((prop.flags >> 3) & 0x3 != 0) {
+                    slow.* = true;
+                    return null;
+                }
+                return &self.prop_values[index].slot.data;
+            }
+        }
+        return null;
+    }
+
     pub fn findWritableOwnDataPropertyFast(self: *Object, atom_id: atom.Atom) ?WritableOwnDataPropertyFastLookup {
         const lookup = self.findPropertyProbeTrusted(atom_id) orelse return null;
         const flags = property.Flags.fromBits(lookup.prop.flags);
