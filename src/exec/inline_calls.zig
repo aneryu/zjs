@@ -441,7 +441,7 @@ pub const Entry = struct {
     /// refcount leg and arena restore run without a bl/ret round trip, with
     /// `destroyZeroRef` remaining the only (cold) call.
     noinline fn deinitEmptyLeaf(self: *Entry, ctx: *core.JSContext) void {
-        self.deinitEmptyLeafInline(ctx);
+        self.deinitEmptyLeafInline(ctx.runtime);
     }
 
     /// Return epilogue for a published empty leaf. The FunctionBytecode proves
@@ -459,8 +459,7 @@ pub const Entry = struct {
     /// and optional profile guard are the only remaining resources. Plain
     /// leaves keep the borrowed sloppy-global `this`, so their ownership test
     /// stays a predicted-not-taken branch.
-    inline fn deinitEmptyLeafInline(self: *Entry, ctx: *core.JSContext) void {
-        const rt = ctx.runtime;
+    inline fn deinitEmptyLeafInline(self: *Entry, rt: *core.JSRuntime) void {
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
         std.debug.assert(!self.teardown.has_native_caller);
@@ -491,8 +490,7 @@ pub const Entry = struct {
     /// zero-trips — with the same borrowed capture array), and they need this
     /// arm's operand-window guard because inherited-capture bodies read free
     /// names and may carry parser-elided leftovers at `return`.
-    inline fn deinitExactArgsLeafInline(self: *Entry, ctx: *core.JSContext) void {
-        const rt = ctx.runtime;
+    inline fn deinitExactArgsLeafInline(self: *Entry, rt: *core.JSRuntime) void {
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
         std.debug.assert(self.teardown.exact_args_leaf and !self.teardown.empty_leaf);
@@ -527,8 +525,7 @@ pub const Entry = struct {
     /// normal-return arm may use this: abrupt completion keeps general
     /// teardown, whose established cold `releaseNativeCaller` handles the
     /// same ownership.
-    inline fn deinitForwardedLeafInline(self: *Entry, ctx: *core.JSContext) void {
-        const rt = ctx.runtime;
+    inline fn deinitForwardedLeafInline(self: *Entry, rt: *core.JSRuntime) void {
         const frame = &self.frame;
         std.debug.assert(self.teardown.simple);
         std.debug.assert(self.teardown.forwarded_leaf and !self.teardown.empty_leaf);
@@ -1420,7 +1417,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
+        return self.finishEmptyLeafFrame(leaf_this, rt, entry, global, function, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Exact-args authoritative constructor (O1) — the deep fallible twin of
@@ -1482,7 +1479,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
+        return self.finishExactArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Capture-leaf authoritative constructor (O2) — the deep fallible twin
@@ -1539,7 +1536,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
+        return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Padded-args authoritative constructor (Q3) — the deep fallible twin
@@ -1603,7 +1600,7 @@ pub const Machine = struct {
         };
         errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
 
-        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
+        return self.finishPaddedArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
 
     /// Debug-only proof that the comptime `this` arm matches the published
@@ -1692,6 +1689,7 @@ pub const Machine = struct {
     inline fn finishEmptyLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         entry: *Entry,
         global: *core.Object,
         function: *const bytecode.FunctionBytecode,
@@ -1702,7 +1700,7 @@ pub const Machine = struct {
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
-        const rt = self.ctx.runtime;
+        std.debug.assert(rt == self.ctx.runtime);
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         // K1 single pricing, extended through publication: the constructor's
         // committed figure is passed in instead of re-deriving the three
@@ -1755,6 +1753,7 @@ pub const Machine = struct {
     inline fn finishExactArgsLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         entry: *Entry,
         global: *core.Object,
         function: *const bytecode.FunctionBytecode,
@@ -1767,7 +1766,7 @@ pub const Machine = struct {
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
-        const rt = self.ctx.runtime;
+        std.debug.assert(rt == self.ctx.runtime);
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         const args_window: []core.JSValue =
             (region_start + @as(usize, @intFromBool(method_receiver)) + 1)[0..argc];
@@ -1835,6 +1834,7 @@ pub const Machine = struct {
     inline fn finishCaptureLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         entry: *Entry,
         global: *core.Object,
         function: *const bytecode.FunctionBytecode,
@@ -1846,7 +1846,7 @@ pub const Machine = struct {
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
-        const rt = self.ctx.runtime;
+        std.debug.assert(rt == self.ctx.runtime);
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         // K1 single pricing, extended through publication (see
         // finishEmptyLeafFrame).
@@ -1909,6 +1909,7 @@ pub const Machine = struct {
     inline fn finishPaddedArgsLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         entry: *Entry,
         global: *core.Object,
         function: *const bytecode.FunctionBytecode,
@@ -1921,7 +1922,7 @@ pub const Machine = struct {
         resume_pc: [*]const u8,
     ) *Entry {
         const method_receiver = comptime leaf_this == .receiver;
-        const rt = self.ctx.runtime;
+        std.debug.assert(rt == self.ctx.runtime);
         const callable_slot = &region_start[@intFromBool(method_receiver)];
         const args_base = region_start + @as(usize, @intFromBool(method_receiver)) + 1;
         const args_window: []core.JSValue = args_base[0..function.arg_count];
@@ -1992,6 +1993,7 @@ pub const Machine = struct {
     pub inline fn tryPushEmptyLeafCallFast(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.FunctionBytecode,
@@ -2001,7 +2003,9 @@ pub const Machine = struct {
     ) ?*Entry {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertLeafEligible(leaf_this, function, call_facts);
-        const ctx = self.ctx;
+        // Vm-resident rt (see tailcall_dispatch.Vm.rt): the caller hands the
+        // runtime in so this body loads neither ctx nor ctx.runtime.
+        std.debug.assert(rt == self.ctx.runtime);
         // K1 single pricing: one geometry derivation feeds admission, commit,
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
@@ -2011,7 +2015,6 @@ pub const Machine = struct {
         // check-then-alloca: the check is the commitment, quickjs.c:17837/
         // 17845). The rare chunk/carve misses below retreat the committed
         // charge on their cold exits before honoring the pure-miss contract.
-        const rt = ctx.runtime;
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
@@ -2033,7 +2036,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishEmptyLeafFrame(leaf_this, entry, global, function, region_start, carve.window, false, planned_stack_bytes, resume_pc);
+        return self.finishEmptyLeafFrame(leaf_this, rt, entry, global, function, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free exact-args leaf construction (O1) — the
@@ -2047,6 +2050,7 @@ pub const Machine = struct {
     pub inline fn tryPushExactArgsLeafCallFast(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.FunctionBytecode,
@@ -2059,12 +2063,12 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertExactArgsLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(@as(usize, function.arg_count) == argc and argc > 0);
-        const ctx = self.ctx;
+        // Vm-resident rt (see tryPushEmptyLeafCallFast).
+        std.debug.assert(rt == self.ctx.runtime);
         // K1 single pricing (argc == arg_count: padded-argv prefix empty).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
-        const rt = ctx.runtime;
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
@@ -2086,7 +2090,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishExactArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
+        return self.finishExactArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free capture-leaf construction (O2) — the parallel
@@ -2101,6 +2105,7 @@ pub const Machine = struct {
     pub inline fn tryPushCaptureLeafCallFast(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.FunctionBytecode,
@@ -2112,14 +2117,14 @@ pub const Machine = struct {
         std.debug.assert(caller_stack.topPtr() == region_start);
         assertCaptureLeafEligible(leaf_this, function, call_facts);
         std.debug.assert(captures.len != 0);
-        const ctx = self.ctx;
+        // Vm-resident rt (see tryPushEmptyLeafCallFast).
+        std.debug.assert(rt == self.ctx.runtime);
         // K1 single pricing: one geometry derivation feeds admission, commit,
         // and the persisted Entry charge (M1 dossier: the triple recompute was
         // the top opCall residual).
         const planned_stack_bytes = vm_call.qjsBytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
-        const rt = ctx.runtime;
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
@@ -2141,7 +2146,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishCaptureLeafFrame(leaf_this, entry, global, function, captures, region_start, carve.window, false, planned_stack_bytes, resume_pc);
+        return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Warm, allocation-free padded-args leaf construction (Q3) — the
@@ -2161,6 +2166,7 @@ pub const Machine = struct {
     pub inline fn tryPushPaddedArgsLeafCallFast(
         self: *Machine,
         comptime leaf_this: LeafThis,
+        rt: *core.JSRuntime,
         global: *core.Object,
         caller_stack: *stack_mod.Stack,
         function: *const bytecode.FunctionBytecode,
@@ -2175,12 +2181,12 @@ pub const Machine = struct {
         std.debug.assert(argc < function.arg_count);
         std.debug.assert(@intFromPtr(region_start + @as(usize, @intFromBool(leaf_this == .receiver)) + 1 + @as(usize, function.arg_count)) <=
             @intFromPtr(caller_stack.basePtr() + caller_stack.capacity));
-        const ctx = self.ctx;
+        // Vm-resident rt (see tryPushEmptyLeafCallFast).
+        std.debug.assert(rt == self.ctx.runtime);
         // K1 single pricing (argc < arg_count allocates the qjs argv prefix).
         const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(function, argc, false);
         // K2 admission-commit fusion (see `tryPushEmptyLeafCallFast`): the
         // rare chunk/carve misses retreat the committed charge cold.
-        const rt = ctx.runtime;
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
         const index = self.depth;
@@ -2202,7 +2208,7 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.profile_guard = vm_call.enterCallProfile(rt);
         entry.arena_mark = carve.mark;
-        return self.finishPaddedArgsLeafFrame(leaf_this, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
+        return self.finishPaddedArgsLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, argc, carve.window, false, planned_stack_bytes, resume_pc);
     }
 
     /// Optimized inline-call frame setup, factored out of `pushFrame` so the
@@ -3198,8 +3204,11 @@ pub const Machine = struct {
     /// statically fixed `.next/0` continuation. This is intentionally separate
     /// from popFrame: abrupt completion must still inspect and release the
     /// callee's live operand window through general teardown.
-    pub inline fn popReturnedEmptyLeaf(self: *Machine) void {
+    pub inline fn popReturnedEmptyLeaf(self: *Machine, rt: *core.JSRuntime) void {
         const dying = self.topEntry();
+        // Vm-resident rt (see tailcall_dispatch.Vm.rt): the return handler
+        // hands the runtime in, replacing the machine→ctx→runtime chain.
+        std.debug.assert(rt == self.ctx.runtime);
         std.debug.assert(dying.isEmptyLeaf());
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
@@ -3215,8 +3224,7 @@ pub const Machine = struct {
         // watermark restore; keeping it in the return handler removes the
         // only bl/ret on the empty-leaf return path (destroyZeroRef stays
         // outline behind the rc==0 branch).
-        const rt = self.ctx.runtime;
-        dying.deinitEmptyLeafInline(self.ctx);
+        dying.deinitEmptyLeafInline(rt);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
@@ -3225,8 +3233,10 @@ pub const Machine = struct {
     /// Exact-args twin of `popReturnedEmptyLeaf`. Its inline epilogue adds
     /// only the caller-region args release loop; abrupt completion still
     /// inspects and releases the callee through general teardown.
-    pub inline fn popReturnedExactArgsLeaf(self: *Machine) void {
+    pub inline fn popReturnedExactArgsLeaf(self: *Machine, rt: *core.JSRuntime) void {
         const dying = self.topEntry();
+        // Vm-resident rt (see popReturnedEmptyLeaf).
+        std.debug.assert(rt == self.ctx.runtime);
         std.debug.assert(dying.isExactArgsLeaf());
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
@@ -3242,8 +3252,7 @@ pub const Machine = struct {
             dying.frame.actual_arg_count,
             false,
         ));
-        const rt = self.ctx.runtime;
-        dying.deinitExactArgsLeafInline(self.ctx);
+        dying.deinitExactArgsLeafInline(rt);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
@@ -3254,8 +3263,10 @@ pub const Machine = struct {
     /// completion still inspects and releases the callee through general
     /// teardown (whose cold `releaseNativeCaller` arm handles the same
     /// ownership).
-    pub inline fn popReturnedForwardedLeaf(self: *Machine) void {
+    pub inline fn popReturnedForwardedLeaf(self: *Machine, rt: *core.JSRuntime) void {
         const dying = self.topEntry();
+        // Vm-resident rt (see popReturnedEmptyLeaf).
+        std.debug.assert(rt == self.ctx.runtime);
         std.debug.assert(dying.isForwardedLeaf());
         std.debug.assert(!dying.teardown.tail_chain);
         std.debug.assert(dying.return_action == .next);
@@ -3266,8 +3277,7 @@ pub const Machine = struct {
         std.debug.assert(dying.frame.function.arg_count == 0);
         const dying_stack_bytes: usize = dying.frame.planned_stack_bytes;
         std.debug.assert(dying_stack_bytes == vm_call.qjsBytecodeLeafFrameAllocaSize(dying.frame.function));
-        const rt = self.ctx.runtime;
-        dying.deinitForwardedLeafInline(self.ctx);
+        dying.deinitForwardedLeafInline(rt);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;

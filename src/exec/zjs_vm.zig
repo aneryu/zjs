@@ -765,6 +765,7 @@ fn runTC(m: *inline_calls.Machine) HostError!core.JSValue {
     const func = level.function();
     var vm = tailcall_dispatch.Vm{
         .ctx = m.ctx,
+        .rt = m.ctx.runtime,
         .function = func,
         .global = m.global,
         .frame = level.frame,

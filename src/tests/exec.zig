@@ -11338,13 +11338,13 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     var region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
 
     const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
@@ -11355,12 +11355,12 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
     // An oversized operand window cannot use the active arena chunk. The fast
@@ -11372,7 +11372,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     try l0_stack.pushOwned(callable.dup());
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
@@ -11483,7 +11483,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     // constructor (the forwarded twin shares both pools).
     const primed = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(primed.isEmptyLeaf());
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
@@ -11508,7 +11508,7 @@ test "forwarded leaf warm constructor preserves miss fallback and ownership" {
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expect(region_start[1].isUndefined());
-    machine.popReturnedForwardedLeaf();
+    machine.popReturnedForwardedLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
@@ -11753,7 +11753,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     var region_start = l0_stack.topPtr() - 2;
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
-    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
+    try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expect(!region_start[0].isUndefined());
     try std.testing.expect(!region_start[1].isUndefined());
@@ -11767,7 +11767,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(first.frame.ownership.this_value == .owned);
     try std.testing.expect(region_start[0].isUndefined());
     try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
@@ -11779,7 +11779,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     l0_stack.setTopPtr(region_start);
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.receiver, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.same(receiver));
@@ -11787,7 +11787,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
     try std.testing.expectEqual(baseline_rc + 1, receiver_object.header.meta().rc);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(baseline_rc, receiver_object.header.meta().rc);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 
@@ -11946,7 +11946,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.isUndefined());
     try std.testing.expect(first.frame.ownership.this_value == .borrowed);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     const steady_bytes = rt.memory.allocated_bytes;
 
@@ -11957,14 +11957,14 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     const alloc_calls = rt.memory.alloc_calls;
     const create_calls = rt.memory.create_calls;
-    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
+    const warm = machine.tryPushEmptyLeafCallFast(.raw_undefined, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) orelse
         return error.Unexpected;
     try std.testing.expect(warm.isEmptyLeaf());
     try std.testing.expect(warm.frame.this_value.isUndefined());
     try std.testing.expect(warm.frame.ownership.this_value == .borrowed);
     try std.testing.expectEqual(alloc_calls, rt.memory.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.memory.create_calls);
-    machine.popReturnedEmptyLeaf();
+    machine.popReturnedEmptyLeaf(ctx.runtime);
     try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.memory.allocated_bytes);
 }

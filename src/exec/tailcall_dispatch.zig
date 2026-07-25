@@ -118,11 +118,15 @@ pub const Vm = struct {
     /// Field kept ONLY to preserve the measured Vm layout (same rationale as
     /// `_dispatch_layout_padding` below).
     stack_base: [*]JSValue = undefined,
-    /// Keep the dispatch tables and outcome payloads at their measured offsets
-    /// after deriving the single-consumer argument pointer from `frame`. The
-    /// compact layout was instruction-neutral but less cycle-stable on the
-    /// call/closure probes, so this slot is deliberately not reclaimed.
-    _dispatch_layout_padding: usize = undefined,
+    /// Resident `ctx.runtime` — invariant for the Vm's lifetime (a JSContext
+    /// never changes runtime), set once at driver entry. The hot call/return
+    /// legs (budget commit, leaf teardown frees, arena restore) previously
+    /// re-derived rt through the machine→ctx→runtime two-level dependent
+    /// chain on every call AND every return; qjs holds `rt` in a local for
+    /// the whole JS_CallInternal body (quickjs.c:17770 `rt = caller_ctx->rt`).
+    /// Occupies the retired `_dispatch_layout_padding` slot, so the measured
+    /// Vm layout (dispatch tables / outcome payload offsets) is unchanged.
+    rt: *core.JSRuntime,
     /// RETIRED dispatch-table base (B1: hot dispatch is `dispatch_table[op]` static
     /// `adrp+add` now — two dependency-free insns beat the `ldr vm.tbl` whose load sat
     /// on the `br`-target critical path; the historical remat tax this indirection
@@ -526,7 +530,7 @@ inline fn pushAndEnter(vb: [*]JSValue, vm: *Vm, target: *const inline_calls.Inli
 inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
-    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
+    const entry = vm.machine.tryPushEmptyLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, region_start, resume_pc) orelse switch (pushEmptyLeafMiss(leaf_this, vm, function, call_facts, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -543,7 +547,7 @@ inline fn pushWarmEmptyLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 inline fn pushWarmExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = @as(usize, argc) + 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse switch (pushExactArgsLeafMiss(leaf_this, vm, function, call_facts, captures, region_start, argc)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -647,7 +651,7 @@ inline fn pushExactArgsLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, v
 inline fn pushWarmCaptureLeafAndEnter(comptime leaf_this: inline_calls.LeafThis, vb: [*]JSValue, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8, code_ptr: [*]const u8) Outcome {
     const source_count = 1 + @as(usize, @intFromBool(leaf_this == .receiver));
     if (pollRetreatedCallRegion(vm, region_start, source_count)) return .threw;
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse switch (pushCaptureLeafMiss(leaf_this, vm, function, call_facts, captures, region_start)) {
         .entry => |slow_entry| slow_entry,
         .threw => return .threw,
         .recovered => return coldNext(vb, vm),
@@ -1045,7 +1049,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
-        machine.popReturnedEmptyLeaf();
+        machine.popReturnedEmptyLeaf(vm.rt);
         if (caller_opt) |caller| {
             // Flat caller republication — same fields reloadAfterPop's
             // entry arm publishes (enterEntry overwrote them with callee
@@ -1107,7 +1111,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         const resume_pc = dying.emptyLeafResumePc();
         const resume_sp = dying.emptyLeafResumeSp();
         const caller_opt = dying.prev;
-        machine.popReturnedExactArgsLeaf();
+        machine.popReturnedExactArgsLeaf(vm.rt);
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
@@ -1140,7 +1144,7 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // releases the remaining window (and the native frame) exactly once.
         const dying = machine.topEntry();
         const caller_opt = dying.prev;
-        machine.popReturnedForwardedLeaf();
+        machine.popReturnedForwardedLeaf(vm.rt);
         if (caller_opt) |caller| {
             std.debug.assert(caller == machine.top.?);
             const caller_function = caller.frame.function;
@@ -3569,7 +3573,7 @@ noinline fn pushExactArgsLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm:
 /// constructor chain for strict callees, mirroring the zero-arg method arm's
 /// warm/outline split rationale.
 noinline fn warmExactArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+    const entry = vm.machine.tryPushExactArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
         const slow = vm.machine.pushExactArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
@@ -3599,7 +3603,7 @@ noinline fn pushCaptureLeafMiss(comptime leaf_this: inline_calls.LeafThis, vm: *
 /// +1.3% cyc from spilled freight stores). One bl into this warm body still
 /// deletes the InlineTarget freight and the three-deep constructor chain.
 noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse {
+    const entry = vm.machine.tryPushCaptureLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, resume_pc) orelse {
         const slow = vm.machine.pushCaptureLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
@@ -3626,7 +3630,7 @@ noinline fn warmCaptureLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm
 /// first-use Entry allocation, chunk switching, heap fallback, OOM, and
 /// stack-overflow recovery.
 noinline fn warmPaddedArgsLeafOutline(comptime leaf_this: inline_calls.LeafThis, vm: *Vm, function: *const bytecode.FunctionBytecode, call_facts: bytecode.CallFacts, captures: []*core.VarRef, region_start: [*]JSValue, argc: u16, resume_pc: [*]const u8) EmptyLeafMiss {
-    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
+    const entry = vm.machine.tryPushPaddedArgsLeafCallFast(leaf_this, vm.rt, vm.global, vm.stack, function, call_facts, captures, region_start, argc, resume_pc) orelse {
         const slow = vm.machine.pushPaddedArgsLeafCall(leaf_this, vm.global, vm.stack, function, call_facts, captures, region_start, argc) catch |err| {
             if (!callSetupRecover(vm, err)) return .threw;
             return .recovered;
