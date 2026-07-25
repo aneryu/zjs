@@ -1728,6 +1728,11 @@ pub const Object = extern struct {
     }
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
+        // The bare plain-object allocation (`{}` — qjs JS_NewObject) is the
+        // hottest create form. Route it to the dedicated
+        // JS_NewObjectFromShape mirror instead of the general class-payload
+        // constructor (createArrayFromInitialShape precedent for arrays).
+        if (class_id == class.ids.object) return createPlainObject(rt, prototype);
         return createInternal(rt, class_id, prototype, 0, null);
     }
 
@@ -1952,6 +1957,71 @@ pub const Object = extern struct {
         };
         std.debug.assert(!self.isWeakReferenceHolderClass());
         property_storage_owned = false;
+        shape_owned = false;
+        initialized = true;
+        try rt.registerObjectWithBytes(self, alloc_size);
+        initialized = false;
+        return self;
+    }
+
+    /// Allocate a bare plain object straight from the runtime's hashed root
+    /// Shape for `prototype` — the zjs analogue of qjs `JS_NewObject` =
+    /// `JS_NewObjectProtoClass(ctx, proto, JS_CLASS_OBJECT)` (quickjs.c:5847,
+    /// 5743-5759): find_hashed_shape_proto/js_new_shape (both mirrored inside
+    /// `createObjectRoot`), then JS_NewObjectFromShape's pre-allocation GC
+    /// boundary, the raw JSObject allocation, and the EMPTY `JS_CLASS_OBJECT`
+    /// switch arm (quickjs.c:5651-5653 — scalar flag init only, no payload, no
+    /// exotics). The general `createInternal` re-derives all of this per call
+    /// through the class definition plan (plan load + payload-kind triage +
+    /// template loop + the union-of-arms spill frame); the object class is
+    /// standard and its layout facts are compile-time constants, exactly like
+    /// qjs's hardcoded arm. `createArrayFromInitialShape` is the same mirror
+    /// for dense arrays; `createPreparedPropertyTemplate` for property-shaped
+    /// templates. Non-plain classes and capacity/template forms keep the
+    /// general constructor.
+    pub fn createPlainObject(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        if (builtin.mode == .Debug) {
+            // The hardcoded layout facts below must stay in lockstep with the
+            // registered object class definition the generic path consults.
+            const definition = rt.classes.standardPlan(class.ids.object);
+            std.debug.assert(inlineClassPayloadLayoutForDefinition(definition) == null);
+            std.debug.assert(definition.payload_kind == .ordinary);
+            std.debug.assert(!payloadKindAllocates(definition.payload_kind));
+            std.debug.assert(!classHasExoticMethods(class.ids.object, definition.has_exotic));
+        }
+        const shape_ref = try rt.shapes.createObjectRoot(prototype);
+        var shape_owned = true;
+        errdefer if (shape_owned) rt.shapes.release(shape_ref);
+
+        const alloc_size = @sizeOf(Object);
+        rt.collectBeforeObjectAllocation(alloc_size);
+        const self = try rt.memory.createNoTrigger(Object);
+        var initialized = false;
+        errdefer if (initialized)
+            destroyFromHeader(rt, &self.header)
+        else
+            rt.memory.destroy(Object, self);
+
+        self.* = .{
+            .header = .{},
+            .class_id = class.ids.object,
+            // Null payload pointer: the object class's declared `.ordinary`
+            // payload is attached lazily, so a fresh `{}` carries no payload
+            // allocation and `class_payload_kind` stays `.none` (identical to
+            // createInternal's non-allocating ordinary path).
+            .u = ObjectStorage.initPayload(null),
+            .flags = .{
+                .class_payload_kind = .none,
+                .has_exotic_methods = false,
+            },
+            .shape_ref = shape_ref,
+            // A fresh root-shape object defers its property VALUE buffer to
+            // the first append (ensurePropertyCapacity), matching
+            // createInternal's `own_property_capacity == 0` path: the dangling
+            // aligned sentinel means no storage yet.
+            .prop_values = @ptrFromInt(@alignOf(property.Entry)),
+        };
+        std.debug.assert(!self.isWeakReferenceHolderClass());
         shape_owned = false;
         initialized = true;
         try rt.registerObjectWithBytes(self, alloc_size);
