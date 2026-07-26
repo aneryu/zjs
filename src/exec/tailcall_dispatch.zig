@@ -2830,11 +2830,15 @@ pub fn op_put_array_el(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm:
     const key = (sp - 2)[0];
     const obj = (sp - 3)[0];
     const rt = vm.ctx.runtime;
-    if (array_ops.putDenseArrayElementFast(rt, obj, key, value) catch |e| return vm.fail(e)) {
-        value.free(rt);
-        key.free(rt);
-        obj.free(rt);
-        return cont(pc + 1, sp - 3, var_buf, vm);
+    switch (array_ops.putDenseArrayElementFast(rt, obj, key, value)) {
+        .handled => {
+            value.free(rt);
+            key.free(rt);
+            obj.free(rt);
+            return cont(pc + 1, sp - 3, var_buf, vm);
+        },
+        .out_of_memory => return vm.fail(error.OutOfMemory),
+        .miss => {},
     }
     if (key.isInt() and obj.isObject()) {
         // Slow/sparse Array existing own integer element overwrite (crypto

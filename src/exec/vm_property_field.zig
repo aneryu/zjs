@@ -1040,7 +1040,11 @@ pub noinline fn arrayElement(
                 .handled => return .continue_loop,
                 .not_typed_array => {},
             }
-            if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) return .continue_loop;
+            switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key, value)) {
+                .handled => return .continue_loop,
+                .out_of_memory => return error.OutOfMemory,
+                .miss => {},
+            }
             const key_value = object_ops.toPropertyKeyValue(ctx, output, global, key, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -1056,7 +1060,11 @@ pub noinline fn arrayElement(
                 };
                 unreachable;
             }
-            if (try array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) return .continue_loop;
+            switch (array_ops.putDenseArrayElementFast(ctx.runtime, obj, key_value, value)) {
+                .handled => return .continue_loop,
+                .out_of_memory => return error.OutOfMemory,
+                .miss => {},
+            }
             const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(atom_id);
             const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
