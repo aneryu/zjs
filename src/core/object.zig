@@ -7519,12 +7519,13 @@ pub const Object = extern struct {
         {
             var gc_iter = rt.gc.objectIterator();
             while (gc_iter.next()) |h| {
-                h.meta().flags.mark = true;
-            }
-
-            gc_iter = rt.gc.objectIterator();
-            while (gc_iter.next()) |h| {
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
+                // qjs gc_decref marks the current node immediately after
+                // visiting its children (quickjs.c:6736-6738). zjs partitions
+                // trial-zero nodes after the full walk, so the earlier
+                // mark-all pre-pass carried no semantic information and only
+                // walked the intrusive list twice.
+                h.meta().flags.mark = true;
             }
 
             // QJS moves trial-zero nodes to tmp_obj_list. Partitioning after
