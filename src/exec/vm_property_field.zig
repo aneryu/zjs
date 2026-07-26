@@ -1151,7 +1151,7 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
         // canonical validity check, then store the already-coerced bytes.
         if (!(try core.object.typedArrayIndexValid(rt, object, index))) return .handled;
         const off = payload.byte_offset + @as(usize, index) * @as(usize, width);
-        @memcpy(buffer_obj.byteStorage()[off..][0..width], scratch[0..width]);
+        storeElementBytes(buffer_obj.byteStorage()[off..], &scratch, width);
         return .handled;
     };
     // Live validity, identical to the read leg's proven-correct check: a
@@ -1168,8 +1168,26 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     if (byte_len > bytes.len - byte_offset) return .handled;
     if (index >= fixed_len) return .handled;
     const off = byte_offset + @as(usize, index) * @as(usize, width);
-    @memcpy(bytes[off..][0..width], scratch[0..width]);
+    // Store the coerced element with a direct sized copy. `width` is a runtime
+    // value (payload.element_size), so a plain @memcpy lowers to a memcpyFast
+    // CALL even for a 1-byte Uint8 store — the top self-cost of typed-array-heavy
+    // code (gbemu VRAM/memory writes). Switch to comptime lengths so each arm is
+    // a single sized load+store. Widths are always one of {1,2,4,8}.
+    storeElementBytes(bytes[off..], &scratch, width);
     return .handled;
+}
+
+/// Direct sized store of a coerced typed-array element from `scratch` into the
+/// destination buffer. Comptime lengths per width so LLVM emits a plain sized
+/// store instead of a runtime-length memcpyFast call.
+inline fn storeElementBytes(dst: []u8, scratch: *const [8]u8, width: u32) void {
+    switch (width) {
+        1 => dst[0] = scratch[0],
+        2 => dst[0..2].* = scratch[0..2].*,
+        4 => dst[0..4].* = scratch[0..4].*,
+        8 => dst[0..8].* = scratch[0..8].*,
+        else => @memcpy(dst[0..width], scratch[0..width]),
+    }
 }
 
 fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
