@@ -386,6 +386,39 @@ noinline fn callSetupRecover(vm: *Vm, err: HostError) bool {
     return true;
 }
 
+/// Constructor setup recovery matching vm_call.constructor: the caller's
+/// constructor operand region has already been consumed, so only deliver the
+/// pending exception to the intact caller frame. Unlike ordinary OP_call,
+/// OP_call_constructor has no implicit IteratorClose step here.
+noinline fn constructorSetupRecover(vm: *Vm, err: HostError) bool {
+    const caught = call_runtime.handleCatchableRuntimeError(
+        vm.ctx,
+        vm.output,
+        vm.stack,
+        vm.frame,
+        vm.catch_target,
+        vm.global,
+        err,
+    ) catch |e2| {
+        vm.pending_error = e2;
+        return false;
+    };
+    if (!caught) {
+        vm.pending_error = err;
+        return false;
+    }
+    return true;
+}
+
+/// Error before same-Machine constructor setup still owns the complete
+/// `[func, new_target, args...]` caller region. Release it exactly as the
+/// legacy vm_call.constructor pop/defer sequence did, then use the common
+/// constructor catch delivery above.
+noinline fn constructorRegionRecover(vm: *Vm, region_base: usize, err: HostError) bool {
+    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+    return constructorSetupRecover(vm, err);
+}
+
 /// `IteratorNext` itself is outside the IteratorClose-on-abrupt region (qjs
 /// `JS_IteratorNext2` propagates a failing `next()` directly). A same-Machine
 /// setup failure for that method therefore tries the caller catch without
@@ -963,6 +996,7 @@ fn op_post_call_continuation(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValu
             }
             completeForOfNextContinuation(vm, result, @intCast(payload)) catch |err| return vm.fail(err);
         },
+        .constructor => unreachable,
         .next => unreachable,
     }
     return coldNext(var_buf, vm);
@@ -1167,6 +1201,13 @@ inline fn popAndResume(vm: *Vm, value: JSValue) Outcome {
         // L0 caller: keep the authoritative reload (stop-boundary republication).
         reloadAfterPop(vm, null, &pc2, &sp2, &vb2);
         vm.stack.pushOwnedAssumeCapacity(value);
+        sp2 += 1;
+        return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
+    }
+    if (machine.topEntry().completesConstructor()) {
+        const completed = machine.popConstructorReturn(value);
+        reloadAfterPop(vm, machine.top, &pc2, &sp2, &vb2);
+        vm.stack.pushOwnedAssumeCapacity(completed);
         sp2 += 1;
         return @call(.always_tail, next, .{ pc2, sp2, vb2, vm });
     }
@@ -1581,6 +1622,88 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
             return .tail;
         },
     }
+}
+
+/// Ordinary base-bytecode construction stays in the active Machine. General
+/// [[Construct]] policy remains authoritative: this handler admits only the
+/// same-Realm `new_target == func` shape resolved by call_runtime, and falls
+/// through unchanged for proxy/bound/native/class/derived/cross-Realm cases.
+fn op_call_constructor(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) callconv(.c) Outcome {
+    vm.publish(pc, sp); // frame.pc points at the u16 argc operand
+    const argc = readInt(u16, pc + 1);
+    const total = @as(usize, argc) + 2;
+    if (vm.stack.len() >= total) {
+        const region_base = vm.stack.len() - total;
+        const region_start = vm.stack.values + region_base;
+        const func = region_start[0];
+        const new_target = region_start[1];
+        if (call_runtime.resolveSameMachineConstructor(vm.global, func, new_target)) |candidate| {
+            // First JS_CallConstructorInternal poll: before instance creation,
+            // constructibility effects, and the inner bytecode-call poll.
+            exception_ops.pollInterrupt(vm.ctx, vm.global) catch |err| {
+                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            const args = (region_start + 2)[0..argc];
+            const prepared = call_runtime.prepareSameMachineConstructorAfterFirstPoll(
+                vm.ctx,
+                vm.output,
+                vm.global,
+                func,
+                &candidate,
+                args,
+                vm.function,
+                vm.frame,
+            ) catch |err| {
+                if (!constructorRegionRecover(vm, region_base, err)) return .threw;
+                return coldNext(vb, vm);
+            };
+            vm.frame.pc += 2;
+            switch (prepared) {
+                .completed => |result| {
+                    call_runtime.popOwnedStackRegion(vm.rt, vm.stack, region_base);
+                    vm.stack.pushOwnedAssumeCapacity(result);
+                    return coldNext(vb, vm);
+                },
+                .instance => |instance| {
+                    // Parser-emitted direct construction owns two references
+                    // to the same callable (`get_var; dup`). Recast that
+                    // region as method-shaped setup: move the eager instance
+                    // into receiver slot 0, retain slot 1 as the callable,
+                    // and release the displaced duplicate.
+                    const displaced_func = region_start[0];
+                    region_start[0] = instance;
+                    displaced_func.free(vm.rt);
+                    const target = candidate.resolved.bind(instance, func);
+                    vm.stack.setTopPtr(region_start);
+                    const entry = vm.machine.pushConstructorCall(
+                        vm.global,
+                        vm.stack,
+                        &target,
+                        region_start,
+                        argc,
+                    ) catch |err| {
+                        if (!constructorSetupRecover(vm, err)) return .threw;
+                        return coldNext(vb, vm);
+                    };
+                    return enterEntry(vm, entry, target.fb.byteCodeAssumeMaterialized().ptr);
+                },
+            }
+        }
+    }
+
+    // Authoritative slow path expects frame.pc at the argc operand and owns
+    // its existing pop/catch protocol.
+    _ = call_vm.constructor(
+        vm.ctx,
+        vm.output,
+        vm.global,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+    ) catch |e| return vm.fail(e);
+    return coldNext(vb, vm);
 }
 
 /// Generic for-of calls a bytecode iterator's zero-argument `next` method in
@@ -3617,6 +3740,7 @@ const specials: colds.SpecialHandlers = .{
     .op_call2 = op_call2,
     .op_call3 = op_call3,
     .op_call_method = op_call_method,
+    .op_call_constructor = op_call_constructor,
     .op_for_of_next = op_for_of_next,
     .op_tail_call = op_tail_call,
     .op_tail_call_method = op_tail_call_method,
@@ -3839,6 +3963,7 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 switch (continuation.action) {
                     .proxy_get => try completeProxyGetContinuation(vm, result, continuation.takeAtom()),
                     .for_of_next => try completeForOfNextContinuation(vm, result, continuation.takeForOfDepth()),
+                    .constructor => unreachable,
                     .next => unreachable,
                 }
                 reloadTop(vm, &pc, &sp, &var_buf);
@@ -3850,7 +3975,9 @@ pub fn run(vm: *Vm) HostError!JSValue {
                 // qjs polls at JS_CallInternal entry before the planned-frame
                 // stack guard and before any caller-frame mutation.
                 try exception_ops.pollInterrupt(vm.ctx, vm.global);
-                if (vm.tail_is_reuse) {
+                if (vm.tail_is_reuse and
+                    !(vm.machine.depth > 0 and vm.machine.topEntry().completesConstructor()))
+                {
                     _ = vm.machine.tailCallReuse(
                         vm.global,
                         vm.stack,

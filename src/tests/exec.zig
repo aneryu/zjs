@@ -2704,6 +2704,70 @@ test "class entry and construction use bytecode gates without a class behavior f
     try std.testing.expect(result.isUndefined());
 }
 
+test "ordinary constructor Machine completion preserves bindings eval recursion and abrupt teardown" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_arena_mark = js.runtime.vm_stack.mark();
+    const result = try js.eval(
+        \\let observed;
+        \\let evalThis;
+        \\let evalNewTarget;
+        \\function Ordinary(value, mode) {
+        \\  const arrow = () => [this, new.target, arguments[0]];
+        \\  observed = arrow();
+        \\  eval("evalThis = this; evalNewTarget = new.target");
+        \\  this.value = value;
+        \\  if (mode === "object") return { replacement: value + 1 };
+        \\  if (mode === "throw") throw value;
+        \\  return 17;
+        \\}
+        \\const primitive = new Ordinary(3, "primitive");
+        \\assert.sameValue(primitive.value, 3);
+        \\assert.sameValue(observed[0], primitive);
+        \\assert.sameValue(observed[1], Ordinary);
+        \\assert.sameValue(observed[2], 3);
+        \\assert.sameValue(evalThis, primitive);
+        \\assert.sameValue(evalNewTarget, Ordinary);
+        \\const replacement = new Ordinary(4, "object");
+        \\assert.sameValue(replacement.replacement, 5);
+        \\assert.sameValue(replacement.value, undefined);
+        \\let caught;
+        \\try { new Ordinary(6, "throw"); } catch (error) { caught = error; }
+        \\assert.sameValue(caught, 6);
+        \\
+        \\function Recursive(depth) {
+        \\  this.depth = depth;
+        \\  if (depth !== 0) this.child = new Recursive(depth - 1);
+        \\}
+        \\const recursive = new Recursive(32);
+        \\let count = 0;
+        \\for (let cursor = recursive; cursor; cursor = cursor.child) count++;
+        \\assert.sameValue(count, 33);
+        \\
+        \\function EvalTail(value) {
+        \\  eval("this.value = value");
+        \\}
+        \\const evalTail = new EvalTail(9);
+        \\assert.sameValue(evalTail.value, 9);
+        \\
+        \\function GcConstructor(value) {
+        \\  this.value = value;
+        \\  $262.gc();
+        \\  return null;
+        \\}
+        \\const gcValue = new GcConstructor(11);
+        \\assert.sameValue(gcValue.value, 11);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
+}
+
 test "Reflect.construct keeps a fresh prototype getter result alive through instance allocation" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();

@@ -137,6 +137,7 @@ pub const SpecialHandlers = struct {
     op_call2: Handler,
     op_call3: Handler,
     op_call_method: Handler,
+    op_call_constructor: Handler,
     op_for_of_next: Handler,
     op_tail_call: Handler,
     op_tail_call_method: Handler,
@@ -722,11 +723,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) [256]Handler {
             _ = try call_vm.apply(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
         }
     }.b);
-    t[op.call_constructor] = h(struct {
-        fn b(vm: *Vm) HostError!void {
-            _ = try call_vm.constructor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target);
-        }
-    }.b);
+    t[op.call_constructor] = s.op_call_constructor;
     t[op.apply_eval] = h(struct {
         fn b(vm: *Vm) HostError!void {
             _ = try eval_module_vm.applyEval(vm.ctx, vm.stack, vm.function, vm.frame, vm.catch_target, vm.output, vm.global, td.directEvalVarsReachGlobal(vm));

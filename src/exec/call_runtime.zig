@@ -1636,6 +1636,85 @@ pub fn constructValueOrBytecodeWithNewTargetInternal(
     );
 }
 
+/// Same-Machine constructor admission record for OP_call_constructor.
+/// Resolution is deliberately narrower than general [[Construct]]: only a
+/// same-Realm ordinary bytecode function with `new_target == func` enters.
+/// Proxy, bound, native, class/derived, differing-new-target and cross-Realm
+/// construction retain the authoritative recursive adapter below.
+pub const SameMachineConstructorTarget = struct {
+    resolved: inline_calls.ResolvedInlineFunction,
+    function_object: *core.Object,
+};
+
+pub fn resolveSameMachineConstructor(
+    global: *core.Object,
+    func: core.JSValue,
+    new_target: core.JSValue,
+) ?SameMachineConstructorTarget {
+    if (!new_target.sameValue(func)) return null;
+    const resolved = inline_calls.resolveInlineFunction(global, func) orelse return null;
+    if (!resolved.fb.hasPrototype()) return null;
+    const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
+    if (!isConstructibleBytecodeFunctionObject(function_object, resolved.fb)) return null;
+    return .{
+        .resolved = resolved,
+        .function_object = function_object,
+    };
+}
+
+pub const SameMachineConstructorPreparation = union(enum) {
+    /// The QuickJS-style simple-field writer completed construction without
+    /// entering the bytecode body.
+    completed: core.JSValue,
+    /// Owned base instance whose body must execute in the active Machine.
+    instance: core.JSValue,
+};
+
+/// Continue an admitted constructor after OP_call_constructor has paid the
+/// outer JS_CallConstructorInternal interrupt poll. Keep the existing
+/// simple-field writer first; only its miss creates an instance for a
+/// same-Machine bytecode frame. The second poll remains after instance
+/// creation and before bytecode-frame stack preflight, matching
+/// JS_CallInternal's constructor entry ordering.
+pub fn prepareSameMachineConstructorAfterFirstPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    target: *const SameMachineConstructorTarget,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!SameMachineConstructorPreparation {
+    if (try constructSimpleFieldConstructor(
+        ctx,
+        global,
+        func,
+        target.function_object,
+        target.resolved.fb,
+        args,
+        func,
+        false,
+    )) |constructed| {
+        return .{ .completed = constructed };
+    }
+
+    const instance = try createBytecodeConstructorInstance(
+        ctx,
+        output,
+        global,
+        func,
+        target.function_object,
+        func,
+        caller_function,
+        caller_frame,
+    );
+    errdefer instance.free(ctx.runtime);
+    const interrupt_global = ctx.global orelse global;
+    try exception_ops.pollInterrupt(ctx, interrupt_global);
+    return .{ .instance = instance };
+}
+
 /// Construct an ordinary (non-native) bytecode function object. qjs
 /// JS_CallConstructorInternal dispatches construction on the function's class,
 /// not its name — a bytecode function body is never a native builtin — so this

@@ -183,6 +183,7 @@ pub const ReturnAction = enum(u8) {
     next,
     proxy_get,
     for_of_next,
+    constructor,
 };
 
 pub const ReturnContinuation = struct {
@@ -247,7 +248,11 @@ pub const Entry = struct {
         /// boundary. Persist the pricing mode so teardown releases the exact
         /// bytes charged even after the transient InlineTarget is gone.
         copy_argv: bool = false,
-        _padding: u1 = 0,
+        /// `native_caller` owns the eager base instance while a constructor
+        /// body runs. The frame's `this` binding borrows that same value; the
+        /// return completion moves it out before ordinary teardown, while
+        /// abrupt completion releases it here.
+        constructor_instance: bool = false,
     };
 
     /// The Entry's sole persistent FunctionBytecode source is `frame.function`;
@@ -305,6 +310,20 @@ pub const Entry = struct {
 
     pub inline fn isForwardedLeaf(self: *const Entry) bool {
         return self.teardown.forwarded_leaf;
+    }
+
+    pub inline fn completesConstructor(self: *const Entry) bool {
+        return self.teardown.constructor_instance;
+    }
+
+    fn takeConstructorInstance(self: *Entry) core.JSValue {
+        std.debug.assert(self.teardown.constructor_instance);
+        std.debug.assert(self.return_action == .constructor);
+        std.debug.assert(!self.teardown.has_native_caller);
+        const instance = self.native_caller;
+        self.native_caller = core.JSValue.undefinedValue();
+        self.teardown.constructor_instance = false;
+        return instance;
     }
 
     /// Caller-resume record for the empty-leaf return arm, overlaid on Entry
@@ -396,6 +415,13 @@ pub const Entry = struct {
     /// performs only the ownership-bit test.
     noinline fn releaseNativeCaller(self: *Entry, rt: *core.JSRuntime) void {
         std.debug.assert(self.teardown.has_native_caller);
+        std.debug.assert(!self.teardown.constructor_instance);
+        self.native_caller.free(rt);
+    }
+
+    noinline fn releaseConstructorInstance(self: *Entry, rt: *core.JSRuntime) void {
+        std.debug.assert(self.teardown.constructor_instance);
+        std.debug.assert(!self.teardown.has_native_caller);
         self.native_caller.free(rt);
     }
 
@@ -569,6 +595,7 @@ pub const Entry = struct {
         const live_values = frame.locals.ptr[0 .. frame.locals.len + self.stack.len()];
         for (live_values) |v| v.free(rt);
         for (frame.args) |v| v.free(rt);
+        if (self.teardown.constructor_instance) self.releaseConstructorInstance(rt);
     }
 
     /// General teardown for frames whose stack, cold state, or storage escaped
@@ -584,6 +611,7 @@ pub const Entry = struct {
         if (self.teardown.has_native_caller) self.releaseNativeCaller(rt);
         self.stack.deinit(rt);
         self.frame.deinitInlineCall(&rt.memory, rt);
+        if (self.teardown.constructor_instance) self.releaseConstructorInstance(rt);
     }
 
     /// Successful tail replacement has already built and linked the target
@@ -2699,6 +2727,58 @@ pub const Machine = struct {
         return self.pushFrame(.generic, false, false, global, target, source);
     }
 
+    /// Enter an ordinary base constructor in this Machine. The caller has
+    /// rewritten its constructor region to `[instance, callable, args...]`;
+    /// generic method-shaped setup therefore transfers the raw instance into
+    /// `this` without adding a second argument staging format. After setup,
+    /// ownership moves from Frame.this_value into Entry.native_caller:
+    /// `this` borrows the live fallback instance while constructor completion
+    /// or abrupt teardown remains its single owner.
+    pub noinline fn pushConstructorCall(
+        self: *Machine,
+        global: *core.Object,
+        caller_stack: *stack_mod.Stack,
+        target: *const InlineTarget,
+        region_start: [*]core.JSValue,
+        argc: u16,
+    ) HostError!*Entry {
+        std.debug.assert(caller_stack.topPtr() == region_start);
+        std.debug.assert(target.this_value.isObject());
+        const source = ArgsSource.initStack(region_start, argc, true);
+        const planned_stack_bytes = vm_call.qjsBytecodeFrameAllocaSize(
+            target.fb,
+            argc,
+            false,
+        );
+        vm_call.enterInlineCallDepthBytes(self.ctx, global, planned_stack_bytes) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
+        errdefer vm_call.leaveInlineCallDepthBytes(self.ctx, planned_stack_bytes);
+        const entry = self.acquireSlot(global) catch |err| {
+            cleanupStackSource(self.ctx.runtime, source);
+            return err;
+        };
+        entry.return_action = .constructor;
+        entry.continuation_payload = 0;
+        setupInlineEntry(self.ctx, global, entry, target, source) catch |err| return err;
+        errdefer entry.deinit(self.ctx);
+
+        const cold = try entry.frame.ensureCold(&self.ctx.runtime.memory);
+        cold.new_target = entry.frame.current_function;
+        std.debug.assert(entry.frame.ownership.this_value == .owned);
+        std.debug.assert(entry.frame.this_value.same(target.this_value));
+        entry.native_caller = entry.frame.this_value;
+        entry.frame.ownership.this_value = .borrowed;
+        entry.teardown.constructor_instance = true;
+        entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
+
+        entry.prev = self.top;
+        self.top = entry;
+        self.depth += 1;
+        return entry;
+    }
+
     /// Dynamic adapter used by the driver-side fallback. Hot threaded handlers
     /// call the concrete plain/method adapters directly.
     pub inline fn pushCall(
@@ -2739,6 +2819,7 @@ pub const Machine = struct {
             .next => 0,
             .proxy_get => self.ctx.runtime.atoms.dup(@intCast(continuation_payload)),
             .for_of_next => continuation_payload,
+            .constructor => unreachable,
         };
         return entry;
     }
@@ -3288,12 +3369,35 @@ pub const Machine = struct {
     /// return slot until their post-call action runs. Takes ownership of
     /// `result` either way and returns the selected action.
     pub fn popReturn(self: *Machine, result: core.JSValue) ReturnContinuation {
+        if (self.topEntry().completesConstructor()) {
+            const completed = self.popConstructorReturn(result);
+            self.currentLevel().stack.pushOwnedAssumeCapacity(completed);
+            return .{ .action = .next, .payload = 0 };
+        }
         const continuation = self.popReturnedFrame();
         if (continuation.action == .next) {
             std.debug.assert(continuation.payload == 0);
             self.currentLevel().stack.pushOwnedAssumeCapacity(result);
         }
         return continuation;
+    }
+
+    /// Apply base-constructor return completion while the Entry still owns its
+    /// fallback instance. An object result replaces the instance; every
+    /// primitive (including undefined) is discarded and the instance becomes
+    /// the call result.
+    pub fn popConstructorReturn(self: *Machine, result: core.JSValue) core.JSValue {
+        const dying = self.topEntry();
+        const instance = dying.takeConstructorInstance();
+        const continuation = self.popReturnedFrame();
+        std.debug.assert(continuation.action == .constructor);
+        std.debug.assert(continuation.payload == 0);
+        if (result.isObject()) {
+            instance.free(self.ctx.runtime);
+            return result;
+        }
+        result.free(self.ctx.runtime);
+        return instance;
     }
 
     /// Unwind inline frames looking for a catch handler for `err`. The top
