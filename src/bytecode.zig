@@ -6943,6 +6943,7 @@ pub const pipeline_resolve_variables = struct {
 
         var max_label_id: u32 = 0;
         var saw_parser_label = false;
+        var tagged_reference_count: usize = 0;
         var pc: usize = 0;
         var atom_index: usize = 0;
         while (pc < func.code.len) {
@@ -6958,9 +6959,11 @@ pub const pipeline_resolve_variables = struct {
                 }
             }
             if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
+                if (offset + 4 > size) return error.InvalidBytecode;
                 const encoded = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
                 if ((encoded & opcode.op.parser_label_tag) != 0) {
                     saw_parser_label = true;
+                    tagged_reference_count += 1;
                     const id = encoded & ~opcode.op.parser_label_tag;
                     if (id > max_label_id) max_label_id = id;
                 }
@@ -6973,12 +6976,18 @@ pub const pipeline_resolve_variables = struct {
         if (@as(usize, max_label_id) > func.code.len) return error.InvalidBytecode;
 
         const unbound = std.math.maxInt(usize);
-        const targets = try ctx.memory.alloc(usize, @as(usize, max_label_id) + 1);
-        defer ctx.memory.free(usize, targets);
+        const target_count = @as(usize, max_label_id) + 1;
+        const scratch_count = std.math.add(usize, target_count, tagged_reference_count) catch
+            return error.BytecodeOverflow;
+        const scratch = try ctx.memory.alloc(usize, scratch_count);
+        defer ctx.memory.free(usize, scratch);
+        const targets = scratch[0..target_count];
+        const reference_sites = scratch[target_count..];
         @memset(targets, unbound);
 
         pc = 0;
         atom_index = 0;
+        var reference_index: usize = 0;
         while (pc < func.code.len) {
             const op_id = func.code[pc];
             const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
@@ -6990,44 +6999,32 @@ pub const pipeline_resolve_variables = struct {
                     targets[id] = pc;
                 }
             }
-            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += size;
-        }
-
-        // Validate every tagged reference before publishing any absolute PC.
-        pc = 0;
-        atom_index = 0;
-        while (pc < func.code.len) {
-            const op_id = func.code[pc];
-            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
-            const size: usize = instr.size;
             if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
                 const encoded = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
                 if ((encoded & opcode.op.parser_label_tag) != 0) {
-                    const id = encoded & ~opcode.op.parser_label_tag;
-                    if (id == 0 or id >= targets.len or targets[id] == unbound) return error.InvalidBytecode;
+                    if (reference_index >= reference_sites.len) return error.InvalidBytecode;
+                    reference_sites[reference_index] = pc + offset;
+                    reference_index += 1;
                 }
             }
             if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
             pc += size;
         }
+        if (reference_index != reference_sites.len) return error.InvalidBytecode;
 
-        pc = 0;
-        atom_index = 0;
-        while (pc < func.code.len) {
-            const op_id = func.code[pc];
-            const instr = topologyInstruction(func.code, func.atom_operands, pc, atom_index);
-            const size: usize = instr.size;
-            if (topologyLabelOperandOffset(op_id, instr.is_temp)) |offset| {
-                const operand = func.code[pc + offset ..][0..4];
-                const encoded = std.mem.readInt(u32, operand, .little);
-                if ((encoded & opcode.op.parser_label_tag) != 0) {
-                    const id = encoded & ~opcode.op.parser_label_tag;
-                    std.mem.writeInt(u32, operand, @intCast(targets[id]), .little);
-                }
+        // The bytecode remains untouched until every reference has resolved.
+        for (reference_sites) |site| {
+            const encoded = std.mem.readInt(u32, func.code[site..][0..4], .little);
+            const id = encoded & ~opcode.op.parser_label_tag;
+            if (id == 0 or id >= targets.len or targets[id] == unbound) {
+                return error.InvalidBytecode;
             }
-            if (topologyInstructionHasAtom(op_id, instr.is_temp)) atom_index += 1;
-            pc += size;
+        }
+        for (reference_sites) |site| {
+            const operand = func.code[site..][0..4];
+            const encoded = std.mem.readInt(u32, operand, .little);
+            const id = encoded & ~opcode.op.parser_label_tag;
+            std.mem.writeInt(u32, operand, @intCast(targets[id]), .little);
         }
     }
 
