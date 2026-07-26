@@ -8209,7 +8209,11 @@ pub const pipeline_resolve_labels = struct {
     /// The goto must be adjacent: QuickJS skips source markers here, which are
     /// already represented out-of-band by this phase, but it does not cross a
     /// real label or instruction between the conditional and goto.
-    fn matchConditionalGotoPeephole(code: []const u8, pc: usize) !?ConditionalGotoPeephole {
+    fn matchConditionalGotoPeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+    ) !?ConditionalGotoPeephole {
+        const code = topology.code;
         if (pc + 10 > code.len) return null;
         const branch_op = code[pc];
         if ((branch_op != opcode.op.if_false and branch_op != opcode.op.if_true) or
@@ -8217,7 +8221,7 @@ pub const pipeline_resolve_labels = struct {
         {
             return null;
         }
-        if (hasJumpTargetTo(code, pc + 5)) return null;
+        if (topology.hasTargetTo(pc + 5)) return null;
         const branch_target = try resolvedJumpTarget(code, pc);
         if (!try targetAppearsAtFollowingBoundary(code, pc + 10, branch_target)) return null;
         return .{
@@ -8277,6 +8281,27 @@ pub const pipeline_resolve_labels = struct {
 
     fn relOffset(from_pc: usize, target_pc: usize) i64 {
         return @as(i64, @intCast(target_pc)) - @as(i64, @intCast(from_pc + 1));
+    }
+
+    /// During a left-to-right layout pass, backward targets already have their
+    /// current-pass positions while forward targets still have the preceding
+    /// pass's positions. Select the source position from the same generation
+    /// as the target. Mixing a current source with a previous forward target
+    /// creates an artificial distance proportional to all earlier shrinkage
+    /// and turns local branches into a one-block-per-pass propagation wave.
+    fn layoutJumpOffset(
+        positions: []const usize,
+        input_pc: usize,
+        previous_output_pc: usize,
+        current_output_pc: usize,
+        target: usize,
+        emitted_prefix: usize,
+    ) i64 {
+        const source_pc = if (target > input_pc)
+            previous_output_pc
+        else
+            current_output_pc;
+        return relOffset(source_pc + emitted_prefix, positions[target]);
     }
 
     fn jumpSizeForOffset(op_id: u8, diff: i64, use_short_opcodes: bool) usize {
@@ -8381,78 +8406,38 @@ pub const pipeline_resolve_labels = struct {
         return owned;
     }
 
-    // Pass-scoped jump-target bitset (bit p set iff some jump op targets pc p).
-    // `computeLayout`'s up-to-64-pass fixpoint reads a stable `code`, so the
-    // target set is constant; building it once turns every peephole
-    // `hasJumpTargetInRange` query from an O(code) rescan into an O(window)
-    // bit check (windows are <= 12 bytes). Threadlocal so concurrent parses on
-    // different threads don't collide; guarded on code slice identity and
-    // save/restored across re-entrancy so a query only trusts a bitset built
-    // for that exact buffer, else it falls back to the exact scan below.
-    threadlocal var pass_jump_target_bits: []const u8 = &.{};
-    threadlocal var pass_jump_target_code_ptr: usize = 0;
-    threadlocal var pass_jump_target_code_len: usize = 0;
+    const topology_boundary: u8 = 1 << 0;
+    const topology_live: u8 = 1 << 1;
+    const topology_raw_target: u8 = 1 << 2;
+    const topology_normalized_target: u8 = 1 << 3;
 
-    /// Build the jump-target bitset for `code`. Stops at the first malformed op
-    /// exactly like the scan (so the bitset covers the same targets the scan
-    /// could reach). Sized for bits [0, code.len] since a jump target may equal
-    /// code.len (jump-to-end).
-    fn buildJumpTargetBits(mem: *memory.MemoryAccount, code: []const u8) ![]u8 {
-        const nbytes = (code.len + 1 + 7) / 8;
-        const bits = try mem.alloc(u8, nbytes);
-        @memset(bits, 0);
-        var scan_pc: usize = 0;
-        while (scan_pc < code.len) {
-            const op_id = code[scan_pc];
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or scan_pc + size > code.len) break;
-            const target: ?usize = if (isJumpOp(op_id))
-                (jumpTarget(code, scan_pc) catch break)
-            else if (isAtomLabelU8Op(op_id))
-                (atomLabelTarget(code, scan_pc) catch break)
-            else
-                null;
-            if (target) |t| {
-                if (t <= code.len) bits[t >> 3] |= (@as(u8, 1) << @as(u3, @intCast(t & 7)));
-            }
-            scan_pc += size;
-        }
-        return bits;
-    }
+    /// Immutable control-flow facts shared by reachability, layout, and final
+    /// emission. QuickJS records label references while emitting bytecode;
+    /// zjs receives absolute byte offsets from phase 2, so build the equivalent
+    /// target topology once instead of rediscovering it with whole-stream
+    /// scans at every peephole candidate.
+    const TargetTopology = struct {
+        code: []const u8,
+        states: []u8,
 
-    fn hasJumpTargetInRange(code: []const u8, start_pc: usize, end_pc: usize) bool {
-        if (pass_jump_target_bits.len != 0 and
-            pass_jump_target_code_ptr == @intFromPtr(code.ptr) and
-            pass_jump_target_code_len == code.len)
-        {
-            const bit_capacity = pass_jump_target_bits.len * 8;
-            const limit = @min(end_pc, code.len + 1);
-            var pc = start_pc;
+        fn hasRawTargetInRange(self: *const TargetTopology, start_pc: usize, end_pc: usize) bool {
+            const limit = @min(end_pc, self.states.len);
+            var pc = @min(start_pc, limit);
             while (pc < limit) : (pc += 1) {
-                if (pc < bit_capacity and
-                    (pass_jump_target_bits[pc >> 3] & (@as(u8, 1) << @as(u3, @intCast(pc & 7)))) != 0)
-                    return true;
+                if (self.states[pc] & topology_raw_target != 0) return true;
             }
             return false;
         }
-        var scan_pc: usize = 0;
-        while (scan_pc < code.len) {
-            const op_id = code[scan_pc];
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or scan_pc + size > code.len) return false;
-            const target = if (isJumpOp(op_id))
-                (jumpTarget(code, scan_pc) catch return false)
-            else if (isAtomLabelU8Op(op_id))
-                (atomLabelTarget(code, scan_pc) catch return false)
-            else
-                null;
-            if (target) |target_pc| {
-                if (target_pc >= start_pc and target_pc < end_pc) return true;
-            }
-            scan_pc += size;
+
+        fn hasTargetTo(self: *const TargetTopology, pc: usize) bool {
+            return pc < self.states.len and
+                self.states[pc] & (topology_raw_target | topology_normalized_target) != 0;
         }
-        return false;
-    }
+
+        fn isReachable(self: *const TargetTopology, pc: usize) bool {
+            return pc < self.states.len and self.states[pc] & topology_live != 0;
+        }
+    };
 
     const ConstantTestPeephole = struct {
         taken: bool,
@@ -8460,7 +8445,8 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    fn matchConstantTestPeephole(code: []const u8, pc: usize) ?ConstantTestPeephole {
+    fn matchConstantTestPeephole(topology: *const TargetTopology, pc: usize) ?ConstantTestPeephole {
+        const code = topology.code;
         if (pc >= code.len) return null;
         const Producer = struct {
             size: usize,
@@ -8483,7 +8469,7 @@ pub const pipeline_resolve_labels = struct {
         const jump_op = code[jump_pc];
         if (jump_op != opcode.op.if_false and jump_op != opcode.op.if_true) return null;
         const total_size = producer.size + 5;
-        if (hasJumpTargetInRange(code, pc + 1, pc + total_size)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + total_size)) return null;
         return .{
             .taken = if (jump_op == opcode.op.if_true) producer.truthy else !producer.truthy,
             .jump_pc = jump_pc,
@@ -8522,17 +8508,18 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    fn matchPushI32NegPeephole(code: []const u8, pc: usize) ?PushI32NegPeephole {
+    fn matchPushI32NegPeephole(topology: *const TargetTopology, pc: usize) ?PushI32NegPeephole {
+        const code = topology.code;
         if (pc + 6 > code.len or code[pc] != opcode.op.push_i32 or code[pc + 5] != opcode.op.neg) return null;
         const value = std.mem.readInt(i32, code[pc + 1 ..][0..4], .little);
         if (value == std.math.minInt(i32) or value == 0) return null;
         if (pc + 7 <= code.len and
             code[pc + 6] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+            !topology.hasRawTargetInRange(pc + 1, pc + 7))
         {
             return .{ .value = -value, .discarded = true, .total_size = 7 };
         }
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 6)) return null;
         return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
@@ -8542,7 +8529,8 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    fn matchPushBigIntI32NegPeephole(code: []const u8, pc: usize) ?PushBigIntI32NegPeephole {
+    fn matchPushBigIntI32NegPeephole(topology: *const TargetTopology, pc: usize) ?PushBigIntI32NegPeephole {
+        const code = topology.code;
         if (pc + 6 > code.len or
             code[pc] != opcode.op.push_bigint_i32 or
             code[pc + 5] != opcode.op.neg)
@@ -8556,11 +8544,11 @@ pub const pipeline_resolve_labels = struct {
         if (value == std.math.minInt(i32)) return null;
         if (pc + 7 <= code.len and
             code[pc + 6] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 7))
+            !topology.hasRawTargetInRange(pc + 1, pc + 7))
         {
             return .{ .value = value, .discarded = true, .total_size = 7 };
         }
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 6)) return null;
         return .{ .value = -value, .discarded = false, .total_size = 6 };
     }
 
@@ -8572,7 +8560,12 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    fn matchPushAtomValuePeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?PushAtomValuePeephole {
+    fn matchPushAtomValuePeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+        use_short_opcodes: bool,
+    ) ?PushAtomValuePeephole {
+        const code = topology.code;
         if (pc + 5 > code.len or code[pc] != opcode.op.push_atom_value) return null;
         const atom_id = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
 
@@ -8582,47 +8575,50 @@ pub const pipeline_resolve_labels = struct {
         if (!atom.isTaggedInt(atom_id) and
             pc + 6 <= code.len and
             code[pc + 5] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 6))
+            !topology.hasRawTargetInRange(pc + 1, pc + 6))
         {
             return .{ .kind = .discarded, .total_size = 6 };
         }
 
         if (use_short_opcodes and
             atom_id == atom.ids.empty_string and
-            !hasJumpTargetInRange(code, pc + 1, pc + 5))
+            !topology.hasRawTargetInRange(pc + 1, pc + 5))
         {
             return .{ .kind = .empty_string, .total_size = 5 };
         }
         return null;
     }
 
-    fn discardedPushI32DropPairSize(code: []const u8, pc: usize) ?usize {
+    fn discardedPushI32DropPairSize(topology: *const TargetTopology, pc: usize) ?usize {
+        const code = topology.code;
         if (pc + 6 > code.len or
             code[pc] != opcode.op.push_i32 or
             code[pc + 5] != opcode.op.drop)
         {
             return null;
         }
-        if (hasJumpTargetInRange(code, pc + 1, pc + 6)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 6)) return null;
         return 6;
     }
 
-    fn dropReturnUndefPairSize(code: []const u8, pc: usize) ?usize {
+    fn dropReturnUndefPairSize(topology: *const TargetTopology, pc: usize) ?usize {
+        const code = topology.code;
         if (pc + 2 > code.len or
             code[pc] != opcode.op.drop or
             code[pc + 1] != opcode.op.return_undef or
-            hasJumpTargetTo(code, pc + 1))
+            topology.hasTargetTo(pc + 1))
         {
             return null;
         }
         return 2;
     }
 
-    fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
+    fn undefinedDropPairSize(topology: *const TargetTopology, pc: usize) ?usize {
+        const code = topology.code;
         if (pc + 2 > code.len) return null;
         if (code[pc] == opcode.op.undefined and
             code[pc + 1] == opcode.op.drop and
-            !hasJumpTargetTo(code, pc + 1))
+            !topology.hasTargetTo(pc + 1))
         {
             return 2;
         }
@@ -8681,11 +8677,12 @@ pub const pipeline_resolve_labels = struct {
         total_size: usize,
     };
 
-    fn matchUndefinedReturnPeephole(code: []const u8, pc: usize) ?usize {
+    fn matchUndefinedReturnPeephole(topology: *const TargetTopology, pc: usize) ?usize {
+        const code = topology.code;
         if (pc + 2 > code.len or
             code[pc] != opcode.op.undefined or
             code[pc + 1] != opcode.op.@"return" or
-            hasJumpTargetTo(code, pc + 1))
+            topology.hasTargetTo(pc + 1))
         {
             return null;
         }
@@ -8695,7 +8692,12 @@ pub const pipeline_resolve_labels = struct {
     /// QuickJS short-opcode folds for `value === null/undefined` and for the
     /// branch form of `value !== null/undefined`.  The latter inverts the
     /// following branch because `is_null` / `is_undefined` express equality.
-    fn matchNullishTestPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?NullishTestPeephole {
+    fn matchNullishTestPeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+        use_short_opcodes: bool,
+    ) ?NullishTestPeephole {
+        const code = topology.code;
         if (!use_short_opcodes or pc >= code.len) return null;
         const test_op: u8 = switch (code[pc]) {
             opcode.op.null => opcode.op.is_null,
@@ -8704,7 +8706,7 @@ pub const pipeline_resolve_labels = struct {
         };
 
         if (pc + 2 <= code.len and code[pc + 1] == opcode.op.strict_eq) {
-            if (hasJumpTargetInRange(code, pc + 1, pc + 2)) return null;
+            if (topology.hasRawTargetInRange(pc + 1, pc + 2)) return null;
             return .{
                 .test_op = test_op,
                 .branch_op = null,
@@ -8716,7 +8718,7 @@ pub const pipeline_resolve_labels = struct {
         if (pc + 7 > code.len or code[pc + 1] != opcode.op.strict_neq) return null;
         const old_branch = code[pc + 2];
         if (old_branch != opcode.op.if_false and old_branch != opcode.op.if_true) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 7)) return null;
         const target = resolvedJumpTarget(code, pc + 2) catch return null;
         return .{
             .test_op = test_op,
@@ -8730,7 +8732,12 @@ pub const pipeline_resolve_labels = struct {
     /// dedicated short opcodes.  Removing `push_atom_value` also removes one
     /// entry from Bytecode.atom_operands; `run` rebuilds that ownership list
     /// from the final code before installing it.
-    fn matchTypeofTestPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?TypeofTestPeephole {
+    fn matchTypeofTestPeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+        use_short_opcodes: bool,
+    ) ?TypeofTestPeephole {
+        const code = topology.code;
         if (!use_short_opcodes or pc + 7 > code.len or code[pc] != opcode.op.typeof) return null;
         if (code[pc + 1] != opcode.op.push_atom_value) return null;
         const atom_id = std.mem.readInt(u32, code[pc + 2 ..][0..4], .little);
@@ -8743,7 +8750,7 @@ pub const pipeline_resolve_labels = struct {
 
         const compare_op = code[pc + 6];
         if (compare_op == opcode.op.strict_eq or compare_op == opcode.op.eq) {
-            if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+            if (topology.hasRawTargetInRange(pc + 1, pc + 7)) return null;
             return .{
                 .test_op = test_op,
                 .branch_op = null,
@@ -8754,7 +8761,7 @@ pub const pipeline_resolve_labels = struct {
 
         if (compare_op != opcode.op.strict_neq and compare_op != opcode.op.neq) return null;
         if (pc + 12 > code.len or code[pc + 7] != opcode.op.if_false) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 12)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 12)) return null;
         const target = resolvedJumpTarget(code, pc + 7) catch return null;
         return .{
             .test_op = test_op,
@@ -8767,24 +8774,34 @@ pub const pipeline_resolve_labels = struct {
     /// QuickJS `resolve_labels` begins this family at quickjs.c:35264. Atom
     /// ownership is not changed by a matcher: when the emitted atom count
     /// changes, `run` rebuilds the retained list transactionally before install.
-    fn matchGetLengthPeephole(code: []const u8, pc: usize, use_short_opcodes: bool) ?usize {
+    fn matchGetLengthPeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+        use_short_opcodes: bool,
+    ) ?usize {
+        const code = topology.code;
         if (!use_short_opcodes or pc + 5 > code.len or code[pc] != opcode.op.get_field) return null;
         if (std.mem.readInt(u32, code[pc + 1 ..][0..4], .little) != atom.ids.length) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 5)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 5)) return null;
         return 5;
     }
 
-    fn matchDiscardedFieldStorePeephole(code: []const u8, pc: usize) ?DiscardedFieldStorePeephole {
+    fn matchDiscardedFieldStorePeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+    ) ?DiscardedFieldStorePeephole {
+        const code = topology.code;
         if (pc + 7 > code.len or code[pc] != opcode.op.insert2) return null;
         if (code[pc + 1] != opcode.op.put_field or code[pc + 6] != opcode.op.drop) return null;
-        if (hasJumpTargetInRange(code, pc + 1, pc + 7)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 7)) return null;
         return .{
             .atom_id = std.mem.readInt(u32, code[pc + 2 ..][0..4], .little),
             .total_size = 7,
         };
     }
 
-    fn matchDupPutPeephole(code: []const u8, pc: usize) ?DupPutPeephole {
+    fn matchDupPutPeephole(topology: *const TargetTopology, pc: usize) ?DupPutPeephole {
+        const code = topology.code;
         if (pc + 4 > code.len or code[pc] != opcode.op.dup) return null;
         const forms = switch (code[pc + 1]) {
             opcode.op.put_loc => .{ opcode.op.get_loc, opcode.op.set_loc },
@@ -8793,20 +8810,20 @@ pub const pipeline_resolve_labels = struct {
             opcode.op.put_loc_check => .{ opcode.op.get_loc_check, opcode.op.set_loc_check },
             else => return null,
         };
-        if (hasJumpTargetInRange(code, pc + 1, pc + 4)) return null;
+        if (topology.hasRawTargetInRange(pc + 1, pc + 4)) return null;
 
         const put_op = code[pc + 1];
         const idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little);
         var result_op = forms[1];
         var total_size: usize = 4;
         if (pc + 5 <= code.len and code[pc + 4] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 5))
+            !topology.hasRawTargetInRange(pc + 1, pc + 5))
         {
             result_op = put_op;
             total_size = 5;
             if (pc + 8 <= code.len and code[pc + 5] == forms[0] and
                 std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
-                !hasJumpTargetInRange(code, pc + 1, pc + 8))
+                !topology.hasRawTargetInRange(pc + 1, pc + 8))
             {
                 result_op = forms[1];
                 total_size = 8;
@@ -8823,7 +8840,8 @@ pub const pipeline_resolve_labels = struct {
     /// value with `set_x(n)`.  Keeping this in the common bytecode peephole
     /// pass lets parser output remain the canonical name+scope form used by
     /// js_parse_var and applies equally to locals, arguments, and closures.
-    fn matchPutGetPeephole(code: []const u8, pc: usize) ?PutGetPeephole {
+    fn matchPutGetPeephole(topology: *const TargetTopology, pc: usize) ?PutGetPeephole {
+        const code = topology.code;
         if (pc + 6 > code.len) return null;
         const forms = switch (code[pc]) {
             opcode.op.put_loc => .{ opcode.op.get_loc, opcode.op.set_loc },
@@ -8835,7 +8853,7 @@ pub const pipeline_resolve_labels = struct {
         if (code[pc + 3] != forms[0]) return null;
         const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
         if (std.mem.readInt(u16, code[pc + 4 ..][0..2], .little) != idx) return null;
-        if (hasJumpTargetInRange(code, pc + 3, pc + 6)) return null;
+        if (topology.hasRawTargetInRange(pc + 3, pc + 6)) return null;
         return .{
             .set_op = forms[1],
             .idx = idx,
@@ -8881,7 +8899,8 @@ pub const pipeline_resolve_labels = struct {
         return size;
     }
 
-    fn matchAddLocPeephole(code: []const u8, pc: usize) ?AddLocPeephole {
+    fn matchAddLocPeephole(topology: *const TargetTopology, pc: usize) ?AddLocPeephole {
+        const code = topology.code;
         if (pc + 3 > code.len) return null;
         const first_op = code[pc];
         if (first_op != opcode.op.get_loc) return null;
@@ -8908,7 +8927,7 @@ pub const pipeline_resolve_labels = struct {
         var offset: usize = 1;
         const total_len = rhs_size + 9;
         while (offset < total_len) : (offset += 1) {
-            if (hasJumpTargetTo(code, pc + offset)) return null;
+            if (topology.hasTargetTo(pc + offset)) return null;
         }
 
         return .{
@@ -8922,7 +8941,8 @@ pub const pipeline_resolve_labels = struct {
 
     /// Exact wide phase-2 shapes from quickjs.c:35395. The idx<256 condition is
     /// part of the encoding contract for the two-byte inc_loc/dec_loc result.
-    fn matchIncLocPeephole(code: []const u8, pc: usize) ?IncLocPeephole {
+    fn matchIncLocPeephole(topology: *const TargetTopology, pc: usize) ?IncLocPeephole {
+        const code = topology.code;
         if (pc + 3 > code.len or code[pc] != opcode.op.get_loc) return null;
         const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
         if (idx >= 256) return null;
@@ -8932,7 +8952,7 @@ pub const pipeline_resolve_labels = struct {
             code[pc + 4] == opcode.op.put_loc and
             std.mem.readInt(u16, code[pc + 5 ..][0..2], .little) == idx and
             code[pc + 7] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 8))
+            !topology.hasRawTargetInRange(pc + 1, pc + 8))
         {
             return .{
                 .update_op = if (code[pc + 3] == opcode.op.post_inc) opcode.op.inc_loc else opcode.op.dec_loc,
@@ -8947,7 +8967,7 @@ pub const pipeline_resolve_labels = struct {
             code[pc + 5] == opcode.op.put_loc and
             std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
             code[pc + 8] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 9))
+            !topology.hasRawTargetInRange(pc + 1, pc + 9))
         {
             return .{
                 .update_op = if (code[pc + 3] == opcode.op.inc) opcode.op.inc_loc else opcode.op.dec_loc,
@@ -8960,7 +8980,11 @@ pub const pipeline_resolve_labels = struct {
 
     /// Discarded postfix stores from quickjs.c:35501: replace `post_*` plus the
     /// stack permutation/drop with an ordinary update followed by the store.
-    fn matchPostUpdatePeephole(code: []const u8, pc: usize) ?PostUpdatePeephole {
+    fn matchPostUpdatePeephole(
+        topology: *const TargetTopology,
+        pc: usize,
+    ) ?PostUpdatePeephole {
+        const code = topology.code;
         if (pc >= code.len or (code[pc] != opcode.op.post_inc and code[pc] != opcode.op.post_dec)) return null;
         const update_op: u8 = if (code[pc] == opcode.op.post_inc) opcode.op.inc else opcode.op.dec;
 
@@ -8974,13 +8998,13 @@ pub const pipeline_resolve_labels = struct {
             if (forms) |slot_forms| {
                 const idx = std.mem.readInt(u16, code[pc + 2 ..][0..2], .little);
                 if (code[pc + 4] == opcode.op.drop and
-                    !hasJumpTargetInRange(code, pc + 1, pc + 5))
+                    !topology.hasRawTargetInRange(pc + 1, pc + 5))
                 {
                     var store_op = code[pc + 1];
                     var total_size: usize = 5;
                     if (pc + 8 <= code.len and code[pc + 5] == slot_forms[0] and
                         std.mem.readInt(u16, code[pc + 6 ..][0..2], .little) == idx and
-                        !hasJumpTargetInRange(code, pc + 1, pc + 8))
+                        !topology.hasRawTargetInRange(pc + 1, pc + 8))
                     {
                         store_op = slot_forms[1];
                         total_size = 8;
@@ -8998,7 +9022,7 @@ pub const pipeline_resolve_labels = struct {
 
         if (pc + 8 <= code.len and code[pc + 1] == opcode.op.perm3 and
             code[pc + 2] == opcode.op.put_field and code[pc + 7] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 8))
+            !topology.hasRawTargetInRange(pc + 1, pc + 8))
         {
             return .{
                 .kind = .field,
@@ -9011,7 +9035,7 @@ pub const pipeline_resolve_labels = struct {
 
         if (pc + 4 <= code.len and code[pc + 1] == opcode.op.perm4 and
             code[pc + 2] == opcode.op.put_array_el and code[pc + 3] == opcode.op.drop and
-            !hasJumpTargetInRange(code, pc + 1, pc + 4))
+            !topology.hasRawTargetInRange(pc + 1, pc + 4))
         {
             return .{
                 .kind = .array,
@@ -9051,50 +9075,26 @@ pub const pipeline_resolve_labels = struct {
         return op_id == opcode.op.label or op_id == opcode.op.leave_scope or op_id == opcode.op.close_loc;
     }
 
-    fn hasJumpTargetTo(code: []const u8, target_pc: usize) bool {
-        var scan_pc: usize = 0;
-        while (scan_pc < code.len) {
-            const op_id = code[scan_pc];
-            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
-            if (size == 0 or scan_pc + size > code.len) return false;
-            if (isJumpOp(op_id)) {
-                const target = jumpTarget(code, scan_pc) catch return false;
-                if (target == target_pc or (skipLabels(code, target) catch return false) == target_pc) return true;
-            } else if (isAtomLabelU8Op(op_id)) {
-                const target = atomLabelTarget(code, scan_pc) catch return false;
-                if (target == target_pc or (skipLabels(code, target) catch return false) == target_pc) return true;
-            }
-            scan_pc += size;
-        }
-        return false;
-    }
-
-    const reachability_boundary: u8 = 1 << 0;
-    const reachability_live: u8 = 1 << 1;
-
     fn enqueueReachable(
         states: []u8,
         worklist: []usize,
         worklist_len: *usize,
         target: usize,
     ) !void {
-        if (target >= states.len or states[target] & reachability_boundary == 0) {
+        if (target >= states.len or states[target] & topology_boundary == 0) {
             return error.InvalidBytecode;
         }
-        if (states[target] & reachability_live != 0) return;
+        if (states[target] & topology_live != 0) return;
         if (worklist_len.* >= worklist.len) return error.InvalidBytecode;
-        states[target] |= reachability_live;
+        states[target] |= topology_live;
         worklist[worklist_len.*] = target;
         worklist_len.* += 1;
     }
 
-    /// Compute instruction-boundary CFG reachability before layout. QuickJS
-    /// removes a dead jump's label reference while skipping unreachable code;
-    /// using the original jump set as a liveness oracle therefore preserves
-    /// targets referenced only by dead code and cannot eliminate dead cycles.
-    /// An explicit graph gives the same fixed point without mutating the input
-    /// or coupling reachability to the iterative short-jump layout.
-    fn computeReachability(ctx: *const JSContext) ![]u8 {
+    /// Build instruction boundaries, raw and label-normalized incoming edges,
+    /// and CFG reachability in one phase-2 stream walk. The resulting facts
+    /// remain valid while both layout and emission read the immutable input.
+    fn computeTargetTopology(ctx: *const JSContext) !TargetTopology {
         const code = ctx.function.code;
         const states = try ctx.memory.alloc(u8, code.len + 1);
         errdefer ctx.memory.free(u8, states);
@@ -9102,18 +9102,59 @@ pub const pipeline_resolve_labels = struct {
 
         var pc: usize = 0;
         while (pc < code.len) {
-            states[pc] |= reachability_boundary;
-            const size = if (code[pc] == opcode.op.label) 5 else instrSize(code[pc]);
+            states[pc] |= topology_boundary;
+            const op_id = code[pc];
+            const size = if (op_id == opcode.op.label) 5 else instrSize(op_id);
             if (size == 0 or pc + size > code.len) return error.InvalidBytecode;
+            const target: ?usize = if (isJumpOp(op_id))
+                try jumpTarget(code, pc)
+            else if (isAtomLabelU8Op(op_id))
+                try atomLabelTarget(code, pc)
+            else
+                null;
+            if (target) |target_pc| states[target_pc] |= topology_raw_target;
             pc += size;
         }
         if (pc != code.len) return error.InvalidBytecode;
-        states[code.len] |= reachability_boundary;
+        states[code.len] |= topology_boundary;
+
+        // `hasTargetTo` mirrors QuickJS's label reference lookup: an incoming
+        // edge protects both its raw label position and the first non-label
+        // boundary after a consecutive label run. Derive the latter in one
+        // forward pass rather than calling skipLabels for every edge.
+        for (states) |state| {
+            if (state & topology_raw_target != 0 and state & topology_boundary == 0) {
+                return error.InvalidBytecode;
+            }
+        }
+        var pending_label_target = false;
+        pc = 0;
+        while (pc < code.len) {
+            const op_id = code[pc];
+            if (op_id == opcode.op.label) {
+                pending_label_target = pending_label_target or
+                    states[pc] & topology_raw_target != 0;
+            } else {
+                if (pending_label_target or states[pc] & topology_raw_target != 0) {
+                    states[pc] |= topology_normalized_target;
+                }
+                pending_label_target = false;
+            }
+            pc += if (op_id == opcode.op.label) 5 else instrSize(op_id);
+        }
+        if (pending_label_target or states[code.len] & topology_raw_target != 0) {
+            states[code.len] |= topology_normalized_target;
+        }
+
+        const topology: TargetTopology = .{
+            .code = code,
+            .states = states,
+        };
 
         const worklist = try ctx.memory.alloc(usize, code.len + 1);
         defer ctx.memory.free(usize, worklist);
         var worklist_len: usize = 0;
-        try enqueueReachable(states, worklist, &worklist_len, 0);
+        try enqueueReachable(topology.states, worklist, &worklist_len, 0);
 
         var worklist_index: usize = 0;
         while (worklist_index < worklist_len) : (worklist_index += 1) {
@@ -9125,59 +9166,56 @@ pub const pipeline_resolve_labels = struct {
             if (size == 0 or current + size > code.len) return error.InvalidBytecode;
             const next = current + size;
 
-            if (matchConstantTestPeephole(code, current)) |peephole| {
+            if (matchConstantTestPeephole(&topology, current)) |peephole| {
                 switch (try constantTestAction(code, ctx.function.source_loc_slots, peephole)) {
                     .fallthrough => try enqueueReachable(
-                        states,
+                        topology.states,
                         worklist,
                         &worklist_len,
                         current + peephole.total_size,
                     ),
                     .terminal => {},
-                    .jump => |target| try enqueueReachable(states, worklist, &worklist_len, target),
+                    .jump => |target| try enqueueReachable(topology.states, worklist, &worklist_len, target),
                 }
-            } else if (try matchConditionalGotoPeephole(code, current)) |peephole| {
+            } else if (try matchConditionalGotoPeephole(&topology, current)) |peephole| {
                 // Layout replaces `if_* L1; goto L2; L1:` with an inverted
                 // branch to L2 and falls through at the boundary after the
                 // consumed goto. Model those output successors directly:
                 // threaded input targets can otherwise bypass the fallthrough
                 // trampoline, while terminal folding can hide L2.
-                try enqueueReachable(states, worklist, &worklist_len, peephole.target);
+                try enqueueReachable(topology.states, worklist, &worklist_len, peephole.target);
                 try enqueueReachable(
-                    states,
+                    topology.states,
                     worklist,
                     &worklist_len,
                     current + peephole.total_size,
                 );
             } else if (op_id == opcode.op.goto) {
                 if (try jumpTargetsNextInstruction(code, current)) {
-                    try enqueueReachable(states, worklist, &worklist_len, next);
+                    try enqueueReachable(topology.states, worklist, &worklist_len, next);
                 } else if (gotoTerminalOp(code, ctx.function.source_loc_slots, current) == null) {
-                    try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                    try enqueueReachable(topology.states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
                 }
             } else if (op_id == opcode.op.if_false or op_id == opcode.op.if_true) {
-                try enqueueReachable(states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
-                try enqueueReachable(states, worklist, &worklist_len, next);
+                try enqueueReachable(topology.states, worklist, &worklist_len, try resolvedJumpTarget(code, current));
+                try enqueueReachable(topology.states, worklist, &worklist_len, next);
             } else if (isJumpOp(op_id)) {
-                try enqueueReachable(states, worklist, &worklist_len, try jumpTarget(code, current));
-                try enqueueReachable(states, worklist, &worklist_len, next);
+                try enqueueReachable(topology.states, worklist, &worklist_len, try jumpTarget(code, current));
+                try enqueueReachable(topology.states, worklist, &worklist_len, next);
             } else if (isAtomLabelU8Op(op_id)) {
-                try enqueueReachable(states, worklist, &worklist_len, try threadedAtomLabelTarget(code, current));
-                try enqueueReachable(states, worklist, &worklist_len, next);
+                try enqueueReachable(topology.states, worklist, &worklist_len, try threadedAtomLabelTarget(code, current));
+                try enqueueReachable(topology.states, worklist, &worklist_len, next);
             } else if (!isTerminalOp(op_id)) {
-                try enqueueReachable(states, worklist, &worklist_len, next);
+                try enqueueReachable(topology.states, worklist, &worklist_len, next);
             }
         }
-        return states;
+        return topology;
     }
 
-    fn isReachable(states: []const u8, pc: usize) bool {
-        return pc < states.len and states[pc] & reachability_live != 0;
-    }
-
-    fn redundantReturnUndefSize(code: []const u8, pc: usize) ?usize {
+    fn redundantReturnUndefSize(topology: *const TargetTopology, pc: usize) ?usize {
+        const code = topology.code;
         if (pc >= code.len or code[pc] != opcode.op.return_undef) return null;
-        if (hasJumpTargetTo(code, pc)) return null;
+        if (topology.hasTargetTo(pc)) return null;
         var scan_pc: usize = 0;
         var last_non_cleanup: ?u8 = null;
         var trailing_cleanup_start: usize = 0;
@@ -9197,7 +9235,7 @@ pub const pipeline_resolve_labels = struct {
                 // of the return when another branch enters that cleanup run.
                 // Removing the return would turn that reachable edge into
                 // end-of-code falloff after labels/close_loc are lowered.
-                if (hasJumpTargetInRange(code, trailing_cleanup_start, pc + 1)) return null;
+                if (topology.hasRawTargetInRange(trailing_cleanup_start, pc + 1)) return null;
                 return 1;
             }
         }
@@ -9311,28 +9349,34 @@ pub const pipeline_resolve_labels = struct {
         out_idx.* += size;
     }
 
-    fn optimizedInputSize(code: []const u8, pc: usize, use_short_opcodes: bool, in_size: usize) !usize {
+    fn optimizedInputSize(
+        topology: *const TargetTopology,
+        pc: usize,
+        use_short_opcodes: bool,
+        in_size: usize,
+    ) !usize {
+        const code = topology.code;
         if (code[pc] == opcode.op.label) return in_size;
         if (try jumpTargetsNextInstruction(code, pc)) return in_size;
-        if (try matchConditionalGotoPeephole(code, pc)) |p| return p.total_size;
-        if (matchGetLengthPeephole(code, pc, use_short_opcodes)) |size| return size;
-        if (matchDiscardedFieldStorePeephole(code, pc)) |p| return p.total_size;
-        if (undefinedDropPairSize(code, pc)) |size| return size;
-        if (matchUndefinedReturnPeephole(code, pc)) |size| return size;
-        if (redundantReturnUndefSize(code, pc)) |size| return size;
-        if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
-        if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
-        if (matchDupPutPeephole(code, pc)) |p| return p.total_size;
-        if (matchPutGetPeephole(code, pc)) |p| return p.total_size;
-        if (matchIncLocPeephole(code, pc)) |p| return p.total_size;
-        if (matchAddLocPeephole(code, pc)) |p| return p.total_size;
-        if (matchPostUpdatePeephole(code, pc)) |p| return p.total_size;
-        if (matchConstantTestPeephole(code, pc)) |p| return p.total_size;
-        if (matchPushI32NegPeephole(code, pc)) |p| return p.total_size;
-        if (matchPushBigIntI32NegPeephole(code, pc)) |p| return p.total_size;
-        if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p| return p.total_size;
-        if (discardedPushI32DropPairSize(code, pc)) |size| return size;
-        if (dropReturnUndefPairSize(code, pc)) |size| return size;
+        if (try matchConditionalGotoPeephole(topology, pc)) |p| return p.total_size;
+        if (matchGetLengthPeephole(topology, pc, use_short_opcodes)) |size| return size;
+        if (matchDiscardedFieldStorePeephole(topology, pc)) |p| return p.total_size;
+        if (undefinedDropPairSize(topology, pc)) |size| return size;
+        if (matchUndefinedReturnPeephole(topology, pc)) |size| return size;
+        if (redundantReturnUndefSize(topology, pc)) |size| return size;
+        if (matchNullishTestPeephole(topology, pc, use_short_opcodes)) |p| return p.total_size;
+        if (matchTypeofTestPeephole(topology, pc, use_short_opcodes)) |p| return p.total_size;
+        if (matchDupPutPeephole(topology, pc)) |p| return p.total_size;
+        if (matchPutGetPeephole(topology, pc)) |p| return p.total_size;
+        if (matchIncLocPeephole(topology, pc)) |p| return p.total_size;
+        if (matchAddLocPeephole(topology, pc)) |p| return p.total_size;
+        if (matchPostUpdatePeephole(topology, pc)) |p| return p.total_size;
+        if (matchConstantTestPeephole(topology, pc)) |p| return p.total_size;
+        if (matchPushI32NegPeephole(topology, pc)) |p| return p.total_size;
+        if (matchPushBigIntI32NegPeephole(topology, pc)) |p| return p.total_size;
+        if (matchPushAtomValuePeephole(topology, pc, use_short_opcodes)) |p| return p.total_size;
+        if (discardedPushI32DropPairSize(topology, pc)) |size| return size;
+        if (dropReturnUndefPairSize(topology, pc)) |size| return size;
         return in_size;
     }
 
@@ -9340,68 +9384,43 @@ pub const pipeline_resolve_labels = struct {
         ctx: *const JSContext,
         positions: []usize,
         sizes: []usize,
-        reachability: []const u8,
+        topology: *const TargetTopology,
         use_short_opcodes: bool,
         initial_pc: usize,
     ) !usize {
-        const code = ctx.function.code;
-        @memset(positions, 0);
+        const code = topology.code;
+        for (positions, 0..) |*position, input_pc| {
+            position.* = initial_pc + input_pc;
+        }
         @memset(sizes, 0);
-
-        // Precompute the jump-target set once for the whole layout fixpoint:
-        // `code` is read-only here, so the peephole matchers' repeated
-        // `hasJumpTargetInRange` queries become O(window) instead of O(code)
-        // rescans (the O(64*n^2) that timed out on large generated functions).
-        // Save/restore the threadlocal across any re-entrant computeLayout;
-        // fall back to the per-call scan on OOM. Only built for large functions:
-        // below the threshold the per-call scan's O(n^2) is sub-millisecond, so
-        // small functions keep the exact allocation-free scan path (this also
-        // keeps the resolve_labels OOM-injection unit tests, which use tiny
-        // synthetic functions, on their original allocation sequence).
-        const jump_target_bitset_threshold = 4096;
-        const jt_bits: ?[]u8 = if (code.len >= jump_target_bitset_threshold)
-            (buildJumpTargetBits(ctx.memory, code) catch null)
-        else
-            null;
-        const jt_saved_bits = pass_jump_target_bits;
-        const jt_saved_ptr = pass_jump_target_code_ptr;
-        const jt_saved_len = pass_jump_target_code_len;
-        if (jt_bits) |b| {
-            pass_jump_target_bits = b;
-            pass_jump_target_code_ptr = @intFromPtr(code.ptr);
-            pass_jump_target_code_len = code.len;
-        }
-        defer {
-            pass_jump_target_bits = jt_saved_bits;
-            pass_jump_target_code_ptr = jt_saved_ptr;
-            pass_jump_target_code_len = jt_saved_len;
-            if (jt_bits) |b| ctx.memory.free(u8, b);
-        }
 
         var changed = true;
         var final_size: usize = 0;
         var pass: usize = 0;
-        // Short-form jumps and instruction shrinkage can cascade through large
-        // generated files; keep iterating past the old small fixed cap, while
-        // still retaining a hard guard against accidental oscillation.
-        const max_passes = 64;
-        while (changed and pass < max_passes) : (pass += 1) {
+        // The raw phase-2 positions above are a conservative initial layout.
+        // Every later pass may only shorten an instruction, so the finite sum
+        // of instruction sizes is the convergence proof; no function-size-
+        // independent pass limit is needed.
+        while (changed) : (pass += 1) {
             changed = false;
             var out_pc: usize = initial_pc;
             var pc: usize = 0;
             while (pc < code.len) {
+                const previous_output_pc = positions[pc];
                 positions[pc] = out_pc;
                 const op = code[pc];
                 const old_size = sizes[pc];
                 const in_size = if (op == opcode.op.label) 5 else instrSize(op);
                 if (pc + in_size > code.len) return error.InvalidBytecode;
 
-                if (!isReachable(reachability, pc)) {
+                if (!topology.isReachable(pc)) {
                     sizes[pc] = 0;
-                    if (old_size != 0) changed = true;
+                    if (old_size != 0) {
+                        changed = true;
+                    }
                     const next_pc = pc + in_size;
                     var boundary_pc = pc + 1;
-                    while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
+                    while (boundary_pc < next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                         positions[boundary_pc] = out_pc;
                     }
                     pc = next_pc;
@@ -9412,65 +9431,90 @@ pub const pipeline_resolve_labels = struct {
                     0
                 else if (try jumpTargetsNextInstruction(code, pc))
                     if (op == opcode.op.goto) 0 else instrSize(opcode.op.drop)
-                else if (try matchConditionalGotoPeephole(code, pc)) |p| blk: {
-                    const target_pc = positions[p.target];
-                    const diff = relOffset(out_pc, target_pc);
+                else if (try matchConditionalGotoPeephole(topology, pc)) |p| blk: {
+                    const diff = layoutJumpOffset(
+                        positions,
+                        pc,
+                        previous_output_pc,
+                        out_pc,
+                        p.target,
+                        0,
+                    );
                     break :blk jumpSizeForOffset(p.branch_op, diff, use_short_opcodes);
-                } else if (matchGetLengthPeephole(code, pc, use_short_opcodes) != null)
+                } else if (matchGetLengthPeephole(topology, pc, use_short_opcodes) != null)
                     1
-                else if (matchDiscardedFieldStorePeephole(code, pc) != null)
+                else if (matchDiscardedFieldStorePeephole(topology, pc) != null)
                     instrSize(opcode.op.put_field)
-                else if (undefinedDropPairSize(code, pc) != null)
+                else if (undefinedDropPairSize(topology, pc) != null)
                     0
-                else if (matchUndefinedReturnPeephole(code, pc) != null)
+                else if (matchUndefinedReturnPeephole(topology, pc) != null)
                     1
-                else if (redundantReturnUndefSize(code, pc) != null)
+                else if (redundantReturnUndefSize(topology, pc) != null)
                     0
-                else if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| blk: {
+                else if (matchNullishTestPeephole(topology, pc, use_short_opcodes)) |p| blk: {
                     const branch_op = p.branch_op orelse break :blk 1;
-                    const target_pc = positions[p.target];
-                    const diff = relOffset(out_pc + 1, target_pc);
+                    const diff = layoutJumpOffset(
+                        positions,
+                        pc,
+                        previous_output_pc,
+                        out_pc,
+                        p.target,
+                        1,
+                    );
                     break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
-                } else if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| blk: {
+                } else if (matchTypeofTestPeephole(topology, pc, use_short_opcodes)) |p| blk: {
                     const branch_op = p.branch_op orelse break :blk 1;
-                    const target_pc = positions[p.target];
-                    const diff = relOffset(out_pc + 1, target_pc);
+                    const diff = layoutJumpOffset(
+                        positions,
+                        pc,
+                        previous_output_pc,
+                        out_pc,
+                        p.target,
+                        1,
+                    );
                     break :blk 1 + jumpSizeForOffset(branch_op, diff, use_short_opcodes);
-                } else if (matchDupPutPeephole(code, pc)) |p|
+                } else if (matchDupPutPeephole(topology, pc)) |p|
                     loweredSlotInstructionSize(p.result_op, p.idx, use_short_opcodes)
-                else if (matchPutGetPeephole(code, pc)) |p|
+                else if (matchPutGetPeephole(topology, pc)) |p|
                     loweredSlotInstructionSize(p.set_op, p.idx, use_short_opcodes)
-                else if (matchIncLocPeephole(code, pc) != null)
+                else if (matchIncLocPeephole(topology, pc) != null)
                     2
-                else if (matchAddLocPeephole(code, pc)) |p|
+                else if (matchAddLocPeephole(topology, pc)) |p|
                     (if (use_short_opcodes and p.rhs_is_empty_string)
                         instrSize(opcode.op.push_empty_string)
                     else
                         loweredInstrSize(code, pc + 3, use_short_opcodes)) + 2
-                else if (matchPostUpdatePeephole(code, pc)) |p|
+                else if (matchPostUpdatePeephole(topology, pc)) |p|
                     postUpdateOutputSize(p, use_short_opcodes)
-                else if (matchConstantTestPeephole(code, pc)) |p| blk: {
+                else if (matchConstantTestPeephole(topology, pc)) |p| blk: {
                     break :blk switch (try constantTestAction(code, ctx.function.source_loc_slots, p)) {
                         .fallthrough => 0,
                         .terminal => 1,
                         .jump => |target| jumpSizeForOffset(
                             opcode.op.goto,
-                            relOffset(out_pc, positions[target]),
+                            layoutJumpOffset(
+                                positions,
+                                pc,
+                                previous_output_pc,
+                                out_pc,
+                                target,
+                                0,
+                            ),
                             use_short_opcodes,
                         ),
                     };
-                } else if (matchPushI32NegPeephole(code, pc)) |p|
+                } else if (matchPushI32NegPeephole(topology, pc)) |p|
                     if (p.discarded) 0 else loweredPushI32Size(p.value, use_short_opcodes)
-                else if (matchPushBigIntI32NegPeephole(code, pc)) |p|
+                else if (matchPushBigIntI32NegPeephole(topology, pc)) |p|
                     if (p.discarded) 0 else instrSize(opcode.op.push_bigint_i32)
-                else if (matchPushAtomValuePeephole(code, pc, use_short_opcodes)) |p|
+                else if (matchPushAtomValuePeephole(topology, pc, use_short_opcodes)) |p|
                     switch (p.kind) {
                         .discarded => 0,
                         .empty_string => instrSize(opcode.op.push_empty_string),
                     }
-                else if (discardedPushI32DropPairSize(code, pc) != null)
+                else if (discardedPushI32DropPairSize(topology, pc) != null)
                     0
-                else if (dropReturnUndefPairSize(code, pc) != null)
+                else if (dropReturnUndefPairSize(topology, pc) != null)
                     instrSize(opcode.op.return_undef)
                 else if (gotoTerminalOp(code, ctx.function.source_loc_slots, pc) != null)
                     1
@@ -9478,25 +9522,34 @@ pub const pipeline_resolve_labels = struct {
                     instrSize(op)
                 else if (isJumpOp(op)) blk: {
                     const target = try resolvedJumpTarget(code, pc);
-                    const target_pc = positions[target];
-                    const diff = relOffset(out_pc, target_pc);
+                    const diff = layoutJumpOffset(
+                        positions,
+                        pc,
+                        previous_output_pc,
+                        out_pc,
+                        target,
+                        0,
+                    );
                     break :blk jumpSizeForOffset(op, diff, use_short_opcodes);
                 } else loweredInstrSize(code, pc, use_short_opcodes);
 
+                if (pass != 0 and new_size > old_size) return error.InvalidBytecode;
                 sizes[pc] = new_size;
-                if (old_size != new_size) changed = true;
-                const next_pc = pc + try optimizedInputSize(code, pc, use_short_opcodes, in_size);
+                if (old_size != new_size) {
+                    changed = true;
+                }
+                const next_pc = pc + try optimizedInputSize(topology, pc, use_short_opcodes, in_size);
                 var boundary_pc = pc + 1;
-                while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
+                while (boundary_pc < next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                     positions[boundary_pc] = out_pc + new_size;
                 }
-                if (matchUndefinedReturnPeephole(code, pc) != null) {
+                if (matchUndefinedReturnPeephole(topology, pc) != null) {
                     // QJS attributes the consumed return's source marker to
                     // return_undef. The matcher already rejects an external
                     // jump target at this boundary.
                     positions[pc + 1] = out_pc;
                 }
-                if (matchNullishTestPeephole(code, pc, use_short_opcodes)) |p| {
+                if (matchNullishTestPeephole(topology, pc, use_short_opcodes)) |p| {
                     // QJS attributes source markers on the consumed compare
                     // and branch to the replacement nullish test. The matcher
                     // rejects control-flow entry into those boundaries, so
@@ -9504,7 +9557,7 @@ pub const pipeline_resolve_labels = struct {
                     positions[pc + 1] = out_pc;
                     if (p.branch_op != null) positions[pc + 2] = out_pc;
                 }
-                if (matchTypeofTestPeephole(code, pc, use_short_opcodes)) |p| {
+                if (matchTypeofTestPeephole(topology, pc, use_short_opcodes)) |p| {
                     // QJS attributes an equality fold to the consumed compare.
                     // For an inequality branch fold it first observes that
                     // compare source, then lets the consumed if_false source
@@ -9514,25 +9567,25 @@ pub const pipeline_resolve_labels = struct {
                     positions[pc + 6] = out_pc;
                     if (p.branch_op != null) positions[pc + 7] = out_pc;
                 }
-                if (matchConstantTestPeephole(code, pc)) |p| {
+                if (matchConstantTestPeephole(topology, pc)) |p| {
                     // QJS applies a source marker before the consumed branch
                     // to the replacement goto. The interior-target guard
                     // makes this boundary remap source-only.
                     positions[p.jump_pc] = out_pc;
                 }
-                if (try matchConditionalGotoPeephole(code, pc) != null) {
+                if (try matchConditionalGotoPeephole(topology, pc) != null) {
                     // QJS carries a source marker before the consumed goto to
                     // the replacement inverted branch.
                     positions[pc + 5] = out_pc;
                 }
-                if (matchPutGetPeephole(code, pc) != null) {
+                if (matchPutGetPeephole(topology, pc) != null) {
                     // QJS applies the source marker before the consumed get to
                     // the replacement set. The matcher rejects control-flow
                     // entry into the get, so remapping that opcode boundary
                     // back to the replacement start is source-only.
                     positions[pc + 3] = out_pc;
                 }
-                if (matchIncLocPeephole(code, pc)) |p| {
+                if (matchIncLocPeephole(topology, pc)) |p| {
                     // QJS attributes every consumed update/store/drop marker
                     // to the replacement inc_loc/dec_loc. The matcher rejects
                     // control-flow entry into the consumed suffix.
@@ -9545,7 +9598,7 @@ pub const pipeline_resolve_labels = struct {
                         positions[pc + 8] = out_pc;
                     }
                 }
-                if (matchAddLocPeephole(code, pc)) |p| {
+                if (matchAddLocPeephole(topology, pc)) |p| {
                     // code_match retains the last source marker visited before
                     // any consumed RHS/add/dup/put/drop opcode, then QJS emits
                     // that marker once at the replacement RHS start. There is
@@ -9563,7 +9616,7 @@ pub const pipeline_resolve_labels = struct {
                     positions[put_pc] = out_pc;
                     positions[drop_pc] = out_pc;
                 }
-                if (matchDupPutPeephole(code, pc)) |p| {
+                if (matchDupPutPeephole(topology, pc)) |p| {
                     // QJS attributes the replacement to the consumed put, or
                     // to the following drop when that later source marker is
                     // present. A trailing get's marker is deliberately delayed
@@ -9571,14 +9624,14 @@ pub const pipeline_resolve_labels = struct {
                     positions[pc + 1] = out_pc;
                     if (p.total_size >= 5) positions[pc + 4] = out_pc;
                 }
-                if (matchPushI32NegPeephole(code, pc) != null) {
+                if (matchPushI32NegPeephole(topology, pc) != null) {
                     // QuickJS attributes the folded push to the unary minus.
                     // A discarded push/neg/drop has size zero, so the same
                     // mapping points all consumed source positions at the
                     // surviving next instruction.
                     positions[pc + 5] = out_pc;
                 }
-                if (matchPushBigIntI32NegPeephole(code, pc)) |p| {
+                if (matchPushBigIntI32NegPeephole(topology, pc)) |p| {
                     // QuickJS attributes the folded push to the unary minus.
                     // A discarded push/neg/drop has size zero, so the default
                     // boundary mapping also points the drop at the surviving
@@ -9587,7 +9640,7 @@ pub const pipeline_resolve_labels = struct {
                     positions[pc + 5] = out_pc;
                     if (p.discarded) positions[pc + 6] = out_pc;
                 }
-                if (dropReturnUndefPairSize(code, pc) != null) {
+                if (dropReturnUndefPairSize(topology, pc) != null) {
                     positions[pc + 1] = out_pc;
                 }
                 out_pc += new_size;
@@ -9596,7 +9649,6 @@ pub const pipeline_resolve_labels = struct {
             positions[code.len] = out_pc;
             final_size = out_pc;
         }
-        if (changed) return error.InvalidBytecode;
         return final_size;
     }
 
@@ -9754,8 +9806,8 @@ pub const pipeline_resolve_labels = struct {
         defer ctx.memory.free(usize, positions);
         const sizes = try ctx.memory.alloc(usize, func.code.len + 1);
         defer ctx.memory.free(usize, sizes);
-        const reachability = try computeReachability(ctx);
-        defer ctx.memory.free(u8, reachability);
+        const topology = try computeTargetTopology(ctx);
+        defer ctx.memory.free(u8, topology.states);
 
         // First pass: compute the old-pc -> new-pc layout. OP_label is
         // dropped; jumps are rewritten from parser absolute targets to the
@@ -9764,7 +9816,7 @@ pub const pipeline_resolve_labels = struct {
             ctx,
             positions,
             sizes,
-            reachability,
+            &topology,
             use_short_opcodes,
             prologue_size,
         );
@@ -9786,7 +9838,7 @@ pub const pipeline_resolve_labels = struct {
             const op = func.code[i];
             const raw_size = if (op == opcode.op.label) 5 else instrSize(op);
             if (i + raw_size > func.code.len) return error.InvalidBytecode;
-            if (!isReachable(reachability, i)) {
+            if (!topology.isReachable(i)) {
                 i += raw_size;
             } else if (op == opcode.op.label) {
                 i += 5;
@@ -9796,27 +9848,27 @@ pub const pipeline_resolve_labels = struct {
                     out_idx += instrSize(opcode.op.drop);
                 }
                 i += instrSize(op);
-            } else if (try matchConditionalGotoPeephole(func.code, i)) |p| {
+            } else if (try matchConditionalGotoPeephole(&topology, i)) |p| {
                 try emitJumpToTarget(p.branch_op, p.target, output, &out_idx, positions, sizes[i]);
                 i += p.total_size;
-            } else if (matchGetLengthPeephole(func.code, i, use_short_opcodes)) |input_size| {
+            } else if (matchGetLengthPeephole(&topology, i, use_short_opcodes)) |input_size| {
                 output[out_idx] = opcode.op.get_length;
                 out_idx += 1;
                 i += input_size;
-            } else if (matchDiscardedFieldStorePeephole(func.code, i)) |p| {
+            } else if (matchDiscardedFieldStorePeephole(&topology, i)) |p| {
                 output[out_idx] = opcode.op.put_field;
                 std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], p.atom_id, .little);
                 out_idx += instrSize(opcode.op.put_field);
                 i += p.total_size;
-            } else if (undefinedDropPairSize(func.code, i)) |pair_size| {
+            } else if (undefinedDropPairSize(&topology, i)) |pair_size| {
                 i += pair_size;
-            } else if (matchUndefinedReturnPeephole(func.code, i)) |return_size| {
+            } else if (matchUndefinedReturnPeephole(&topology, i)) |return_size| {
                 output[out_idx] = opcode.op.return_undef;
                 out_idx += 1;
                 i += return_size;
-            } else if (redundantReturnUndefSize(func.code, i)) |return_size| {
+            } else if (redundantReturnUndefSize(&topology, i)) |return_size| {
                 i += return_size;
-            } else if (matchNullishTestPeephole(func.code, i, use_short_opcodes)) |p| {
+            } else if (matchNullishTestPeephole(&topology, i, use_short_opcodes)) |p| {
                 output[out_idx] = p.test_op;
                 out_idx += 1;
                 if (p.branch_op) |branch_op| {
@@ -9824,7 +9876,7 @@ pub const pipeline_resolve_labels = struct {
                     try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
                 }
                 i += p.total_size;
-            } else if (matchTypeofTestPeephole(func.code, i, use_short_opcodes)) |p| {
+            } else if (matchTypeofTestPeephole(&topology, i, use_short_opcodes)) |p| {
                 output[out_idx] = p.test_op;
                 out_idx += 1;
                 if (p.branch_op) |branch_op| {
@@ -9832,18 +9884,18 @@ pub const pipeline_resolve_labels = struct {
                     try emitJumpToTarget(branch_op, p.target, output, &out_idx, positions, branch_size);
                 }
                 i += p.total_size;
-            } else if (matchDupPutPeephole(func.code, i)) |p| {
+            } else if (matchDupPutPeephole(&topology, i)) |p| {
                 try emitSlotInstruction(p.result_op, p.idx, output, &out_idx, use_short_opcodes);
                 i += p.total_size;
-            } else if (matchPutGetPeephole(func.code, i)) |p| {
+            } else if (matchPutGetPeephole(&topology, i)) |p| {
                 try emitSlotInstruction(p.set_op, p.idx, output, &out_idx, use_short_opcodes);
                 i += p.total_size;
-            } else if (matchIncLocPeephole(func.code, i)) |p| {
+            } else if (matchIncLocPeephole(&topology, i)) |p| {
                 output[out_idx] = p.update_op;
                 output[out_idx + 1] = @intCast(p.idx);
                 out_idx += 2;
                 i += p.total_size;
-            } else if (matchAddLocPeephole(func.code, i)) |p| {
+            } else if (matchAddLocPeephole(&topology, i)) |p| {
                 // This combined matcher precedes the standalone
                 // push_atom_value shortener, so mirror QuickJS's get_loc case
                 // and shorten an empty RHS before emitting add_loc.
@@ -9857,7 +9909,7 @@ pub const pipeline_resolve_labels = struct {
                 output[out_idx + 1] = @intCast(p.idx);
                 out_idx += 2;
                 i += p.total_size;
-            } else if (matchPostUpdatePeephole(func.code, i)) |p| {
+            } else if (matchPostUpdatePeephole(&topology, i)) |p| {
                 output[out_idx] = p.update_op;
                 out_idx += 1;
                 switch (p.kind) {
@@ -9873,7 +9925,7 @@ pub const pipeline_resolve_labels = struct {
                     },
                 }
                 i += p.total_size;
-            } else if (matchConstantTestPeephole(func.code, i)) |p| {
+            } else if (matchConstantTestPeephole(&topology, i)) |p| {
                 switch (try constantTestAction(func.code, func.source_loc_slots, p)) {
                     .fallthrough => {},
                     .terminal => |terminal_op| {
@@ -9886,25 +9938,25 @@ pub const pipeline_resolve_labels = struct {
                     },
                 }
                 i += p.total_size;
-            } else if (matchPushI32NegPeephole(func.code, i)) |p| {
+            } else if (matchPushI32NegPeephole(&topology, i)) |p| {
                 if (!p.discarded) emitPushI32Value(output, &out_idx, p.value, use_short_opcodes);
                 i += p.total_size;
-            } else if (matchPushBigIntI32NegPeephole(func.code, i)) |p| {
+            } else if (matchPushBigIntI32NegPeephole(&topology, i)) |p| {
                 if (!p.discarded) {
                     output[out_idx] = opcode.op.push_bigint_i32;
                     std.mem.writeInt(i32, output[out_idx + 1 ..][0..4], p.value, .little);
                     out_idx += instrSize(opcode.op.push_bigint_i32);
                 }
                 i += p.total_size;
-            } else if (matchPushAtomValuePeephole(func.code, i, use_short_opcodes)) |p| {
+            } else if (matchPushAtomValuePeephole(&topology, i, use_short_opcodes)) |p| {
                 if (p.kind == .empty_string) {
                     output[out_idx] = opcode.op.push_empty_string;
                     out_idx += instrSize(opcode.op.push_empty_string);
                 }
                 i += p.total_size;
-            } else if (discardedPushI32DropPairSize(func.code, i)) |pair_size| {
+            } else if (discardedPushI32DropPairSize(&topology, i)) |pair_size| {
                 i += pair_size;
-            } else if (dropReturnUndefPairSize(func.code, i)) |return_size| {
+            } else if (dropReturnUndefPairSize(&topology, i)) |return_size| {
                 output[out_idx] = opcode.op.return_undef;
                 out_idx += instrSize(opcode.op.return_undef);
                 i += return_size;

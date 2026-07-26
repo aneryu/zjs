@@ -5,6 +5,7 @@ const engine = zjs;
 const bytecode = zjs.bytecode;
 const core = zjs.core;
 const frame_mod = zjs.exec.frame;
+const parser = zjs.parser;
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2741,6 +2742,42 @@ test "resolve_variables: scope_get_var_undef → get_var_undef" {
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 1), fd.closure_var.len);
     try std.testing.expectEqual(z_atom, fd.closure_var[0].var_name);
+}
+
+test "resolve_labels converges for a large branch topology" {
+    const branch_count = 2048;
+    const branch_source = "if (input) { value += 1; } else { value -= 1; }";
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.ensureTotalCapacity(
+        std.testing.allocator,
+        "function targetTopologyProbe(input) { let value = 0; ".len +
+            branch_count * branch_source.len +
+            "return value; }".len,
+    );
+    try source.appendSlice(
+        std.testing.allocator,
+        "function targetTopologyProbe(input) { let value = 0; ",
+    );
+    for (0..branch_count) |_| {
+        try source.appendSlice(std.testing.allocator, branch_source);
+    }
+    try source.appendSlice(std.testing.allocator, "return value; }");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    rt.updateNativeStackTop();
+    const realm = try core.RealmContext.create(rt);
+    defer realm.destroy();
+
+    var parsed = try parser.compile(
+        .{ .realm = realm },
+        source.items,
+        .{ .mode = .script, .filename = "large-branch-topology.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
 }
 
 test "resolve_labels: drops label opcodes" {
