@@ -1096,7 +1096,7 @@ pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JS
     const width: usize = payload.element_size;
     if (width == 0) return null;
     const element_offset = @as(usize, index) * width;
-    return core.typed_array.readNumericElement(kind, data[element_offset .. element_offset + width]);
+    return core.typed_array.readNumericElement(kind, data + element_offset);
 }
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };

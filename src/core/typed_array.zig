@@ -846,11 +846,15 @@ fn f64ToFloat16(value: f64) u16 {
 /// BigInt/error-union path. QuickJS's JS_GetPropertyValue typed-array arm
 /// switches on the concrete numeric class and returns the value directly; keep
 /// the same split here so the VM's already-validated numeric fast path does not
-/// acquire the stack frame needed by kinds 11/12.
+/// acquire the stack frame needed by kinds 11/12. Use the platform C ABI for
+/// this leaf just as QuickJS's C helper does: a 16-byte JSValue is returned in
+/// the ABI result registers on 64-bit targets instead of through Zig's internal
+/// sret pointer. The raw byte pointer is safe because every caller has already
+/// validated the concrete typed-array kind and its fixed element width.
 ///
 /// This is also the single source of truth for numeric decoding: readElement
 /// delegates kinds 1..10 here before handling the allocating BigInt kinds.
-pub noinline fn readNumericElement(kind: u8, bytes: []const u8) JSValue {
+pub noinline fn readNumericElement(kind: u8, bytes: [*]const u8) callconv(.c) JSValue {
     return switch (kind) {
         1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
         2 => JSValue.int32(bytes[0]),
@@ -867,7 +871,7 @@ pub noinline fn readNumericElement(kind: u8, bytes: []const u8) JSValue {
 }
 
 pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
-    if (kind >= 1 and kind <= 10) return readNumericElement(kind, bytes);
+    if (kind >= 1 and kind <= 10) return readNumericElement(kind, bytes.ptr);
     return switch (kind) {
         11 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], .little)),
         12 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], .little))),
